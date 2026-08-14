@@ -14,7 +14,7 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Calibration dependency graph, invalidation, residual gates, and rollback-ready snapshots
 - [x] Fiducial, rigid-transform, residual, and placement-tolerance vision primitives
 
-## Gate 1 — Camera and non-moving hardware validation
+## Gate 1 — Camera and initial hardware validation
 
 - [x] Detect the attached REV4 controller and assign both PnP camera roles
 - [x] Validate bounded controller handshake, reconnect, and fail-safe disconnect
@@ -23,12 +23,14 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Enumerate native camera formats, controls, and initial automatic settings
 - [x] Define the V3 working-plane views: datum fiducial/top camera and N1 nozzle/bottom camera under ring lighting
 - [ ] Lock camera exposure, white balance, gain, working-plane focus, and lighting
+- [x] Acquire the top datum and N1 bottom-camera views; measure initial geometry/exposure seeds
 - [ ] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
 - [ ] Record camera capture fixtures without moving the machine
 
 ## Gate 2 — Motion and homing validation
 
 - [x] Require explicit preflight/lease gates; home/verify nozzle Z before X/Y using bounded `M114` reports
+- [x] Complete the first physical staged home, safe-Z XY probes, target acquisition, park, and disconnect
 - [ ] Validate axis signs, safe-Z convention, feed limits, controlled stop, and reconnect
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
 - [ ] Implement and measure primary-datum visual refinement
