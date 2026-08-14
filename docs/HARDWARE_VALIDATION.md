@@ -64,6 +64,12 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   tip edges substantially better. In the same 320 by 320 center crop, variance
   of the discrete Laplacian increased from 54.24 to 72.23 (about 33 percent)
   relative to the pre-cleaning exposure-200 frame.
+- A fresh Z-before-XY home followed by the exact 324 mm bottom-camera traverse
+  at 300 mm/min validated the distance-derived completion timeout. The move
+  completed in 65.0 seconds without a fault. A repeat exposure-200 frame was
+  stable at mean 44.71 versus 44.07 and Laplacian variance 74.07 versus 72.23.
+  The head then returned to X=0/Y=0/Z=31.5 at 600 mm/min and disconnected
+  fail-safe with all outputs off.
 
 ## First working-plane observations
 
@@ -134,7 +140,8 @@ and then completed a fail-safe disconnect. A non-moving capture after reconnect
 confirmed N045 at the intended target. The driver now reads `M114` before a
 move and derives a bounded 60-to-900-second completion timeout from the
 reported start pose, target, and feed. That correction has unit coverage but
-still requires a fresh physical traverse before it is hardware-validated.
+was also validated by repeating the same physical traverse in 65.0 seconds,
+past the old fixed limit, followed by a successful 32.6-second return move.
 
 ## Procedure sources
 
