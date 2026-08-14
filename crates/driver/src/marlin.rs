@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{timeout, Instant};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
-use velocitypnp_domain::{HomingProfile, Pose};
+use velocitypnp_domain::{HomingAxis, HomingProfile, Pose};
 
 const DISCONNECT_FAILSAFE_COMMANDS: [&str; 5] =
     ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"];
@@ -151,19 +151,32 @@ impl MachineDriver for MarlinDriver {
 
     async fn home(&mut self) -> Result<Pose> {
         let homing = self.homing.clone();
+        validate_homing_profile(&homing)?;
         let homing_timeout = Duration::from_secs(homing.timeout_seconds);
-        if homing.command.trim().is_empty()
-            || homing_timeout.is_zero()
-            || !homing.reported_position_tolerance_mm.is_finite()
-            || homing.reported_position_tolerance_mm < 0.0
-        {
-            bail!("invalid homing configuration");
+        let mut reported = None;
+        for stage in &homing.stages {
+            self.command(&stage.command, homing_timeout)
+                .await
+                .with_context(|| format!("executing homing stage {}", stage.id))?;
+            self.command("M400", homing_timeout)
+                .await
+                .with_context(|| format!("waiting for homing stage {}", stage.id))?;
+            let stage_position = self
+                .reported_position()
+                .await
+                .with_context(|| format!("reading position after homing stage {}", stage.id))?;
+            verify_homed(
+                stage_position,
+                self.home_pose,
+                &stage.verify_axes,
+                homing.reported_position_tolerance_mm,
+            )
+            .with_context(|| format!("verifying homing stage {}", stage.id))?;
+            reported = Some(stage_position);
         }
-        self.command(&homing.command, homing_timeout).await?;
-        self.command("M400", homing_timeout).await?;
-        let reported = self.reported_position().await?;
-        verify_homed(reported, self.home_pose, &homing)?;
-        Ok(reported.primary_pose)
+        Ok(reported
+            .context("homing profile has no stages")?
+            .primary_pose)
     }
 
     async fn move_to(&mut self, target: Pose, feed_mm_per_min: f64) -> Result<Pose> {
@@ -209,6 +222,36 @@ fn actuator_commands(actuator_id: &str, enabled: bool) -> Result<&'static [&'sta
 
 fn supported_firmware(firmware: &str) -> bool {
     firmware.contains("FIRMWARE_NAME:Marlin") && firmware.contains("MACHINE_TYPE:LumenPnP")
+}
+
+fn validate_homing_profile(homing: &HomingProfile) -> Result<()> {
+    if homing.stages.is_empty()
+        || homing.timeout_seconds == 0
+        || !homing.reported_position_tolerance_mm.is_finite()
+        || homing.reported_position_tolerance_mm < 0.0
+    {
+        bail!("invalid homing configuration");
+    }
+    let mut verified = [false; 3];
+    for stage in &homing.stages {
+        if stage.id.trim().is_empty()
+            || stage.command.trim().is_empty()
+            || stage.verify_axes.is_empty()
+        {
+            bail!("invalid homing stage configuration");
+        }
+        for axis in &stage.verify_axes {
+            verified[match axis {
+                HomingAxis::X => 0,
+                HomingAxis::Y => 1,
+                HomingAxis::Z => 2,
+            }] = true;
+        }
+    }
+    if !verified.into_iter().all(|axis| axis) {
+        bail!("homing stages must verify X, Y, and Z");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -265,15 +308,20 @@ fn parse_position_report(lines: &[String]) -> Result<MarlinPosition> {
     bail!("M114 response did not contain finite X, Y, Z, A, and B coordinates")
 }
 
-fn verify_homed(reported: MarlinPosition, expected: Pose, homing: &HomingProfile) -> Result<()> {
-    let linear_deltas = [
-        ("X", (reported.primary_pose.x_mm - expected.x_mm).abs()),
-        ("Y", (reported.primary_pose.y_mm - expected.y_mm).abs()),
-        ("Z", (reported.primary_pose.z_mm - expected.z_mm).abs()),
-    ];
-    let failures = linear_deltas
-        .into_iter()
-        .filter(|(_, delta)| *delta > homing.reported_position_tolerance_mm)
+fn verify_homed(
+    reported: MarlinPosition,
+    expected: Pose,
+    axes: &[HomingAxis],
+    tolerance_mm: f64,
+) -> Result<()> {
+    let failures = axes
+        .iter()
+        .map(|axis| match axis {
+            HomingAxis::X => ("X", (reported.primary_pose.x_mm - expected.x_mm).abs()),
+            HomingAxis::Y => ("Y", (reported.primary_pose.y_mm - expected.y_mm).abs()),
+            HomingAxis::Z => ("Z", (reported.primary_pose.z_mm - expected.z_mm).abs()),
+        })
+        .filter(|(_, delta)| *delta > tolerance_mm)
         .map(|(axis, delta)| format!("{axis} delta {delta:.3} mm"))
         .collect::<Vec<_>>();
     if failures.is_empty() {
@@ -299,7 +347,18 @@ mod tests {
         HomingProfile {
             method: "sensorless".into(),
             operator_checks: Vec::new(),
-            command: "G28".into(),
+            stages: vec![
+                velocitypnp_domain::HomingStageProfile {
+                    id: "nozzle_z".into(),
+                    command: "G28 Z".into(),
+                    verify_axes: vec![HomingAxis::Z],
+                },
+                velocitypnp_domain::HomingStageProfile {
+                    id: "gantry_xy".into(),
+                    command: "G28 X Y".into(),
+                    verify_axes: vec![HomingAxis::X, HomingAxis::Y, HomingAxis::Z],
+                },
+            ],
             timeout_seconds: 120,
             reported_position_tolerance_mm: 0.05,
             requires_visual_refinement: true,
@@ -400,10 +459,10 @@ mod tests {
             primary_pose: expected,
             secondary_rotation_deg: 0.0,
         };
-        assert!(verify_homed(reported, expected, &homing_profile()).is_ok());
+        assert!(verify_homed(reported, expected, &[HomingAxis::X], 0.05).is_ok());
 
         reported.primary_pose.x_mm = 0.051;
-        let error = verify_homed(reported, expected, &homing_profile())
+        let error = verify_homed(reported, expected, &[HomingAxis::X], 0.05)
             .unwrap_err()
             .to_string();
         assert!(error.contains("X delta 0.051 mm"));
@@ -411,6 +470,33 @@ mod tests {
         reported.primary_pose.x_mm = 0.0;
         reported.primary_pose.rotation_deg = 720.0;
         reported.secondary_rotation_deg = 720.0;
-        assert!(verify_homed(reported, expected, &homing_profile()).is_ok());
+        assert!(verify_homed(
+            reported,
+            expected,
+            &[HomingAxis::X, HomingAxis::Y, HomingAxis::Z],
+            0.05,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn v3_profile_homes_and_verifies_z_before_xy() {
+        let homing = homing_profile();
+        assert!(validate_homing_profile(&homing).is_ok());
+        assert_eq!(homing.stages[0].command, "G28 Z");
+        assert_eq!(homing.stages[0].verify_axes, [HomingAxis::Z]);
+        assert_eq!(homing.stages[1].command, "G28 X Y");
+        assert_eq!(
+            homing.stages[1].verify_axes,
+            [HomingAxis::X, HomingAxis::Y, HomingAxis::Z]
+        );
+    }
+
+    #[test]
+    fn rejects_homing_profiles_that_do_not_verify_every_linear_axis() {
+        let mut homing = homing_profile();
+        homing.stages.pop();
+        let error = validate_homing_profile(&homing).unwrap_err().to_string();
+        assert!(error.contains("verify X, Y, and Z"));
     }
 }

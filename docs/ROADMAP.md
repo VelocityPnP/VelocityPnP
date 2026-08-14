@@ -28,7 +28,7 @@ The project is organized by measurable gates rather than calendar estimates.
 
 ## Gate 2 — Motion and homing validation
 
-- [x] Require explicit preflight/lease gates and verify `G28` completion with a bounded `M114` report
+- [x] Require explicit preflight/lease gates; home/verify nozzle Z before X/Y using bounded `M114` reports
 - [ ] Validate axis signs, safe-Z convention, feed limits, controlled stop, and reconnect
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
 - [ ] Implement and measure primary-datum visual refinement

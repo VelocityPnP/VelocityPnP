@@ -78,11 +78,13 @@ focus/orientation and lock repeatable capture settings.
 
 ## Still prohibited
 
-Homing is now the prerequisite for working-plane camera setup. The first
-physical `G28` remains prohibited until an operator explicitly confirms that
-both nozzles are level, the full travel envelope is clear, and physical power
-isolation is within reach. Jogging remains prohibited until coarse homing is
-verified from the controller's `M114` position report.
+Homing is now the prerequisite for working-plane camera setup. The V3 profile
+homes the coupled nozzle Z axis first with `G28 Z` and verifies its 31.5 mm
+level/safe coordinate before allowing `G28 X Y`. The second stage verifies X,
+Y, and the preserved Z coordinate. Both stages require an operator to confirm
+that both nozzles are initially level, the full travel envelope is clear, and
+physical power isolation is within reach. Jogging remains prohibited until
+both stages are verified from controller `M114` position reports.
 Production job execution remains unavailable by design.
 
 ## Procedure sources

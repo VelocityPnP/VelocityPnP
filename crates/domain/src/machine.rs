@@ -132,10 +132,25 @@ pub struct MachineProfile {
 pub struct HomingProfile {
     pub method: String,
     pub operator_checks: Vec<String>,
-    pub command: String,
+    pub stages: Vec<HomingStageProfile>,
     pub timeout_seconds: u64,
     pub reported_position_tolerance_mm: f64,
     pub requires_visual_refinement: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomingStageProfile {
+    pub id: String,
+    pub command: String,
+    pub verify_axes: Vec<HomingAxis>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomingAxis {
+    X,
+    Y,
+    Z,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

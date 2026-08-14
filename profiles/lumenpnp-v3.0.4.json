@@ -21,7 +21,10 @@
       "The work envelope is clear of hands, tools, and loose components",
       "Physical power isolation is within reach"
     ],
-    "command": "G28",
+    "stages": [
+      {"id": "nozzle_z", "command": "G28 Z", "verify_axes": ["z"]},
+      {"id": "gantry_xy", "command": "G28 X Y", "verify_axes": ["x", "y", "z"]}
+    ],
     "timeout_seconds": 120,
     "reported_position_tolerance_mm": 0.05,
     "requires_visual_refinement": true
