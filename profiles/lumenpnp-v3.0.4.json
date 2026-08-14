@@ -43,6 +43,7 @@
   ],
   "capabilities": {
     "dual_nozzle": true,
+    "rotation_motion": false,
     "visual_homing": true,
     "photon_bus": false,
     "physical_endstops": false,

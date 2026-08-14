@@ -26,6 +26,41 @@ impl Pose {
     }
 }
 
+/// An absolute linear jog target. Omitting rotation preserves the controller's
+/// current primary-nozzle angle instead of assuming a potentially unsafe zero.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct JogTarget {
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub z_mm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<f64>,
+}
+
+impl JogTarget {
+    pub fn resolve(self, current: Pose) -> Option<Pose> {
+        let rotation_deg = self.rotation_deg.unwrap_or(current.rotation_deg);
+        let pose = Pose {
+            x_mm: self.x_mm,
+            y_mm: self.y_mm,
+            z_mm: self.z_mm,
+            rotation_deg,
+        };
+        pose.finite().then_some(pose)
+    }
+}
+
+impl From<Pose> for JogTarget {
+    fn from(value: Pose) -> Self {
+        Self {
+            x_mm: value.x_mm,
+            y_mm: value.y_mm,
+            z_mm: value.z_mm,
+            rotation_deg: Some(value.rotation_deg),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
     pub x_min_mm: f64,
@@ -128,5 +163,20 @@ mod tests {
             x_mm: f64::NAN,
             ..Pose::ORIGIN
         }));
+    }
+
+    #[test]
+    fn jog_target_preserves_rotation_when_omitted() {
+        let current = Pose {
+            rotation_deg: 720.0,
+            ..Pose::ORIGIN
+        };
+        let target = JogTarget {
+            x_mm: 10.0,
+            y_mm: 20.0,
+            z_mm: 31.5,
+            rotation_deg: None,
+        };
+        assert_eq!(target.resolve(current).unwrap().rotation_deg, 720.0);
     }
 }

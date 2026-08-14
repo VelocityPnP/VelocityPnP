@@ -9,6 +9,13 @@ export interface Pose {
   rotation_deg: number;
 }
 
+export interface JogTarget {
+  x_mm: number;
+  y_mm: number;
+  z_mm: number;
+  rotation_deg?: number;
+}
+
 export interface ControlLease {
   id: string;
   client_name: string;

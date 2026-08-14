@@ -1,5 +1,5 @@
 use crate::MachineDriver;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use uuid::Uuid;
 use velocitypnp_domain::{
-    ControlLease, MachineEvent, MachineProfile, MachineState, MachineStatus, Pose,
+    ControlLease, JogTarget, MachineEvent, MachineProfile, MachineState, MachineStatus, Pose,
 };
 
 #[derive(Clone)]
@@ -95,7 +95,12 @@ impl MachineHandle {
         .await
     }
 
-    pub async fn jog(&self, lease_id: Uuid, target: Pose, feed_mm_per_min: f64) -> Result<Pose> {
+    pub async fn jog(
+        &self,
+        lease_id: Uuid,
+        target: JogTarget,
+        feed_mm_per_min: f64,
+    ) -> Result<Pose> {
         request(&self.tx, |reply| Command::Jog {
             lease_id,
             target,
@@ -159,7 +164,7 @@ enum Command {
     },
     Jog {
         lease_id: Uuid,
-        target: Pose,
+        target: JogTarget,
         feed_mm_per_min: f64,
         reply: oneshot::Sender<Result<Pose>>,
     },
@@ -337,9 +342,33 @@ impl MachineActor {
         }
     }
 
-    async fn jog(&mut self, lease_id: Uuid, target: Pose, feed_mm_per_min: f64) -> Result<Pose> {
-        self.status().assert_lease(lease_id, Utc::now())?;
-        self.status().assert_can_jog(target, &self.profile.bounds)?;
+    async fn jog(
+        &mut self,
+        lease_id: Uuid,
+        target: JogTarget,
+        feed_mm_per_min: f64,
+    ) -> Result<Pose> {
+        let status = self.status();
+        status.assert_lease(lease_id, Utc::now())?;
+        let current = status.pose.context("jog requires a known current pose")?;
+        let target = target
+            .resolve(current)
+            .context("jog target must contain finite coordinates")?;
+        status.assert_can_jog(target, &self.profile.bounds)?;
+        let rotation_motion_enabled = self
+            .profile
+            .capabilities
+            .get("rotation_motion")
+            .copied()
+            .unwrap_or(false);
+        if !status.simulated
+            && !rotation_motion_enabled
+            && (target.rotation_deg - current.rotation_deg).abs() > 1e-6
+        {
+            bail!(
+                "physical nozzle rotation is disabled until rotation motion is hardware-validated"
+            );
+        }
         let max_feed = self.profile.default_feed_mm_per_min.max(1.0);
         let feed = feed_mm_per_min.clamp(1.0, max_feed);
         match self.driver.move_to(target, feed).await {
@@ -439,7 +468,87 @@ mod tests {
             z_mm: 31.5,
             rotation_deg: 0.0,
         };
-        assert_eq!(handle.jog(lease.id, pose, 100.0).await.unwrap(), pose);
+        assert_eq!(
+            handle.jog(lease.id, pose.into(), 100.0).await.unwrap(),
+            pose
+        );
+    }
+
+    struct PhysicalPoseDriver;
+
+    #[async_trait]
+    impl MachineDriver for PhysicalPoseDriver {
+        fn simulated(&self) -> bool {
+            false
+        }
+
+        async fn connect(&mut self) -> Result<String> {
+            Ok("Marlin test driver".into())
+        }
+
+        async fn disconnect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn home(&mut self) -> Result<Pose> {
+            Ok(Pose {
+                z_mm: 31.5,
+                rotation_deg: 720.0,
+                ..Pose::ORIGIN
+            })
+        }
+
+        async fn move_to(&mut self, target: Pose, _feed_mm_per_min: f64) -> Result<Pose> {
+            Ok(target)
+        }
+
+        async fn actuate(&mut self, _actuator_id: &str, _enabled: bool) -> Result<()> {
+            Ok(())
+        }
+
+        async fn emergency_stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn physical_jog_preserves_rotation_and_rejects_unvalidated_changes() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(Box::new(PhysicalPoseDriver), profile);
+        handle.connect().await.unwrap();
+        handle.complete_preflight(true).await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.home(lease.id, true).await.unwrap();
+
+        let preserved = handle
+            .jog(
+                lease.id,
+                JogTarget {
+                    x_mm: 10.0,
+                    y_mm: 20.0,
+                    z_mm: 31.5,
+                    rotation_deg: None,
+                },
+                100.0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(preserved.rotation_deg, 720.0);
+
+        let error = handle
+            .jog(
+                lease.id,
+                JogTarget {
+                    rotation_deg: Some(0.0),
+                    ..preserved.into()
+                },
+                100.0,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rotation is disabled"));
+        assert_eq!(handle.status().state, MachineState::Ready);
     }
 
     #[tokio::test]

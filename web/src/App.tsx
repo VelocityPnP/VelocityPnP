@@ -94,7 +94,11 @@ function MachinePanel({ status, devices, events, busy, run }: {
   const machineAction = (action: () => Promise<Parameters<typeof waitForOperation>[0]>) => run(async () => waitForOperation(await action()));
   const jog = (dx: number, dy: number, dz = 0) => {
     if (!lease) return;
-    void machineAction(() => api.jog(lease.id, { ...pose, x_mm: pose.x_mm + dx, y_mm: pose.y_mm + dy, z_mm: pose.z_mm + dz }));
+    void machineAction(() => api.jog(lease.id, {
+      x_mm: pose.x_mm + dx,
+      y_mm: pose.y_mm + dy,
+      z_mm: pose.z_mm + dz,
+    }));
   };
 
   return <div className="content-grid">

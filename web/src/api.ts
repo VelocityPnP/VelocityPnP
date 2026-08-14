@@ -1,6 +1,6 @@
 import type {
   BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, ControlLease, Device,
-  MachineStatus, Operation, Pose, Residuals,
+  JogTarget, MachineStatus, Operation, Residuals,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -60,7 +60,7 @@ export const api = {
   lease: async (clientName = "VelocityPnP web UI") =>
     (await jsonPost<{ lease: ControlLease }>("/control/lease", { client_name: clientName, duration_seconds: 900 })).lease,
   home: (leaseId: string) => jsonPost<Operation>("/machine/home", { lease_id: leaseId, confirmed: true }),
-  jog: (leaseId: string, target: Pose, feed = 300) =>
+  jog: (leaseId: string, target: JogTarget, feed = 300) =>
     jsonPost<Operation>("/machine/jog", { lease_id: leaseId, target, feed_mm_per_min: feed }),
   actuate: (leaseId: string, actuatorId: string, enabled: boolean) =>
     jsonPost<Operation>(`/machine/actuators/${actuatorId}`, { lease_id: leaseId, enabled }),

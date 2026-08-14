@@ -19,6 +19,12 @@ controller recovery and a new homing cycle. The polling latency is bounded to
 roughly 20 ms in the driver, but USB, firmware, and electrical failures can
 still defeat a software stop.
 
+Physical jog requests preserve the controller-reported primary-nozzle angle
+when rotation is omitted. The V3.0.4 profile disables rotation motion until it
+is separately hardware-validated, and the machine actor rejects an explicit
+angle change before any command reaches the driver. This interlock applies to
+all API, CLI, UI, Python, and internal job callers.
+
 Physical disconnect and graceful daemon shutdown command both vacuum channels
 and the shared lights off before releasing serial. SIGINT and SIGTERM use this
 path. A process crash, `SIGKILL`, USB failure, controller failure, or loss of

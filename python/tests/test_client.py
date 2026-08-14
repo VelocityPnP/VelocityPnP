@@ -64,6 +64,22 @@ class ClientTests(unittest.TestCase):
                 client.home("00000000-0000-0000-0000-000000000000")
         send.assert_not_called()
 
+    def test_jog_preserves_rotation_when_omitted(self):
+        client = Client(timeout=1)
+        operation = {"id": "op", "status": "succeeded", "message": None}
+        with patch.object(client, "_request", return_value=operation) as send:
+            client.jog(
+                "00000000-0000-0000-0000-000000000000",
+                x_mm=10.0,
+                y_mm=20.0,
+                z_mm=31.5,
+            )
+        send.assert_called_once_with("POST", "/machine/jog", {
+            "lease_id": "00000000-0000-0000-0000-000000000000",
+            "target": {"x_mm": 10.0, "y_mm": 20.0, "z_mm": 31.5},
+            "feed_mm_per_min": 300.0,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

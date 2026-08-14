@@ -47,6 +47,10 @@ Homing is intentionally not implicit. After physically leveling both nozzles,
 clearing the complete travel envelope, and putting power isolation within
 reach, pass `home --lease <UUID> --confirm-safety-checks`.
 
+CLI jog commands preserve the controller-reported primary-nozzle angle when
+`--rotation` is omitted. Physical rotation requests are rejected while the
+active profile's `rotation_motion` capability is false.
+
 Attached PnP camera roles are available without opening the motion controller:
 
 ```bash

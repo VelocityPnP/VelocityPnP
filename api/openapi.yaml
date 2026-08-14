@@ -138,7 +138,7 @@ paths:
               required: [lease_id, target]
               properties:
                 lease_id: { type: string, format: uuid }
-                target: { $ref: "#/components/schemas/Pose" }
+                target: { $ref: "#/components/schemas/JogTarget" }
                 feed_mm_per_min: { type: number, exclusiveMinimum: 0, default: 300 }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
@@ -373,6 +373,16 @@ components:
         y_mm: { type: number }
         z_mm: { type: number }
         rotation_deg: { type: number }
+    JogTarget:
+      type: object
+      required: [x_mm, y_mm, z_mm]
+      properties:
+        x_mm: { type: number }
+        y_mm: { type: number }
+        z_mm: { type: number }
+        rotation_deg:
+          type: number
+          description: Omit to preserve the controller-reported primary-nozzle angle.
     Residuals:
       type: object
       required: [sample_count, rms_mm, p95_mm, max_mm]

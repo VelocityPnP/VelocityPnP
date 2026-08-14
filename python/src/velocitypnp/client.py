@@ -99,17 +99,19 @@ class Client:
         x_mm: float,
         y_mm: float,
         z_mm: float,
-        rotation_deg: float = 0.0,
+        rotation_deg: float | None = None,
         feed_mm_per_min: float = 300.0,
     ) -> dict[str, Any]:
+        target: dict[str, Any] = {
+            "x_mm": x_mm,
+            "y_mm": y_mm,
+            "z_mm": z_mm,
+        }
+        if rotation_deg is not None:
+            target["rotation_deg"] = rotation_deg
         return self.wait(self._request("POST", "/machine/jog", {
             "lease_id": str(lease_id),
-            "target": {
-                "x_mm": x_mm,
-                "y_mm": y_mm,
-                "z_mm": z_mm,
-                "rotation_deg": rotation_deg,
-            },
+            "target": target,
             "feed_mm_per_min": feed_mm_per_min,
         }))
 

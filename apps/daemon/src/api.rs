@@ -20,8 +20,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
     lumen_calibration_workflow, BoardDesign, CalibrationSnapshot, CalibrationStepId, Feeder,
-    InspectionReport, InspectionStatus, Job, MachineProfile, Operation, OperationStatus, Pose,
-    Residuals,
+    InspectionReport, InspectionStatus, Job, JogTarget, MachineProfile, Operation, OperationStatus,
+    Pose, Residuals,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -371,7 +371,7 @@ async fn home(
 #[derive(Deserialize)]
 struct JogRequest {
     lease_id: Uuid,
-    target: Pose,
+    target: JogTarget,
     #[serde(default = "default_jog_feed")]
     feed_mm_per_min: f64,
 }
@@ -950,11 +950,11 @@ async fn simulate_job(
                 ..step.board_place
             };
             machine
-                .jog(body.lease_id, pick_safe, 300.0)
+                .jog(body.lease_id, pick_safe.into(), 300.0)
                 .await
                 .map_err(|error| error.to_string())?;
             machine
-                .jog(body.lease_id, step.feeder_pick, 120.0)
+                .jog(body.lease_id, step.feeder_pick.into(), 120.0)
                 .await
                 .map_err(|error| error.to_string())?;
             machine
@@ -962,15 +962,15 @@ async fn simulate_job(
                 .await
                 .map_err(|error| error.to_string())?;
             machine
-                .jog(body.lease_id, pick_safe, 120.0)
+                .jog(body.lease_id, pick_safe.into(), 120.0)
                 .await
                 .map_err(|error| error.to_string())?;
             machine
-                .jog(body.lease_id, place_safe, 300.0)
+                .jog(body.lease_id, place_safe.into(), 300.0)
                 .await
                 .map_err(|error| error.to_string())?;
             machine
-                .jog(body.lease_id, step.board_place, 120.0)
+                .jog(body.lease_id, step.board_place.into(), 120.0)
                 .await
                 .map_err(|error| error.to_string())?;
             machine
@@ -978,7 +978,7 @@ async fn simulate_job(
                 .await
                 .map_err(|error| error.to_string())?;
             machine
-                .jog(body.lease_id, place_safe, 120.0)
+                .jog(body.lease_id, place_safe.into(), 120.0)
                 .await
                 .map_err(|error| error.to_string())?;
         }

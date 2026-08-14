@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
-use velocitypnp_domain::{Operation, OperationStatus, Pose};
+use velocitypnp_domain::{JogTarget, Operation, OperationStatus};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "VelocityPnP command-line client")]
@@ -50,8 +50,9 @@ enum Command {
         y: f64,
         #[arg(long)]
         z: f64,
-        #[arg(long, default_value_t = 0.0)]
-        rotation: f64,
+        /// Primary-nozzle rotation. Omit to preserve the reported angle.
+        #[arg(long)]
+        rotation: Option<f64>,
         #[arg(long, default_value_t = 300.0)]
         feed: f64,
     },
@@ -151,7 +152,7 @@ async fn main() -> Result<()> {
             rotation,
             feed,
         } => {
-            let target = Pose {
+            let target = JogTarget {
                 x_mm: x,
                 y_mm: y,
                 z_mm: z,
