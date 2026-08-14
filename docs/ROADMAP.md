@@ -21,12 +21,14 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Record a sanitized physical-controller transcript fixture without motion
 - [x] Capture stable frames from both attached UVC cameras through the native backend
 - [x] Enumerate native camera formats, controls, and initial automatic settings
+- [x] Define the V3 working-plane views: datum fiducial/top camera and N1 nozzle/bottom camera under ring lighting
 - [ ] Lock camera exposure, white balance, gain, working-plane focus, and lighting
 - [ ] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
 - [ ] Record camera capture fixtures without moving the machine
 
 ## Gate 2 — Motion and homing validation
 
+- [x] Require explicit preflight/lease gates and verify `G28` completion with a bounded `M114` report
 - [ ] Validate axis signs, safe-Z convention, feed limits, controlled stop, and reconnect
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
 - [ ] Implement and measure primary-datum visual refinement

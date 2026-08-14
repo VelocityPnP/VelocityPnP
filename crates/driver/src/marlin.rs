@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{timeout, Instant};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
-use velocitypnp_domain::Pose;
+use velocitypnp_domain::{HomingProfile, Pose};
 
 const DISCONNECT_FAILSAFE_COMMANDS: [&str; 5] =
     ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"];
@@ -16,16 +16,18 @@ pub struct MarlinDriver {
     path: String,
     baud: u32,
     home_pose: Pose,
+    homing: HomingProfile,
     emergency_flag: Arc<AtomicBool>,
     stream: Option<BufReader<SerialStream>>,
 }
 
 impl MarlinDriver {
-    pub fn new(path: impl Into<String>, baud: u32, home_pose: Pose) -> Self {
+    pub fn new(path: impl Into<String>, baud: u32, home_pose: Pose, homing: HomingProfile) -> Self {
         Self {
             path: path.into(),
             baud,
             home_pose,
+            homing,
             emergency_flag: Arc::new(AtomicBool::new(false)),
             stream: None,
         }
@@ -86,6 +88,12 @@ impl MarlinDriver {
             }
         }
     }
+
+    async fn reported_position(&mut self) -> Result<MarlinPosition> {
+        let lines = self.command("M114", Duration::from_secs(5)).await?;
+        parse_position_report(&lines)
+            .with_context(|| format!("decoding M114 response: {}", lines.join(" | ")))
+    }
 }
 
 #[async_trait]
@@ -142,9 +150,20 @@ impl MachineDriver for MarlinDriver {
     }
 
     async fn home(&mut self) -> Result<Pose> {
-        self.command("G28", Duration::from_secs(60)).await?;
-        self.command("M400", Duration::from_secs(60)).await?;
-        Ok(self.home_pose)
+        let homing = self.homing.clone();
+        let homing_timeout = Duration::from_secs(homing.timeout_seconds);
+        if homing.command.trim().is_empty()
+            || homing_timeout.is_zero()
+            || !homing.reported_position_tolerance_mm.is_finite()
+            || homing.reported_position_tolerance_mm < 0.0
+        {
+            bail!("invalid homing configuration");
+        }
+        self.command(&homing.command, homing_timeout).await?;
+        self.command("M400", homing_timeout).await?;
+        let reported = self.reported_position().await?;
+        verify_homed(reported, self.home_pose, &homing)?;
+        Ok(reported.primary_pose)
     }
 
     async fn move_to(&mut self, target: Pose, feed_mm_per_min: f64) -> Result<Pose> {
@@ -192,9 +211,100 @@ fn supported_firmware(firmware: &str) -> bool {
     firmware.contains("FIRMWARE_NAME:Marlin") && firmware.contains("MACHINE_TYPE:LumenPnP")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MarlinPosition {
+    primary_pose: Pose,
+    secondary_rotation_deg: f64,
+}
+
+fn parse_position_report(lines: &[String]) -> Result<MarlinPosition> {
+    for line in lines {
+        // Marlin may append step counts that repeat the axis labels. Only the
+        // user-coordinate portion before "Count" describes the current pose.
+        let coordinates = line.split("Count").next().unwrap_or(line);
+        let mut x = None;
+        let mut y = None;
+        let mut z = None;
+        let mut a = None;
+        let mut b = None;
+        for field in coordinates.split_ascii_whitespace() {
+            let Some((label, value)) = field.split_once(':') else {
+                continue;
+            };
+            let slot = match label {
+                "X" => &mut x,
+                "Y" => &mut y,
+                "Z" => &mut z,
+                "A" => &mut a,
+                "B" => &mut b,
+                _ => continue,
+            };
+            let parsed = value
+                .trim_end_matches(',')
+                .parse::<f64>()
+                .with_context(|| format!("invalid {label} coordinate {value}"))?;
+            if !parsed.is_finite() {
+                bail!("non-finite {label} coordinate {value}");
+            }
+            *slot = Some(parsed);
+        }
+        if let (Some(x_mm), Some(y_mm), Some(z_mm), Some(rotation_deg), Some(secondary)) =
+            (x, y, z, a, b)
+        {
+            return Ok(MarlinPosition {
+                primary_pose: Pose {
+                    x_mm,
+                    y_mm,
+                    z_mm,
+                    rotation_deg,
+                },
+                secondary_rotation_deg: secondary,
+            });
+        }
+    }
+    bail!("M114 response did not contain finite X, Y, Z, A, and B coordinates")
+}
+
+fn verify_homed(reported: MarlinPosition, expected: Pose, homing: &HomingProfile) -> Result<()> {
+    let linear_deltas = [
+        ("X", (reported.primary_pose.x_mm - expected.x_mm).abs()),
+        ("Y", (reported.primary_pose.y_mm - expected.y_mm).abs()),
+        ("Z", (reported.primary_pose.z_mm - expected.z_mm).abs()),
+    ];
+    let failures = linear_deltas
+        .into_iter()
+        .filter(|(_, delta)| *delta > homing.reported_position_tolerance_mm)
+        .map(|(axis, delta)| format!("{axis} delta {delta:.3} mm"))
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "homing verification failed ({}) at X{:.3} Y{:.3} Z{:.3} A{:.3} B{:.3}",
+            failures.join(", "),
+            reported.primary_pose.x_mm,
+            reported.primary_pose.y_mm,
+            reported.primary_pose.z_mm,
+            reported.primary_pose.rotation_deg,
+            reported.secondary_rotation_deg,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn homing_profile() -> HomingProfile {
+        HomingProfile {
+            method: "sensorless".into(),
+            operator_checks: Vec::new(),
+            command: "G28".into(),
+            timeout_seconds: 120,
+            reported_position_tolerance_mm: 0.05,
+            requires_visual_refinement: true,
+        }
+    }
 
     #[test]
     fn actuator_commands_match_the_v3_0_4_profile() {
@@ -238,5 +348,69 @@ mod tests {
             "FIRMWARE_NAME:Marlin 2.1\nMACHINE_TYPE:3D Printer\nok"
         ));
         assert!(!supported_firmware("MACHINE_TYPE:LumenPnP\nok"));
+    }
+
+    #[test]
+    fn parses_position_before_marlin_step_counts() {
+        let report = parse_position_report(&[
+            "X:0.00 Y:0.00 Z:31.50 A:0.00 B:0.00 C:0.00 Count X:0 Y:0 Z:25200 A:0 B:0".into(),
+            "ok".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            report,
+            MarlinPosition {
+                primary_pose: Pose {
+                    x_mm: 0.0,
+                    y_mm: 0.0,
+                    z_mm: 31.5,
+                    rotation_deg: 0.0,
+                },
+                secondary_rotation_deg: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_attached_rev4_unhomed_position_fixture() {
+        let lines = include_str!("../tests/fixtures/lumenpnp-v3.0.4-rev4-m114-unhomed.txt")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let report = parse_position_report(&lines).unwrap();
+        assert_eq!(report.primary_pose.rotation_deg, 720.0);
+        assert_eq!(report.secondary_rotation_deg, 720.0);
+    }
+
+    #[test]
+    fn rejects_incomplete_or_non_finite_position_reports() {
+        assert!(parse_position_report(&["X:0 Y:0 Z:31.5 A:0 ok".into()]).is_err());
+        assert!(parse_position_report(&["X:nan Y:0 Z:31.5 A:0 B:0".into()]).is_err());
+    }
+
+    #[test]
+    fn verifies_linear_home_while_preserving_reported_rotations() {
+        let expected = Pose {
+            x_mm: 0.0,
+            y_mm: 0.0,
+            z_mm: 31.5,
+            rotation_deg: 0.0,
+        };
+        let mut reported = MarlinPosition {
+            primary_pose: expected,
+            secondary_rotation_deg: 0.0,
+        };
+        assert!(verify_homed(reported, expected, &homing_profile()).is_ok());
+
+        reported.primary_pose.x_mm = 0.051;
+        let error = verify_homed(reported, expected, &homing_profile())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("X delta 0.051 mm"));
+
+        reported.primary_pose.x_mm = 0.0;
+        reported.primary_pose.rotation_deg = 720.0;
+        reported.secondary_rotation_deg = 720.0;
+        assert!(verify_homed(reported, expected, &homing_profile()).is_ok());
     }
 }

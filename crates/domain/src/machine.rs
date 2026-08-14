@@ -133,6 +133,8 @@ pub struct HomingProfile {
     pub method: String,
     pub operator_checks: Vec<String>,
     pub command: String,
+    pub timeout_seconds: u64,
+    pub reported_position_tolerance_mm: f64,
     pub requires_visual_refinement: bool,
 }
 

@@ -4,7 +4,7 @@ This is the evidence log for the first attached-machine validation on
 2026-08-14. It is deliberately split into facts observed by software and
 checks that still require an operator or further implementation.
 
-No homing, jogging, or other motion command was sent during this session.
+No homing, jogging, or other motion command has been sent as of this revision.
 
 ## Attached hardware
 
@@ -36,6 +36,8 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   successfully, and released the serial device.
 - The sanitized M115 response is retained as a driver regression fixture at
   `crates/driver/tests/fixtures/lumenpnp-v3.0.4-rev4-m115.txt`.
+- The non-moving unhomed M114 response is retained at
+  `crates/driver/tests/fixtures/lumenpnp-v3.0.4-rev4-m114-unhomed.txt`.
 - Each camera delivered 10 of 10 full-resolution YUYV frames at 10 frames per
   second after the USB connection was physically reconnected.
 - The native VelocityPnP V4L2 backend resolved each stable role, discarded five
@@ -43,6 +45,11 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   the API. Both snapshots reported capture sequence 6.
 - Native control enumeration succeeded for both cameras. Their control ranges
   and current values are identical.
+- A non-moving `M114` probe against the attached REV4 firmware returned all six
+  coordinates in the expected format. Before homing it reported X/Y/Z at zero,
+  A/B at 720 degrees, and C at 10000. Coarse-home verification therefore checks
+  the G28-established X/Y/Z reference while preserving the finite reported A
+  rotation; nozzle rotation reference/limits remain a separate calibration.
 
 ## Camera recovery and pending calibration
 
@@ -60,13 +67,26 @@ the devices' 100 microsecond units, but both controls are inactive while the
 automatic modes are enabled. Neither camera exposes a focus control.
 
 The captured Top scene is a nearly uniform plane; the Bottom scene contains an
-out-of-focus obstruction or edge. A high-contrast target at each camera's real
-working plane is required before focus/orientation can be assessed and manual
-exposure, white balance, gain, lighting, and settling behavior can be locked.
+out-of-focus obstruction or edge. These are not the correct calibration views.
+After coarse homing, the top camera must be positioned over the machine's 1 mm
+datum fiducial at the exact center of the Opulo logo. Nozzle N1 with the N045
+tip must be positioned over the bottom camera at the V3 camera Z of 31.5 mm.
+The ring lights remain on for both views. Camera defaults are retained while
+automatic exposure is toggled on for settling and then off; exposure is the
+first control to tune. Those machine-native targets are used to assess
+focus/orientation and lock repeatable capture settings.
 
 ## Still prohibited
 
-Homing and motion remain out of scope until camera reproducibility is complete
-and an operator explicitly confirms the actuator observations and physical
-preflight.
+Homing is now the prerequisite for working-plane camera setup. The first
+physical `G28` remains prohibited until an operator explicitly confirms that
+both nozzles are level, the full travel envelope is clear, and physical power
+isolation is within reach. Jogging remains prohibited until coarse homing is
+verified from the controller's `M114` position report.
 Production job execution remains unavailable by design.
+
+## Procedure sources
+
+- [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
+- [Opulo V3 homing-fiducial calibration](https://docs.opulo.io/misc/calibration/4-homing-fiducial/)
+- [Opulo LumenPnP V3.0.4 OpenPnP machine profile](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml)

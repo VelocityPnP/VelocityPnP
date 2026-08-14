@@ -63,10 +63,15 @@ class Client:
             "duration_seconds": duration_seconds,
         })["lease"]
 
-    def home(self, lease_id: str | uuid.UUID, *, safety_checks_confirmed: bool = True) -> dict[str, Any]:
+    def home(self, lease_id: str | uuid.UUID, *, safety_checks_confirmed: bool = False) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "homing requires explicit confirmation that both nozzles are level, "
+                "the envelope is clear, and power isolation is reachable"
+            )
         return self.wait(self._request("POST", "/machine/home", {
             "lease_id": str(lease_id),
-            "confirmed": safety_checks_confirmed,
+            "confirmed": True,
         }))
 
     def jog(

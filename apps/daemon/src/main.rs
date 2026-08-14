@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
             args.serial_port.to_string_lossy(),
             args.baud,
             profile.home_pose,
+            profile.homing.clone(),
         ))
     };
     let machine = MachineHandle::spawn(driver, profile.clone());

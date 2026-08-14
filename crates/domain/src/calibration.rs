@@ -34,11 +34,11 @@ pub struct CalibrationStepDefinition {
 pub fn lumen_calibration_workflow() -> Vec<CalibrationStepDefinition> {
     use CalibrationStepId::*;
     vec![
-        step(CameraReproducibility, "Camera reproducibility", "Lock resolution, exposure, white balance, focus, lighting, and frame settling.", &[], false, false),
-        step(TopCameraIntrinsics, "Top camera intrinsics", "Measure lens distortion and camera matrix from a known target.", &[CameraReproducibility], true, true),
         step(CoarseHoming, "Coarse hardware homing", "Establish controller coordinates using the profile-specific homing method.", &[], true, false),
-        step(VisualHoming, "Visual homing", "Refine the coarse home against the fixed datum fiducial.", &[CoarseHoming, TopCameraIntrinsics], true, false),
-        step(MotionGeometry, "Motion geometry", "Measure scale, skew, backlash, and direction-dependent residuals over the work envelope.", &[VisualHoming], true, true),
+        step(CameraReproducibility, "Camera reproducibility", "After coarse homing, move the top camera over the 1 mm datum fiducial and nozzle N1 over the bottom camera; then lock resolution, exposure, white balance, focus, ring lighting, and frame settling.", &[CoarseHoming], true, false),
+        step(VisualHoming, "Visual homing", "Refine the coarse home against the fixed 1 mm datum fiducial at the center of the Opulo logo.", &[CoarseHoming, CameraReproducibility], true, false),
+        step(TopCameraIntrinsics, "Top camera intrinsics", "Measure lens distortion and camera matrix from a known target after visual homing.", &[VisualHoming], true, true),
+        step(MotionGeometry, "Motion geometry", "Measure scale, skew, backlash, and direction-dependent residuals over the work envelope.", &[VisualHoming, TopCameraIntrinsics], true, true),
         step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to corrected machine coordinates at calibrated Z planes.", &[MotionGeometry], true, true),
         step(NozzleOffsets, "Nozzle offsets", "Measure each nozzle relative to the down-looking camera.", &[TopCameraScale], true, false),
         step(BottomCameraGeometry, "Bottom camera geometry", "Locate and calibrate the up-looking camera.", &[NozzleOffsets], true, true),
@@ -146,5 +146,17 @@ mod tests {
             .completed_steps
             .contains(&CalibrationStepId::TopCameraIntrinsics));
         assert!(!snapshot.production_ready);
+    }
+
+    #[test]
+    fn coarse_homing_precedes_working_plane_camera_setup() {
+        let workflow = lumen_calibration_workflow();
+        assert_eq!(workflow[0].id, CalibrationStepId::CoarseHoming);
+        let camera = workflow
+            .iter()
+            .find(|step| step.id == CalibrationStepId::CameraReproducibility)
+            .unwrap();
+        assert_eq!(camera.dependencies, [CalibrationStepId::CoarseHoming]);
+        assert!(camera.requires_motion);
     }
 }

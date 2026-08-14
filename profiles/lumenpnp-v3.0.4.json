@@ -22,6 +22,8 @@
       "Physical power isolation is within reach"
     ],
     "command": "G28",
+    "timeout_seconds": 120,
+    "reported_position_tolerance_mm": 0.05,
     "requires_visual_refinement": true
   },
   "axes": [

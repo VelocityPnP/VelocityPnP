@@ -41,6 +41,13 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "camera role"):
             client.camera_snapshot("laptop_camera")
 
+    def test_home_requires_explicit_physical_confirmation(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.home("00000000-0000-0000-0000-000000000000")
+        send.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

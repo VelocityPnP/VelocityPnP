@@ -37,6 +37,9 @@ enum Command {
     Home {
         #[arg(long, env = "VELOCITYPNP_LEASE")]
         lease: Uuid,
+        /// Confirm both nozzles are level, the envelope is clear, and power isolation is reachable.
+        #[arg(long)]
+        confirm_safety_checks: bool,
     },
     Jog {
         #[arg(long, env = "VELOCITYPNP_LEASE")]
@@ -121,7 +124,13 @@ async fn main() -> Result<()> {
             )
             .await?
         }
-        Command::Home { lease } => {
+        Command::Home {
+            lease,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!("homing requires --confirm-safety-checks after physical inspection");
+            }
             run_operation(
                 &client,
                 base,

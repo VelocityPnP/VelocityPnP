@@ -43,6 +43,10 @@ cargo run -p velocitypnp -- preflight
 cargo run -p velocitypnp -- lease
 ```
 
+Homing is intentionally not implicit. After physically leveling both nozzles,
+clearing the complete travel envelope, and putting power isolation within
+reach, pass `home --lease <UUID> --confirm-safety-checks`.
+
 Attached PnP camera roles are available without opening the motion controller:
 
 ```bash
