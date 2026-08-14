@@ -33,6 +33,14 @@ class ClientTests(unittest.TestCase):
         self.assertIn(b"(kicad_pcb)", payload)
         self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
 
+    def test_camera_snapshot_uses_role_scoped_png_endpoint(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request_bytes", return_value=b"png") as send:
+            self.assertEqual(client.camera_snapshot("top_camera"), b"png")
+        send.assert_called_once_with("GET", "/cameras/top_camera/snapshot", "image/png")
+        with self.assertRaisesRegex(ValueError, "camera role"):
+            client.camera_snapshot("laptop_camera")
+
 
 if __name__ == "__main__":
     unittest.main()

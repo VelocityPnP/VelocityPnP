@@ -2,9 +2,10 @@
 
 ## Prerequisites
 
-- Rust stable (minimum 1.85)
+- Rust 1.88 or newer (the repository pins 1.88.0)
 - Node.js 20.19 or newer
 - Python 3.10 or newer
+- Clang/libclang for the Linux V4L2 bindings
 - Optional: OpenCV development libraries for `--features native-opencv`
 
 The SQLite library is statically bundled, so a system SQLite development
@@ -42,6 +43,17 @@ cargo run -p velocitypnp -- preflight
 cargo run -p velocitypnp -- lease
 ```
 
+Attached PnP camera roles are available without opening the motion controller:
+
+```bash
+wget http://127.0.0.1:4080/api/v1/cameras/top_camera/snapshot -O top.png
+wget http://127.0.0.1:4080/api/v1/cameras/bottom_camera/snapshot -O bottom.png
+wget -qO- http://127.0.0.1:4080/api/v1/cameras/top_camera/controls
+```
+
+Snapshots use the stable role assigned during discovery, discard five settling
+frames, and return 1280x720 grayscale PNGs from native YUYV capture.
+
 Build the UI with `npm run build`, then serve it from the daemon using
 `--web-dir web/dist`. The Vite development server is loopback-only and proxies
 API calls to the daemon.
@@ -60,4 +72,3 @@ cargo run -p velocitypnpd -- \
 
 Opening a USB CDC controller may reset it. Connect does only the bounded Marlin
 identity query and unit/mode setup; it does not home or move automatically.
-

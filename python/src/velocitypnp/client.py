@@ -43,6 +43,11 @@ class Client:
     def devices(self) -> list[dict[str, Any]]:
         return self._request("GET", "/system/devices")["devices"]
 
+    def camera_snapshot(self, role: str) -> bytes:
+        if role not in {"top_camera", "bottom_camera"}:
+            raise ValueError("camera role must be top_camera or bottom_camera")
+        return self._request_bytes("GET", f"/cameras/{role}/snapshot", "image/png")
+
     def connect(self) -> dict[str, Any]:
         return self.wait(self._request("POST", "/machine/connect"))
 
@@ -222,6 +227,21 @@ class Client:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 return json.load(response)
+        except HTTPError as error:
+            try:
+                payload = json.load(error)
+                message = payload.get("error", {}).get("message", str(error))
+            except (ValueError, TypeError):
+                message = str(error)
+            raise ApiError(error.code, message) from error
+
+    def _request_bytes(self, method: str, path: str, accept: str) -> bytes:
+        request = Request(
+            f"{self.base_url}{path}", method=method, headers={"Accept": accept},
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                return response.read()
         except HTTPError as error:
             try:
                 payload = json.load(error)

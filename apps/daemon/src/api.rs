@@ -28,12 +28,16 @@ use velocitypnp_kicad::{import_board, merge_bom};
 use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::plan_job;
 use velocitypnp_store::Store;
+use velocitypnp_vision::{
+    capture_gray_frame, encode_gray_png, query_camera_controls, V4l2CaptureConfig,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub machine: MachineHandle,
     pub profile: Arc<MachineProfile>,
     pub store: Store,
+    camera_capture_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -42,6 +46,7 @@ impl AppState {
             machine,
             profile: Arc::new(profile),
             store,
+            camera_capture_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -70,6 +75,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/system/devices", get(devices))
+        .route("/api/v1/cameras/{role}/snapshot", get(camera_snapshot))
+        .route("/api/v1/cameras/{role}/controls", get(camera_controls))
         .route("/api/v1/machine/profile", get(machine_profile))
         .route("/api/v1/machine/status", get(machine_status))
         .route("/api/v1/machine/connect", post(connect))
@@ -181,6 +188,63 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
 async fn devices() -> ApiResult<Json<Value>> {
     let devices = discover_linux_devices().map_err(ApiError::internal)?;
     Ok(Json(json!({"devices": devices})))
+}
+
+async fn camera_snapshot(
+    State(state): State<AppState>,
+    Path(role): Path<String>,
+) -> ApiResult<Response> {
+    let device_path = camera_path_for_role(&role)?;
+
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    let capture = tokio::task::spawn_blocking(move || {
+        let capture = capture_gray_frame(&V4l2CaptureConfig::lumenpnp(device_path))?;
+        let png = encode_gray_png(&capture.frame)?;
+        anyhow::Ok((png, capture.metadata))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-velocitypnp-camera-role", role)
+        .header("x-velocitypnp-frame-sequence", capture.1.sequence)
+        .header("x-velocitypnp-frame-width", capture.1.width)
+        .header("x-velocitypnp-frame-height", capture.1.height)
+        .body(axum::body::Body::from(capture.0))
+        .map_err(ApiError::internal)
+}
+
+async fn camera_controls(
+    State(state): State<AppState>,
+    Path(role): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let device_path = camera_path_for_role(&role)?;
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    let controls = tokio::task::spawn_blocking(move || query_camera_controls(device_path))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({"role": role, "controls": controls})))
+}
+
+fn camera_path_for_role(role: &str) -> ApiResult<String> {
+    if !matches!(role, "top_camera" | "bottom_camera") {
+        return Err(ApiError::bad_request(
+            "camera role must be top_camera or bottom_camera",
+        ));
+    }
+    let device = discover_linux_devices()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|device| {
+            device.capture_capable == Some(true) && device.suggested_role.as_deref() == Some(role)
+        })
+        .ok_or_else(|| ApiError::not_found(format!("{role} is not attached")))?;
+    Ok(device.stable_path.unwrap_or(device.path))
 }
 
 async fn machine_profile(State(state): State<AppState>) -> Json<MachineProfile> {
@@ -1035,6 +1099,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_rejects_unknown_role_before_hardware_access() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cameras/laptop_camera/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

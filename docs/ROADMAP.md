@@ -19,8 +19,9 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Detect the attached REV4 controller and assign both PnP camera roles
 - [x] Validate bounded controller handshake, reconnect, and fail-safe disconnect
 - [x] Record a sanitized physical-controller transcript fixture without motion
-- [ ] Capture stable frames from both attached UVC cameras through the native backend
-- [ ] Enumerate and lock camera format, exposure, white balance, focus, and lighting
+- [x] Capture stable frames from both attached UVC cameras through the native backend
+- [x] Enumerate native camera formats, controls, and initial automatic settings
+- [ ] Lock camera exposure, white balance, gain, working-plane focus, and lighting
 - [ ] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
 - [ ] Record camera capture fixtures without moving the machine
 

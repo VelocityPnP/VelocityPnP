@@ -54,7 +54,7 @@ Changing an upstream measurement invalidates all dependent results.
 - `velocitypnp-kicad`: direct `.kicad_pcb` parser and optional BOM merge
 - `velocitypnp-openpnp`: one-way migration of user-owned OpenPnP XML into untrusted calibration/configuration seeds
 - `velocitypnp-planner`: job validation and conservative placement planning
-- `velocitypnp-vision`: deterministic image/geometry primitives; optional native OpenCV feature
+- `velocitypnp-vision`: deterministic image/geometry primitives, native Linux V4L2 capture, and optional OpenCV calibration
 - `velocitypnp-store`: SQLite migrations, entities, operations, and event journal
 - `velocitypnpd`: REST/SSE API and static web hosting
 - `velocitypnp`: command-line API client

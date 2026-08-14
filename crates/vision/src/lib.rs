@@ -1,16 +1,38 @@
-//! Deterministic vision/calibration primitives. Camera capture and full lens
-//! calibration are enabled separately through the `native-opencv` feature so
-//! the simulator and import pipeline remain portable.
+//! Deterministic vision/calibration primitives. Linux camera capture and full
+//! OpenCV calibration are separate features so the simulator and import
+//! pipeline remain portable.
+
+#[cfg(all(feature = "native-v4l2", target_os = "linux"))]
+mod v4l2_capture;
+
+#[cfg(all(feature = "native-v4l2", target_os = "linux"))]
+pub use v4l2_capture::*;
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use velocitypnp_domain::{Residuals, Transform2d};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrayFrame {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+}
+
+pub fn encode_gray_png(frame: &GrayFrame) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        frame.pixels.len() == frame.width as usize * frame.height as usize,
+        "gray frame buffer does not match its dimensions"
+    );
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, frame.width, frame.height);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&frame.pixels)?;
+    }
+    Ok(encoded)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -234,5 +256,21 @@ mod tests {
                 rotation_deg: 3.0
             }
         ));
+    }
+
+    #[test]
+    fn encodes_gray_frame_as_png() {
+        let encoded = encode_gray_png(&GrayFrame {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 64, 128, 255],
+        })
+        .unwrap();
+        assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(encoded));
+        let reader = decoder.read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (2, 2));
+        assert_eq!(reader.info().color_type, png::ColorType::Grayscale);
     }
 }
