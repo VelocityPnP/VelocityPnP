@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Rust 1.88 or newer (the repository pins 1.88.0)
-- Node.js 20.19 or newer
+- Node.js 20.19.x, or 22.12 or newer (the repository pins Node 22.23.2)
 - Python 3.10 or newer
 - Clang/libclang for the Linux V4L2 bindings
 - Optional: OpenCV development libraries for `--features native-opencv`
