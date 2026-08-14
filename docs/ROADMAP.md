@@ -1,0 +1,56 @@
+# Implementation status and hardware gates
+
+The project is organized by measurable gates rather than calendar estimates.
+
+## Implemented foundation
+
+- [x] Rust workspace, simulator, Linux discovery, REV4 Marlin transport
+- [x] Single-owner state machine, control lease, bounds, preflight, homing, E-stop
+- [x] SQLite snapshots, operation tracking, and append-only event journal
+- [x] React UI, CLI, Python client, REST/SSE interface
+- [x] Direct KiCad PCB import, BOM enrichment, top/bottom data preservation
+- [x] Strip/drag/Photon configuration models and Photon packet codec
+- [x] Deterministic job preflight/planning and simulator placement cycles
+- [x] Calibration dependency graph, invalidation, residual gates, and rollback-ready snapshots
+- [x] Fiducial, rigid-transform, residual, and placement-tolerance vision primitives
+
+## Gate 1 — Camera and non-moving hardware validation
+
+- [ ] Capture stable frames from both attached UVC cameras through the native backend
+- [ ] Enumerate and lock camera format, exposure, white balance, focus, and lighting
+- [ ] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
+- [ ] Record controller/camera transcript fixtures without moving the machine
+
+## Gate 2 — Motion and homing validation
+
+- [ ] Validate axis signs, safe-Z convention, feed limits, controlled stop, and reconnect
+- [ ] Tune V3 sensorless homing with bounded per-axis procedures
+- [ ] Implement and measure primary-datum visual refinement
+- [ ] Pass 30-cycle homing p95 residual of 0.05 mm or better
+
+## Gate 3 — Full calibration
+
+- [ ] Fabricate and publish the known-dimension multi-fiducial calibration PCB
+- [ ] Bind OpenCV camera intrinsics/distortion calibration to recorded workflow steps
+- [ ] Automate XY scale, skew, backlash, camera scale, nozzle offsets, and bottom-camera location
+- [ ] Fit nozzle runout compensation and vacuum classification per nozzle/tip
+- [ ] Pass full-bed and nozzle p95 residual of 0.05 mm or better
+
+## Gate 4 — Feeder and job production validation
+
+- [ ] Validate vision-assisted strip setup and indexing
+- [ ] Validate drag motion/actuator sequences with collision review
+- [ ] Validate Photon discovery/feed/status/retry on arriving hardware
+- [ ] Add vacuum and bottom-vision feedback to the physical job executor
+- [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
+
+## Gate 5 — Inspection and newer machines
+
+- [ ] Build top-camera board mosaics and package-template pose comparison
+- [ ] Meet labeled-dataset recall and false-flag targets
+- [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
+- [ ] Package signed Debian releases and migration-tested backup/restore bundles
+
+The physical job execution endpoint remains absent until Gates 1–4 pass. The
+simulator endpoint exists specifically to exercise job state and path planning
+without turning an unvalidated workflow into machine motion.

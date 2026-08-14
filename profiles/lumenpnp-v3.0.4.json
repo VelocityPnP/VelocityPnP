@@ -1,0 +1,46 @@
+{
+  "id": "lumenpnp-v3.0.4",
+  "display_name": "LumenPnP V3.0.4",
+  "mechanics_revision": "3.0.4",
+  "controller_families": ["MARLIN_OPULO_LUMEN_REV4", "LumenPnP"],
+  "bounds": {
+    "x_min_mm": 0.0,
+    "x_max_mm": 433.0,
+    "y_min_mm": 0.0,
+    "y_max_mm": 487.0,
+    "z_min_mm": 0.0,
+    "z_max_mm": 40.0
+  },
+  "home_pose": {"x_mm": 0.0, "y_mm": 0.0, "z_mm": 31.5, "rotation_deg": 0.0},
+  "safe_z_mm": 31.5,
+  "default_feed_mm_per_min": 1200.0,
+  "homing": {
+    "method": "sensorless",
+    "operator_checks": [
+      "Both nozzles are level and clear of the staging plate",
+      "The work envelope is clear of hands, tools, and loose components",
+      "Physical power isolation is within reach"
+    ],
+    "command": "G28",
+    "requires_visual_refinement": true
+  },
+  "axes": [
+    {"name": "x", "controller_letter": "X", "kind": "linear"},
+    {"name": "y", "controller_letter": "Y", "kind": "linear"},
+    {"name": "z1", "controller_letter": "Z", "kind": "linear"},
+    {"name": "rotation1", "controller_letter": "A", "kind": "rotation"},
+    {"name": "rotation2", "controller_letter": "B", "kind": "rotation"}
+  ],
+  "actuators": [
+    {"id": "lights", "display_name": "Top and bottom ring lights", "kind": "light"},
+    {"id": "vacuum_1", "display_name": "Nozzle 1 vacuum", "kind": "vacuum"},
+    {"id": "vacuum_2", "display_name": "Nozzle 2 vacuum", "kind": "vacuum"}
+  ],
+  "capabilities": {
+    "dual_nozzle": true,
+    "visual_homing": true,
+    "photon_bus": false,
+    "physical_endstops": false,
+    "contact_probe": false
+  }
+}

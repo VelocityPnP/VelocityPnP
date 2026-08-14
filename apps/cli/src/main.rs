@@ -1,0 +1,294 @@
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+use reqwest::{multipart, Client, Response};
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::time::Duration;
+use uuid::Uuid;
+use velocitypnp_domain::{Operation, OperationStatus, Pose};
+
+#[derive(Debug, Parser)]
+#[command(version, about = "VelocityPnP command-line client")]
+struct Args {
+    #[arg(
+        long,
+        env = "VELOCITYPNP_API",
+        default_value = "http://127.0.0.1:4080/api/v1"
+    )]
+    api: String,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Status,
+    Devices,
+    Connect,
+    Disconnect,
+    Preflight,
+    Lease {
+        #[arg(default_value = "velocitypnp-cli")]
+        client_name: String,
+        #[arg(long, default_value_t = 900)]
+        seconds: u32,
+    },
+    Home {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+    },
+    Jog {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long)]
+        x: f64,
+        #[arg(long)]
+        y: f64,
+        #[arg(long)]
+        z: f64,
+        #[arg(long, default_value_t = 0.0)]
+        rotation: f64,
+        #[arg(long, default_value_t = 300.0)]
+        feed: f64,
+    },
+    EmergencyStop,
+    ImportBoard {
+        pcb: PathBuf,
+        #[arg(long)]
+        bom: Option<PathBuf>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    ImportOpenpnp {
+        machine: PathBuf,
+        #[arg(long)]
+        parts: Option<PathBuf>,
+    },
+    Boards,
+    CalibrationWorkflow,
+    NewCalibration {
+        #[arg(long, default_value = "unassigned")]
+        machine_serial: String,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let client = Client::builder().timeout(Duration::from_secs(90)).build()?;
+    let base = args.api.trim_end_matches('/');
+    let output = match args.command {
+        Command::Status => get(&client, &format!("{base}/machine/status")).await?,
+        Command::Devices => get(&client, &format!("{base}/system/devices")).await?,
+        Command::Connect => {
+            run_operation(
+                &client,
+                base,
+                post(&client, &format!("{base}/machine/connect"), None).await?,
+            )
+            .await?
+        }
+        Command::Disconnect => {
+            run_operation(
+                &client,
+                base,
+                post(&client, &format!("{base}/machine/disconnect"), None).await?,
+            )
+            .await?
+        }
+        Command::Preflight => {
+            run_operation(
+                &client,
+                base,
+                post(
+                    &client,
+                    &format!("{base}/machine/preflight"),
+                    Some(json!({"confirmed": true})),
+                )
+                .await?,
+            )
+            .await?
+        }
+        Command::Lease {
+            client_name,
+            seconds,
+        } => {
+            post(
+                &client,
+                &format!("{base}/control/lease"),
+                Some(json!({"client_name": client_name, "duration_seconds": seconds})),
+            )
+            .await?
+        }
+        Command::Home { lease } => {
+            run_operation(
+                &client,
+                base,
+                post(
+                    &client,
+                    &format!("{base}/machine/home"),
+                    Some(json!({"lease_id": lease, "confirmed": true})),
+                )
+                .await?,
+            )
+            .await?
+        }
+        Command::Jog {
+            lease,
+            x,
+            y,
+            z,
+            rotation,
+            feed,
+        } => {
+            let target = Pose {
+                x_mm: x,
+                y_mm: y,
+                z_mm: z,
+                rotation_deg: rotation,
+            };
+            run_operation(
+                &client,
+                base,
+                post(
+                    &client,
+                    &format!("{base}/machine/jog"),
+                    Some(json!({"lease_id": lease, "target": target, "feed_mm_per_min": feed})),
+                )
+                .await?,
+            )
+            .await?
+        }
+        Command::EmergencyStop => {
+            run_operation(
+                &client,
+                base,
+                post(&client, &format!("{base}/machine/emergency-stop"), None).await?,
+            )
+            .await?
+        }
+        Command::ImportBoard { pcb, bom, name } => {
+            let mut form = multipart::Form::new().part(
+                "pcb",
+                multipart::Part::bytes(tokio::fs::read(&pcb).await?).file_name(
+                    pcb.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            );
+            if let Some(bom) = bom {
+                form = form.part(
+                    "bom",
+                    multipart::Part::bytes(tokio::fs::read(&bom).await?).file_name(
+                        bom.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                );
+            }
+            if let Some(name) = name {
+                form = form.text("name", name);
+            }
+            decode(
+                client
+                    .post(format!("{base}/boards/import"))
+                    .multipart(form)
+                    .send()
+                    .await?,
+            )
+            .await?
+        }
+        Command::ImportOpenpnp { machine, parts } => {
+            let mut form = multipart::Form::new().part(
+                "machine",
+                multipart::Part::bytes(tokio::fs::read(&machine).await?).file_name("machine.xml"),
+            );
+            if let Some(parts) = parts {
+                form = form.part(
+                    "parts",
+                    multipart::Part::bytes(tokio::fs::read(parts).await?).file_name("parts.xml"),
+                );
+            }
+            decode(
+                client
+                    .post(format!("{base}/import/openpnp"))
+                    .multipart(form)
+                    .send()
+                    .await?,
+            )
+            .await?
+        }
+        Command::Boards => get(&client, &format!("{base}/boards")).await?,
+        Command::CalibrationWorkflow => {
+            get(&client, &format!("{base}/calibration/workflow")).await?
+        }
+        Command::NewCalibration { machine_serial } => {
+            post(
+                &client,
+                &format!("{base}/calibrations"),
+                Some(json!({"machine_serial": machine_serial})),
+            )
+            .await?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+async fn get(client: &Client, url: &str) -> Result<Value> {
+    decode(client.get(url).send().await?).await
+}
+
+async fn post(client: &Client, url: &str, body: Option<Value>) -> Result<Value> {
+    let request = client.post(url);
+    decode(match body {
+        Some(body) => request.json(&body).send().await?,
+        None => request.send().await?,
+    })
+    .await
+}
+
+async fn decode(response: Response) -> Result<Value> {
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    let value: Value = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "server returned {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        )
+    })?;
+    if !status.is_success() {
+        bail!(
+            "server returned {status}: {}",
+            serde_json::to_string(&value)?
+        );
+    }
+    Ok(value)
+}
+
+async fn run_operation(client: &Client, base: &str, initial: Value) -> Result<Value> {
+    let mut operation: Operation = serde_json::from_value(initial)?;
+    loop {
+        if !matches!(
+            operation.status,
+            OperationStatus::Pending | OperationStatus::Running
+        ) {
+            if operation.status == OperationStatus::Failed {
+                bail!(
+                    "operation failed: {}",
+                    operation
+                        .message
+                        .unwrap_or_else(|| "unknown failure".into())
+                );
+            }
+            return Ok(serde_json::to_value(operation)?);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        operation = serde_json::from_value(
+            get(client, &format!("{base}/operations/{}", operation.id)).await?,
+        )?;
+    }
+}

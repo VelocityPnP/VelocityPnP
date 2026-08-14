@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openpnp-machine>
+  <machine>
+    <axes>
+      <axis name="x" type="X" letter="X">
+        <home-coordinate value="0" units="Millimeters"/>
+        <soft-limit-low value="0" units="Millimeters"/>
+        <soft-limit-high value="433" units="Millimeters"/>
+      </axis>
+    </axes>
+    <heads>
+      <head>
+        <nozzles>
+          <nozzle name="N1">
+            <head-offsets x="-23.761" y="-66.619" z="0" rotation="0" units="Millimeters"/>
+          </nozzle>
+        </nozzles>
+      </head>
+    </heads>
+    <cameras>
+      <camera name="Top" looking="Down" unique-id="example-camera" flip-x="true">
+        <units-per-pixel x="0.0135" y="0.0135" units="Millimeters"/>
+        <head-offsets x="0" y="0" z="0" rotation="0" units="Millimeters"/>
+      </camera>
+    </cameras>
+    <feeders>
+      <feeder class="ReferenceStripFeeder" id="F1" name="Example strip" part-id="P1">
+        <location x="20" y="40" z="5" rotation="0" units="Millimeters"/>
+      </feeder>
+    </feeders>
+  </machine>
+</openpnp-machine>

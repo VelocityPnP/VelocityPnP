@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "velocitypnp"
+version = "0.1.0"
+description = "Python client for the VelocityPnP API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "VelocityPnP contributors" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

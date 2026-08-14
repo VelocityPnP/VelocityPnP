@@ -1,0 +1,415 @@
+openapi: 3.1.0
+info:
+  title: VelocityPnP API
+  version: 0.1.0
+  description: >-
+    Versioned control, calibration, board, feeder, and job interface. Machine
+    operations are asynchronous and return an Operation resource.
+servers:
+  - url: http://127.0.0.1:4080/api/v1
+paths:
+  /health:
+    get:
+      operationId: health
+      responses:
+        "200": { description: Healthy, content: { application/json: { schema: { type: object } } } }
+  /system/devices:
+    get:
+      operationId: listDevices
+      responses:
+        "200":
+          description: Linux serial and camera devices
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices: { type: array, items: { $ref: "#/components/schemas/DeviceIdentity" } }
+  /machine/profile:
+    get:
+      operationId: getMachineProfile
+      responses:
+        "200": { description: Active versioned machine profile, content: { application/json: { schema: { type: object } } } }
+  /machine/status:
+    get:
+      operationId: getMachineStatus
+      responses:
+        "200":
+          description: Current machine state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [machine]
+                properties:
+                  machine: { $ref: "#/components/schemas/MachineStatus" }
+  /machine/connect:
+    post:
+      operationId: connectMachine
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /machine/disconnect:
+    post:
+      operationId: disconnectMachine
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /machine/preflight:
+    post:
+      operationId: completePreflight
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Confirmation" } } } }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /control/lease:
+    post:
+      operationId: acquireControlLease
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_name]
+              properties:
+                client_name: { type: string, minLength: 1 }
+                duration_seconds: { type: integer, minimum: 30, maximum: 3600, default: 900 }
+      responses:
+        "200": { description: Exclusive control lease, content: { application/json: { schema: { type: object } } } }
+  /machine/home:
+    post:
+      operationId: homeMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/LeaseRequest"
+                - $ref: "#/components/schemas/Confirmation"
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /machine/jog:
+    post:
+      operationId: jogMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, target]
+              properties:
+                lease_id: { type: string, format: uuid }
+                target: { $ref: "#/components/schemas/Pose" }
+                feed_mm_per_min: { type: number, exclusiveMinimum: 0, default: 300 }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /machine/actuators/{actuator_id}:
+    post:
+      operationId: setActuator
+      parameters:
+        - { name: actuator_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, enabled]
+              properties:
+                lease_id: { type: string, format: uuid }
+                enabled: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /machine/emergency-stop:
+    post:
+      operationId: emergencyStop
+      description: Always available; does not require a control lease.
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /operations/{id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Operation, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        "200": { description: Server-sent machine events, content: { text/event-stream: { schema: { type: string } } } }
+  /events/recent:
+    get:
+      operationId: recentEvents
+      responses:
+        "200": { description: Persisted audit events, content: { application/json: { schema: { type: object } } } }
+  /calibration/workflow:
+    get:
+      operationId: calibrationWorkflow
+      responses:
+        "200": { description: Ordered calibration dependency graph, content: { application/json: { schema: { type: object } } } }
+  /calibrations:
+    get:
+      operationId: listCalibrations
+      responses:
+        "200": { description: Calibration snapshots, content: { application/json: { schema: { type: object } } } }
+    post:
+      operationId: createCalibration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [machine_serial]
+              properties: { machine_serial: { type: string } }
+      responses:
+        "201": { description: New snapshot, content: { application/json: { schema: { type: object } } } }
+  /calibrations/{id}/steps/{step}/complete:
+    post:
+      operationId: completeCalibrationStep
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: step, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmed]
+              properties:
+                confirmed: { type: boolean }
+                residuals: { $ref: "#/components/schemas/Residuals" }
+                values: { type: object, additionalProperties: true }
+      responses:
+        "200": { description: Updated calibration snapshot, content: { application/json: { schema: { type: object } } } }
+  /calibrations/{id}/steps/{step}/invalidate:
+    post:
+      operationId: invalidateCalibrationStep
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: step, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Snapshot with dependent steps invalidated, content: { application/json: { schema: { type: object } } } }
+  /boards:
+    get:
+      operationId: listBoards
+      responses:
+        "200": { description: Imported board designs, content: { application/json: { schema: { type: object } } } }
+  /boards/import:
+    post:
+      operationId: importKiCadBoard
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [pcb]
+              properties:
+                pcb: { type: string, format: binary }
+                bom: { type: string, format: binary }
+                name: { type: string }
+      responses:
+        "201": { description: Imported and validated board, content: { application/json: { schema: { type: object } } } }
+  /boards/{id}:
+    get:
+      operationId: getBoard
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Board design, content: { application/json: { schema: { type: object } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /import/openpnp:
+    post:
+      operationId: importOpenPnp
+      description: Extracts untrusted migration seeds; imported calibration never becomes production-ready automatically.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [machine]
+              properties:
+                machine: { type: string, format: binary }
+                parts: { type: string, format: binary }
+      responses:
+        "200": { description: Staged OpenPnP migration report, content: { application/json: { schema: { type: object } } } }
+  /feeders:
+    get:
+      operationId: listFeeders
+      responses:
+        "200": { description: Feeders, content: { application/json: { schema: { type: object } } } }
+    post:
+      operationId: putFeeder
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        "201": { description: Stored feeder, content: { application/json: { schema: { type: object } } } }
+  /jobs:
+    get:
+      operationId: listJobs
+      responses:
+        "200": { description: Jobs, content: { application/json: { schema: { type: object } } } }
+    post:
+      operationId: putJob
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        "201": { description: Stored job, content: { application/json: { schema: { type: object } } } }
+  /jobs/{id}/plan:
+    get:
+      operationId: planJob
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Deterministic plan and preflight report, content: { application/json: { schema: { type: object } } } }
+  /jobs/{id}/simulate:
+    post:
+      operationId: simulateJob
+      description: Executes conservative placement cycles only when the daemon uses the simulator driver.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/LeaseRequest" } } } }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /inspections:
+    get:
+      operationId: listInspections
+      responses:
+        "200": { description: Inspection reports, content: { application/json: { schema: { type: object } } } }
+    post:
+      operationId: putInspection
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/InspectionReport" } } } }
+      responses:
+        "201": { description: Stored inspection report, content: { application/json: { schema: { $ref: "#/components/schemas/InspectionReport" } } } }
+  /inspections/{id}:
+    get:
+      operationId: getInspection
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Inspection report, content: { application/json: { schema: { $ref: "#/components/schemas/InspectionReport" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /inspections/{id}/findings/{finding_id}/disposition:
+    post:
+      operationId: dispositionInspectionFinding
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: finding_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disposition]
+              properties:
+                disposition: { type: string, enum: [accepted, rework, false_positive] }
+      responses:
+        "200": { description: Updated inspection report, content: { application/json: { schema: { $ref: "#/components/schemas/InspectionReport" } } } }
+components:
+  responses:
+    OperationAccepted:
+      description: Operation accepted
+      content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } }
+    NotFound:
+      description: Resource not found
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  schemas:
+    Confirmation:
+      type: object
+      required: [confirmed]
+      properties: { confirmed: { type: boolean } }
+    LeaseRequest:
+      type: object
+      required: [lease_id]
+      properties: { lease_id: { type: string, format: uuid } }
+    Pose:
+      type: object
+      required: [x_mm, y_mm, z_mm, rotation_deg]
+      properties:
+        x_mm: { type: number }
+        y_mm: { type: number }
+        z_mm: { type: number }
+        rotation_deg: { type: number }
+    Residuals:
+      type: object
+      required: [sample_count, rms_mm, p95_mm, max_mm]
+      properties:
+        sample_count: { type: integer, minimum: 1 }
+        rms_mm: { type: number, minimum: 0 }
+        p95_mm: { type: number, minimum: 0 }
+        max_mm: { type: number, minimum: 0 }
+    MachineStatus:
+      type: object
+      required: [state, simulated, profile_id, homed]
+      properties:
+        state:
+          type: string
+          enum: [disconnected, connected, preflight, unhomed, homing, ready, running, paused, fault, e_stopped]
+        simulated: { type: boolean }
+        profile_id: { type: string }
+        pose: { oneOf: [{ $ref: "#/components/schemas/Pose" }, { type: "null" }] }
+        homed: { type: boolean }
+        fault: { type: [object, "null"] }
+        control_lease: { type: [object, "null"] }
+        calibration_revision: { type: [string, "null"], format: uuid }
+    DeviceIdentity:
+      type: object
+      required: [kind, path]
+      properties:
+        kind: { type: string, enum: [serial_controller, camera] }
+        path: { type: string }
+        stable_path: { type: [string, "null"] }
+        vendor_id: { type: [string, "null"] }
+        product_id: { type: [string, "null"] }
+        serial: { type: [string, "null"] }
+        product: { type: [string, "null"] }
+        capture_capable: { type: [boolean, "null"] }
+        suggested_role: { type: [string, "null"] }
+    InspectionReport:
+      type: object
+      required: [id, job_id, created_at, status, findings]
+      properties:
+        id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        status: { type: string, enum: [awaiting_capture, needs_review, passed, rework_required] }
+        findings:
+          type: array
+          items:
+            type: object
+            required: [id, board_instance_id, placement_reference, kind, confidence]
+            properties:
+              id: { type: string, format: uuid }
+              board_instance_id: { type: string, format: uuid }
+              placement_reference: { type: string }
+              kind: { type: string }
+              confidence: { type: number, minimum: 0, maximum: 1 }
+              measured_offset_mm: { type: [number, "null"], minimum: 0 }
+              measured_rotation_deg: { type: [number, "null"] }
+              image_artifact: { type: [string, "null"] }
+              disposition: { type: [string, "null"] }
+    Operation:
+      type: object
+      required: [id, kind, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        status: { type: string, enum: [pending, running, succeeded, failed, cancelled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        message: { type: [string, "null"] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }

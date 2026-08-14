@@ -1,0 +1,526 @@
+use crate::MachineDriver;
+use anyhow::{anyhow, bail, Result};
+use chrono::{Duration as ChronoDuration, Utc};
+use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use uuid::Uuid;
+use velocitypnp_domain::{
+    ControlLease, MachineEvent, MachineProfile, MachineState, MachineStatus, Pose,
+};
+
+#[derive(Clone)]
+pub struct MachineHandle {
+    tx: mpsc::Sender<Command>,
+    status: watch::Receiver<MachineStatus>,
+    events: broadcast::Sender<MachineEvent>,
+    emergency_flag: Arc<AtomicBool>,
+}
+
+impl MachineHandle {
+    pub fn spawn(mut driver: Box<dyn MachineDriver>, profile: MachineProfile) -> Self {
+        let emergency_flag = Arc::new(AtomicBool::new(false));
+        driver.set_emergency_flag(emergency_flag.clone());
+        let (tx, rx) = mpsc::channel(64);
+        let (status_tx, status) = watch::channel(MachineStatus {
+            simulated: driver.simulated(),
+            profile_id: profile.id.clone(),
+            ..MachineStatus::default()
+        });
+        let (events, _) = broadcast::channel(256);
+        tokio::spawn(
+            MachineActor {
+                driver,
+                profile,
+                rx,
+                status_tx,
+                events: events.clone(),
+                emergency_flag: emergency_flag.clone(),
+                sequence: 0,
+            }
+            .run(),
+        );
+        Self {
+            tx,
+            status,
+            events,
+            emergency_flag,
+        }
+    }
+
+    pub fn status(&self) -> MachineStatus {
+        self.status.borrow().clone()
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<MachineEvent> {
+        self.events.subscribe()
+    }
+
+    pub async fn connect(&self) -> Result<String> {
+        request(&self.tx, |reply| Command::Connect { reply }).await
+    }
+
+    pub async fn disconnect(&self) -> Result<()> {
+        request(&self.tx, |reply| Command::Disconnect { reply }).await
+    }
+
+    pub async fn complete_preflight(&self, checks_confirmed: bool) -> Result<()> {
+        request(&self.tx, |reply| Command::CompletePreflight {
+            checks_confirmed,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn acquire_lease(
+        &self,
+        client_name: String,
+        duration_seconds: u32,
+    ) -> Result<ControlLease> {
+        request(&self.tx, |reply| Command::AcquireLease {
+            client_name,
+            duration_seconds,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn home(&self, lease_id: Uuid, checks_confirmed: bool) -> Result<Pose> {
+        request(&self.tx, |reply| Command::Home {
+            lease_id,
+            checks_confirmed,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn jog(&self, lease_id: Uuid, target: Pose, feed_mm_per_min: f64) -> Result<Pose> {
+        request(&self.tx, |reply| Command::Jog {
+            lease_id,
+            target,
+            feed_mm_per_min,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn actuate(&self, lease_id: Uuid, actuator_id: String, enabled: bool) -> Result<()> {
+        request(&self.tx, |reply| Command::Actuate {
+            lease_id,
+            actuator_id,
+            enabled,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn emergency_stop(&self) -> Result<()> {
+        // This reaches a blocking physical driver before the serialized actor
+        // can dequeue the explicit state-transition command.
+        self.emergency_flag.store(true, Ordering::Release);
+        request(&self.tx, |reply| Command::EmergencyStop { reply }).await
+    }
+}
+
+async fn request<T>(
+    tx: &mpsc::Sender<Command>,
+    build: impl FnOnce(oneshot::Sender<Result<T>>) -> Command,
+) -> Result<T> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(build(reply_tx))
+        .await
+        .map_err(|_| anyhow!("machine actor stopped"))?;
+    reply_rx
+        .await
+        .map_err(|_| anyhow!("machine actor dropped response"))?
+}
+
+enum Command {
+    Connect {
+        reply: oneshot::Sender<Result<String>>,
+    },
+    Disconnect {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    CompletePreflight {
+        checks_confirmed: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    AcquireLease {
+        client_name: String,
+        duration_seconds: u32,
+        reply: oneshot::Sender<Result<ControlLease>>,
+    },
+    Home {
+        lease_id: Uuid,
+        checks_confirmed: bool,
+        reply: oneshot::Sender<Result<Pose>>,
+    },
+    Jog {
+        lease_id: Uuid,
+        target: Pose,
+        feed_mm_per_min: f64,
+        reply: oneshot::Sender<Result<Pose>>,
+    },
+    Actuate {
+        lease_id: Uuid,
+        actuator_id: String,
+        enabled: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    EmergencyStop {
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+struct MachineActor {
+    driver: Box<dyn MachineDriver>,
+    profile: MachineProfile,
+    rx: mpsc::Receiver<Command>,
+    status_tx: watch::Sender<MachineStatus>,
+    events: broadcast::Sender<MachineEvent>,
+    emergency_flag: Arc<AtomicBool>,
+    sequence: u64,
+}
+
+impl MachineActor {
+    async fn run(mut self) {
+        while let Some(command) = self.rx.recv().await {
+            match command {
+                Command::Connect { reply } => {
+                    let _ = reply.send(self.connect().await);
+                }
+                Command::Disconnect { reply } => {
+                    let result = self.driver.disconnect().await;
+                    self.update(|s| {
+                        s.state = MachineState::Disconnected;
+                        s.homed = false;
+                        s.pose = None;
+                        s.control_lease = None;
+                    });
+                    self.emit("machine.disconnected", json!({}));
+                    let _ = reply.send(result);
+                }
+                Command::CompletePreflight {
+                    checks_confirmed,
+                    reply,
+                } => {
+                    let result = if self.status().state != MachineState::Preflight {
+                        bail_result("preflight is only valid immediately after connection")
+                    } else if !checks_confirmed {
+                        bail_result("operator preflight checks were not confirmed")
+                    } else {
+                        self.update(|s| s.state = MachineState::Unhomed);
+                        self.emit("machine.preflight_completed", json!({}));
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                Command::AcquireLease {
+                    client_name,
+                    duration_seconds,
+                    reply,
+                } => {
+                    let _ = reply.send(self.acquire_lease(client_name, duration_seconds));
+                }
+                Command::Home {
+                    lease_id,
+                    checks_confirmed,
+                    reply,
+                } => {
+                    let _ = reply.send(self.home(lease_id, checks_confirmed).await);
+                }
+                Command::Jog {
+                    lease_id,
+                    target,
+                    feed_mm_per_min,
+                    reply,
+                } => {
+                    let _ = reply.send(self.jog(lease_id, target, feed_mm_per_min).await);
+                }
+                Command::Actuate {
+                    lease_id,
+                    actuator_id,
+                    enabled,
+                    reply,
+                } => {
+                    let _ = reply.send(self.actuate(lease_id, actuator_id, enabled).await);
+                }
+                Command::EmergencyStop { reply } => {
+                    let result = self.driver.emergency_stop().await;
+                    self.emergency_flag.store(false, Ordering::Release);
+                    self.update(|s| {
+                        s.state = MachineState::EStopped;
+                        s.homed = false;
+                        s.control_lease = None;
+                    });
+                    self.emit("machine.emergency_stopped", json!({}));
+                    let _ = reply.send(result);
+                }
+            }
+        }
+    }
+
+    async fn connect(&mut self) -> Result<String> {
+        if self.status().state != MachineState::Disconnected {
+            bail!("machine is already connected");
+        }
+        match self.driver.connect().await {
+            Ok(firmware) => {
+                self.update(|s| {
+                    s.state = MachineState::Preflight;
+                    s.fault = None;
+                });
+                self.emit("machine.connected", json!({"firmware": firmware}));
+                Ok(firmware)
+            }
+            Err(error) => {
+                self.set_fault("connect_failed", error.to_string(), true);
+                Err(error)
+            }
+        }
+    }
+
+    fn acquire_lease(
+        &mut self,
+        client_name: String,
+        duration_seconds: u32,
+    ) -> Result<ControlLease> {
+        if self.status().state == MachineState::Disconnected {
+            bail!("connect the machine before acquiring control");
+        }
+        let now = Utc::now();
+        if let Some(existing) = &self.status().control_lease {
+            if existing.expires_at > now {
+                bail!(
+                    "machine is controlled by {} until {}",
+                    existing.client_name,
+                    existing.expires_at
+                );
+            }
+        }
+        let duration_seconds = duration_seconds.clamp(30, 3600);
+        let lease = ControlLease {
+            id: Uuid::new_v4(),
+            client_name,
+            acquired_at: now,
+            expires_at: now + ChronoDuration::seconds(i64::from(duration_seconds)),
+        };
+        self.update(|s| s.control_lease = Some(lease.clone()));
+        self.emit("control.lease_acquired", json!({"lease": lease}));
+        Ok(lease)
+    }
+
+    async fn home(&mut self, lease_id: Uuid, checks_confirmed: bool) -> Result<Pose> {
+        self.status().assert_lease(lease_id, Utc::now())?;
+        self.status().assert_can_home()?;
+        if !checks_confirmed {
+            bail!("operator homing safety checks were not confirmed");
+        }
+        self.update(|s| s.state = MachineState::Homing);
+        self.emit("machine.homing_started", json!({}));
+        match self.driver.home().await {
+            Ok(pose) => {
+                self.update(|s| {
+                    s.state = MachineState::Ready;
+                    s.homed = true;
+                    s.pose = Some(pose);
+                });
+                self.emit("machine.homing_completed", json!({"pose": pose}));
+                Ok(pose)
+            }
+            Err(error) => {
+                self.set_fault("homing_failed", error.to_string(), true);
+                Err(error)
+            }
+        }
+    }
+
+    async fn jog(&mut self, lease_id: Uuid, target: Pose, feed_mm_per_min: f64) -> Result<Pose> {
+        self.status().assert_lease(lease_id, Utc::now())?;
+        self.status().assert_can_jog(target, &self.profile.bounds)?;
+        let max_feed = self.profile.default_feed_mm_per_min.max(1.0);
+        let feed = feed_mm_per_min.clamp(1.0, max_feed);
+        match self.driver.move_to(target, feed).await {
+            Ok(pose) => {
+                self.update(|s| s.pose = Some(pose));
+                self.emit("machine.position", json!({"pose": pose}));
+                Ok(pose)
+            }
+            Err(error) => {
+                self.set_fault("motion_failed", error.to_string(), true);
+                Err(error)
+            }
+        }
+    }
+
+    async fn actuate(&mut self, lease_id: Uuid, actuator_id: String, enabled: bool) -> Result<()> {
+        self.status().assert_lease(lease_id, Utc::now())?;
+        if !matches!(
+            self.status().state,
+            MachineState::Preflight | MachineState::Unhomed | MachineState::Ready
+        ) {
+            bail!("actuator checks are not allowed in the current machine state");
+        }
+        self.driver.actuate(&actuator_id, enabled).await?;
+        self.emit(
+            "machine.actuator",
+            json!({"actuator_id": actuator_id, "enabled": enabled}),
+        );
+        Ok(())
+    }
+
+    fn status(&self) -> MachineStatus {
+        self.status_tx.borrow().clone()
+    }
+
+    fn update(&self, change: impl FnOnce(&mut MachineStatus)) {
+        self.status_tx.send_modify(change);
+    }
+
+    fn emit(&mut self, kind: &str, payload: serde_json::Value) {
+        self.sequence += 1;
+        let _ = self.events.send(MachineEvent {
+            sequence: self.sequence,
+            at: Utc::now(),
+            kind: kind.into(),
+            payload,
+        });
+    }
+
+    fn set_fault(&mut self, code: &str, message: String, recoverable: bool) {
+        let fault = velocitypnp_domain::Fault {
+            code: code.into(),
+            message,
+            recoverable,
+            at: Utc::now(),
+        };
+        self.update(|s| {
+            s.state = MachineState::Fault;
+            s.homed = false;
+            s.fault = Some(fault.clone());
+            s.control_lease = None;
+        });
+        self.emit("machine.fault", json!({"fault": fault}));
+    }
+}
+
+fn bail_result<T>(message: &str) -> Result<T> {
+    Err(anyhow!(message.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SimulatorDriver;
+    use async_trait::async_trait;
+    use std::time::Duration;
+
+    fn profile() -> MachineProfile {
+        serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn simulator_requires_preflight_lease_and_home_before_jog() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile,
+        );
+        handle.connect().await.unwrap();
+        assert_eq!(handle.status().state, MachineState::Preflight);
+        handle.complete_preflight(true).await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.home(lease.id, true).await.unwrap();
+        let pose = Pose {
+            x_mm: 10.0,
+            y_mm: 20.0,
+            z_mm: 31.5,
+            rotation_deg: 0.0,
+        };
+        assert_eq!(handle.jog(lease.id, pose, 100.0).await.unwrap(), pose);
+    }
+
+    #[tokio::test]
+    async fn estop_revokes_control() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile,
+        );
+        handle.connect().await.unwrap();
+        handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.emergency_stop().await.unwrap();
+        assert_eq!(handle.status().state, MachineState::EStopped);
+        assert!(handle.status().control_lease.is_none());
+    }
+
+    struct InterruptibleDriver {
+        emergency_flag: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl MachineDriver for InterruptibleDriver {
+        fn simulated(&self) -> bool {
+            false
+        }
+
+        fn set_emergency_flag(&mut self, flag: Arc<AtomicBool>) {
+            self.emergency_flag = flag;
+        }
+
+        async fn connect(&mut self) -> Result<String> {
+            Ok("Marlin test driver".into())
+        }
+
+        async fn disconnect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn home(&mut self) -> Result<Pose> {
+            loop {
+                if self.emergency_flag.swap(false, Ordering::AcqRel) {
+                    bail!("homing interrupted by emergency stop");
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        async fn move_to(&mut self, target: Pose, _feed_mm_per_min: f64) -> Result<Pose> {
+            Ok(target)
+        }
+
+        async fn actuate(&mut self, _actuator_id: &str, _enabled: bool) -> Result<()> {
+            Ok(())
+        }
+
+        async fn emergency_stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn estop_interrupts_a_blocking_driver_operation() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(InterruptibleDriver {
+                emergency_flag: Arc::new(AtomicBool::new(false)),
+            }),
+            profile,
+        );
+        handle.connect().await.unwrap();
+        handle.complete_preflight(true).await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        let homing_handle = handle.clone();
+        let homing = tokio::spawn(async move { homing_handle.home(lease.id, true).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        tokio::time::timeout(Duration::from_millis(100), handle.emergency_stop())
+            .await
+            .expect("emergency stop was stuck behind homing")
+            .unwrap();
+        assert!(homing.await.unwrap().is_err());
+        assert_eq!(handle.status().state, MachineState::EStopped);
+    }
+}

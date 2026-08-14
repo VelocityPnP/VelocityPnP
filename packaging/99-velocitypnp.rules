@@ -1,0 +1,6 @@
+# LumenPnP REV4 controller. Group membership still controls access.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", GROUP="dialout", MODE="0660", SYMLINK+="velocitypnp/controller"
+
+# Opulo/Lumen UVC cameras. Stable by-id links remain the primary identity.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="32e4", ATTRS{idProduct}=="9310", GROUP="video", MODE="0660"
+

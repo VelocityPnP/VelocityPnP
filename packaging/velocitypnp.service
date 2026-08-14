@@ -1,0 +1,22 @@
+[Unit]
+Description=VelocityPnP machine-control daemon
+After=network.target
+
+[Service]
+Type=simple
+User=velocitypnp
+Group=velocitypnp
+WorkingDirectory=/var/lib/velocitypnp
+ExecStart=/usr/bin/velocitypnpd --database /var/lib/velocitypnp/velocitypnp.db --web-dir /usr/share/velocitypnp/web
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/velocitypnp
+SupplementaryGroups=dialout video
+
+[Install]
+WantedBy=multi-user.target
+

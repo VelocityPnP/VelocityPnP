@@ -1,0 +1,27 @@
+{
+  "name": "velocitypnp-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test": "vitest",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "6.0.5",
+    "vite": "8.2.1",
+    "typescript": "7.0.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "vitest": "4.1.10"
+  }
+}

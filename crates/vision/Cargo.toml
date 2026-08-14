@@ -1,0 +1,16 @@
+[package]
+name = "velocitypnp-vision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+native-opencv = ["dep:opencv"]
+
+[dependencies]
+opencv = { version = "0.99", optional = true, default-features = false, features = ["calib3d", "imgproc", "videoio"] }
+serde.workspace = true
+velocitypnp-domain = { path = "../domain" }
+

@@ -1,0 +1,17 @@
+(kicad_pcb
+  (version 20240108)
+  (generator pcbnew)
+  (general (thickness 1.6))
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (at 10 10 90)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (property "Height" "0.4"))
+  (footprint "Fiducial:Fiducial_1mm_Mask2mm"
+    (layer "F.Cu")
+    (at 2 2)
+    (property "Reference" "FID1")
+    (property "Value" "Fiducial"))
+  (gr_rect (start 0 0) (end 30 20) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts"))
+)

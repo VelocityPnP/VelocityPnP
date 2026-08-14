@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openpnp-parts>
+  <parts>
+    <part id="P1" name="10k" package-id="R0402">
+      <height value="0.4" units="Millimeters"/>
+    </part>
+  </parts>
+</openpnp-parts>
