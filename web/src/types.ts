@@ -39,6 +39,19 @@ export interface Device {
   suggested_role: string | null;
 }
 
+export interface CameraControl {
+  id: number;
+  name: string;
+  kind: string;
+  minimum: number;
+  maximum: number;
+  step: number;
+  default: number;
+  flags: string;
+  menu_items: Array<[number, string]>;
+  current: number | boolean | string | null;
+}
+
 export interface Operation {
   id: string;
   kind: string;
@@ -89,4 +102,3 @@ export interface MachineEvent {
   kind: string;
   payload: unknown;
 }
-

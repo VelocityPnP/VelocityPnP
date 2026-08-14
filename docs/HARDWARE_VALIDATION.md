@@ -70,8 +70,11 @@ Using the V3.0.4 N1 head offset, the bottom camera acquired N1 at safe
 Z=31.5. Separate +1 mm probes measured approximately +30 pixels in X and +32
 pixels in Y. The manually centered head position was X=242.335, Y=215.353,
 which implies a provisional bottom-camera location of X=218.574, Y=148.734
-after applying the N1 offset. The nozzle center hole was resolved, but the
-image remained optically soft and requires physical focus validation.
+after applying the N1 offset. The operator confirmed N045 was installed on N1
+and N24 on N2. The N045 center hole was resolved, but the image remained
+optically soft. The bottom camera was subsequently cleaned with alcohol and
+requires another target capture to validate whether physical focus adjustment
+is still necessary.
 
 For both cameras, automatic exposure 625 (62.5 ms) washed out useful detail.
 Manual trials at 200, 100, and 50 selected 200 (20 ms) as the initial setting;

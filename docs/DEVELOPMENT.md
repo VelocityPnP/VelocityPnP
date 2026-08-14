@@ -57,6 +57,10 @@ wget -qO- http://127.0.0.1:4080/api/v1/cameras/top_camera/controls
 
 Snapshots use the stable role assigned during discovery, discard five settling
 frames, and return 1280x720 grayscale PNGs from native YUYV capture.
+Camera control updates use `PUT` on the role-scoped controls endpoint. The
+daemon validates IDs, types, ranges, steps, menu values, and writability before
+applying values in request order, so automatic mode can be disabled before its
+manual value is set.
 
 Build the UI with `npm run build`, then serve it from the daemon using
 `--web-dir web/dist`. The Vite development server is loopback-only and proxies

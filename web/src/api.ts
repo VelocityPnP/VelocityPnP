@@ -1,5 +1,5 @@
 import type {
-  BoardDesign, CalibrationSnapshot, CalibrationStep, ControlLease, Device,
+  BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, ControlLease, Device,
   MachineStatus, Operation, Pose, Residuals,
 } from "./types";
 
@@ -28,6 +28,14 @@ function jsonPost<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
+function jsonPut<T>(path: string, body: unknown): Promise<T> {
+  return request(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function waitForOperation(operation: Operation): Promise<Operation> {
   let current = operation;
   while (current.status === "pending" || current.status === "running") {
@@ -41,6 +49,11 @@ export async function waitForOperation(operation: Operation): Promise<Operation>
 export const api = {
   status: async () => (await request<{ machine: MachineStatus }>("/machine/status")).machine,
   devices: async () => (await request<{ devices: Device[] }>("/system/devices")).devices,
+  cameraControls: async (role: "top_camera" | "bottom_camera") =>
+    (await request<{ controls: CameraControl[] }>(`/cameras/${role}/controls`)).controls,
+  setCameraControls: async (
+    role: "top_camera" | "bottom_camera", controls: Array<{ id: number; value: number | boolean }>,
+  ) => (await jsonPut<{ controls: CameraControl[] }>(`/cameras/${role}/controls`, { controls })).controls,
   connect: () => jsonPost<Operation>("/machine/connect"),
   disconnect: () => jsonPost<Operation>("/machine/disconnect"),
   preflight: () => jsonPost<Operation>("/machine/preflight", { confirmed: true }),
@@ -73,4 +86,3 @@ export const api = {
     return request<BoardDesign>("/boards/import", { method: "POST", body: form });
   },
 };
-

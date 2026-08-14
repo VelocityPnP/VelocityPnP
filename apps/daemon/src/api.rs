@@ -29,7 +29,8 @@ use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::plan_job;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    capture_gray_frame, encode_gray_png, query_camera_controls, V4l2CaptureConfig,
+    apply_camera_controls, capture_gray_frame, encode_gray_png, query_camera_controls,
+    CameraControlUpdate, V4l2CaptureConfig,
 };
 
 #[derive(Clone)]
@@ -76,7 +77,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/system/devices", get(devices))
         .route("/api/v1/cameras/{role}/snapshot", get(camera_snapshot))
-        .route("/api/v1/cameras/{role}/controls", get(camera_controls))
+        .route(
+            "/api/v1/cameras/{role}/controls",
+            get(camera_controls).put(update_camera_controls),
+        )
         .route("/api/v1/machine/profile", get(machine_profile))
         .route("/api/v1/machine/status", get(machine_status))
         .route("/api/v1/machine/connect", post(connect))
@@ -125,7 +129,7 @@ pub fn router(state: AppState) -> Router {
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
-                .allow_methods([Method::GET, Method::POST]),
+                .allow_methods([Method::GET, Method::POST, Method::PUT]),
         )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -228,6 +232,26 @@ async fn camera_controls(
         .await
         .map_err(ApiError::internal)?
         .map_err(ApiError::internal)?;
+    Ok(Json(json!({"role": role, "controls": controls})))
+}
+
+#[derive(Deserialize)]
+struct CameraControlsRequest {
+    controls: Vec<CameraControlUpdate>,
+}
+
+async fn update_camera_controls(
+    State(state): State<AppState>,
+    Path(role): Path<String>,
+    Json(body): Json<CameraControlsRequest>,
+) -> ApiResult<Json<Value>> {
+    let device_path = camera_path_for_role(&role)?;
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    let controls =
+        tokio::task::spawn_blocking(move || apply_camera_controls(device_path, &body.controls))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
     Ok(Json(json!({"role": role, "controls": controls})))
 }
 
@@ -1108,6 +1132,22 @@ mod tests {
                 Request::builder()
                     .uri("/api/v1/cameras/laptop_camera/snapshot")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn camera_control_update_rejects_unknown_role_before_hardware_access() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/cameras/laptop_camera/controls")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"controls":[{"id":1,"value":1}]}"#))
                     .unwrap(),
             )
             .await

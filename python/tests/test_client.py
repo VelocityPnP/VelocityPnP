@@ -41,6 +41,22 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "camera role"):
             client.camera_snapshot("laptop_camera")
 
+    def test_camera_controls_are_role_scoped_and_ordered(self):
+        client = Client(timeout=1)
+        response = {"controls": [{"id": 10094849, "current": 1}]}
+        with patch.object(client, "_request", return_value=response) as send:
+            controls = client.set_camera_controls(
+                "bottom_camera", {10094849: 1, 10094851: False, 10094850: 200},
+            )
+        self.assertEqual(controls, response["controls"])
+        send.assert_called_once_with("PUT", "/cameras/bottom_camera/controls", {
+            "controls": [
+                {"id": 10094849, "value": 1},
+                {"id": 10094851, "value": False},
+                {"id": 10094850, "value": 200},
+            ],
+        })
+
     def test_home_requires_explicit_physical_confirmation(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:

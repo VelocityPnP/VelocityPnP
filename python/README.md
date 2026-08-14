@@ -9,6 +9,11 @@ from pathlib import Path
 from velocitypnp import Client
 
 with Client("http://127.0.0.1:4080/api/v1") as pnp:
+    pnp.set_camera_controls("top_camera", {
+        10094849: 1,    # manual exposure mode
+        10094851: False,
+        10094850: 200,  # 20 ms in V4L2 100 us units
+    })
     Path("top.png").write_bytes(pnp.camera_snapshot("top_camera"))
     board = pnp.import_board("controller.kicad_pcb", bom="controller-bom.csv")
     pnp.connect()

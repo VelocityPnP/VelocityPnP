@@ -44,9 +44,27 @@ class Client:
         return self._request("GET", "/system/devices")["devices"]
 
     def camera_snapshot(self, role: str) -> bytes:
+        self._validate_camera_role(role)
+        return self._request_bytes("GET", f"/cameras/{role}/snapshot", "image/png")
+
+    def camera_controls(self, role: str) -> list[dict[str, Any]]:
+        self._validate_camera_role(role)
+        return self._request("GET", f"/cameras/{role}/controls")["controls"]
+
+    def set_camera_controls(
+        self, role: str, controls: dict[int, int | bool],
+    ) -> list[dict[str, Any]]:
+        self._validate_camera_role(role)
+        payload = {"controls": [
+            {"id": control_id, "value": value}
+            for control_id, value in controls.items()
+        ]}
+        return self._request("PUT", f"/cameras/{role}/controls", payload)["controls"]
+
+    @staticmethod
+    def _validate_camera_role(role: str) -> None:
         if role not in {"top_camera", "bottom_camera"}:
             raise ValueError("camera role must be top_camera or bottom_camera")
-        return self._request_bytes("GET", f"/cameras/{role}/snapshot", "image/png")
 
     def connect(self) -> dict[str, Any]:
         return self.wait(self._request("POST", "/machine/connect"))

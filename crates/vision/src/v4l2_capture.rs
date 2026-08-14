@@ -1,10 +1,11 @@
 use crate::GrayFrame;
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use v4l::buffer::Type;
-use v4l::control::Value;
+use v4l::control::{Control, Description, Flags, Type as ControlType, Value};
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::MmapStream;
 use v4l::video::Capture;
@@ -78,10 +79,71 @@ pub struct CameraControlInfo {
     pub current: Option<CameraControlValue>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraControlUpdate {
+    pub id: u32,
+    pub value: CameraControlValue,
+}
+
 pub fn query_camera_controls(device_path: impl Into<PathBuf>) -> Result<Vec<CameraControlInfo>> {
     let device_path = device_path.into();
     let device = Device::with_path(&device_path)
         .with_context(|| format!("opening camera {}", device_path.display()))?;
+    query_controls(&device)
+}
+
+pub fn apply_camera_controls(
+    device_path: impl Into<PathBuf>,
+    updates: &[CameraControlUpdate],
+) -> Result<Vec<CameraControlInfo>> {
+    ensure!(!updates.is_empty(), "camera control update is empty");
+    ensure!(
+        updates.len() <= 32,
+        "camera control update contains too many values"
+    );
+    let device_path = device_path.into();
+    let device = Device::with_path(&device_path)
+        .with_context(|| format!("opening camera {}", device_path.display()))?;
+    let descriptions = device
+        .query_controls()
+        .context("querying camera controls")?;
+    let mut seen = BTreeSet::new();
+    let mut controls = Vec::with_capacity(updates.len());
+    for update in updates {
+        ensure!(
+            seen.insert(update.id),
+            "duplicate camera control {}",
+            update.id
+        );
+        let description = descriptions
+            .iter()
+            .find(|description| description.id == update.id)
+            .with_context(|| format!("camera control {} does not exist", update.id))?;
+        ensure!(
+            !description
+                .flags
+                .intersects(Flags::DISABLED | Flags::READ_ONLY | Flags::GRABBED),
+            "camera control {} ({}) is not writable",
+            update.id,
+            description.name
+        );
+        controls.push(Control {
+            id: update.id,
+            value: validated_control_value(description, &update.value)?,
+        });
+    }
+    // Preserve request ordering because a preceding automatic/manual selector
+    // can activate a later exposure or white-balance control.
+    for control in controls {
+        let id = control.id;
+        device
+            .set_control(control)
+            .with_context(|| format!("setting camera control {id}"))?;
+    }
+    query_controls(&device)
+}
+
+fn query_controls(device: &Device) -> Result<Vec<CameraControlInfo>> {
     device
         .query_controls()
         .context("querying camera controls")?
@@ -111,6 +173,66 @@ pub fn query_camera_controls(device_path: impl Into<PathBuf>) -> Result<Vec<Came
             })
         })
         .collect()
+}
+
+fn validated_control_value(
+    description: &Description,
+    requested: &CameraControlValue,
+) -> Result<Value> {
+    match (description.typ, requested) {
+        (ControlType::Boolean, CameraControlValue::Boolean(value)) => Ok(Value::Boolean(*value)),
+        (
+            ControlType::Integer
+            | ControlType::Integer64
+            | ControlType::Menu
+            | ControlType::IntegerMenu
+            | ControlType::Bitmask,
+            CameraControlValue::Integer(value),
+        ) => {
+            ensure!(
+                (description.minimum..=description.maximum).contains(value),
+                "camera control {} ({}) value {} is outside {}..={}",
+                description.id,
+                description.name,
+                value,
+                description.minimum,
+                description.maximum
+            );
+            if description.step > 0 {
+                ensure!(
+                    (*value - description.minimum) as u64 % description.step == 0,
+                    "camera control {} ({}) value {} does not match step {}",
+                    description.id,
+                    description.name,
+                    value,
+                    description.step
+                );
+            }
+            if matches!(
+                description.typ,
+                ControlType::Menu | ControlType::IntegerMenu
+            ) {
+                let item_exists = description
+                    .items
+                    .as_ref()
+                    .is_none_or(|items| items.iter().any(|(index, _)| i64::from(*index) == *value));
+                ensure!(
+                    item_exists,
+                    "camera control {} ({}) has no menu item {}",
+                    description.id,
+                    description.name,
+                    value
+                );
+            }
+            Ok(Value::Integer(*value))
+        }
+        _ => bail!(
+            "camera control {} ({}) expects {}, not the supplied value type",
+            description.id,
+            description.name,
+            description.typ
+        ),
+    }
 }
 
 fn control_value(value: Value) -> Option<CameraControlValue> {
@@ -232,6 +354,21 @@ fn yuyv_to_gray(buffer: &[u8], width: u32, height: u32, stride: u32) -> Result<G
 #[cfg(test)]
 mod tests {
     use super::*;
+    use v4l::control::MenuItem;
+
+    fn control_description(typ: ControlType) -> Description {
+        Description {
+            id: 42,
+            typ,
+            name: "Test control".into(),
+            minimum: 1,
+            maximum: 5,
+            step: 2,
+            default: 1,
+            flags: Flags::empty(),
+            items: None,
+        }
+    }
 
     #[test]
     fn extracts_luma_from_yuyv_with_row_padding() {
@@ -250,5 +387,26 @@ mod tests {
     #[test]
     fn rejects_truncated_yuyv_frame() {
         assert!(yuyv_to_gray(&[0; 7], 4, 1, 8).is_err());
+    }
+
+    #[test]
+    fn validates_camera_control_range_step_and_type() {
+        let description = control_description(ControlType::Integer);
+        assert!(validated_control_value(&description, &CameraControlValue::Integer(3)).is_ok());
+        assert!(validated_control_value(&description, &CameraControlValue::Integer(2)).is_err());
+        assert!(validated_control_value(&description, &CameraControlValue::Integer(7)).is_err());
+        assert!(validated_control_value(&description, &CameraControlValue::Boolean(true)).is_err());
+    }
+
+    #[test]
+    fn validates_camera_menu_membership() {
+        let mut description = control_description(ControlType::Menu);
+        description.step = 1;
+        description.items = Some(vec![
+            (1, MenuItem::Name("Manual".into())),
+            (3, MenuItem::Name("Automatic".into())),
+        ]);
+        assert!(validated_control_value(&description, &CameraControlValue::Integer(3)).is_ok());
+        assert!(validated_control_value(&description, &CameraControlValue::Integer(2)).is_err());
     }
 }
