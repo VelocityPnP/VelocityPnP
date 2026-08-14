@@ -11,6 +11,10 @@ use velocitypnp_domain::{HomingAxis, HomingProfile, Pose};
 
 const DISCONNECT_FAILSAFE_COMMANDS: [&str; 5] =
     ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"];
+const MIN_MOVE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_MOVE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MOVE_TIMEOUT_MARGIN_SECONDS: f64 = 15.0;
+const MOVE_TIMEOUT_SAFETY_FACTOR: f64 = 1.5;
 
 pub struct MarlinDriver {
     path: String,
@@ -183,12 +187,25 @@ impl MachineDriver for MarlinDriver {
         if !target.finite() || !feed_mm_per_min.is_finite() || feed_mm_per_min <= 0.0 {
             bail!("invalid motion values");
         }
+        let start = self
+            .reported_position()
+            .await
+            .context("reading position before motion")?
+            .primary_pose;
+        let completion_timeout = move_completion_timeout(start, target, feed_mm_per_min);
         let command = format!(
             "G0 X{:.4} Y{:.4} Z{:.4} A{:.4} F{:.0}",
             target.x_mm, target.y_mm, target.z_mm, target.rotation_deg, feed_mm_per_min
         );
         self.command(&command, Duration::from_secs(30)).await?;
-        self.command("M400", Duration::from_secs(60)).await?;
+        self.command("M400", completion_timeout)
+            .await
+            .with_context(|| {
+                format!(
+                    "waiting up to {:.1}s for motion completion",
+                    completion_timeout.as_secs_f64()
+                )
+            })?;
         Ok(target)
     }
 
@@ -206,6 +223,21 @@ impl MachineDriver for MarlinDriver {
         }
         Ok(())
     }
+}
+
+fn move_completion_timeout(start: Pose, target: Pose, feed_mm_per_min: f64) -> Duration {
+    let distance = ((target.x_mm - start.x_mm).powi(2)
+        + (target.y_mm - start.y_mm).powi(2)
+        + (target.z_mm - start.z_mm).powi(2)
+        + (target.rotation_deg - start.rotation_deg).powi(2))
+    .sqrt();
+    let nominal_seconds = distance * 60.0 / feed_mm_per_min;
+    let timeout_seconds =
+        nominal_seconds * MOVE_TIMEOUT_SAFETY_FACTOR + MOVE_TIMEOUT_MARGIN_SECONDS;
+    Duration::from_secs_f64(timeout_seconds.clamp(
+        MIN_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
+        MAX_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
+    ))
 }
 
 fn actuator_commands(actuator_id: &str, enabled: bool) -> Result<&'static [&'static str]> {
@@ -396,6 +428,45 @@ mod tests {
         assert_eq!(
             DISCONNECT_FAILSAFE_COMMANDS,
             ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"]
+        );
+    }
+
+    #[test]
+    fn move_timeout_covers_the_observed_conservative_bottom_camera_traverse() {
+        let start = Pose {
+            x_mm: 0.0,
+            y_mm: 0.0,
+            z_mm: 31.5,
+            rotation_deg: 720.0,
+        };
+        let target = Pose {
+            x_mm: 242.335,
+            y_mm: 215.353,
+            z_mm: 31.5,
+            rotation_deg: 720.0,
+        };
+
+        let timeout = move_completion_timeout(start, target, 300.0);
+        assert!(timeout > Duration::from_secs(110));
+        assert!(timeout < Duration::from_secs(115));
+    }
+
+    #[test]
+    fn move_timeout_is_bounded_for_short_and_pathological_moves() {
+        assert_eq!(
+            move_completion_timeout(Pose::ORIGIN, Pose::ORIGIN, 300.0),
+            MIN_MOVE_COMPLETION_TIMEOUT
+        );
+        assert_eq!(
+            move_completion_timeout(
+                Pose::ORIGIN,
+                Pose {
+                    rotation_deg: 100_000.0,
+                    ..Pose::ORIGIN
+                },
+                1.0,
+            ),
+            MAX_MOVE_COMPLETION_TIMEOUT
         );
     }
 

@@ -57,6 +57,13 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   holding Z=31.5 and A=720. Subsequent calibration moves completed at 600
   mm/min. The head returned to X=0/Y=0/Z=31.5 before a successful fail-safe
   disconnect cleared its pose and control lease.
+- The role-scoped camera-control API restored bottom-camera manual exposure
+  mode, exposure 200, and disabled dynamic frame rate after reconnect; all
+  three values read back correctly before capture.
+- A post-cleaning bottom-camera capture resolved the N045 bore and concentric
+  tip edges substantially better. In the same 320 by 320 center crop, variance
+  of the discrete Laplacian increased from 54.24 to 72.23 (about 33 percent)
+  relative to the pre-cleaning exposure-200 frame.
 
 ## First working-plane observations
 
@@ -72,9 +79,10 @@ pixels in Y. The manually centered head position was X=242.335, Y=215.353,
 which implies a provisional bottom-camera location of X=218.574, Y=148.734
 after applying the N1 offset. The operator confirmed N045 was installed on N1
 and N24 on N2. The N045 center hole was resolved, but the image remained
-optically soft. The bottom camera was subsequently cleaned with alcohol and
-requires another target capture to validate whether physical focus adjustment
-is still necessary.
+optically soft. After the bottom camera was cleaned with alcohol, a new capture
+at the same exposure materially improved local contrast and edge definition.
+The nozzle bore is now usable as a vision target; repeat captures are still
+needed before deciding whether physical focus adjustment is worthwhile.
 
 For both cameras, automatic exposure 625 (62.5 ms) washed out useful detail.
 Manual trials at 200, 100, and 50 selected 200 (20 ms) as the initial setting;
@@ -117,6 +125,16 @@ that session's Z-first and XY stages pass. Rotation motion, higher feed limits,
 controlled-stop behavior, repeatability claims, and automated visual-home
 coordinate correction remain unvalidated.
 Production job execution remains unavailable by design.
+
+One conservative X/Y traverse exposed a completion-timeout defect. The
+324 mm move from home to the N1 bottom-camera target needs about 65 seconds at
+300 mm/min, but the original driver allowed only 60 seconds for `M400`. The
+software entered a recoverable fault, revoked its lease, invalidated homing,
+and then completed a fail-safe disconnect. A non-moving capture after reconnect
+confirmed N045 at the intended target. The driver now reads `M114` before a
+move and derives a bounded 60-to-900-second completion timeout from the
+reported start pose, target, and feed. That correction has unit coverage but
+still requires a fresh physical traverse before it is hardware-validated.
 
 ## Procedure sources
 
