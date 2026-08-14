@@ -16,10 +16,13 @@ The project is organized by measurable gates rather than calendar estimates.
 
 ## Gate 1 — Camera and non-moving hardware validation
 
+- [x] Detect the attached REV4 controller and assign both PnP camera roles
+- [x] Validate bounded controller handshake, reconnect, and fail-safe disconnect
+- [x] Record a sanitized physical-controller transcript fixture without motion
 - [ ] Capture stable frames from both attached UVC cameras through the native backend
 - [ ] Enumerate and lock camera format, exposure, white balance, focus, and lighting
 - [ ] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
-- [ ] Record controller/camera transcript fixtures without moving the machine
+- [ ] Record camera capture fixtures without moving the machine
 
 ## Gate 2 — Motion and homing validation
 

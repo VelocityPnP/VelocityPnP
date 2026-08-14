@@ -25,7 +25,8 @@ This repository contains the first working platform slice:
 
 Physical calibration, camera CV, feeders and production placement are exposed
 as gated workflow stages and must pass hardware-in-loop acceptance before being
-marked production-ready. See [docs/ROADMAP.md](docs/ROADMAP.md).
+marked production-ready. See [docs/ROADMAP.md](docs/ROADMAP.md) and the current
+[hardware validation log](docs/HARDWARE_VALIDATION.md).
 
 ## Quick start
 

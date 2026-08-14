@@ -9,6 +9,9 @@ use tokio::time::{timeout, Instant};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use velocitypnp_domain::Pose;
 
+const DISCONNECT_FAILSAFE_COMMANDS: [&str; 5] =
+    ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"];
+
 pub struct MarlinDriver {
     path: String,
     baud: u32,
@@ -108,7 +111,7 @@ impl MachineDriver for MarlinDriver {
             .command("M115", Duration::from_secs(5))
             .await?
             .join("\n");
-        if !firmware.contains("Marlin") && !firmware.contains("LumenPnP") {
+        if !supported_firmware(&firmware) {
             self.stream = None;
             bail!("connected device did not identify as a supported Marlin controller");
         }
@@ -119,8 +122,23 @@ impl MachineDriver for MarlinDriver {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        if self.stream.is_some() {
+            for command in DISCONNECT_FAILSAFE_COMMANDS {
+                if let Err(error) = self.command(command, Duration::from_secs(2)).await {
+                    failures.push(format!("{command}: {error}"));
+                }
+            }
+        }
         self.stream = None;
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!(
+                "controller disconnected after actuator fail-safe errors: {}",
+                failures.join("; ")
+            )
+        }
     }
 
     async fn home(&mut self) -> Result<Pose> {
@@ -143,16 +161,7 @@ impl MachineDriver for MarlinDriver {
     }
 
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()> {
-        let command = match (actuator_id, enabled) {
-            ("lights", true) => "M150 P255 R255 U255 B255",
-            ("lights", false) => "M150 P0",
-            ("vacuum_1", true) => "M106 P1 S255\nM106",
-            ("vacuum_1", false) => "M107 P1\nM107",
-            ("vacuum_2", true) => "M106 P2 S255\nM106 P3 S255",
-            ("vacuum_2", false) => "M107 P2\nM107 P3",
-            _ => bail!("actuator {actuator_id} is not supported by the active profile"),
-        };
-        for line in command.lines() {
+        for line in actuator_commands(actuator_id, enabled)? {
             self.command(line, Duration::from_secs(5)).await?;
         }
         Ok(())
@@ -164,5 +173,70 @@ impl MachineDriver for MarlinDriver {
             stream.get_mut().flush().await?;
         }
         Ok(())
+    }
+}
+
+fn actuator_commands(actuator_id: &str, enabled: bool) -> Result<&'static [&'static str]> {
+    match (actuator_id, enabled) {
+        ("lights", true) => Ok(&["M150 P255 R255 U255 B255"]),
+        ("lights", false) => Ok(&["M150 P0"]),
+        ("vacuum_1", true) => Ok(&["M106 P1 S255", "M106"]),
+        ("vacuum_1", false) => Ok(&["M107 P1", "M107"]),
+        ("vacuum_2", true) => Ok(&["M106 P2 S255", "M106 P3 S255"]),
+        ("vacuum_2", false) => Ok(&["M107 P2", "M107 P3"]),
+        _ => bail!("actuator {actuator_id} is not supported by the active profile"),
+    }
+}
+
+fn supported_firmware(firmware: &str) -> bool {
+    firmware.contains("FIRMWARE_NAME:Marlin") && firmware.contains("MACHINE_TYPE:LumenPnP")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actuator_commands_match_the_v3_0_4_profile() {
+        assert_eq!(
+            actuator_commands("lights", true).unwrap(),
+            ["M150 P255 R255 U255 B255"]
+        );
+        assert_eq!(actuator_commands("lights", false).unwrap(), ["M150 P0"]);
+        assert_eq!(
+            actuator_commands("vacuum_1", true).unwrap(),
+            ["M106 P1 S255", "M106"]
+        );
+        assert_eq!(
+            actuator_commands("vacuum_1", false).unwrap(),
+            ["M107 P1", "M107"]
+        );
+        assert_eq!(
+            actuator_commands("vacuum_2", true).unwrap(),
+            ["M106 P2 S255", "M106 P3 S255"]
+        );
+        assert_eq!(
+            actuator_commands("vacuum_2", false).unwrap(),
+            ["M107 P2", "M107 P3"]
+        );
+        assert!(actuator_commands("unknown", false).is_err());
+    }
+
+    #[test]
+    fn disconnect_fail_safe_turns_every_validated_output_off() {
+        assert_eq!(
+            DISCONNECT_FAILSAFE_COMMANDS,
+            ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"]
+        );
+    }
+
+    #[test]
+    fn captured_rev4_firmware_is_recognized() {
+        let firmware = include_str!("../tests/fixtures/lumenpnp-v3.0.4-rev4-m115.txt");
+        assert!(supported_firmware(firmware));
+        assert!(!supported_firmware(
+            "FIRMWARE_NAME:Marlin 2.1\nMACHINE_TYPE:3D Printer\nok"
+        ));
+        assert!(!supported_firmware("MACHINE_TYPE:LumenPnP\nok"));
     }
 }

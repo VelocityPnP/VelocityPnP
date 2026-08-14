@@ -5,7 +5,7 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use velocitypnp_domain::MachineProfile;
 use velocitypnp_driver::{MachineDriver, MachineHandle, MarlinDriver, SimulatorDriver};
@@ -15,7 +15,7 @@ use velocitypnp_store::Store;
 #[command(version, about = "VelocityPnP machine-control daemon")]
 struct Args {
     /// Run without physical hardware.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     simulate: bool,
 
     /// Explicitly permit opening the attached controller.
@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         ))
     };
     let machine = MachineHandle::spawn(driver, profile.clone());
+    let shutdown_machine = machine.clone();
     let store = Store::open(&args.database)?;
     let state = api::AppState::new(machine, profile, store);
     state.spawn_event_journal();
@@ -79,6 +80,56 @@ async fn main() -> Result<()> {
     }
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     info!(address = %args.listen, simulated = args.simulate, "VelocityPnP daemon listening");
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    if shutdown_machine.status().state != velocitypnp_domain::MachineState::Disconnected {
+        if let Err(error) = shutdown_machine.disconnect().await {
+            warn!(%error, "machine disconnect reported errors during shutdown");
+        }
+    }
+    serve_result?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_mode_requires_an_explicit_false_value() {
+        let args = Args::try_parse_from(["velocitypnpd", "--simulate=false", "--allow-hardware"])
+            .expect("documented physical-mode arguments must parse");
+        assert!(!args.simulate);
+        assert!(args.allow_hardware);
+    }
+
+    #[test]
+    fn simulation_remains_the_default() {
+        assert!(Args::try_parse_from(["velocitypnpd"]).unwrap().simulate);
+    }
 }

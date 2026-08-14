@@ -19,6 +19,11 @@ controller recovery and a new homing cycle. The polling latency is bounded to
 roughly 20 ms in the driver, but USB, firmware, and electrical failures can
 still defeat a software stop.
 
+Physical disconnect and graceful daemon shutdown command both vacuum channels
+and the shared lights off before releasing serial. SIGINT and SIGTERM use this
+path. A process crash, `SIGKILL`, USB failure, controller failure, or loss of
+host power can bypass it, so physical power isolation remains mandatory.
+
 The v1 trusted-LAN model has no user authentication. Keep the daemon bound to
 loopback unless the network is isolated and trusted. The control lease prevents
 competing writers but is not an authentication mechanism.
