@@ -221,6 +221,26 @@ paths:
                 enabled: { type: boolean }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /machine/sensors/{sensor_id}/read:
+    post:
+      operationId: readMachineSensor
+      description: >-
+        Reads one profile-defined sensor through the serialized machine actor.
+        Values remain raw counts until hardware calibration defines a physical
+        conversion.
+      parameters:
+        - { name: sensor_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LeaseRequest" }
+      responses:
+        "200":
+          description: Timestamped sensor reading
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SensorReading" }
   /machine/emergency-stop:
     post:
       operationId: emergencyStop
@@ -491,6 +511,16 @@ components:
         center_jitter_p95_px: { type: [number, "null"], minimum: 0 }
         passed: { type: boolean }
         samples: { type: array, items: { type: object } }
+    SensorReading:
+      type: object
+      required: [sensor_id, raw_value, unit, observed_at]
+      properties:
+        sensor_id: { type: string }
+        raw_value:
+          type: integer
+          description: Signed raw controller count; not calibrated pressure.
+        unit: { type: string, const: raw_counts }
+        observed_at: { type: string, format: date-time }
     Confirmation:
       type: object
       required: [confirmed]

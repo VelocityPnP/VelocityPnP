@@ -10,6 +10,8 @@ pub struct SimulatorDriver {
     pose: Pose,
     bounds: Bounds,
     safe_z_mm: f64,
+    vacuum_1_enabled: bool,
+    vacuum_2_enabled: bool,
 }
 
 impl SimulatorDriver {
@@ -19,6 +21,8 @@ impl SimulatorDriver {
             pose: Pose::ORIGIN,
             bounds,
             safe_z_mm,
+            vacuum_1_enabled: false,
+            vacuum_2_enabled: false,
         }
     }
 
@@ -70,11 +74,28 @@ impl MachineDriver for SimulatorDriver {
         Ok(self.pose)
     }
 
-    async fn actuate(&mut self, actuator_id: &str, _enabled: bool) -> Result<()> {
+    async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()> {
         self.require_connected()?;
         match actuator_id {
-            "lights" | "vacuum_1" | "vacuum_2" => Ok(()),
+            "lights" => Ok(()),
+            "vacuum_1" => {
+                self.vacuum_1_enabled = enabled;
+                Ok(())
+            }
+            "vacuum_2" => {
+                self.vacuum_2_enabled = enabled;
+                Ok(())
+            }
             _ => bail!("unknown simulated actuator {actuator_id}"),
+        }
+    }
+
+    async fn read_sensor(&mut self, sensor_id: &str) -> Result<i64> {
+        self.require_connected()?;
+        match sensor_id {
+            "vacuum_1" => Ok(if self.vacuum_1_enabled { -80 } else { 0 }),
+            "vacuum_2" => Ok(if self.vacuum_2_enabled { -80 } else { 0 }),
+            _ => bail!("unknown simulated sensor {sensor_id}"),
         }
     }
 

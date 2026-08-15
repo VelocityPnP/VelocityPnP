@@ -125,6 +125,8 @@ pub struct MachineProfile {
     pub homing: HomingProfile,
     pub axes: Vec<AxisProfile>,
     pub actuators: Vec<ActuatorProfile>,
+    #[serde(default)]
+    pub sensors: Vec<SensorProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -165,6 +167,23 @@ pub struct ActuatorProfile {
     pub id: String,
     pub display_name: String,
     pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorProfile {
+    pub id: String,
+    pub display_name: String,
+    pub kind: String,
+    pub unit: String,
+    pub actuator_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SensorReading {
+    pub sensor_id: String,
+    pub raw_value: i64,
+    pub unit: String,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

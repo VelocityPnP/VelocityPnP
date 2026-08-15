@@ -109,6 +109,17 @@ class ClientTests(unittest.TestCase):
             "feed_mm_per_min": 300.0,
         })
 
+    def test_sensor_read_uses_lease_and_profile_id(self):
+        client = Client(timeout=1)
+        reading = {"sensor_id": "vacuum_1", "raw_value": -42}
+        with patch.object(client, "_request", return_value=reading) as send:
+            self.assertEqual(client.read_sensor("lease", "vacuum_1"), reading)
+        send.assert_called_once_with(
+            "POST",
+            "/machine/sensors/vacuum_1/read",
+            {"lease_id": "lease"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

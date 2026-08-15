@@ -24,8 +24,9 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   leaving the laptop camera unassigned.
 - Three bounded connect/disconnect cycles identified Marlin `bugfix-2.1.x`,
   build date 2022-10-03, `MACHINE_TYPE:LumenPnP`, zero extruders, and six axes.
-- Connection sent only `M115`, `G21`, `G90`, and `M82`. The machine remained in
-  preflight with no known pose and was never marked homed.
+- During the recorded session, connection sent only `M115`, `G21`, `G90`, and
+  `M82`. The machine remained in preflight with no known pose and was never
+  marked homed.
 - The controller acknowledged bounded on/off pulses for the shared ring lights,
   VAC1, and VAC2. Software cannot confirm the physical light or pump response;
   that operator observation remains pending.
@@ -139,6 +140,14 @@ controlled-stop behavior, repeatability claims, and automated visual-home
 coordinate correction remain unvalidated.
 Production job execution remains unavailable by design.
 
+The driver now has the current Opulo REV04 initialization and VAC1/VAC2 read
+sequences implemented behind leased, profile-scoped raw sensor reads. The new
+connect path writes command register 48 with value 27 on both multiplexer
+channels, then reads register 6 with `M261`. Those commands have unit coverage
+but have not yet been run against this attached controller. No pressure-unit
+conversion or useful vacuum threshold is claimed until ambient and
+sealed-nozzle samples are recorded.
+
 One conservative X/Y traverse exposed a completion-timeout defect. The
 324 mm move from home to the N1 bottom-camera target needs about 65 seconds at
 300 mm/min, but the original driver allowed only 60 seconds for `M400`. The
@@ -154,4 +163,6 @@ past the old fixed limit, followed by a successful 32.6-second return move.
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
 - [Opulo V3 homing-fiducial calibration](https://docs.opulo.io/misc/calibration/4-homing-fiducial/)
+- [Opulo V2/V3 G-code macro update guide](https://docs.opulo.io/guides/update-gcode-macros/)
+- [Opulo actuator check](https://docs.opulo.io/byop/testing/actuator-check/)
 - [Opulo LumenPnP V3.0.4 OpenPnP machine profile](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml)

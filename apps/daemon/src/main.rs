@@ -66,6 +66,11 @@ async fn main() -> Result<()> {
             args.baud,
             profile.home_pose,
             profile.homing.clone(),
+            profile
+                .capabilities
+                .get("rev04_integrated_vacuum_sensors")
+                .copied()
+                .unwrap_or(false),
         ))
     };
     let machine = MachineHandle::spawn(driver, profile.clone());

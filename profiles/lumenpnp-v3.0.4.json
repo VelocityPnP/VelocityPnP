@@ -41,9 +41,26 @@
     {"id": "vacuum_1", "display_name": "Nozzle 1 vacuum", "kind": "vacuum"},
     {"id": "vacuum_2", "display_name": "Nozzle 2 vacuum", "kind": "vacuum"}
   ],
+  "sensors": [
+    {
+      "id": "vacuum_1",
+      "display_name": "Nozzle 1 vacuum pressure",
+      "kind": "vacuum_pressure",
+      "unit": "raw_counts",
+      "actuator_id": "vacuum_1"
+    },
+    {
+      "id": "vacuum_2",
+      "display_name": "Nozzle 2 vacuum pressure",
+      "kind": "vacuum_pressure",
+      "unit": "raw_counts",
+      "actuator_id": "vacuum_2"
+    }
+  ],
   "capabilities": {
     "dual_nozzle": true,
     "rotation_motion": false,
+    "rev04_integrated_vacuum_sensors": true,
     "visual_homing": true,
     "photon_bus": false,
     "physical_endstops": false,

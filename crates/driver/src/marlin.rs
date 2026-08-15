@@ -11,6 +11,18 @@ use velocitypnp_domain::{HomingAxis, HomingProfile, Pose};
 
 const DISCONNECT_FAILSAFE_COMMANDS: [&str; 5] =
     ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"];
+const VACUUM_SENSOR_INITIALIZATION_COMMANDS: [&str; 10] = [
+    "M260 A112 B1 S1",
+    "M260 A109",
+    "M260 B48",
+    "M260 B27",
+    "M260 S1",
+    "M260 A112 B2 S1",
+    "M260 A109",
+    "M260 B48",
+    "M260 B27",
+    "M260 S1",
+];
 const MIN_MOVE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MOVE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MOVE_TIMEOUT_MARGIN_SECONDS: f64 = 15.0;
@@ -21,17 +33,25 @@ pub struct MarlinDriver {
     baud: u32,
     home_pose: Pose,
     homing: HomingProfile,
+    rev04_integrated_vacuum_sensors: bool,
     emergency_flag: Arc<AtomicBool>,
     stream: Option<BufReader<SerialStream>>,
 }
 
 impl MarlinDriver {
-    pub fn new(path: impl Into<String>, baud: u32, home_pose: Pose, homing: HomingProfile) -> Self {
+    pub fn new(
+        path: impl Into<String>,
+        baud: u32,
+        home_pose: Pose,
+        homing: HomingProfile,
+        rev04_integrated_vacuum_sensors: bool,
+    ) -> Self {
         Self {
             path: path.into(),
             baud,
             home_pose,
             homing,
+            rev04_integrated_vacuum_sensors,
             emergency_flag: Arc::new(AtomicBool::new(false)),
             stream: None,
         }
@@ -130,6 +150,15 @@ impl MachineDriver for MarlinDriver {
         for setup in ["G21", "G90", "M82"] {
             self.command(setup, Duration::from_secs(5)).await?;
         }
+        if self.rev04_integrated_vacuum_sensors {
+            for setup in VACUUM_SENSOR_INITIALIZATION_COMMANDS {
+                self.command(setup, Duration::from_secs(5))
+                    .await
+                    .with_context(|| {
+                        format!("initializing integrated vacuum sensors with {setup}")
+                    })?;
+            }
+        }
         Ok(firmware)
     }
 
@@ -211,9 +240,29 @@ impl MachineDriver for MarlinDriver {
 
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()> {
         for line in actuator_commands(actuator_id, enabled)? {
-            self.command(line, Duration::from_secs(5)).await?;
+            if let Err(error) = self.command(line, Duration::from_secs(5)).await {
+                if enabled {
+                    for off in actuator_commands(actuator_id, false).unwrap_or_default() {
+                        let _ = self.command(off, Duration::from_secs(2)).await;
+                    }
+                }
+                return Err(error)
+                    .with_context(|| format!("setting actuator {actuator_id} enabled={enabled}"));
+            }
         }
         Ok(())
+    }
+
+    async fn read_sensor(&mut self, sensor_id: &str) -> Result<i64> {
+        if !self.rev04_integrated_vacuum_sensors {
+            bail!("REV04 integrated vacuum sensors are disabled for the active profile");
+        }
+        let mut response = Vec::new();
+        for line in vacuum_sensor_read_commands(sensor_id)? {
+            response = self.command(line, Duration::from_secs(5)).await?;
+        }
+        parse_vacuum_sensor_report(&response)
+            .with_context(|| format!("decoding {sensor_id} response: {}", response.join(" | ")))
     }
 
     async fn emergency_stop(&mut self) -> Result<()> {
@@ -250,6 +299,36 @@ fn actuator_commands(actuator_id: &str, enabled: bool) -> Result<&'static [&'sta
         ("vacuum_2", false) => Ok(&["M107 P2", "M107 P3"]),
         _ => bail!("actuator {actuator_id} is not supported by the active profile"),
     }
+}
+
+fn vacuum_sensor_read_commands(sensor_id: &str) -> Result<&'static [&'static str]> {
+    match sensor_id {
+        "vacuum_1" => Ok(&["M260 A112 B1 S1", "M260 A109 B6 S1", "M261 A109 B1 S2"]),
+        "vacuum_2" => Ok(&["M260 A112 B2 S1", "M260 A109 B6 S1", "M261 A109 B1 S2"]),
+        _ => bail!("sensor {sensor_id} is not supported by the active profile"),
+    }
+}
+
+fn parse_vacuum_sensor_report(lines: &[String]) -> Result<i64> {
+    for line in lines {
+        let Some((_, data)) = line.split_once("data:") else {
+            continue;
+        };
+        let token = data
+            .trim()
+            .split(|character: char| character.is_ascii_whitespace() || character == ',')
+            .next()
+            .filter(|token| !token.is_empty())
+            .context("vacuum sensor data field is empty")?;
+        let value = token
+            .parse::<i64>()
+            .with_context(|| format!("invalid vacuum sensor value {token}"))?;
+        if !(-32_768..=32_767).contains(&value) {
+            bail!("vacuum sensor value {value} is outside the signed 16-bit range");
+        }
+        return Ok(value);
+    }
+    bail!("M261 response did not contain a data field")
 }
 
 fn supported_firmware(firmware: &str) -> bool {
@@ -421,6 +500,47 @@ mod tests {
             ["M107 P2", "M107 P3"]
         );
         assert!(actuator_commands("unknown", false).is_err());
+    }
+
+    #[test]
+    fn vacuum_sensor_commands_match_the_documented_rev04_sequence() {
+        assert_eq!(
+            &VACUUM_SENSOR_INITIALIZATION_COMMANDS[..5],
+            [
+                "M260 A112 B1 S1",
+                "M260 A109",
+                "M260 B48",
+                "M260 B27",
+                "M260 S1",
+            ]
+        );
+        assert_eq!(
+            vacuum_sensor_read_commands("vacuum_1").unwrap(),
+            ["M260 A112 B1 S1", "M260 A109 B6 S1", "M261 A109 B1 S2",]
+        );
+        assert_eq!(
+            vacuum_sensor_read_commands("vacuum_2").unwrap()[0],
+            "M260 A112 B2 S1"
+        );
+        assert!(vacuum_sensor_read_commands("unknown").is_err());
+    }
+
+    #[test]
+    fn parses_decimal_vacuum_sensor_reports() {
+        assert_eq!(
+            parse_vacuum_sensor_report(&[
+                "echo:i2c-reply: from:109 bytes:1 data:-42".into(),
+                "ok".into(),
+            ])
+            .unwrap(),
+            -42
+        );
+        assert_eq!(
+            parse_vacuum_sensor_report(&["i2c-reply: data:127, ok".into()]).unwrap(),
+            127
+        );
+        assert!(parse_vacuum_sensor_report(&["ok".into()]).is_err());
+        assert!(parse_vacuum_sensor_report(&["i2c-reply: data:nope".into()]).is_err());
     }
 
     #[test]

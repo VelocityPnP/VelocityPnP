@@ -146,6 +146,15 @@ class Client:
             "lease_id": str(lease_id), "enabled": enabled,
         }))
 
+    def read_sensor(
+        self, lease_id: str | uuid.UUID, sensor_id: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/machine/sensors/{sensor_id}/read",
+            {"lease_id": str(lease_id)},
+        )
+
     def emergency_stop(self) -> dict[str, Any]:
         return self.wait(self._request("POST", "/machine/emergency-stop"))
 

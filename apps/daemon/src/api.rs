@@ -22,6 +22,7 @@ use velocitypnp_domain::{
     lumen_calibration_workflow, BoardDesign, CalibrationSnapshot, CalibrationStepId, CameraProfile,
     CameraProfileControlValue, CameraRole, Feeder, InspectionReport, InspectionStatus, Job,
     JogTarget, MachineProfile, MachineState, Operation, OperationStatus, Pose, Residuals,
+    SensorReading,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -98,6 +99,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/machine/home", post(home))
         .route("/api/v1/machine/jog", post(jog))
         .route("/api/v1/machine/actuators/{actuator_id}", post(actuate))
+        .route(
+            "/api/v1/machine/sensors/{sensor_id}/read",
+            post(read_sensor),
+        )
         .route("/api/v1/machine/emergency-stop", post(emergency_stop))
         .route("/api/v1/control/lease", post(acquire_lease))
         .route("/api/v1/events", get(events))
@@ -588,6 +593,24 @@ async fn actuate(
             .map(|_| None)
             .map_err(|error| error.to_string())
     })
+}
+
+#[derive(Deserialize)]
+struct SensorReadRequest {
+    lease_id: Uuid,
+}
+
+async fn read_sensor(
+    State(state): State<AppState>,
+    Path(sensor_id): Path<String>,
+    Json(body): Json<SensorReadRequest>,
+) -> ApiResult<Json<SensorReading>> {
+    state
+        .machine
+        .read_sensor(body.lease_id, sensor_id)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
 async fn emergency_stop(State(state): State<AppState>) -> ApiResult<(StatusCode, Json<Operation>)> {
@@ -1384,6 +1407,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn sensor_read_is_leased_and_profile_scoped() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("sensor test".into(), 60)
+            .await
+            .unwrap();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/machine/sensors/vacuum_1/read")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"lease_id": lease.id}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let reading: SensorReading = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reading.sensor_id, "vacuum_1");
+        assert_eq!(reading.raw_value, 0);
+        assert_eq!(reading.unit, "raw_counts");
     }
 
     #[tokio::test]

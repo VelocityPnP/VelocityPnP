@@ -56,6 +56,17 @@ enum Command {
         #[arg(long, default_value_t = 300.0)]
         feed: f64,
     },
+    Actuate {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        actuator_id: String,
+        enabled: bool,
+    },
+    ReadSensor {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        sensor_id: String,
+    },
     EmergencyStop,
     ImportBoard {
         pcb: PathBuf,
@@ -167,6 +178,31 @@ async fn main() -> Result<()> {
                     Some(json!({"lease_id": lease, "target": target, "feed_mm_per_min": feed})),
                 )
                 .await?,
+            )
+            .await?
+        }
+        Command::Actuate {
+            lease,
+            actuator_id,
+            enabled,
+        } => {
+            run_operation(
+                &client,
+                base,
+                post(
+                    &client,
+                    &format!("{base}/machine/actuators/{actuator_id}"),
+                    Some(json!({"lease_id": lease, "enabled": enabled})),
+                )
+                .await?,
+            )
+            .await?
+        }
+        Command::ReadSensor { lease, sensor_id } => {
+            post(
+                &client,
+                &format!("{base}/machine/sensors/{sensor_id}/read"),
+                Some(json!({"lease_id": lease})),
             )
             .await?
         }

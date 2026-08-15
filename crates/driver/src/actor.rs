@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use uuid::Uuid;
 use velocitypnp_domain::{
     ControlLease, JogTarget, MachineEvent, MachineProfile, MachineState, MachineStatus, Pose,
+    SensorReading,
 };
 
 #[derive(Clone)]
@@ -120,6 +121,15 @@ impl MachineHandle {
         .await
     }
 
+    pub async fn read_sensor(&self, lease_id: Uuid, sensor_id: String) -> Result<SensorReading> {
+        request(&self.tx, |reply| Command::ReadSensor {
+            lease_id,
+            sensor_id,
+            reply,
+        })
+        .await
+    }
+
     pub async fn emergency_stop(&self) -> Result<()> {
         // This reaches a blocking physical driver before the serialized actor
         // can dequeue the explicit state-transition command.
@@ -173,6 +183,11 @@ enum Command {
         actuator_id: String,
         enabled: bool,
         reply: oneshot::Sender<Result<()>>,
+    },
+    ReadSensor {
+        lease_id: Uuid,
+        sensor_id: String,
+        reply: oneshot::Sender<Result<SensorReading>>,
     },
     EmergencyStop {
         reply: oneshot::Sender<Result<()>>,
@@ -251,6 +266,13 @@ impl MachineActor {
                     reply,
                 } => {
                     let _ = reply.send(self.actuate(lease_id, actuator_id, enabled).await);
+                }
+                Command::ReadSensor {
+                    lease_id,
+                    sensor_id,
+                    reply,
+                } => {
+                    let _ = reply.send(self.read_sensor(lease_id, sensor_id).await);
                 }
                 Command::EmergencyStop { reply } => {
                     let result = self.driver.emergency_stop().await;
@@ -392,12 +414,45 @@ impl MachineActor {
         ) {
             bail!("actuator checks are not allowed in the current machine state");
         }
+        if !self
+            .profile
+            .actuators
+            .iter()
+            .any(|actuator| actuator.id == actuator_id)
+        {
+            bail!("actuator {actuator_id} is not present in the active profile");
+        }
         self.driver.actuate(&actuator_id, enabled).await?;
         self.emit(
             "machine.actuator",
             json!({"actuator_id": actuator_id, "enabled": enabled}),
         );
         Ok(())
+    }
+
+    async fn read_sensor(&mut self, lease_id: Uuid, sensor_id: String) -> Result<SensorReading> {
+        self.status().assert_lease(lease_id, Utc::now())?;
+        if !matches!(
+            self.status().state,
+            MachineState::Preflight | MachineState::Unhomed | MachineState::Ready
+        ) {
+            bail!("sensor reads are not allowed in the current machine state");
+        }
+        let sensor = self
+            .profile
+            .sensors
+            .iter()
+            .find(|sensor| sensor.id == sensor_id)
+            .cloned()
+            .with_context(|| format!("sensor {sensor_id} is not present in the active profile"))?;
+        let reading = SensorReading {
+            raw_value: self.driver.read_sensor(&sensor_id).await?,
+            sensor_id,
+            unit: sensor.unit,
+            observed_at: Utc::now(),
+        };
+        self.emit("machine.sensor", json!({"reading": reading}));
+        Ok(reading)
     }
 
     fn status(&self) -> MachineStatus {
@@ -506,6 +561,10 @@ mod tests {
             Ok(())
         }
 
+        async fn read_sensor(&mut self, _sensor_id: &str) -> Result<i64> {
+            Ok(0)
+        }
+
         async fn emergency_stop(&mut self) -> Result<()> {
             Ok(())
         }
@@ -565,6 +624,37 @@ mod tests {
         assert!(handle.status().control_lease.is_none());
     }
 
+    #[tokio::test]
+    async fn simulator_sensor_read_tracks_vacuum_actuator() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile,
+        );
+        handle.connect().await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        assert_eq!(
+            handle
+                .read_sensor(lease.id, "vacuum_1".into())
+                .await
+                .unwrap()
+                .raw_value,
+            0
+        );
+        handle
+            .actuate(lease.id, "vacuum_1".into(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            handle
+                .read_sensor(lease.id, "vacuum_1".into())
+                .await
+                .unwrap()
+                .raw_value,
+            -80
+        );
+    }
+
     struct InterruptibleDriver {
         emergency_flag: Arc<AtomicBool>,
     }
@@ -602,6 +692,10 @@ mod tests {
 
         async fn actuate(&mut self, _actuator_id: &str, _enabled: bool) -> Result<()> {
             Ok(())
+        }
+
+        async fn read_sensor(&mut self, _sensor_id: &str) -> Result<i64> {
+            Ok(0)
         }
 
         async fn emergency_stop(&mut self) -> Result<()> {

@@ -106,4 +106,20 @@ cargo run -p velocitypnpd -- \
 ```
 
 Opening a USB CDC controller may reset it. Connect does only the bounded Marlin
-identity query and unit/mode setup; it does not home or move automatically.
+identity query, unit/mode setup, and documented integrated-vacuum-sensor
+initialization; it does not home, move, or enable an output automatically.
+
+The V3.0.4 profile exposes `vacuum_1` and `vacuum_2` as both actuators and raw
+pressure sensors. Reads require a lease and are allowed during preflight,
+unhomed, or ready states:
+
+```bash
+velocitypnp read-sensor --lease "$VELOCITYPNP_LEASE" vacuum_1
+velocitypnp actuate --lease "$VELOCITYPNP_LEASE" vacuum_1 true
+velocitypnp actuate --lease "$VELOCITYPNP_LEASE" vacuum_1 false
+```
+
+Sensor readings are signed controller counts, not pressure units. Establish
+the ambient and sealed-nozzle distributions on the attached machine before
+using them for part detection. An actuator-on validation must always include
+an explicit off command and a fail-safe disconnect.

@@ -93,6 +93,13 @@ export interface CameraReproducibilityReport {
   passed: boolean;
 }
 
+export interface SensorReading {
+  sensor_id: string;
+  raw_value: number;
+  unit: string;
+  observed_at: string;
+}
+
 export interface Operation {
   id: string;
   kind: string;
