@@ -358,33 +358,54 @@ residual. Initial coarse-home corrections ranged from 0.0457 to 0.8296 mm,
 which confirms that sensorless homing is a capture-range operation, not the
 precision datum. The attached machine ended homed, ready, and fault-free. This
 completes the persisted initial-machine runner and its visual-homing workflow
-step. It does not make the calibration production-ready: motion geometry,
-nozzle runout, and final placement validation still require their own evidence.
+step. At that point, motion geometry, nozzle runout, and final placement
+validation still required their own evidence.
 
-## Head geometry implementation pending physical validation
+## Head geometry and runout validation
 
-On 2026-08-15 the initial-machine runner was extended beyond the validated
-visual-home stage. The new software first identifies N1/N045 and N2/N24 without
-operator tip entry. It uses central ±0.5 mm X/Y probes to measure the local
-bottom-camera image-to-motion map. It then has both cameras locate the opposing
-lens and applies at most three reciprocal corrections, each bounded to 4 mm.
-This phase runs after the first successful visual-home cycle, but its snapshot
-steps are not committed unless the complete 30-cycle repeatability gate passes.
+The complete head-geometry run passed on the attached machine on 2026-08-15.
+Run `aead8ce5-2bbe-4491-8461-4797b12449a0` belongs to calibration
+`f6acd39d-b509-4e42-b265-132c0efcf8d2` for machine serial `3286336D3331`.
+All 14 runner checks passed. The run stored seven settled reciprocal-camera
+frames in SQLite for later diagnosis.
 
-For each detected nozzle, the runner reads its current controller angle and
-uses 12 alternating relative offsets from ±15 to ±165 degrees at 600
-degrees/minute. This makes the first rotation small while retaining a broad
-fit. N1 is mapped to controller axis A and N2 to B from the tagged V3.0.4
-profile. The runner returns each axis to its captured start angle and fits the
-stationary axis, top-camera head offset, and periodic tip-runout coefficients.
-The runout fit must have a p95 physical residual no larger than 0.05 mm. Normal
-physical jog rotation remains disabled, and no unrestricted rotation endpoint
-exists.
+The bottom camera used central ±0.5 mm probes. Its measured image motion per
+machine millimetre was `[[27.8256, -0.3190], [0.5374, 28.0278]]`. Independent
+bottom-camera corrections put the visible top-camera lens within 0.0403 mm of
+the image centre. The top camera then measured a local map at the raised lens
+plane. Its image motion was `[[39.3652, -0.0741], [0.0821, -42.0470]]` pixels
+per machine millimetre. Independent top-camera corrections put the visible
+bottom-camera lens within 0.0234 mm of the image centre.
 
-Synthetic vision and fit tests, simulator actor tests, and command-generation
-tests pass. This section is implementation evidence only. The opposing-lens
-detector, A/B motion, measured offsets, and runout residuals do not yet have
-attached-machine evidence.
+Early runs exposed three bootstrap defects before rotation started. An
+open-loop return error was incorrectly used as a mapping gate. The two camera
+centres were incorrectly forced to share one controller pose and one movement
+bound. A five-frame lens batch was rejected when one frame had no detection.
+The final runner treats open-loop return as a diagnostic, centres each camera
+from its own bounded seed, measures the local top-camera map, and requires a
+stable three-of-five lens cluster. Saved hardware frames cover the large
+cropped lens and the smaller concentric features near centre.
+
+The runner identified N1 as N045 and N2 as N24 before rotation. Each nozzle
+then used 12 alternating offsets from ±15 to ±165 degrees at 600
+degrees/minute. Both controller axes started at 720 degrees and were restored
+to 720 degrees after measurement. N1 runout radius was 0.0881 mm. Its fit had
+0.00795 mm p95 residual. N2 runout radius was 0.1433 mm. Its fit had 0.00861 mm
+p95 residual. Both are below the 0.05 mm fit-residual limit.
+
+The measured N1 head offset was X=-22.1268 mm and Y=-70.7246 mm. The measured
+N2 head offset was X=25.4152 mm and Y=-70.9452 mm. The N1-to-N2 rotation-axis
+offset was X=47.5420 mm and Y=-0.2205 mm. The combined 24-sample runout fit had
+0.00861 mm p95 and maximum residual, and 0.00421 mm RMS residual.
+
+The same run completed all 30 visual-home cycles. Closed-loop verification had
+0.0106 mm p95, 0.0129 mm maximum, and 0.00594 mm RMS residual. Independent
+return had 0.0143 mm p95, 0.0153 mm maximum, and 0.00791 mm RMS residual. The
+machine ended homed, ready, and fault-free. The snapshot now contains coarse
+homing, camera reproducibility, visual homing, bottom-camera geometry, nozzle
+offsets, and nozzle runout. It remains not production-ready because camera
+intrinsics, motion geometry, Z planes, vacuum thresholds, and known-board
+validation are still incomplete.
 
 ## Procedure sources
 

@@ -55,7 +55,7 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add automatic bottom-camera local mapping, reciprocal camera centering,
   and N1/N2 head-offset measurement
 - [x] Fit and persist nozzle runout coefficients per detected nozzle/tip
-- [ ] Pass attached-hardware head geometry and nozzle runout validation
+- [x] Pass attached-hardware head geometry and nozzle runout validation
 - [ ] Fit vacuum classification per nozzle/tip
 - [ ] Pass full-bed and nozzle p95 residual of 0.05 mm or better
 

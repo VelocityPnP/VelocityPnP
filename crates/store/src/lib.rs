@@ -61,6 +61,14 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS event_journal_occurred_at
                 ON event_journal(occurred_at);
+            CREATE TABLE IF NOT EXISTS calibration_artifacts (
+                run_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, name)
+            );
             "#,
         )?;
         Ok(())
@@ -108,6 +116,46 @@ impl Store {
 
     pub fn get_calibration_run(&self, id: Uuid) -> Result<Option<AutomatedCalibrationRun>> {
         self.get("calibration_run", id)
+    }
+
+    pub fn put_calibration_artifact(
+        &self,
+        run_id: Uuid,
+        name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(!name.is_empty(), "calibration artifact name is empty");
+        anyhow::ensure!(
+            !media_type.is_empty(),
+            "calibration artifact media type is empty"
+        );
+        self.connection.lock().execute(
+            r#"INSERT INTO calibration_artifacts(run_id, name, media_type, data, created_at)
+               VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ON CONFLICT(run_id, name) DO UPDATE SET
+                 media_type = excluded.media_type,
+                 data = excluded.data,
+                 created_at = excluded.created_at"#,
+            params![run_id.to_string(), name, media_type, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_calibration_artifact(
+        &self,
+        run_id: Uuid,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT media_type, data FROM calibration_artifacts WHERE run_id = ?1 AND name = ?2",
+                params![run_id.to_string(), name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn put_camera_profile(&self, profile: &CameraProfile) -> Result<()> {
@@ -333,5 +381,21 @@ mod tests {
         let restored = store.get_calibration_run(run.id).unwrap().unwrap();
         assert_eq!(restored.phase, CalibrationRunPhase::VisualHomingValidation);
         assert_eq!(restored.operation_id, run.operation_id);
+    }
+
+    #[test]
+    fn calibration_artifact_round_trip_retains_media_type_and_bytes() {
+        let store = Store::memory().unwrap();
+        let run_id = Uuid::new_v4();
+        let data = [1, 2, 3, 4];
+
+        store
+            .put_calibration_artifact(run_id, "view.png", "image/png", &data)
+            .unwrap();
+
+        assert_eq!(
+            store.get_calibration_artifact(run_id, "view.png").unwrap(),
+            Some(("image/png".into(), data.to_vec()))
+        );
     }
 }

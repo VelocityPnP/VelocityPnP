@@ -228,6 +228,7 @@ export interface NozzleRunoutReport {
 
 export interface HeadGeometryReport {
   bottom_camera_mapping: BottomCameraMappingReport;
+  top_camera_reciprocal_mapping: BottomCameraMappingReport;
   top_camera_center: HeadFeatureCenterReport;
   bottom_camera_reciprocal_observation: HeadFeatureCenterReport;
   nozzles: NozzleRunoutReport[];

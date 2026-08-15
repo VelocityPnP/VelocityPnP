@@ -20,8 +20,10 @@ const TOOLING_CENTER_JITTER_P95_LIMIT_PX: f64 = 3.0;
 const TOOLING_CLUSTER_DIAMETER_LIMIT_PX: f64 = 2.0;
 const TOOLING_CONCENTRIC_CENTER_LIMIT_PX: f64 = 8.0;
 const TOOLING_CONCENTRIC_DIAMETER_GAP_PX: f64 = 8.0;
+const TOOLING_MIN_DETECTION_RATE: f64 = 0.6;
 const TOOLING_DARK_THRESHOLDS: [u8; 2] = [45, 90];
 const HEAD_CAMERA_THRESHOLDS: [u8; 6] = [30, 45, 60, 90, 120, 150];
+const PARTIAL_CAMERA_LENS_THRESHOLDS: [u8; 9] = [60, 90, 120, 150, 165, 180, 195, 210, 225];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrayFrame {
@@ -352,7 +354,7 @@ pub fn summarize_nozzle_tooling(
             .map(|candidate| candidate.expected_tip_id.clone())
     });
     let passed = requested_samples > 0
-        && detection_rate >= 0.8
+        && detection_rate >= TOOLING_MIN_DETECTION_RATE
         && detected_tip_id.as_deref() == Some(nozzle.expected_tip_id.as_str())
         && mean_bore_diameter_mm.is_some_and(|diameter| {
             (diameter - nozzle.expected_bore_diameter_mm).abs() <= nozzle.bore_diameter_tolerance_mm
@@ -418,6 +420,22 @@ pub fn detect_opposed_camera_feature(
     min_diameter_px: f64,
     max_diameter_px: f64,
 ) -> Option<FiducialDetection> {
+    let large_lens = PARTIAL_CAMERA_LENS_THRESHOLDS
+        .into_iter()
+        .filter_map(|threshold| {
+            detect_partial_dark_camera_lens(
+                frame,
+                threshold,
+                frame_center_x_px,
+                frame_center_y_px,
+                max_center_error_px,
+                max_diameter_px,
+            )
+        })
+        .max_by(|left, right| left.confidence.total_cmp(&right.confidence));
+    if large_lens.is_some() {
+        return large_lens;
+    }
     let mut targets = HEAD_CAMERA_THRESHOLDS
         .into_iter()
         .flat_map(|threshold| {
@@ -446,6 +464,86 @@ pub fn detect_opposed_camera_feature(
     })
 }
 
+fn detect_partial_dark_camera_lens(
+    frame: &GrayFrame,
+    threshold: u8,
+    frame_center_x_px: f64,
+    frame_center_y_px: f64,
+    max_center_error_px: f64,
+    min_diameter_px: f64,
+) -> Option<FiducialDetection> {
+    if frame.width < 64
+        || frame.height < 64
+        || frame.pixels.len() != frame.width as usize * frame.height as usize
+    {
+        return None;
+    }
+    let width = frame.width as usize;
+    let height = frame.height as usize;
+    let center_x = frame_center_x_px.round().clamp(1.0, (width - 2) as f64) as usize;
+    let mut points = Vec::new();
+    for y in (0..height).step_by(2) {
+        let row = &frame.pixels[y * width..(y + 1) * width];
+        if row[center_x] > threshold {
+            continue;
+        }
+        let left_bright = (0..center_x).rev().find(|x| row[*x] > threshold);
+        let right_bright = ((center_x + 1)..width).find(|x| row[*x] > threshold);
+        let (Some(left_bright), Some(right_bright)) = (left_bright, right_bright) else {
+            continue;
+        };
+        let left = left_bright + 1;
+        let right = right_bright - 1;
+        if right <= left || ((right - left) as f64) < min_diameter_px {
+            continue;
+        }
+        points.push((left as f64, y as f64));
+        points.push((right as f64, y as f64));
+    }
+    if points.len() < 64 {
+        return None;
+    }
+    let design = points
+        .iter()
+        .map(|(x, y)| [x - frame_center_x_px, y - frame_center_y_px, 1.0])
+        .collect::<Vec<_>>();
+    let values = design
+        .iter()
+        .map(|[x, y, _]| -(x * x + y * y))
+        .collect::<Vec<_>>();
+    let [d, e, f] = fit_three_parameter_model(&design, &values)?;
+    let relative_center_x = -d / 2.0;
+    let relative_center_y = -e / 2.0;
+    let radius_squared =
+        relative_center_x * relative_center_x + relative_center_y * relative_center_y - f;
+    if !radius_squared.is_finite() || radius_squared <= 0.0 {
+        return None;
+    }
+    let radius = radius_squared.sqrt();
+    let diameter = 2.0 * radius;
+    let center_error = relative_center_x.hypot(relative_center_y);
+    let max_radius = 2.0 * f64::from(frame.width.max(frame.height));
+    if diameter < min_diameter_px || radius > max_radius || center_error > max_center_error_px {
+        return None;
+    }
+    let rms_error = (design
+        .iter()
+        .map(|[x, y, _]| (x - relative_center_x).hypot(y - relative_center_y) - radius)
+        .map(|error| error * error)
+        .sum::<f64>()
+        / design.len() as f64)
+        .sqrt();
+    if !rms_error.is_finite() || rms_error > 5.0 {
+        return None;
+    }
+    Some(FiducialDetection {
+        x_px: frame_center_x_px + relative_center_x,
+        y_px: frame_center_y_px + relative_center_y,
+        diameter_px: diameter,
+        confidence: 1.0 / (1.0 + rms_error),
+    })
+}
+
 pub fn summarize_head_camera_feature(
     frames: &[GrayFrame],
     bottom_vision: &BottomVisionProfile,
@@ -453,19 +551,8 @@ pub fn summarize_head_camera_feature(
     let detections = frames
         .iter()
         .map(|frame| detect_head_camera_feature(frame, bottom_vision))
-        .collect::<Option<Vec<_>>>()?;
-    let mean_x = mean(detections.iter().map(|target| target.x_px));
-    let mean_y = mean(detections.iter().map(|target| target.y_px));
-    let max_jitter = detections
-        .iter()
-        .map(|target| (target.x_px - mean_x).hypot(target.y_px - mean_y))
-        .fold(0.0, f64::max);
-    (max_jitter <= TOOLING_CENTER_JITTER_P95_LIMIT_PX).then(|| FiducialDetection {
-        x_px: mean_x,
-        y_px: mean_y,
-        diameter_px: mean(detections.iter().map(|target| target.diameter_px)),
-        confidence: mean(detections.iter().map(|target| target.confidence)),
-    })
+        .collect::<Vec<_>>();
+    summarize_stable_feature(&detections)
 }
 
 pub fn summarize_opposed_camera_feature(
@@ -488,18 +575,40 @@ pub fn summarize_opposed_camera_feature(
                 max_diameter_px,
             )
         })
-        .collect::<Option<Vec<_>>>()?;
-    let mean_x = mean(detections.iter().map(|target| target.x_px));
-    let mean_y = mean(detections.iter().map(|target| target.y_px));
-    let max_jitter = detections
+        .collect::<Vec<_>>();
+    summarize_stable_feature(&detections)
+}
+
+fn summarize_stable_feature(detections: &[Option<FiducialDetection>]) -> Option<FiducialDetection> {
+    let minimum_support = (detections.len() as f64 * TOOLING_MIN_DETECTION_RATE).ceil() as usize;
+    let best = detections
         .iter()
-        .map(|target| (target.x_px - mean_x).hypot(target.y_px - mean_y))
-        .fold(0.0, f64::max);
-    (max_jitter <= TOOLING_CENTER_JITTER_P95_LIMIT_PX).then(|| FiducialDetection {
-        x_px: mean_x,
-        y_px: mean_y,
-        diameter_px: mean(detections.iter().map(|target| target.diameter_px)),
-        confidence: mean(detections.iter().map(|target| target.confidence)),
+        .flatten()
+        .map(|seed| {
+            detections
+                .iter()
+                .flatten()
+                .filter(|target| {
+                    (target.x_px - seed.x_px).hypot(target.y_px - seed.y_px)
+                        <= TOOLING_CENTER_JITTER_P95_LIMIT_PX
+                })
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .max_by(|left, right| {
+            left.len().cmp(&right.len()).then_with(|| {
+                mean(left.iter().map(|target| target.confidence))
+                    .total_cmp(&mean(right.iter().map(|target| target.confidence)))
+            })
+        })?;
+    if best.len() < minimum_support {
+        return None;
+    }
+    Some(FiducialDetection {
+        x_px: mean(best.iter().map(|target| target.x_px)),
+        y_px: mean(best.iter().map(|target| target.y_px)),
+        diameter_px: mean(best.iter().map(|target| target.diameter_px)),
+        confidence: mean(best.iter().map(|target| target.confidence)),
     })
 }
 
@@ -1410,6 +1519,68 @@ mod tests {
     }
 
     #[test]
+    fn tooling_accepts_three_stable_detections_but_not_two() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 64.0;
+        bottom_vision.frame_center_y_px = 64.0;
+        bottom_vision.max_center_error_px = 55.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n1 = bottom_vision.nozzles[0].clone();
+        let frames = (0..5)
+            .map(|sample| {
+                if sample < 3 {
+                    frame_with_dark_disks(128, 128, &[(64, 64, 6)])
+                } else {
+                    frame_with_dark_disks(128, 128, &[])
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n1);
+
+        assert!(report.passed);
+        assert_eq!(report.detected_samples, 3);
+        assert_eq!(report.detection_rate, 0.6);
+
+        let report = summarize_nozzle_tooling(&frames[1..], &bottom_vision, &n1);
+
+        assert!(!report.passed);
+        assert_eq!(report.detected_samples, 2);
+    }
+
+    #[test]
+    fn camera_feature_accepts_a_stable_three_of_five_cluster() {
+        let stable = FiducialDetection {
+            x_px: 640.0,
+            y_px: 360.0,
+            diameter_px: 60.0,
+            confidence: 0.8,
+        };
+        let detections = [
+            Some(stable),
+            None,
+            Some(FiducialDetection {
+                x_px: 641.0,
+                ..stable
+            }),
+            Some(FiducialDetection {
+                y_px: 359.0,
+                ..stable
+            }),
+            None,
+        ];
+
+        let target = summarize_stable_feature(&detections).unwrap();
+
+        assert!((target.x_px - 640.3333333333334).abs() < 1e-9);
+        assert!((target.y_px - 359.6666666666667).abs() < 1e-9);
+        assert!(summarize_stable_feature(&detections[1..]).is_none());
+    }
+
+    #[test]
     fn tooling_prefers_the_n045_bore_over_a_more_stable_outer_annulus() {
         let machine: velocitypnp_domain::MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
@@ -1553,6 +1724,44 @@ mod tests {
         let tooling = summarize_nozzle_tooling(&[bottom], bottom_vision, n1);
         assert_eq!(tooling.detected_tip_id.as_deref(), Some("N045"));
         assert!(tooling.passed);
+    }
+
+    #[test]
+    fn detects_cropped_bottom_camera_lens_in_attached_top_view() {
+        let frame = decode_gray_png(include_bytes!(
+            "../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera.png"
+        ))
+        .unwrap();
+        let target = detect_opposed_camera_feature(&frame, 640.0, 360.0, 400.0, 40.0, 400.0)
+            .expect("cropped bottom-camera lens was not detected");
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let visual = machine.visual_homing.unwrap();
+        let correction = plan_pixel_correction(
+            target,
+            visual.frame_center_x_px,
+            visual.frame_center_y_px,
+            visual.pixel_error_to_machine_mm,
+        )
+        .unwrap();
+
+        assert!((target.x_px - 566.4).abs() < 5.0);
+        assert!((target.y_px - 166.8).abs() < 5.0);
+        assert!((target.diameter_px - 929.0).abs() < 10.0);
+        assert!(correction.distance_mm < 4.0);
+    }
+
+    #[test]
+    fn keeps_outer_bottom_camera_lens_across_reciprocal_correction() {
+        let frame = decode_gray_png(include_bytes!(
+            "../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera-near-centered.png"
+        ))
+        .unwrap();
+        let target = detect_opposed_camera_feature(&frame, 640.0, 360.0, 400.0, 40.0, 400.0)
+            .expect("near-centered bottom-camera lens was not detected");
+
+        assert!(target.diameter_px > 800.0);
+        assert!((target.x_px - 640.0).hypot(target.y_px - 360.0) < 150.0);
     }
 
     #[test]

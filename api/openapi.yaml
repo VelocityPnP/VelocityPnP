@@ -398,6 +398,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AutomatedCalibrationRun" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /calibration-runs/{id}/artifacts/{name}:
+    get:
+      operationId: getCalibrationArtifact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Persisted calibration diagnostic artifact
+          content:
+            image/png: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /calibrations/{id}/steps/{step}/invalidate:
     post:
       operationId: invalidateCalibrationStep
@@ -784,7 +796,7 @@ components:
         status: { type: string, enum: [pending, running, succeeded, rejected, failed] }
         phase:
           type: string
-          enum: [pending, coarse_homing, actuator_checks, top_camera_reproducibility, tooling_verification, bottom_camera_reproducibility, visual_homing_validation, complete]
+          enum: [pending, coarse_homing, actuator_checks, top_camera_reproducibility, tooling_verification, bottom_camera_reproducibility, visual_homing_validation, head_geometry_calibration, complete]
         config: { type: object }
         checks:
           type: array
@@ -796,6 +808,10 @@ components:
         visual_homing_report:
           oneOf:
             - { $ref: "#/components/schemas/VisualHomingValidationReport" }
+            - { type: "null" }
+        head_geometry_report:
+          oneOf:
+            - { type: object, additionalProperties: true }
             - { type: "null" }
         failure: { type: [string, "null"] }
         simulated: { type: boolean }

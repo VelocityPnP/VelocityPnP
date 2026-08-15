@@ -252,6 +252,7 @@ pub struct NozzleRunoutReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeadGeometryReport {
     pub bottom_camera_mapping: BottomCameraMappingReport,
+    pub top_camera_reciprocal_mapping: BottomCameraMappingReport,
     pub top_camera_center: HeadFeatureCenterReport,
     pub bottom_camera_reciprocal_observation: HeadFeatureCenterReport,
     pub nozzles: Vec<NozzleRunoutReport>,

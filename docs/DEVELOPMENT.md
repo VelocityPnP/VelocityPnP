@@ -188,6 +188,9 @@ There is no unrestricted HTTP nozzle-rotation endpoint.
 Every phase and sample is persisted under
 `GET /api/v1/calibration-runs/{id}`. A completed measurement outside its gate is
 `rejected`, while camera, storage, lease, or motion failures are `failed`.
+Settled reciprocal-camera frames are stored in SQLite. Their metadata and
+relative URLs are in `camera_reports.head_geometry_artifacts`; retrieve an
+image with `GET /api/v1/calibration-runs/{id}/artifacts/{name}`.
 Successful evidence advances the snapshot automatically. Calibration stages
 whose runners are not implemented are reported as planned and cannot be
 completed manually. Starting a run renews the caller's matching control lease
