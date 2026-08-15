@@ -34,6 +34,12 @@ enum Command {
         #[arg(long, default_value_t = 900)]
         seconds: u32,
     },
+    RenewLease {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value_t = 3600)]
+        seconds: u32,
+    },
     Home {
         #[arg(long, env = "VELOCITYPNP_LEASE")]
         lease: Uuid,
@@ -96,6 +102,22 @@ enum Command {
         #[arg(long, default_value = "unassigned")]
         machine_serial: String,
     },
+    CalibrationRuns {
+        calibration: Uuid,
+    },
+    CalibrationRun {
+        run: Uuid,
+    },
+    Calibrate {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Confirm level nozzles, a clear envelope, and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+        #[arg(long, default_value_t = 30)]
+        visual_homing_samples: u32,
+    },
 }
 
 #[tokio::main]
@@ -143,6 +165,14 @@ async fn main() -> Result<()> {
                 &client,
                 &format!("{base}/control/lease"),
                 Some(json!({"client_name": client_name, "duration_seconds": seconds})),
+            )
+            .await?
+        }
+        Command::RenewLease { lease, seconds } => {
+            post(
+                &client,
+                &format!("{base}/control/lease/renew"),
+                Some(json!({"lease_id": lease, "duration_seconds": seconds})),
             )
             .await?
         }
@@ -304,6 +334,37 @@ async fn main() -> Result<()> {
                 Some(json!({"machine_serial": machine_serial})),
             )
             .await?
+        }
+        Command::CalibrationRuns { calibration } => {
+            get(&client, &format!("{base}/calibrations/{calibration}/runs")).await?
+        }
+        Command::CalibrationRun { run } => {
+            get(&client, &format!("{base}/calibration-runs/{run}")).await?
+        }
+        Command::Calibrate {
+            calibration,
+            lease,
+            confirm_safety_checks,
+            visual_homing_samples,
+        } => {
+            if !confirm_safety_checks {
+                bail!("calibration requires --confirm-safety-checks after physical inspection");
+            }
+            let started = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/runs"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                    "visual_homing_sample_count": visual_homing_samples,
+                })),
+            )
+            .await?;
+            let run_id = started["run"]["id"]
+                .as_str()
+                .context("calibration response did not contain a run ID")?;
+            run_operation(&client, base, started["operation"].clone()).await?;
+            get(&client, &format!("{base}/calibration-runs/{run_id}")).await?
         }
     };
     println!("{}", serde_json::to_string_pretty(&output)?);

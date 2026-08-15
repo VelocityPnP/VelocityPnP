@@ -87,6 +87,15 @@ impl MachineHandle {
         .await
     }
 
+    pub async fn renew_lease(&self, lease_id: Uuid, duration_seconds: u32) -> Result<ControlLease> {
+        request(&self.tx, |reply| Command::RenewLease {
+            lease_id,
+            duration_seconds,
+            reply,
+        })
+        .await
+    }
+
     pub async fn home(&self, lease_id: Uuid, checks_confirmed: bool) -> Result<Pose> {
         request(&self.tx, |reply| Command::Home {
             lease_id,
@@ -185,6 +194,11 @@ enum Command {
         duration_seconds: u32,
         reply: oneshot::Sender<Result<ControlLease>>,
     },
+    RenewLease {
+        lease_id: Uuid,
+        duration_seconds: u32,
+        reply: oneshot::Sender<Result<ControlLease>>,
+    },
     Home {
         lease_id: Uuid,
         checks_confirmed: bool,
@@ -269,6 +283,13 @@ impl MachineActor {
                     reply,
                 } => {
                     let _ = reply.send(self.acquire_lease(client_name, duration_seconds));
+                }
+                Command::RenewLease {
+                    lease_id,
+                    duration_seconds,
+                    reply,
+                } => {
+                    let _ = reply.send(self.renew_lease(lease_id, duration_seconds));
                 }
                 Command::Home {
                     lease_id,
@@ -368,6 +389,17 @@ impl MachineActor {
         };
         self.update(|s| s.control_lease = Some(lease.clone()));
         self.emit("control.lease_acquired", json!({"lease": lease}));
+        Ok(lease)
+    }
+
+    fn renew_lease(&mut self, lease_id: Uuid, duration_seconds: u32) -> Result<ControlLease> {
+        let now = Utc::now();
+        self.status().assert_lease(lease_id, now)?;
+        let mut lease = self.status().control_lease.unwrap();
+        let duration_seconds = duration_seconds.clamp(30, 3600);
+        lease.expires_at = now + ChronoDuration::seconds(i64::from(duration_seconds));
+        self.update(|status| status.control_lease = Some(lease.clone()));
+        self.emit("control.lease_renewed", json!({"lease": lease}));
         Ok(lease)
     }
 
@@ -619,6 +651,9 @@ mod tests {
         assert_eq!(handle.status().state, MachineState::Preflight);
         handle.complete_preflight(true).await.unwrap();
         let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        let renewed = handle.renew_lease(lease.id, 3600).await.unwrap();
+        assert_eq!(renewed.id, lease.id);
+        assert!(renewed.expires_at > lease.expires_at);
         handle.home(lease.id, true).await.unwrap();
         let pose = Pose {
             x_mm: 10.0,

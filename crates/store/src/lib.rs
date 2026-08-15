@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    BoardDesign, CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job,
-    MachineEvent, Operation,
+    AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CameraProfile, CameraRole, Feeder,
+    InspectionReport, Job, MachineEvent, Operation,
 };
 
 #[derive(Clone)]
@@ -96,6 +96,18 @@ impl Store {
 
     pub fn get_calibration(&self, id: Uuid) -> Result<Option<CalibrationSnapshot>> {
         self.get("calibration", id)
+    }
+
+    pub fn put_calibration_run(&self, run: &AutomatedCalibrationRun) -> Result<()> {
+        self.put("calibration_run", run.id, run)
+    }
+
+    pub fn list_calibration_runs(&self) -> Result<Vec<AutomatedCalibrationRun>> {
+        self.list("calibration_run")
+    }
+
+    pub fn get_calibration_run(&self, id: Uuid) -> Result<Option<AutomatedCalibrationRun>> {
+        self.get("calibration_run", id)
     }
 
     pub fn put_camera_profile(&self, profile: &CameraProfile) -> Result<()> {
@@ -251,7 +263,11 @@ fn feeder_id(feeder: &Feeder) -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velocitypnp_domain::BoardDesign;
+    use chrono::Utc;
+    use std::collections::BTreeMap;
+    use velocitypnp_domain::{
+        AutomatedCalibrationConfig, BoardDesign, CalibrationRunPhase, CalibrationRunStatus,
+    };
 
     #[test]
     fn board_round_trip() {
@@ -281,5 +297,40 @@ mod tests {
                 .unwrap(),
             Some(profile)
         );
+    }
+
+    #[test]
+    fn calibration_run_round_trip_retains_progress() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let run = AutomatedCalibrationRun {
+            id: Uuid::new_v4(),
+            calibration_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: now,
+            updated_at: now,
+            status: CalibrationRunStatus::Running,
+            phase: CalibrationRunPhase::VisualHomingValidation,
+            config: AutomatedCalibrationConfig {
+                camera_sample_count: 30,
+                tooling_sample_count: 5,
+                visual_homing_sample_count: 30,
+                excursion_x_mm: -10.0,
+                excursion_y_mm: -10.0,
+                excursion_feed_mm_per_min: 600.0,
+                visual_homing_p95_limit_mm: 0.05,
+            },
+            checks: vec![],
+            camera_reports: BTreeMap::new(),
+            visual_homing_samples: vec![],
+            visual_homing_report: None,
+            failure: None,
+            simulated: true,
+        };
+        store.put_calibration_run(&run).unwrap();
+        let restored = store.get_calibration_run(run.id).unwrap().unwrap();
+        assert_eq!(restored.phase, CalibrationRunPhase::VisualHomingValidation);
+        assert_eq!(restored.operation_id, run.operation_id);
     }
 }

@@ -39,13 +39,18 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
 - [x] Implement bounded primary-datum detection, correction, and XY reset
 - [x] Validate both pixel-to-axis signs and measure primary-datum refinement
+- [x] Persist a first-class initial calibration runner with API, CLI, Python,
+  and guided web progress
+- [x] Remove operator-entered calibration metrics from the supported workflow
+- [x] Add bottom-camera detection of configured N045/N24 tooling assignments
 - [ ] Pass 30-cycle visual-refined homing p95 residual of 0.05 mm or better
 
 ## Gate 3 — Full calibration
 
 - [ ] Fabricate and publish the known-dimension multi-fiducial calibration PCB
 - [ ] Bind OpenCV camera intrinsics/distortion calibration to recorded workflow steps
-- [ ] Automate XY scale, skew, backlash, camera scale, nozzle offsets, and bottom-camera location
+- [ ] Add machine runners for XY scale, skew, backlash, camera scale, nozzle
+  offsets, and bottom-camera location
 - [ ] Fit nozzle runout compensation and vacuum classification per nozzle/tip
 - [ ] Pass full-bed and nozzle p95 residual of 0.05 mm or better
 

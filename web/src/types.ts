@@ -136,6 +136,7 @@ export interface CalibrationStep {
   dependencies: string[];
   requires_motion: boolean;
   requires_fixture: boolean;
+  automation: "automated" | "planned";
 }
 
 export interface CalibrationSnapshot {
@@ -154,6 +155,63 @@ export interface Residuals {
   rms_mm: number;
   p95_mm: number;
   max_mm: number;
+}
+
+export interface CalibrationCheck {
+  id: string;
+  title: string;
+  source: "controller" | "vision" | "operator";
+  status: "pending" | "passed" | "failed";
+  message: string;
+  evidence: unknown;
+}
+
+export interface VisualHomingValidationSample {
+  cycle: number;
+  observed_at: string;
+  initial_correction_mm: number;
+  correction_count: number;
+  verification_residual_mm: number;
+  verification_residual_px: number;
+  return_residual_mm: number;
+  return_residual_px: number;
+  return_error_x_px: number;
+  return_error_y_px: number;
+}
+
+export interface VisualHomingValidationReport {
+  visual_verification: Residuals;
+  independent_return: Residuals;
+  initial_correction_min_mm: number;
+  initial_correction_mean_mm: number;
+  initial_correction_max_mm: number;
+  passed: boolean;
+}
+
+export interface AutomatedCalibrationRun {
+  id: string;
+  calibration_id: string;
+  operation_id: string;
+  profile_id: string;
+  created_at: string;
+  updated_at: string;
+  status: "pending" | "running" | "succeeded" | "rejected" | "failed";
+  phase: string;
+  config: {
+    camera_sample_count: number;
+    tooling_sample_count: number;
+    visual_homing_sample_count: number;
+    excursion_x_mm: number;
+    excursion_y_mm: number;
+    excursion_feed_mm_per_min: number;
+    visual_homing_p95_limit_mm: number;
+  };
+  checks: CalibrationCheck[];
+  camera_reports: Record<string, unknown>;
+  visual_homing_samples: VisualHomingValidationSample[];
+  visual_homing_report: VisualHomingValidationReport | null;
+  failure: string | null;
+  simulated: boolean;
 }
 
 export interface BoardDesign {

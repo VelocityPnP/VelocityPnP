@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, waitForOperation } from "./api";
 import type {
-  BoardDesign, CalibrationSnapshot, CalibrationStep, Device, MachineEvent,
-  MachineStatus, Pose, Residuals, SensorReading, VisualHomingResult,
+  AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CalibrationStep, Device,
+  MachineEvent, MachineStatus, Pose, SensorReading, VisualHomingResult,
 } from "./types";
 import "./styles.css";
 
@@ -32,7 +32,7 @@ export default function App() {
     void api.devices().then(setDevices).catch(() => undefined);
     const timer = window.setInterval(() => void refresh(), 1000);
     const source = new EventSource("/api/v1/events");
-    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.position", "machine.actuator", "machine.sensor", "machine.visual_home_applied", "machine.fault", "machine.emergency_stopped", "control.lease_acquired"];
+    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.position", "machine.actuator", "machine.sensor", "machine.visual_home_applied", "machine.fault", "machine.emergency_stopped", "control.lease_acquired", "control.lease_renewed"];
     for (const kind of kinds) {
       source.addEventListener(kind, (message) => {
         const event = message as MessageEvent;
@@ -67,14 +67,14 @@ export default function App() {
       </aside>
       <main>
         <header className="topbar">
-          <div><p className="eyebrow">LumenPnP V3.0.4</p><h1>{tab === "machine" ? "Machine control" : tab === "calibration" ? "Calibration lab" : "Board library"}</h1></div>
+          <div><p className="eyebrow">LumenPnP V3.0.4</p><h1>{tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : "Board library"}</h1></div>
           <button className="estop" onClick={() => {
             if (window.confirm("Emergency stop immediately? The controller may require a reset.")) void run(async () => waitForOperation(await api.emergencyStop()));
           }}>EMERGENCY STOP</button>
         </header>
         {error && <div className="alert"><span>!</span>{error}<button onClick={() => setError(null)}>Dismiss</button></div>}
         {tab === "machine" && status && <MachinePanel status={status} devices={devices} events={events} busy={busy} run={run} />}
-        {tab === "calibration" && <CalibrationPanel simulated={status?.simulated ?? true} setError={setError} />}
+        {tab === "calibration" && status && <CalibrationPanel status={status} devices={devices} setError={setError} />}
         {tab === "boards" && <BoardsPanel setError={setError} />}
       </main>
     </div>
@@ -189,11 +189,14 @@ function SequenceStep({ number, title, done, children }: { number: string; title
 
 function StateBadge({ state }: { state: string }) { return <span className={`badge state-${state}`}>{pretty(state)}</span>; }
 
-function CalibrationPanel({ simulated, setError }: { simulated: boolean; setError: (value: string | null) => void }) {
+function CalibrationPanel({ status, devices, setError }: {
+  status: MachineStatus; devices: Device[]; setError: (value: string | null) => void;
+}) {
   const [steps, setSteps] = useState<CalibrationStep[]>([]);
   const [snapshots, setSnapshots] = useState<CalibrationSnapshot[]>([]);
   const [active, setActive] = useState<CalibrationSnapshot | null>(null);
-  const [metrics, setMetrics] = useState<Residuals>({ sample_count: 30, rms_mm: 0, p95_mm: 0, max_mm: 0 });
+  const [activeRun, setActiveRun] = useState<AutomatedCalibrationRun | null>(null);
+  const [starting, setStarting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -203,38 +206,79 @@ function CalibrationPanel({ simulated, setError }: { simulated: boolean; setErro
   }, [setError]);
   useEffect(() => { void load(); }, [load]);
 
+  useEffect(() => {
+    if (!active) { setActiveRun(null); return; }
+    void api.calibrationRuns(active.id)
+      .then((runs) => setActiveRun(runs[0] ?? null))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }, [active?.id, setError]);
+
+  useEffect(() => {
+    if (!activeRun || !["pending", "running"].includes(activeRun.status)) return;
+    const timer = window.setInterval(() => {
+      void api.calibrationRun(activeRun.id).then((run) => {
+        setActiveRun(run);
+        if (!["pending", "running"].includes(run.status)) void load();
+      }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeRun?.id, activeRun?.status, load, setError]);
+
   const completed = useMemo(() => new Set(active?.completed_steps ?? []), [active]);
-  const canRun = (step: CalibrationStep) => step.dependencies.every((dependency) => completed.has(dependency));
-  const record = async (step: CalibrationStep) => {
-    if (!active) return;
+  const createSnapshot = async () => {
+    const serial = devices.find((device) => device.kind === "serial_controller")?.serial ?? "unassigned";
     try {
-      const needsMetrics = ["visual_homing", "motion_geometry", "nozzle_runout", "validation"].includes(step.id);
-      const updated = await api.completeCalibration(active.id, step.id, needsMetrics ? metrics : null, { source: "operator_ui" });
-      setActive(updated); await load();
+      const snapshot = await api.createCalibration(serial);
+      setSnapshots((current) => [snapshot, ...current]);
+      setActiveRun(null);
+      setActive(snapshot);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
+  const start = async () => {
+    if (!active) return;
+    if (!window.confirm(
+      "Start automated calibration? Confirm both nozzles are level, the travel envelope is clear, and power isolation is within reach. Installed nozzle tips will be identified by the bottom camera.",
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 3600)
+        : await api.lease("VelocityPnP calibration", 3600);
+      const started = await api.startCalibration(active.id, lease.id);
+      setActiveRun(started.run);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
+
+  const runActive = Boolean(activeRun && ["pending", "running"].includes(activeRun.status));
+  const machineReady = ["unhomed", "ready"].includes(status.state);
 
   return <div className="calibration-layout">
     <section className="card calibration-summary">
-      <p className="eyebrow">Revisioned measurements</p><h2>{active ? `Snapshot ${active.id.slice(0, 8)}` : "No calibration snapshot"}</h2>
-      <p>Every result retains provenance and invalidates dependent measurements when changed.</p>
-      {simulated && <div className="notice">Simulation results can exercise the workflow but can never mark a machine production-ready.</div>}
-      <button onClick={() => void api.createCalibration("3286336D3331").then((value) => { setActive(value); void load(); }).catch((reason) => setError(String(reason)))}>New snapshot</button>
-      <div className="metric-form">
-        <label>Samples<input type="number" min="1" value={metrics.sample_count} onChange={(e) => setMetrics({ ...metrics, sample_count: Number(e.target.value) })} /></label>
-        <label>RMS mm<input type="number" min="0" step="0.001" value={metrics.rms_mm} onChange={(e) => setMetrics({ ...metrics, rms_mm: Number(e.target.value) })} /></label>
-        <label>P95 mm<input type="number" min="0" step="0.001" value={metrics.p95_mm} onChange={(e) => setMetrics({ ...metrics, p95_mm: Number(e.target.value) })} /></label>
-        <label>Max mm<input type="number" min="0" step="0.001" value={metrics.max_mm} onChange={(e) => setMetrics({ ...metrics, max_mm: Number(e.target.value) })} /></label>
-      </div>
-      <small>Measurement entry is enabled now; automated capture replaces manual entry as each CV stage lands.</small>
+      <p className="eyebrow">Machine-measured revision</p><h2>{active ? `Snapshot ${active.id.slice(0, 8)}` : "No calibration snapshot"}</h2>
+      <p>The machine executes supported steps, retains raw evidence and residuals, and invalidates downstream measurements when an upstream result changes.</p>
+      {status.simulated && <div className="notice">Simulation can exercise the runner but can never mark a machine production-ready.</div>}
+      {!active ? <button onClick={() => void createSnapshot()}>Create calibration</button> : <>
+        <button disabled={starting || runActive || !machineReady} onClick={() => void start()}>{runActive ? "Calibration running" : activeRun ? "Run calibration again" : "Run initial calibration"}</button>
+        <button className="secondary" disabled={starting || runActive} onClick={() => void createSnapshot()}>New revision</button>
+        {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
+      </>}
+      {activeRun && <div className="calibration-run">
+        <div className="run-heading"><strong>{pretty(activeRun.status)}</strong><span>{pretty(activeRun.phase)}</span></div>
+        {activeRun.phase === "visual_homing_validation" && <p>{activeRun.visual_homing_samples.length} / {activeRun.config.visual_homing_sample_count} homing cycles measured</p>}
+        <div className="calibration-checks">{activeRun.checks.map((check) => <div key={check.id} className={`check-${check.status}`}><span>{check.status === "passed" ? "✓" : check.status === "failed" ? "!" : "·"}</span><div><strong>{check.title}</strong><small>{check.message}</small></div></div>)}</div>
+        {activeRun.visual_homing_report && <p className="run-result">Independent return p95 <strong>{activeRun.visual_homing_report.independent_return.p95_mm.toFixed(4)} mm</strong></p>}
+        {activeRun.failure && <div className="notice">{activeRun.failure}</div>}
+      </div>}
+      <small>No calibration metric can be entered manually. A step completes only from a successful machine runner.</small>
     </section>
     <section className="workflow">{steps.map((step, index) => {
-      const done = completed.has(step.id); const ready = Boolean(active) && canRun(step);
-      return <article className={`workflow-step ${done ? "workflow-done" : ready ? "workflow-ready" : "workflow-locked"}`} key={step.id}>
+      const done = completed.has(step.id); const automated = step.automation === "automated";
+      return <article className={`workflow-step ${done ? "workflow-done" : automated ? "workflow-ready" : "workflow-locked"}`} key={step.id}>
         <div className="workflow-index">{done ? "✓" : String(index + 1).padStart(2, "0")}</div>
-        <div><div className="step-labels">{step.requires_motion && <span>Motion</span>}{step.requires_fixture && <span>Fixture</span>}</div><h3>{step.title}</h3><p>{step.description}</p>
+        <div><div className="step-labels">{automated && <span>Automated</span>}{step.requires_motion && <span>Motion</span>}{step.requires_fixture && <span>Fixture</span>}</div><h3>{step.title}</h3><p>{step.description}</p>
           {step.dependencies.length > 0 && <small>Requires {step.dependencies.map(pretty).join(", ")}</small>}</div>
-        <button disabled={!ready || done} onClick={() => void record(step)}>{done ? "Recorded" : ready ? "Record result" : "Locked"}</button>
+        <button disabled>{done ? "Measured" : automated ? "In initial run" : "Not implemented"}</button>
       </article>;
     })}</section>
     {snapshots.length > 1 && <p className="snapshot-count">{snapshots.length} calibration snapshots retained</p>}

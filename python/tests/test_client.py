@@ -133,6 +133,27 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "without moving"):
             client.visual_home("lease", apply_offset=True, move_to_seed=False)
 
+    def test_calibration_run_requires_safety_confirmation_and_is_machine_driven(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.start_calibration_run("calibration", "lease")
+        send.assert_not_called()
+
+        started = {"run": {"id": "run"}, "operation": {"id": "op"}}
+        with patch.object(client, "_request", return_value=started) as send:
+            self.assertEqual(
+                client.start_calibration_run(
+                    "calibration", "lease", safety_checks_confirmed=True,
+                ),
+                started,
+            )
+        send.assert_called_once_with("POST", "/calibrations/calibration/runs", {
+            "lease_id": "lease",
+            "confirmed_external_safety_checks": True,
+            "visual_homing_sample_count": 30,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

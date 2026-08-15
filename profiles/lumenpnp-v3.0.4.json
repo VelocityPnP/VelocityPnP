@@ -74,6 +74,36 @@
     "feed_mm_per_min": 300.0,
     "axis_mapping_validated": true
   },
+  "bottom_vision": {
+    "camera_role": "bottom_camera",
+    "camera_x_mm": 218.574,
+    "camera_y_mm": 148.734,
+    "working_z_mm": 31.5,
+    "frame_center_x_px": 640.0,
+    "frame_center_y_px": 360.0,
+    "units_per_pixel_x_mm": 0.03125,
+    "units_per_pixel_y_mm": 0.03149606,
+    "max_center_error_px": 100.0,
+    "feed_mm_per_min": 300.0,
+    "nozzles": [
+      {
+        "nozzle_id": "N1",
+        "head_offset_x_mm": -23.761,
+        "head_offset_y_mm": -66.619,
+        "expected_tip_id": "N045",
+        "expected_bore_diameter_mm": 0.45,
+        "bore_diameter_tolerance_mm": 0.18
+      },
+      {
+        "nozzle_id": "N2",
+        "head_offset_x_mm": 25.692,
+        "head_offset_y_mm": -66.46,
+        "expected_tip_id": "N24",
+        "expected_bore_diameter_mm": 2.4,
+        "bore_diameter_tolerance_mm": 0.6
+      }
+    ]
+  },
   "capabilities": {
     "dual_nozzle": true,
     "rotation_motion": false,

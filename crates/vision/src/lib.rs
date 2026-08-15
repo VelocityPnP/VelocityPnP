@@ -11,7 +11,8 @@ pub use v4l2_capture::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use velocitypnp_domain::{
-    CameraReproducibilityThresholds, CameraRole, Residuals, Transform2d, VisualHomingProfile,
+    BottomVisionProfile, CameraReproducibilityThresholds, CameraRole, NozzleToolingProfile,
+    Residuals, Transform2d, VisualHomingProfile,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +101,21 @@ pub struct VisualHomingPlan {
     pub within_capture_bound: bool,
     pub within_correction_bound: bool,
     pub accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NozzleToolingReport {
+    pub nozzle_id: String,
+    pub expected_tip_id: String,
+    pub detected_tip_id: Option<String>,
+    pub requested_samples: u32,
+    pub detected_samples: u32,
+    pub detection_rate: f64,
+    pub mean_bore_diameter_mm: Option<f64>,
+    pub bore_diameter_range_mm: Option<f64>,
+    pub center_error_p95_px: Option<f64>,
+    pub passed: bool,
+    pub detections: Vec<Option<FiducialDetection>>,
 }
 
 pub fn camera_sample_metrics(frame: &GrayFrame, role: CameraRole) -> Option<CameraSampleMetrics> {
@@ -256,6 +272,95 @@ pub fn summarize_camera_reproducibility(
         passed,
         samples,
     }
+}
+
+pub fn summarize_nozzle_tooling(
+    frames: &[GrayFrame],
+    bottom_vision: &BottomVisionProfile,
+    nozzle: &NozzleToolingProfile,
+) -> NozzleToolingReport {
+    let detections = frames
+        .iter()
+        .map(|frame| detect_nozzle_bore(frame, bottom_vision))
+        .collect::<Vec<_>>();
+    let detected = detections.iter().flatten().copied().collect::<Vec<_>>();
+    let requested_samples = frames.len() as u32;
+    let detected_samples = detected.len() as u32;
+    let detection_rate = if requested_samples == 0 {
+        0.0
+    } else {
+        f64::from(detected_samples) / f64::from(requested_samples)
+    };
+    let units_per_pixel =
+        (bottom_vision.units_per_pixel_x_mm + bottom_vision.units_per_pixel_y_mm) / 2.0;
+    let diameters = detected
+        .iter()
+        .map(|detection| detection.diameter_px * units_per_pixel)
+        .collect::<Vec<_>>();
+    let mean_bore_diameter_mm = (!diameters.is_empty()).then(|| mean(diameters.iter().copied()));
+    let bore_diameter_range_mm = (!diameters.is_empty()).then(|| {
+        diameters.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            - diameters.iter().copied().fold(f64::INFINITY, f64::min)
+    });
+    let mut center_errors = detected
+        .iter()
+        .map(|detection| {
+            (detection.x_px - bottom_vision.frame_center_x_px)
+                .hypot(detection.y_px - bottom_vision.frame_center_y_px)
+        })
+        .collect::<Vec<_>>();
+    center_errors.sort_by(f64::total_cmp);
+    let center_error_p95_px = percentile_95(&center_errors);
+    let detected_tip_id = mean_bore_diameter_mm.and_then(|diameter| {
+        bottom_vision
+            .nozzles
+            .iter()
+            .min_by(|left, right| {
+                (diameter - left.expected_bore_diameter_mm)
+                    .abs()
+                    .total_cmp(&(diameter - right.expected_bore_diameter_mm).abs())
+            })
+            .map(|candidate| candidate.expected_tip_id.clone())
+    });
+    let passed = requested_samples > 0
+        && detection_rate >= 0.8
+        && detected_tip_id.as_deref() == Some(nozzle.expected_tip_id.as_str())
+        && mean_bore_diameter_mm.is_some_and(|diameter| {
+            (diameter - nozzle.expected_bore_diameter_mm).abs() <= nozzle.bore_diameter_tolerance_mm
+        })
+        && center_error_p95_px.is_some_and(|error| error <= bottom_vision.max_center_error_px);
+    NozzleToolingReport {
+        nozzle_id: nozzle.nozzle_id.clone(),
+        expected_tip_id: nozzle.expected_tip_id.clone(),
+        detected_tip_id,
+        requested_samples,
+        detected_samples,
+        detection_rate,
+        mean_bore_diameter_mm,
+        bore_diameter_range_mm,
+        center_error_p95_px,
+        passed,
+        detections,
+    }
+}
+
+pub fn detect_nozzle_bore(
+    frame: &GrayFrame,
+    bottom_vision: &BottomVisionProfile,
+) -> Option<FiducialDetection> {
+    let mut targets = detect_dark_fiducials(frame, 45, 5.0, 120.0)
+        .into_iter()
+        .filter(|target| {
+            (target.x_px - bottom_vision.frame_center_x_px)
+                .hypot(target.y_px - bottom_vision.frame_center_y_px)
+                <= bottom_vision.max_center_error_px
+        })
+        .collect::<Vec<_>>();
+    // The bore is the innermost circular dark component. Larger concentric
+    // annuli are part of the nozzle body and would otherwise make an N045 look
+    // deceptively similar to the much larger N24 opening.
+    targets.sort_by(|left, right| left.diameter_px.total_cmp(&right.diameter_px));
+    targets.into_iter().next()
 }
 
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
@@ -598,6 +703,14 @@ mod tests {
         assert!((top_target.y_px - 360.0).abs() < 1.0);
         assert!((bottom_target.x_px - 640.0).abs() < 5.0);
         assert!((bottom_target.y_px - 360.0).abs() < 10.0);
+
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let bottom_vision = machine.bottom_vision.as_ref().unwrap();
+        let n1 = &bottom_vision.nozzles[0];
+        let tooling = summarize_nozzle_tooling(&[bottom], bottom_vision, n1);
+        assert_eq!(tooling.detected_tip_id.as_deref(), Some("N045"));
+        assert!(tooling.passed);
     }
 
     #[test]

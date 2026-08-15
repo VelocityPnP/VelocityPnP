@@ -21,11 +21,14 @@ This repository contains the first working platform slice:
 - staged, one-way OpenPnP XML migration that never bypasses recalibration
 - versioned REST/SSE API, CLI and Python client
 - React operator UI with discovery, control, calibration and board import
+- persisted machine-executed calibration runs with progress and evidence
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 
-Physical calibration, camera CV, feeders and production placement are exposed
-as gated workflow stages and must pass hardware-in-loop acceptance before being
-marked production-ready. See [docs/ROADMAP.md](docs/ROADMAP.md) and the current
+Supported physical calibration stages are executed by the daemon; callers
+cannot mark a step complete by entering measurements. Later calibration,
+feeder, and production stages remain explicitly unavailable until their
+machine runners pass hardware-in-loop acceptance. See
+[docs/ROADMAP.md](docs/ROADMAP.md) and the current
 [hardware validation log](docs/HARDWARE_VALIDATION.md).
 
 ## Quick start

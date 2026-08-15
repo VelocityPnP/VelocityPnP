@@ -6,7 +6,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use futures::Future;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,10 +19,13 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    lumen_calibration_workflow, BoardDesign, CalibrationSnapshot, CalibrationStepId, CameraProfile,
-    CameraProfileControlValue, CameraRole, Feeder, InspectionReport, InspectionStatus, Job,
-    JogTarget, MachineProfile, MachineState, Operation, OperationStatus, Pose, Residuals,
-    SensorReading, VisualHomingProfile,
+    lumen_calibration_workflow, summarize_visual_homing_validation, AutomatedCalibrationConfig,
+    AutomatedCalibrationRun, BoardDesign, CalibrationCheck, CalibrationCheckSource,
+    CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
+    CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRole, Feeder,
+    InspectionReport, InspectionStatus, Job, JogTarget, MachineProfile, MachineState, Operation,
+    OperationStatus, Pose, Residuals, SensorReading, VisualHomingProfile,
+    VisualHomingValidationSample,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -32,8 +35,11 @@ use velocitypnp_store::Store;
 use velocitypnp_vision::{
     apply_camera_controls, camera_sample_metrics, capture_gray_frame, capture_gray_frames,
     encode_gray_png, plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
-    CameraControlUpdate, CameraControlValue, GrayFrame, V4l2CaptureConfig,
+    summarize_nozzle_tooling, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    GrayFrame, NozzleToolingReport, V4l2CaptureConfig, VisualHomingPlan,
 };
+
+const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,11 +51,53 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(machine: MachineHandle, profile: MachineProfile, store: Store) -> Self {
-        Self {
+        let state = Self {
             machine,
             profile: Arc::new(profile),
             store,
             camera_capture_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        state.recover_interrupted_calibration_runs();
+        state
+    }
+
+    fn recover_interrupted_calibration_runs(&self) {
+        let Ok(runs) = self.store.list_calibration_runs() else {
+            tracing::error!("failed to inspect calibration runs during startup");
+            return;
+        };
+        for mut run in runs.into_iter().filter(|run| {
+            matches!(
+                run.status,
+                CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+            )
+        }) {
+            let message = "daemon restarted before the calibration run completed";
+            run.status = CalibrationRunStatus::Failed;
+            run.failure = Some(message.into());
+            run.updated_at = Utc::now();
+            if let Err(error) = self.store.put_calibration_run(&run) {
+                tracing::error!(%error, run_id = %run.id, "failed to recover calibration run");
+            }
+            match self.store.get_operation(run.operation_id) {
+                Ok(Some(mut operation))
+                    if matches!(
+                        operation.status,
+                        OperationStatus::Pending | OperationStatus::Running
+                    ) =>
+                {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some(message.into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(%error, operation_id = %operation.id, "failed to recover calibration operation");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, operation_id = %run.operation_id, "failed to inspect calibration operation");
+                }
+            }
         }
     }
 
@@ -106,6 +154,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/machine/emergency-stop", post(emergency_stop))
         .route("/api/v1/control/lease", post(acquire_lease))
+        .route("/api/v1/control/lease/renew", post(renew_lease))
         .route("/api/v1/events", get(events))
         .route("/api/v1/events/recent", get(recent_events))
         .route("/api/v1/operations/{id}", get(get_operation))
@@ -115,9 +164,10 @@ pub fn router(state: AppState) -> Router {
             get(list_calibrations).post(create_calibration),
         )
         .route(
-            "/api/v1/calibrations/{id}/steps/{step}/complete",
-            post(complete_calibration_step),
+            "/api/v1/calibrations/{id}/runs",
+            get(list_calibration_runs).post(start_calibration_run),
         )
+        .route("/api/v1/calibration-runs/{id}", get(get_calibration_run))
         .route(
             "/api/v1/calibrations/{id}/steps/{step}/invalidate",
             post(invalidate_calibration_step),
@@ -339,9 +389,6 @@ async fn camera_reproducibility(
         ));
     }
     let profile = stored_camera_profile(&state, role)?;
-    let device_path = camera_path_for_role(role)?;
-    let config = camera_capture_config(&profile, device_path);
-    let updates = profile_control_updates(&profile);
 
     if profile.lighting_enabled {
         state
@@ -350,10 +397,40 @@ async fn camera_reproducibility(
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
-    let capture_guard = state.camera_capture_lock.lock().await;
+    let capture = capture_camera_reproducibility_report(&state, role, sample_count).await;
+    let lights_off = if profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = lights_off {
+        if let Err(stop_error) = state.machine.emergency_stop().await {
+            tracing::error!(%stop_error, "emergency stop after camera light cleanup failure also failed");
+        }
+        return Err(ApiError::internal(error));
+    }
+    let (controls, report) = capture?;
+    Ok(Json(json!({
+        "role": role,
+        "profile": profile,
+        "controls": controls,
+        "report": report,
+    })))
+}
+
+async fn capture_camera_reproducibility_report(
+    state: &AppState,
+    role: CameraRole,
+    sample_count: u32,
+) -> ApiResult<(Value, CameraReproducibilityReport)> {
+    let profile = stored_camera_profile(state, role)?;
+    let device_path = camera_path_for_role(role)?;
+    let config = camera_capture_config(&profile, device_path);
+    let updates = profile_control_updates(&profile);
     let thresholds = profile.thresholds.clone();
-    let capture = tokio::task::spawn_blocking(move || {
-        let controls = apply_camera_controls(&config.device, &updates)?;
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    tokio::task::spawn_blocking(move || {
+        let controls = serde_json::to_value(apply_camera_controls(&config.device, &updates)?)?;
         let mut failures = 0;
         let mut samples = Vec::with_capacity(sample_count as usize);
         match capture_gray_frames(&config, sample_count) {
@@ -370,23 +447,9 @@ async fn camera_reproducibility(
         let report = summarize_camera_reproducibility(sample_count, failures, samples, &thresholds);
         anyhow::Ok((controls, report))
     })
-    .await;
-    drop(capture_guard);
-    let lights_off = if profile.lighting_enabled {
-        state.machine.disable_actuator("lights".into()).await
-    } else {
-        Ok(())
-    };
-    lights_off.map_err(ApiError::internal)?;
-    let (controls, report) = capture
-        .map_err(ApiError::internal)?
-        .map_err(ApiError::internal)?;
-    Ok(Json(json!({
-        "role": role,
-        "profile": profile,
-        "controls": controls,
-        "report": report,
-    })))
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)
 }
 
 fn parse_camera_role(role: &str) -> ApiResult<CameraRole> {
@@ -509,6 +572,25 @@ async fn acquire_lease(
 }
 
 #[derive(Deserialize)]
+struct RenewLeaseRequest {
+    lease_id: Uuid,
+    #[serde(default = "default_lease_seconds")]
+    duration_seconds: u32,
+}
+
+async fn renew_lease(
+    State(state): State<AppState>,
+    Json(body): Json<RenewLeaseRequest>,
+) -> ApiResult<Json<Value>> {
+    let lease = state
+        .machine
+        .renew_lease(body.lease_id, body.duration_seconds)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(json!({"lease": lease})))
+}
+
+#[derive(Deserialize)]
 struct HomeRequest {
     lease_id: Uuid,
     confirmed: bool,
@@ -622,6 +704,28 @@ struct VisualHomingRequest {
     move_to_seed: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct VisualHomingCorrection {
+    attempt: usize,
+    observation: VisualHomingPlan,
+    corrected_pose: Pose,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VisualHomingExecution {
+    applied: bool,
+    seed_pose: Pose,
+    initial: VisualHomingPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corrected_pose: Option<Pose>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corrections: Vec<VisualHomingCorrection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification: Option<VisualHomingPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_pose: Option<Pose>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -629,7 +733,14 @@ fn default_true() -> bool {
 async fn visual_home(
     State(state): State<AppState>,
     Json(body): Json<VisualHomingRequest>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<VisualHomingExecution>> {
+    execute_visual_home(&state, body).await.map(Json)
+}
+
+async fn execute_visual_home(
+    state: &AppState,
+    body: VisualHomingRequest,
+) -> ApiResult<VisualHomingExecution> {
     let status = state.machine.status();
     status
         .assert_lease(body.lease_id, Utc::now())
@@ -658,7 +769,7 @@ async fn visual_home(
             "applying visual homing requires a deterministic move to the configured seed",
         ));
     }
-    let camera_profile = stored_camera_profile(&state, visual.camera_role)?;
+    let camera_profile = stored_camera_profile(state, visual.camera_role)?;
     let device_path = camera_path_for_role(visual.camera_role)?;
     let seed_pose = if body.move_to_seed {
         state
@@ -680,7 +791,7 @@ async fn visual_home(
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
     let result = run_visual_homing(
-        &state,
+        state,
         body.lease_id,
         body.apply_offset,
         &visual,
@@ -695,12 +806,12 @@ async fn visual_home(
         Ok(())
     };
     if let Err(error) = lights_off {
-        if result.is_ok() {
-            return Err(ApiError::internal(error));
+        if let Err(stop_error) = state.machine.emergency_stop().await {
+            tracing::error!(%stop_error, "emergency stop after visual-homing light cleanup failure also failed");
         }
-        tracing::error!(%error, "visual homing also failed to turn lights off");
+        return Err(ApiError::internal(error));
     }
-    result.map(Json)
+    result
 }
 
 async fn run_visual_homing(
@@ -711,43 +822,54 @@ async fn run_visual_homing(
     camera_profile: &CameraProfile,
     device_path: &str,
     seed_pose: Pose,
-) -> ApiResult<Value> {
+) -> ApiResult<VisualHomingExecution> {
     let initial_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
     let initial = plan_visual_homing(&initial_frame, visual)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if !apply_offset {
-        return Ok(json!({
-            "applied": false,
-            "seed_pose": seed_pose,
-            "initial": initial,
-        }));
+        return Ok(VisualHomingExecution {
+            applied: false,
+            seed_pose,
+            initial,
+            corrected_pose: None,
+            corrections: Vec::new(),
+            verification: None,
+            final_pose: None,
+        });
     }
     if !initial.within_capture_bound || !initial.within_correction_bound {
         return Err(ApiError::bad_request(
             "visual homing observation exceeds the configured correction bounds",
         ));
     }
-    let corrected_pose = state
-        .machine
-        .jog(
-            lease_id,
-            JogTarget {
-                x_mm: seed_pose.x_mm + initial.correction_x_mm,
-                y_mm: seed_pose.y_mm + initial.correction_y_mm,
-                z_mm: seed_pose.z_mm,
-                rotation_deg: None,
-            },
-            visual.feed_mm_per_min,
-        )
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let verification_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
-    let verification = plan_visual_homing(&verification_frame, visual)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mut corrected_pose = seed_pose;
+    let mut verification = initial.clone();
+    let mut corrections = Vec::with_capacity(MAX_VISUAL_HOME_CORRECTIONS);
+    for attempt in 1..=MAX_VISUAL_HOME_CORRECTIONS {
+        let target =
+            next_visual_correction_target(seed_pose, corrected_pose, &verification, visual)
+                .map_err(ApiError::bad_request)?;
+        corrected_pose = state
+            .machine
+            .jog(lease_id, target, visual.feed_mm_per_min)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        corrections.push(VisualHomingCorrection {
+            attempt,
+            observation: verification,
+            corrected_pose,
+        });
+        let verification_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
+        verification = plan_visual_homing(&verification_frame, visual)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if verification.accepted {
+            break;
+        }
+    }
     if !verification.accepted {
         return Err(ApiError::bad_request(format!(
-            "visual homing verification error {:.3}px exceeds {:.3}px",
-            verification.error_radius_px, visual.acceptance_radius_px
+            "visual homing verification error {:.3}px exceeds {:.3}px after {} corrections",
+            verification.error_radius_px, visual.acceptance_radius_px, MAX_VISUAL_HOME_CORRECTIONS,
         )));
     }
     let final_pose = state
@@ -755,14 +877,41 @@ async fn run_visual_homing(
         .apply_visual_homing_offset(lease_id)
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    Ok(json!({
-        "applied": true,
-        "seed_pose": seed_pose,
-        "initial": initial,
-        "corrected_pose": corrected_pose,
-        "verification": verification,
-        "final_pose": final_pose,
-    }))
+    Ok(VisualHomingExecution {
+        applied: true,
+        seed_pose,
+        initial,
+        corrected_pose: Some(corrected_pose),
+        corrections,
+        verification: Some(verification),
+        final_pose: Some(final_pose),
+    })
+}
+
+fn next_visual_correction_target(
+    seed_pose: Pose,
+    current_pose: Pose,
+    observation: &VisualHomingPlan,
+    visual: &VisualHomingProfile,
+) -> Result<JogTarget, String> {
+    if !observation.within_capture_bound || !observation.within_correction_bound {
+        return Err("visual homing observation exceeds the configured correction bounds".into());
+    }
+    let x_mm = current_pose.x_mm + observation.correction_x_mm;
+    let y_mm = current_pose.y_mm + observation.correction_y_mm;
+    let offset_mm = (x_mm - seed_pose.x_mm).hypot(y_mm - seed_pose.y_mm);
+    if !offset_mm.is_finite() || offset_mm > visual.max_correction_mm {
+        return Err(format!(
+            "visual homing cumulative correction {offset_mm:.3}mm exceeds {:.3}mm",
+            visual.max_correction_mm
+        ));
+    }
+    Ok(JogTarget {
+        x_mm,
+        y_mm,
+        z_mm: seed_pose.z_mm,
+        rotation_deg: None,
+    })
 }
 
 async fn capture_profiled_frame(
@@ -770,12 +919,29 @@ async fn capture_profiled_frame(
     profile: &CameraProfile,
     device_path: &str,
 ) -> ApiResult<GrayFrame> {
+    capture_profiled_frames(state, profile, device_path, 1)
+        .await?
+        .pop()
+        .ok_or_else(|| ApiError::internal("camera returned no frames"))
+}
+
+async fn capture_profiled_frames(
+    state: &AppState,
+    profile: &CameraProfile,
+    device_path: &str,
+    sample_count: u32,
+) -> ApiResult<Vec<GrayFrame>> {
     let updates = profile_control_updates(profile);
     let config = camera_capture_config(profile, device_path.to_owned());
     let _capture_guard = state.camera_capture_lock.lock().await;
     tokio::task::spawn_blocking(move || {
         apply_camera_controls(&config.device, &updates)?;
-        anyhow::Ok(capture_gray_frame(&config)?.frame)
+        anyhow::Ok(
+            capture_gray_frames(&config, sample_count)?
+                .into_iter()
+                .map(|capture| capture.frame)
+                .collect(),
+        )
     })
     .await
     .map_err(ApiError::internal)?
@@ -807,6 +973,14 @@ where
         .put_operation(&operation)
         .map_err(ApiError::internal)?;
     let returned = operation.clone();
+    spawn_prepared_operation(state, operation, task);
+    Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+fn spawn_prepared_operation<F>(state: AppState, operation: Operation, task: F)
+where
+    F: Future<Output = Result<Option<String>, String>> + Send + 'static,
+{
     tokio::spawn(async move {
         let mut operation = operation;
         operation.status = OperationStatus::Running;
@@ -829,7 +1003,6 @@ where
             tracing::error!(%error, "failed to finish operation");
         }
     });
-    Ok((StatusCode::ACCEPTED, Json(returned)))
 }
 
 async fn get_operation(
@@ -915,30 +1088,900 @@ async fn list_calibrations(State(state): State<AppState>) -> ApiResult<Json<Valu
 }
 
 #[derive(Deserialize)]
-struct CompleteCalibrationRequest {
-    #[serde(default)]
-    residuals: Option<Residuals>,
-    #[serde(default)]
-    values: Value,
-    confirmed: bool,
+struct StartCalibrationRunRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+    #[serde(default = "default_camera_sample_count")]
+    camera_sample_count: u32,
+    #[serde(default = "default_tooling_sample_count")]
+    tooling_sample_count: u32,
+    #[serde(default = "default_visual_homing_sample_count")]
+    visual_homing_sample_count: u32,
+    #[serde(default = "default_calibration_excursion")]
+    excursion_x_mm: f64,
+    #[serde(default = "default_calibration_excursion")]
+    excursion_y_mm: f64,
+    #[serde(default = "default_calibration_excursion_feed")]
+    excursion_feed_mm_per_min: f64,
+    #[serde(default = "default_visual_homing_p95_limit")]
+    visual_homing_p95_limit_mm: f64,
 }
 
-async fn complete_calibration_step(
+fn default_tooling_sample_count() -> u32 {
+    5
+}
+
+fn default_visual_homing_sample_count() -> u32 {
+    30
+}
+
+fn default_calibration_excursion() -> f64 {
+    -10.0
+}
+
+fn default_calibration_excursion_feed() -> f64 {
+    600.0
+}
+
+fn default_visual_homing_p95_limit() -> f64 {
+    0.05
+}
+
+#[derive(Serialize)]
+struct StartCalibrationRunResponse {
+    run: AutomatedCalibrationRun,
+    operation: Operation,
+}
+
+async fn start_calibration_run(
     State(state): State<AppState>,
-    Path((id, step)): Path<(Uuid, String)>,
-    Json(body): Json<CompleteCalibrationRequest>,
-) -> ApiResult<Json<CalibrationSnapshot>> {
-    if !body.confirmed {
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartCalibrationRunRequest>,
+) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    if !body.confirmed_external_safety_checks {
         return Err(ApiError::bad_request(
-            "calibration result was not confirmed",
+            "calibration requires confirmation that the travel envelope is clear, both nozzles are level, and power isolation is reachable",
         ));
     }
-    let step = parse_calibration_step(&step)?;
-    let mut snapshot = state
+    let snapshot = state
         .store
-        .get_calibration(id)
+        .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    if state
+        .store
+        .list_calibration_runs()
+        .map_err(ApiError::internal)?
+        .iter()
+        .any(|run| {
+            run.calibration_id == calibration_id
+                && matches!(
+                    run.status,
+                    CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+                )
+        })
+    {
+        return Err(ApiError::bad_request(
+            "this calibration snapshot already has an active run",
+        ));
+    }
+    let machine = state.machine.status();
+    machine
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if !matches!(machine.state, MachineState::Unhomed | MachineState::Ready) {
+        return Err(ApiError::bad_request(
+            "automated calibration requires a preflight-complete machine",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    visual.validate().map_err(ApiError::bad_request)?;
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?;
+    bottom.validate().map_err(ApiError::bad_request)?;
+    let top_camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let bottom_camera_path = camera_path_for_role(CameraRole::BottomCamera)?;
+    let config = AutomatedCalibrationConfig {
+        camera_sample_count: body.camera_sample_count,
+        tooling_sample_count: body.tooling_sample_count,
+        visual_homing_sample_count: body.visual_homing_sample_count,
+        excursion_x_mm: body.excursion_x_mm,
+        excursion_y_mm: body.excursion_y_mm,
+        excursion_feed_mm_per_min: body.excursion_feed_mm_per_min,
+        visual_homing_p95_limit_mm: body.visual_homing_p95_limit_mm,
+    };
+    config.validate().map_err(ApiError::bad_request)?;
+    if config.excursion_feed_mm_per_min > state.profile.default_feed_mm_per_min {
+        return Err(ApiError::bad_request(
+            "calibration excursion feed exceeds the active profile limit",
+        ));
+    }
+    validate_calibration_targets(&state.profile, &config)?;
+    state
+        .machine
+        .renew_lease(body.lease_id, 3600)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
+    let operation = Operation::pending("calibration.initial_machine");
+    let now = Utc::now();
+    let run = AutomatedCalibrationRun {
+        id: Uuid::new_v4(),
+        calibration_id,
+        operation_id: operation.id,
+        profile_id: state.profile.id.clone(),
+        created_at: now,
+        updated_at: now,
+        status: CalibrationRunStatus::Pending,
+        phase: CalibrationRunPhase::Pending,
+        config,
+        checks: initial_calibration_checks(json!({
+            "machine_profile_id": state.profile.id,
+            "top_camera": top_camera_path,
+            "bottom_camera": bottom_camera_path,
+        })),
+        camera_reports: BTreeMap::new(),
+        visual_homing_samples: Vec::new(),
+        visual_homing_report: None,
+        failure: None,
+        simulated: machine.simulated,
+    };
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_calibration_run(&run)
+        .map_err(ApiError::internal)?;
+    let returned = StartCalibrationRunResponse {
+        run: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    let run_id = run.id;
+    let lease_id = body.lease_id;
+    spawn_prepared_operation(state, operation, async move {
+        execute_calibration_run(task_state, run_id, lease_id).await
+    });
+    Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+async fn list_calibration_runs(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let runs = state
+        .store
+        .list_calibration_runs()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|run| run.calibration_id == calibration_id)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({"runs": runs})))
+}
+
+async fn get_calibration_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<AutomatedCalibrationRun>> {
+    state
+        .store
+        .get_calibration_run(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("calibration run not found"))
+}
+
+fn validate_calibration_targets(
+    profile: &MachineProfile,
+    config: &AutomatedCalibrationConfig,
+) -> ApiResult<()> {
+    let visual = profile.visual_homing.as_ref().unwrap();
+    let targets = [
+        visual.seed_pose,
+        JogTarget {
+            x_mm: visual.fiducial_x_mm + config.excursion_x_mm,
+            y_mm: visual.fiducial_y_mm + config.excursion_y_mm,
+            z_mm: visual.seed_pose.z_mm,
+            rotation_deg: None,
+        },
+        JogTarget {
+            x_mm: visual.fiducial_x_mm,
+            y_mm: visual.fiducial_y_mm,
+            z_mm: visual.seed_pose.z_mm,
+            rotation_deg: None,
+        },
+    ];
+    if targets.iter().any(|target| {
+        !profile.bounds.contains(Pose {
+            x_mm: target.x_mm,
+            y_mm: target.y_mm,
+            z_mm: target.z_mm,
+            rotation_deg: 0.0,
+        })
+    }) {
+        return Err(ApiError::bad_request(
+            "calibration visual-homing target is outside machine bounds",
+        ));
+    }
+    let bottom = profile.bottom_vision.as_ref().unwrap();
+    if bottom.nozzles.iter().any(|nozzle| {
+        let target = bottom.nozzle_target(nozzle);
+        !profile.bounds.contains(Pose {
+            x_mm: target.x_mm,
+            y_mm: target.y_mm,
+            z_mm: target.z_mm,
+            rotation_deg: 0.0,
+        })
+    }) {
+        return Err(ApiError::bad_request(
+            "bottom-camera nozzle target is outside machine bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
+    vec![
+        calibration_check(
+            "external_safety",
+            "External safety conditions",
+            CalibrationCheckSource::Operator,
+            CalibrationCheckStatus::Passed,
+            "Operator confirmed a clear envelope, level nozzles, and reachable power isolation",
+        ),
+        CalibrationCheck {
+            id: "device_discovery".into(),
+            title: "Machine and camera discovery".into(),
+            source: CalibrationCheckSource::Controller,
+            status: CalibrationCheckStatus::Passed,
+            message: "Active profile and both stable camera roles were resolved".into(),
+            evidence: device_evidence,
+        },
+        calibration_check(
+            "coarse_homing",
+            "Profile-scoped coarse homing",
+            CalibrationCheckSource::Controller,
+            CalibrationCheckStatus::Pending,
+            "Waiting for staged Z-before-XY homing",
+        ),
+        calibration_check(
+            "actuators",
+            "Vacuum actuator and sensor paths",
+            CalibrationCheckSource::Controller,
+            CalibrationCheckStatus::Pending,
+            "Waiting for automatic off/on/read/off checks",
+        ),
+        calibration_check(
+            "top_camera",
+            "Top-camera reproducibility",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for automatic capture",
+        ),
+        calibration_check(
+            "tooling_N1",
+            "N1 installed tooling",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for bottom-camera identification",
+        ),
+        calibration_check(
+            "tooling_N2",
+            "N2 installed tooling",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for bottom-camera identification",
+        ),
+        calibration_check(
+            "bottom_camera",
+            "Bottom-camera reproducibility",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for automatic capture",
+        ),
+        calibration_check(
+            "visual_homing",
+            "Visual-refined homing repeatability",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for repeated visual homing and excursion cycles",
+        ),
+    ]
+}
+
+fn calibration_check(
+    id: &str,
+    title: &str,
+    source: CalibrationCheckSource,
+    status: CalibrationCheckStatus,
+    message: &str,
+) -> CalibrationCheck {
+    CalibrationCheck {
+        id: id.into(),
+        title: title.into(),
+        source,
+        status,
+        message: message.into(),
+        evidence: Value::Null,
+    }
+}
+
+enum CalibrationStop {
+    Rejected(String),
+    Failed(String),
+}
+
+async fn execute_calibration_run(
+    state: AppState,
+    run_id: Uuid,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    let mut run = state
+        .store
+        .get_calibration_run(run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration run disappeared from storage".to_string())?;
+    run.status = CalibrationRunStatus::Running;
+    set_run_phase(&state, &mut run, CalibrationRunPhase::CoarseHoming)?;
+
+    let pose = match state.machine.home(lease_id, true).await {
+        Ok(pose) => pose,
+        Err(error) => return fail_calibration_run(&state, &mut run, error.to_string()),
+    };
+    update_run_check(
+        &mut run,
+        "coarse_homing",
+        CalibrationCheckStatus::Passed,
+        "Controller completed staged Z-before-XY homing",
+        json!({"pose": pose}),
+    );
+    persist_calibration_run(&state, &mut run)?;
+    if let Err(error) = record_automated_calibration_step(
+        &state,
+        run.calibration_id,
+        CalibrationStepId::CoarseHoming,
+        None,
+        json!({"run_id": run.id, "pose": pose, "source": "controller"}),
+    ) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+
+    if let Err(error) = execute_initial_actuator_checks(&state, &mut run, lease_id).await {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+
+    if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
+        if let Err(cleanup_error) = state.machine.disable_actuator("lights".into()).await {
+            tracing::error!(%cleanup_error, "camera-check light cleanup also failed");
+            if let Err(stop_error) = state.machine.emergency_stop().await {
+                tracing::error!(%stop_error, "emergency stop after light cleanup failure also failed");
+            }
+        }
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let camera_result = execute_camera_calibration(&state, &mut run, lease_id).await;
+    let lights_off = state.machine.disable_actuator("lights".into()).await;
+    if let Err(error) = lights_off {
+        if let Err(stop_error) = state.machine.emergency_stop().await {
+            tracing::error!(%stop_error, "emergency stop after light cleanup failure also failed");
+        }
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    match camera_result {
+        Ok(()) => {}
+        Err(CalibrationStop::Rejected(message)) => {
+            return reject_calibration_run(&state, &mut run, message)
+        }
+        Err(CalibrationStop::Failed(message)) => {
+            return fail_calibration_run(&state, &mut run, message)
+        }
+    }
+    if let Err(error) = record_automated_calibration_step(
+        &state,
+        run.calibration_id,
+        CalibrationStepId::CameraReproducibility,
+        None,
+        json!({
+            "run_id": run.id,
+            "reports": run.camera_reports,
+            "source": "machine_vision",
+        }),
+    ) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+
+    set_run_phase(
+        &state,
+        &mut run,
+        CalibrationRunPhase::VisualHomingValidation,
+    )?;
+    let visual = state.profile.visual_homing.as_ref().unwrap().clone();
+    for cycle in 1..=run.config.visual_homing_sample_count {
+        if let Err(error) = state.machine.home(lease_id, true).await {
+            return fail_calibration_run(&state, &mut run, error.to_string());
+        }
+        let applied = match execute_visual_home(
+            &state,
+            VisualHomingRequest {
+                lease_id,
+                apply_offset: true,
+                move_to_seed: true,
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) if error.status == StatusCode::BAD_REQUEST => {
+                let completed_cycles = run.visual_homing_samples.len();
+                update_run_check(
+                    &mut run,
+                    "visual_homing",
+                    CalibrationCheckStatus::Failed,
+                    &error.message,
+                    json!({"completed_cycles": completed_cycles}),
+                );
+                return reject_calibration_run(&state, &mut run, error.message);
+            }
+            Err(error) => return fail_calibration_run(&state, &mut run, error.message),
+        };
+        let verification = match applied.verification.as_ref() {
+            Some(verification) => verification,
+            None => {
+                return fail_calibration_run(
+                    &state,
+                    &mut run,
+                    "applied visual homing returned no verification".into(),
+                )
+            }
+        };
+        let away = JogTarget {
+            x_mm: visual.fiducial_x_mm + run.config.excursion_x_mm,
+            y_mm: visual.fiducial_y_mm + run.config.excursion_y_mm,
+            z_mm: visual.seed_pose.z_mm,
+            rotation_deg: None,
+        };
+        if let Err(error) = state
+            .machine
+            .jog(lease_id, away, run.config.excursion_feed_mm_per_min)
+            .await
+        {
+            return fail_calibration_run(&state, &mut run, error.to_string());
+        }
+        let returned = JogTarget {
+            x_mm: visual.fiducial_x_mm,
+            y_mm: visual.fiducial_y_mm,
+            z_mm: visual.seed_pose.z_mm,
+            rotation_deg: None,
+        };
+        if let Err(error) = state
+            .machine
+            .jog(lease_id, returned, run.config.excursion_feed_mm_per_min)
+            .await
+        {
+            return fail_calibration_run(&state, &mut run, error.to_string());
+        }
+        let observation = match execute_visual_home(
+            &state,
+            VisualHomingRequest {
+                lease_id,
+                apply_offset: false,
+                move_to_seed: false,
+            },
+        )
+        .await
+        {
+            Ok(result) => result.initial,
+            Err(error) if error.status == StatusCode::BAD_REQUEST => {
+                let completed_cycles = run.visual_homing_samples.len();
+                update_run_check(
+                    &mut run,
+                    "visual_homing",
+                    CalibrationCheckStatus::Failed,
+                    &error.message,
+                    json!({"completed_cycles": completed_cycles}),
+                );
+                return reject_calibration_run(&state, &mut run, error.message);
+            }
+            Err(error) => return fail_calibration_run(&state, &mut run, error.message),
+        };
+        run.visual_homing_samples
+            .push(VisualHomingValidationSample {
+                cycle,
+                observed_at: Utc::now(),
+                initial_correction_mm: applied.initial.correction_distance_mm,
+                correction_count: applied.corrections.len() as u32,
+                verification_residual_mm: verification.correction_distance_mm,
+                verification_residual_px: verification.error_radius_px,
+                return_residual_mm: observation.correction_distance_mm,
+                return_residual_px: observation.error_radius_px,
+                return_error_x_px: observation.error_x_px,
+                return_error_y_px: observation.error_y_px,
+            });
+        let sample_count = run.config.visual_homing_sample_count;
+        let progress_message = format!("Completed {cycle} of {sample_count} visual-homing cycles");
+        update_run_check(
+            &mut run,
+            "visual_homing",
+            CalibrationCheckStatus::Pending,
+            &progress_message,
+            json!({"completed_cycles": cycle}),
+        );
+        if let Err(error) = persist_calibration_run(&state, &mut run) {
+            return fail_calibration_run(&state, &mut run, error);
+        }
+    }
+    let report = match summarize_visual_homing_validation(
+        &run.visual_homing_samples,
+        run.config.visual_homing_p95_limit_mm,
+    ) {
+        Some(report) => report,
+        None => {
+            return fail_calibration_run(
+                &state,
+                &mut run,
+                "visual-homing report could not be calculated".into(),
+            )
+        }
+    };
+    run.visual_homing_report = Some(report.clone());
+    if !report.passed {
+        update_run_check(
+            &mut run,
+            "visual_homing",
+            CalibrationCheckStatus::Failed,
+            "Measured visual-homing residuals exceed the configured p95 limit",
+            serde_json::to_value(&report).unwrap_or(Value::Null),
+        );
+        let p95_limit = run.config.visual_homing_p95_limit_mm;
+        return reject_calibration_run(
+            &state,
+            &mut run,
+            format!(
+                "visual-homing p95 {:.4}mm exceeds {:.4}mm",
+                report.independent_return.p95_mm, p95_limit
+            ),
+        );
+    }
+    update_run_check(
+        &mut run,
+        "visual_homing",
+        CalibrationCheckStatus::Passed,
+        "Visual-refined homing met the configured repeatability limit",
+        serde_json::to_value(&report).unwrap_or(Value::Null),
+    );
+    if let Err(error) = record_automated_calibration_step(
+        &state,
+        run.calibration_id,
+        CalibrationStepId::VisualHoming,
+        Some(report.independent_return),
+        json!({"run_id": run.id, "report": report, "config": run.config}),
+    ) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    run.phase = CalibrationRunPhase::Complete;
+    run.status = CalibrationRunStatus::Succeeded;
+    run.failure = None;
+    persist_calibration_run(&state, &mut run)?;
+    Ok(Some(format!(
+        "Initial machine calibration passed {} visual-homing cycles",
+        run.config.visual_homing_sample_count
+    )))
+}
+
+async fn execute_initial_actuator_checks(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+) -> Result<(), String> {
+    set_run_phase(state, run, CalibrationRunPhase::ActuatorChecks)?;
+    let sensors = state
+        .profile
+        .sensors
+        .iter()
+        .filter(|sensor| sensor.kind == "vacuum_pressure" && sensor.actuator_id.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    if sensors.is_empty() {
+        return Err("active profile has no vacuum actuator/sensor pairs".into());
+    }
+    let mut evidence = serde_json::Map::new();
+    for sensor in sensors {
+        let actuator_id = sensor.actuator_id.as_ref().unwrap().clone();
+        let baseline = state
+            .machine
+            .read_sensor(lease_id, sensor.id.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = state
+            .machine
+            .actuate(lease_id, actuator_id.clone(), true)
+            .await
+        {
+            if let Err(cleanup_error) = state.machine.disable_actuator(actuator_id.clone()).await {
+                tracing::error!(%cleanup_error, %actuator_id, "actuator check cleanup also failed");
+                if let Err(stop_error) = state.machine.emergency_stop().await {
+                    tracing::error!(%stop_error, "emergency stop after actuator cleanup failure also failed");
+                }
+            }
+            return Err(error.to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let active = state.machine.read_sensor(lease_id, sensor.id.clone()).await;
+        let disabled = state.machine.disable_actuator(actuator_id.clone()).await;
+        if let Err(error) = disabled {
+            if let Err(stop_error) = state.machine.emergency_stop().await {
+                tracing::error!(%stop_error, "emergency stop after actuator cleanup failure also failed");
+            }
+            return Err(format!("failed to disable {actuator_id}: {error}"));
+        }
+        let active = active.map_err(|error| error.to_string())?;
+        evidence.insert(
+            sensor.id,
+            json!({
+                "actuator_id": actuator_id,
+                "baseline_raw": baseline.raw_value,
+                "active_raw": active.raw_value,
+                "raw_delta": active.raw_value - baseline.raw_value,
+                "unit": active.unit,
+            }),
+        );
+    }
+    update_run_check(
+        run,
+        "actuators",
+        CalibrationCheckStatus::Passed,
+        "Every vacuum command/read path responded and each output was switched off; calibrated pneumatic performance is a later step",
+        Value::Object(evidence),
+    );
+    persist_calibration_run(state, run)
+}
+
+async fn execute_camera_calibration(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+) -> Result<(), CalibrationStop> {
+    set_run_phase(state, run, CalibrationRunPhase::TopCameraReproducibility)
+        .map_err(CalibrationStop::Failed)?;
+    let visual = state.profile.visual_homing.as_ref().unwrap();
+    state
+        .machine
+        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let (_, top_report) = capture_camera_reproducibility_report(
+        state,
+        CameraRole::TopCamera,
+        run.config.camera_sample_count,
+    )
+    .await
+    .map_err(api_calibration_stop)?;
+    run.camera_reports.insert(
+        "top_camera".into(),
+        serde_json::to_value(&top_report)
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?,
+    );
+    update_camera_check(run, "top_camera", &top_report);
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+    if !top_report.passed {
+        return Err(CalibrationStop::Rejected(
+            "top-camera reproducibility did not meet its profile thresholds".into(),
+        ));
+    }
+
+    set_run_phase(state, run, CalibrationRunPhase::ToolingVerification)
+        .map_err(CalibrationStop::Failed)?;
+    let bottom = state.profile.bottom_vision.as_ref().unwrap().clone();
+    let camera_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(api_calibration_stop)?;
+    let device_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(api_calibration_stop)?;
+    for nozzle in &bottom.nozzles {
+        state
+            .machine
+            .jog(
+                lease_id,
+                bottom.nozzle_target(nozzle),
+                bottom.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+        let frames = capture_profiled_frames(
+            state,
+            &camera_profile,
+            &device_path,
+            run.config.tooling_sample_count,
+        )
+        .await
+        .map_err(api_calibration_stop)?;
+        let report = summarize_nozzle_tooling(&frames, &bottom, nozzle);
+        run.camera_reports.insert(
+            format!("tooling_{}", nozzle.nozzle_id),
+            serde_json::to_value(&report)
+                .map_err(|error| CalibrationStop::Failed(error.to_string()))?,
+        );
+        update_tooling_check(run, &report);
+        persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+        if !report.passed {
+            return Err(CalibrationStop::Rejected(format!(
+                "{} tooling could not be identified as {}",
+                nozzle.nozzle_id, nozzle.expected_tip_id
+            )));
+        }
+    }
+
+    set_run_phase(state, run, CalibrationRunPhase::BottomCameraReproducibility)
+        .map_err(CalibrationStop::Failed)?;
+    let reference_nozzle = bottom
+        .nozzles
+        .first()
+        .ok_or_else(|| CalibrationStop::Failed("bottom-vision profile has no nozzles".into()))?;
+    state
+        .machine
+        .jog(
+            lease_id,
+            bottom.nozzle_target(reference_nozzle),
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let (_, bottom_report) = capture_camera_reproducibility_report(
+        state,
+        CameraRole::BottomCamera,
+        run.config.camera_sample_count,
+    )
+    .await
+    .map_err(api_calibration_stop)?;
+    run.camera_reports.insert(
+        "bottom_camera".into(),
+        serde_json::to_value(&bottom_report)
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?,
+    );
+    update_camera_check(run, "bottom_camera", &bottom_report);
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+    if !bottom_report.passed {
+        return Err(CalibrationStop::Rejected(
+            "bottom-camera reproducibility did not meet its profile thresholds".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn api_calibration_stop(error: ApiError) -> CalibrationStop {
+    if error.status == StatusCode::BAD_REQUEST {
+        CalibrationStop::Rejected(error.message)
+    } else {
+        CalibrationStop::Failed(error.message)
+    }
+}
+
+fn update_camera_check(
+    run: &mut AutomatedCalibrationRun,
+    id: &str,
+    report: &CameraReproducibilityReport,
+) {
+    let status = if report.passed {
+        CalibrationCheckStatus::Passed
+    } else {
+        CalibrationCheckStatus::Failed
+    };
+    update_run_check(
+        run,
+        id,
+        status,
+        if report.passed {
+            "Camera capture met every profile threshold"
+        } else {
+            "Camera capture did not meet every profile threshold"
+        },
+        serde_json::to_value(report).unwrap_or(Value::Null),
+    );
+}
+
+fn update_tooling_check(run: &mut AutomatedCalibrationRun, report: &NozzleToolingReport) {
+    update_run_check(
+        run,
+        &format!("tooling_{}", report.nozzle_id),
+        if report.passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        if report.passed {
+            "Bottom-camera bore measurement matches the configured nozzle tip"
+        } else {
+            "Bottom-camera bore measurement does not match the configured nozzle tip"
+        },
+        serde_json::to_value(report).unwrap_or(Value::Null),
+    );
+}
+
+fn update_run_check(
+    run: &mut AutomatedCalibrationRun,
+    id: &str,
+    status: CalibrationCheckStatus,
+    message: &str,
+    evidence: Value,
+) {
+    if let Some(check) = run.checks.iter_mut().find(|check| check.id == id) {
+        check.status = status;
+        check.message = message.into();
+        check.evidence = evidence;
+    }
+}
+
+fn set_run_phase(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    phase: CalibrationRunPhase,
+) -> Result<(), String> {
+    run.phase = phase;
+    persist_calibration_run(state, run)
+}
+
+fn persist_calibration_run(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+) -> Result<(), String> {
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_calibration_run(run)
+        .map_err(|error| error.to_string())
+}
+
+fn reject_calibration_run(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    message: String,
+) -> Result<Option<String>, String> {
+    run.status = CalibrationRunStatus::Rejected;
+    run.failure = Some(message.clone());
+    persist_calibration_run(state, run)?;
+    Ok(Some(format!(
+        "Calibration measurements rejected: {message}"
+    )))
+}
+
+fn fail_calibration_run(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    message: String,
+) -> Result<Option<String>, String> {
+    run.status = CalibrationRunStatus::Failed;
+    run.failure = Some(message.clone());
+    if let Err(error) = persist_calibration_run(state, run) {
+        tracing::error!(%error, "failed to persist failed calibration run");
+    }
+    Err(message)
+}
+
+fn record_automated_calibration_step(
+    state: &AppState,
+    calibration_id: Uuid,
+    step: CalibrationStepId,
+    residuals: Option<Residuals>,
+    values: Value,
+) -> Result<(), String> {
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
     let definition = lumen_calibration_workflow()
         .into_iter()
         .find(|item| item.id == step)
@@ -948,17 +1991,10 @@ async fn complete_calibration_step(
         .iter()
         .find(|dependency| !snapshot.completed_steps.contains(dependency))
     {
-        return Err(ApiError::bad_request(format!(
-            "prerequisite {missing:?} is incomplete"
-        )));
+        return Err(format!("prerequisite {missing:?} is incomplete"));
     }
-    if let Some(residuals) = body.residuals {
-        if !residuals.rms_mm.is_finite()
-            || !residuals.p95_mm.is_finite()
-            || !residuals.max_mm.is_finite()
-        {
-            return Err(ApiError::bad_request("residual metrics must be finite"));
-        }
+    snapshot.invalidate_from(step);
+    if let Some(residuals) = residuals {
         snapshot.residuals.insert(step, residuals);
     }
     if !snapshot.values.is_object() {
@@ -968,15 +2004,14 @@ async fn complete_calibration_step(
         .values
         .as_object_mut()
         .unwrap()
-        .insert(step_name(step).into(), body.values);
+        .insert(step_name(step).into(), values);
     snapshot.completed_steps.insert(step);
     snapshot.production_ready =
         calibration_is_production_ready(&snapshot, state.machine.status().simulated);
     state
         .store
         .put_calibration(&snapshot)
-        .map_err(ApiError::internal)?;
-    Ok(Json(snapshot))
+        .map_err(|error| error.to_string())
 }
 
 async fn invalidate_calibration_step(
@@ -1019,21 +2054,7 @@ fn parse_calibration_step(value: &str) -> ApiResult<CalibrationStepId> {
 }
 
 fn step_name(step: CalibrationStepId) -> &'static str {
-    use CalibrationStepId::*;
-    match step {
-        CameraReproducibility => "camera_reproducibility",
-        TopCameraIntrinsics => "top_camera_intrinsics",
-        CoarseHoming => "coarse_homing",
-        VisualHoming => "visual_homing",
-        MotionGeometry => "motion_geometry",
-        TopCameraScale => "top_camera_scale",
-        NozzleOffsets => "nozzle_offsets",
-        BottomCameraGeometry => "bottom_camera_geometry",
-        NozzleRunout => "nozzle_runout",
-        ZPlanes => "z_planes",
-        VacuumThresholds => "vacuum_thresholds",
-        Validation => "validation",
-    }
+    step.as_str()
 }
 
 async fn import_kicad_board(
@@ -1463,6 +2484,35 @@ mod tests {
         AppState::new(machine, profile, Store::memory().unwrap())
     }
 
+    fn test_calibration_run(operation_id: Uuid) -> AutomatedCalibrationRun {
+        let now = Utc::now();
+        AutomatedCalibrationRun {
+            id: Uuid::new_v4(),
+            calibration_id: Uuid::new_v4(),
+            operation_id,
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: now,
+            updated_at: now,
+            status: CalibrationRunStatus::Pending,
+            phase: CalibrationRunPhase::Pending,
+            config: AutomatedCalibrationConfig {
+                camera_sample_count: 30,
+                tooling_sample_count: 5,
+                visual_homing_sample_count: 30,
+                excursion_x_mm: -10.0,
+                excursion_y_mm: -10.0,
+                excursion_feed_mm_per_min: 600.0,
+                visual_homing_p95_limit_mm: 0.05,
+            },
+            checks: initial_calibration_checks(json!({})),
+            camera_reports: BTreeMap::new(),
+            visual_homing_samples: vec![],
+            visual_homing_report: None,
+            failure: None,
+            simulated: true,
+        }
+    }
+
     #[tokio::test]
     async fn health_reports_simulator() {
         let response = router(test_state())
@@ -1475,6 +2525,83 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn automated_actuator_checks_leave_vacuum_outputs_off() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        state.machine.complete_preflight(true).await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("calibration test".into(), 60)
+            .await
+            .unwrap();
+        state.machine.home(lease.id, true).await.unwrap();
+        let mut run = test_calibration_run(Uuid::new_v4());
+        execute_initial_actuator_checks(&state, &mut run, lease.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            run.checks
+                .iter()
+                .find(|check| check.id == "actuators")
+                .unwrap()
+                .status,
+            CalibrationCheckStatus::Passed
+        );
+        assert_eq!(
+            state
+                .machine
+                .read_sensor(lease.id, "vacuum_1".into())
+                .await
+                .unwrap()
+                .raw_value,
+            0
+        );
+        assert_eq!(
+            state
+                .machine
+                .read_sensor(lease.id, "vacuum_2".into())
+                .await
+                .unwrap()
+                .raw_value,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_marks_interrupted_calibration_and_operation_failed() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let store = Store::memory().unwrap();
+        let operation = Operation::pending("calibration.initial_machine");
+        let run = test_calibration_run(operation.id);
+        store.put_operation(&operation).unwrap();
+        store.put_calibration_run(&run).unwrap();
+        let machine = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile.clone(),
+        );
+        let state = AppState::new(machine, profile, store);
+        assert_eq!(
+            state
+                .store
+                .get_calibration_run(run.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            CalibrationRunStatus::Failed
+        );
+        assert_eq!(
+            state
+                .store
+                .get_operation(operation.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            OperationStatus::Failed
+        );
     }
 
     #[tokio::test]
@@ -1608,7 +2735,18 @@ mod tests {
 
     #[tokio::test]
     async fn visual_home_apply_rejects_unvalidated_mapping_before_camera_access() {
-        let state = test_state();
+        let mut profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        profile
+            .visual_homing
+            .as_mut()
+            .unwrap()
+            .axis_mapping_validated = false;
+        let machine = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile.clone(),
+        );
+        let state = AppState::new(machine, profile, Store::memory().unwrap());
         state.machine.connect().await.unwrap();
         state.machine.complete_preflight(true).await.unwrap();
         let lease = state
@@ -1631,6 +2769,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn calibration_requires_only_external_safety_confirmation_from_the_operator() {
+        let calibration_id = Uuid::new_v4();
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/calibrations/{calibration_id}/runs"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("travel envelope"));
+        assert!(!message.contains("tooling"));
+    }
+
+    #[tokio::test]
+    async fn manual_calibration_measurement_endpoint_is_not_exposed() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/steps/visual_homing/complete",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "confirmed": true,
+                            "residuals": {
+                                "sample_count": 30,
+                                "rms_mm": 0.0,
+                                "p95_mm": 0.0,
+                                "max_mm": 0.0,
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn iterative_visual_home_bounds_total_offset_from_the_seed() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let visual = profile.visual_homing.unwrap();
+        let seed = Pose {
+            x_mm: visual.seed_pose.x_mm,
+            y_mm: visual.seed_pose.y_mm,
+            z_mm: visual.seed_pose.z_mm,
+            rotation_deg: 0.0,
+        };
+        let observation = VisualHomingPlan {
+            target: velocitypnp_vision::FiducialDetection {
+                x_px: 640.0,
+                y_px: 360.0,
+                diameter_px: 75.0,
+                confidence: 1.0,
+            },
+            error_x_px: 0.0,
+            error_y_px: 0.0,
+            error_radius_px: 0.0,
+            correction_x_mm: 0.4,
+            correction_y_mm: 0.0,
+            correction_distance_mm: 0.4,
+            within_capture_bound: true,
+            within_correction_bound: true,
+            accepted: false,
+        };
+        let target = next_visual_correction_target(seed, seed, &observation, &visual).unwrap();
+        assert_eq!(target.x_mm, seed.x_mm + 0.4);
+
+        let current = Pose {
+            x_mm: seed.x_mm + 0.7,
+            ..seed
+        };
+        assert!(next_visual_correction_target(seed, current, &observation, &visual).is_err());
     }
 
     #[tokio::test]

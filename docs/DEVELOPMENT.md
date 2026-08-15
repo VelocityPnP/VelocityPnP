@@ -69,10 +69,9 @@ manual value is set.
 
 Role-scoped profiles persist capture format, ordered controls, ring-light use,
 and reproducibility thresholds in SQLite. A missing profile resolves to the
-V3.0.4 seed: 1280x720 YUYV at 10 frames per second, five top-camera or 60
-bottom-camera settling frames, manual exposure 200, manual 4600 K white
-balance, and zero gain. Update a profile with
-`PUT /api/v1/cameras/{role}/profile`.
+V3.0.4 seed: 1280x720 YUYV at 10 frames per second, 60 settling frames,
+manual exposure 200, manual 4600 K white balance, and zero gain. Update a
+profile with `PUT /api/v1/cameras/{role}/profile`.
 
 After homing and acquiring a control lease, a bounded 30-frame check applies
 the profile once, turns on the configured lights, opens one capture stream,
@@ -136,7 +135,41 @@ velocitypnp visual-home --lease "$VELOCITYPNP_LEASE"
 
 `--current-pose` skips the seed move for controlled axis-sign probes.
 `--apply-offset` is rejected while `axis_mapping_validated` is false. Once the
-mapping has physical evidence, apply mode permits only a one-millimetre
-correction, captures a verification frame with at most one pixel residual, and
-then sends a profile-defined XY-only coordinate reset. Z and both nozzle angles
+mapping has physical evidence, apply mode permits up to three corrections while
+keeping the total offset from the seed within one millimetre. Every correction
+uses a fresh frame; the final frame must have at most one pixel residual before
+the profile-defined XY-only coordinate reset is sent. Z and both nozzle angles
 are never included in that reset.
+
+## Automated calibration runs
+
+The supported calibration path does not accept operator-entered measurements.
+Create a snapshot, then start its initial machine runner from the web UI or the
+CLI. The only confirmation covers conditions the V3 cannot observe before its
+first motion: level nozzles, a clear travel envelope, and reachable physical
+power isolation.
+
+```bash
+velocitypnp new-calibration --machine-serial 3286336D3331
+velocitypnp calibrate CALIBRATION_UUID \
+  --lease "$VELOCITYPNP_LEASE" \
+  --confirm-safety-checks
+```
+
+The runner performs profile-scoped Z-before-XY coarse homing, pulses and reads
+back each configured vacuum actuator/sensor pair with explicit off cleanup,
+moves to both camera working views, applies stored camera controls, measures
+reproducibility, and presents N1 and N2 to the bottom camera. Bore diameter
+distinguishes the configured N045 and N24 assignments; the operator does not
+declare the loaded tips. It then repeats coarse home, bounded visual refinement,
+a deterministic -10/-10 mm excursion, return, and observation for 30 cycles by
+default.
+
+Every phase and sample is persisted under
+`GET /api/v1/calibration-runs/{id}`. A completed measurement outside its gate is
+`rejected`, while camera, storage, lease, or motion failures are `failed`.
+Successful evidence advances the snapshot automatically. Calibration stages
+whose runners are not implemented are reported as planned and cannot be
+completed manually. Starting a run renews the caller's matching control lease
+to the machine actor's one-hour maximum so the default 30-cycle measurement
+does not expire mid-run.

@@ -165,8 +165,8 @@ focus/orientation and lock repeatable capture settings.
 Every fresh connection still requires the operator leveling heuristic because
 the V3 has no absolute nozzle-height feedback. Jogging remains prohibited until
 that session's Z-first and XY stages pass. Rotation motion, higher feed limits,
-controlled-stop behavior, homing repeatability claims, and the complete
-automated visual-home correction remain unvalidated.
+controlled-stop behavior, and the 30-cycle visual-refined homing acceptance
+claim remain unvalidated.
 Production job execution remains unavailable by design.
 
 The driver has the current Opulo REV04 initialization and VAC1/VAC2 read
@@ -201,6 +201,43 @@ from -0.0237 to 0.3856 mm. The eighth already-submitted home completed before
 the client loop stopped, leaving the machine ready at X=0, Y=0, and Z=31.5.
 This is coarse-envelope evidence, not a failed precision claim. The remaining
 30-cycle criterion measures the verified residual after visual refinement.
+
+The first end-to-end repeatability cycle stopped before its excursion when the
+single correction left a 1.306 px verification error against the unchanged
+1 px gate. No `G92` was sent, the lights were disabled, and the machine stayed
+homed, ready, and fault-free at the bounded corrected pose. Apply mode now
+allows up to three fresh-frame correction iterations while constraining the
+total offset from the configured seed to one millimetre. Attached validation of
+that convergence change initially stopped after three corrections at 1.295 px,
+again without `G92`. Five independent observation-only captures at the fixed
+pose showed that increasing top-camera settling from 5 to 60 frames reduced
+reopened-capture spread to about 0.11 px. A fresh end-to-end pilot then passed
+with one correction, a 0.0114 mm/0.843 px verification residual, and a 0.0168 mm
+independent residual after the fixed excursion and return. Both role defaults
+now use 60 settling frames. Two subsequent ad hoc cycles passed with independent
+return residuals of 0.0137 mm and 0.0106 mm. A fourth cycle stopped safely when
+three correction attempts left 1.589 px of image residual. That is about
+0.0215 mm at the current scale, below the overall 0.05 mm repeatability target,
+but above the separate one-pixel apply gate; no `G92` was issued.
+
+Further ad hoc cycling was stopped because a shell loop is not a usable or
+auditable calibration product. The daemon now owns a persisted initial-machine
+calibration run. After one external-safety confirmation, it performs staged
+coarse homing; pulses and reads both vacuum actuator/sensor paths with explicit
+off cleanup; moves to the top and bottom working views; captures camera
+reproducibility; presents N1 and N2 to the bottom camera; compares their bore
+diameters with the profile's N045 and N24 assignments; and executes the agreed
+coarse-home, visual-refine, fixed-excursion, return, and independent-observation
+sequence. Progress, per-cycle samples, rejection reasons, and the final report
+are stored in SQLite and exposed through the API, CLI, Python client, and web
+UI. The operator UI no longer accepts calibration metrics. The 30-cycle
+hardware gate will be rerun through this first-class operation.
+
+The V3.0.4 bottom-vision seed uses the attached machine's observed camera
+center and the tagged Opulo N1/N2 head offsets. The retained N045 fixture
+measures a 0.422 mm bore and is automatically classified as N045. Live N2/N24
+classification remains part of the next runner validation; it is not claimed
+as attached-hardware evidence yet.
 
 One conservative X/Y traverse exposed a completion-timeout defect. The
 324 mm move from home to the N1 bottom-camera target needs about 65 seconds at

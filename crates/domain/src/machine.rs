@@ -129,6 +129,8 @@ pub struct MachineProfile {
     pub sensors: Vec<SensorProfile>,
     #[serde(default)]
     pub visual_homing: Option<VisualHomingProfile>,
+    #[serde(default)]
+    pub bottom_vision: Option<BottomVisionProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -241,6 +243,77 @@ impl VisualHomingProfile {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BottomVisionProfile {
+    pub camera_role: CameraRole,
+    pub camera_x_mm: f64,
+    pub camera_y_mm: f64,
+    pub working_z_mm: f64,
+    pub frame_center_x_px: f64,
+    pub frame_center_y_px: f64,
+    pub units_per_pixel_x_mm: f64,
+    pub units_per_pixel_y_mm: f64,
+    pub max_center_error_px: f64,
+    pub feed_mm_per_min: f64,
+    pub nozzles: Vec<NozzleToolingProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NozzleToolingProfile {
+    pub nozzle_id: String,
+    pub head_offset_x_mm: f64,
+    pub head_offset_y_mm: f64,
+    pub expected_tip_id: String,
+    pub expected_bore_diameter_mm: f64,
+    pub bore_diameter_tolerance_mm: f64,
+}
+
+impl BottomVisionProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let values = [
+            self.camera_x_mm,
+            self.camera_y_mm,
+            self.working_z_mm,
+            self.frame_center_x_px,
+            self.frame_center_y_px,
+            self.units_per_pixel_x_mm,
+            self.units_per_pixel_y_mm,
+            self.max_center_error_px,
+            self.feed_mm_per_min,
+        ];
+        if self.camera_role != CameraRole::BottomCamera
+            || values.iter().any(|value| !value.is_finite())
+            || self.units_per_pixel_x_mm <= 0.0
+            || self.units_per_pixel_y_mm <= 0.0
+            || self.max_center_error_px <= 0.0
+            || self.feed_mm_per_min <= 0.0
+            || self.nozzles.is_empty()
+            || self.nozzles.iter().any(|nozzle| {
+                nozzle.nozzle_id.trim().is_empty()
+                    || nozzle.expected_tip_id.trim().is_empty()
+                    || !nozzle.head_offset_x_mm.is_finite()
+                    || !nozzle.head_offset_y_mm.is_finite()
+                    || !nozzle.expected_bore_diameter_mm.is_finite()
+                    || !nozzle.bore_diameter_tolerance_mm.is_finite()
+                    || nozzle.expected_bore_diameter_mm <= 0.0
+                    || nozzle.bore_diameter_tolerance_mm <= 0.0
+            })
+        {
+            return Err("bottom-vision profile is invalid");
+        }
+        Ok(())
+    }
+
+    pub fn nozzle_target(&self, nozzle: &NozzleToolingProfile) -> JogTarget {
+        JogTarget {
+            x_mm: self.camera_x_mm - nozzle.head_offset_x_mm,
+            y_mm: self.camera_y_mm - nozzle.head_offset_y_mm,
+            z_mm: self.working_z_mm,
+            rotation_deg: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceIdentity {
     pub kind: DeviceKind,
@@ -350,5 +423,22 @@ mod tests {
         assert!(visual.pixel_error_to_machine_mm[1][1] > 0.0);
         assert_eq!(visual.pixel_error_to_machine_mm[0][1], 0.0);
         assert_eq!(visual.pixel_error_to_machine_mm[1][0], 0.0);
+    }
+
+    #[test]
+    fn attached_v3_bottom_vision_targets_both_configured_nozzles() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let bottom = profile.bottom_vision.as_ref().unwrap();
+        assert!(bottom.validate().is_ok());
+        assert_eq!(bottom.nozzles[0].expected_tip_id, "N045");
+        assert_eq!(bottom.nozzles[1].expected_tip_id, "N24");
+        for nozzle in &bottom.nozzles {
+            let target = bottom
+                .nozzle_target(nozzle)
+                .resolve(profile.home_pose)
+                .unwrap();
+            assert!(profile.bounds.contains(target));
+        }
     }
 }

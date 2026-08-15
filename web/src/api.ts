@@ -1,7 +1,7 @@
 import type {
-  BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
+  AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, Residuals, SensorReading, VisualHomingResult,
+  Operation, SensorReading, VisualHomingResult,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -66,8 +66,10 @@ export const api = {
   connect: () => jsonPost<Operation>("/machine/connect"),
   disconnect: () => jsonPost<Operation>("/machine/disconnect"),
   preflight: () => jsonPost<Operation>("/machine/preflight", { confirmed: true }),
-  lease: async (clientName = "VelocityPnP web UI") =>
-    (await jsonPost<{ lease: ControlLease }>("/control/lease", { client_name: clientName, duration_seconds: 900 })).lease,
+  lease: async (clientName = "VelocityPnP web UI", durationSeconds = 900) =>
+    (await jsonPost<{ lease: ControlLease }>("/control/lease", { client_name: clientName, duration_seconds: durationSeconds })).lease,
+  renewLease: async (leaseId: string, durationSeconds = 3600) =>
+    (await jsonPost<{ lease: ControlLease }>("/control/lease/renew", { lease_id: leaseId, duration_seconds: durationSeconds })).lease,
   home: (leaseId: string) => jsonPost<Operation>("/machine/home", { lease_id: leaseId, confirmed: true }),
   jog: (leaseId: string, target: JogTarget, feed = 300) =>
     jsonPost<Operation>("/machine/jog", { lease_id: leaseId, target, feed_mm_per_min: feed }),
@@ -87,11 +89,20 @@ export const api = {
     (await request<{ calibrations: CalibrationSnapshot[] }>("/calibrations")).calibrations,
   createCalibration: (machineSerial: string) =>
     jsonPost<CalibrationSnapshot>("/calibrations", { machine_serial: machineSerial }),
-  completeCalibration: (
-    snapshotId: string, stepId: string, residuals: Residuals | null, values: Record<string, unknown> = {},
-  ) => jsonPost<CalibrationSnapshot>(`/calibrations/${snapshotId}/steps/${stepId}/complete`, {
-    confirmed: true, residuals, values,
-  }),
+  calibrationRuns: async (snapshotId: string) =>
+    (await request<{ runs: AutomatedCalibrationRun[] }>(`/calibrations/${snapshotId}/runs`)).runs,
+  calibrationRun: (runId: string) =>
+    request<AutomatedCalibrationRun>(`/calibration-runs/${runId}`),
+  startCalibration: (
+    snapshotId: string, leaseId: string, visualHomingSampleCount = 30,
+  ) => jsonPost<{ run: AutomatedCalibrationRun; operation: Operation }>(
+    `/calibrations/${snapshotId}/runs`,
+    {
+      lease_id: leaseId,
+      confirmed_external_safety_checks: true,
+      visual_homing_sample_count: visualHomingSampleCount,
+    },
+  ),
   invalidateCalibration: (snapshotId: string, stepId: string) =>
     jsonPost<CalibrationSnapshot>(`/calibrations/${snapshotId}/steps/${stepId}/invalidate`),
   boards: async () => (await request<{ boards: BoardDesign[] }>("/boards")).boards,

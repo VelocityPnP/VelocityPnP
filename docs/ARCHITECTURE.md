@@ -48,10 +48,22 @@ controller-reported and untouched.
 ## Persistence and reproducibility
 
 SQLite stores versioned JSON documents for boards, feeders, jobs, operations,
-inspection reports, and calibration snapshots. An append-only event journal
-records machine state changes and operation results. Calibration snapshots
-retain parentage, dependencies, residuals, and production-readiness status.
-Changing an upstream measurement invalidates all dependent results.
+inspection reports, calibration snapshots, and calibration runs. An
+append-only event journal records machine state changes and operation results.
+Calibration runs persist their phase, automatic checks, camera evidence,
+per-cycle samples, rejection reason, and report after every meaningful stage.
+An interrupted run is marked failed on daemon restart rather than appearing to
+continue. Calibration snapshots retain parentage, dependencies, residuals, and
+production-readiness status. Changing an upstream measurement invalidates all
+dependent results and values.
+
+Calibration results cross the trust boundary in one direction: a machine
+runner may complete a step from controller or vision evidence, but API clients
+cannot submit measured residuals or mark a step complete. Operator input is
+limited to external conditions the attached machine cannot observe safely.
+Installed tooling is a vision check: the runner presents each configured
+nozzle to the bottom camera and compares its bore measurement with the
+profile-scoped expected tip.
 
 ## Crates and applications
 

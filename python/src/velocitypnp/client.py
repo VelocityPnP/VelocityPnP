@@ -107,6 +107,14 @@ class Client:
             "duration_seconds": duration_seconds,
         })["lease"]
 
+    def renew_lease(
+        self, lease_id: str | uuid.UUID, duration_seconds: int = 3600,
+    ) -> dict[str, Any]:
+        return self._request("POST", "/control/lease/renew", {
+            "lease_id": str(lease_id),
+            "duration_seconds": duration_seconds,
+        })["lease"]
+
     def home(self, lease_id: str | uuid.UUID, *, safety_checks_confirmed: bool = False) -> dict[str, Any]:
         if not safety_checks_confirmed:
             raise ValueError(
@@ -240,6 +248,58 @@ class Client:
 
     def create_calibration(self, machine_serial: str) -> dict[str, Any]:
         return self._request("POST", "/calibrations", {"machine_serial": machine_serial})
+
+    def calibration_runs(
+        self, calibration_id: str | uuid.UUID,
+    ) -> list[dict[str, Any]]:
+        return self._request(
+            "GET", f"/calibrations/{calibration_id}/runs",
+        )["runs"]
+
+    def calibration_run(self, run_id: str | uuid.UUID) -> dict[str, Any]:
+        return self._request("GET", f"/calibration-runs/{run_id}")
+
+    def start_calibration_run(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        safety_checks_confirmed: bool = False,
+        visual_homing_sample_count: int = 30,
+    ) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "calibration requires explicit confirmation that both nozzles are level, "
+                "the envelope is clear, and power isolation is reachable"
+            )
+        if not 30 <= visual_homing_sample_count <= 100:
+            raise ValueError("visual_homing_sample_count must be between 30 and 100")
+        return self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/runs",
+            {
+                "lease_id": str(lease_id),
+                "confirmed_external_safety_checks": True,
+                "visual_homing_sample_count": visual_homing_sample_count,
+            },
+        )
+
+    def calibrate(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        safety_checks_confirmed: bool = False,
+        visual_homing_sample_count: int = 30,
+    ) -> dict[str, Any]:
+        started = self.start_calibration_run(
+            calibration_id,
+            lease_id,
+            safety_checks_confirmed=safety_checks_confirmed,
+            visual_homing_sample_count=visual_homing_sample_count,
+        )
+        self.wait(started["operation"])
+        return self.calibration_run(started["run"]["id"])
 
     def feeders(self) -> list[dict[str, Any]]:
         return self._request("GET", "/feeders")["feeders"]

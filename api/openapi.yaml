@@ -175,6 +175,22 @@ paths:
                 duration_seconds: { type: integer, minimum: 30, maximum: 3600, default: 900 }
       responses:
         "200": { description: Exclusive control lease, content: { application/json: { schema: { type: object } } } }
+  /control/lease/renew:
+    post:
+      operationId: renewControlLease
+      description: Extends the matching unexpired lease without changing its owner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id]
+              properties:
+                lease_id: { type: string, format: uuid }
+                duration_seconds: { type: integer, minimum: 30, maximum: 3600, default: 900 }
+      responses:
+        "200": { description: Renewed exclusive control lease, content: { application/json: { schema: { type: object } } } }
   /machine/home:
     post:
       operationId: homeMachine
@@ -316,25 +332,72 @@ paths:
               properties: { machine_serial: { type: string } }
       responses:
         "201": { description: New snapshot, content: { application/json: { schema: { type: object } } } }
-  /calibrations/{id}/steps/{step}/complete:
-    post:
-      operationId: completeCalibrationStep
+  /calibrations/{id}/runs:
+    get:
+      operationId: listCalibrationRuns
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: step, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Persisted machine-executed calibration runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomatedCalibrationRun" }
+    post:
+      operationId: startCalibrationRun
+      description: >-
+        Starts the profile-scoped initial calibration runner. The machine homes,
+        verifies both cameras and installed nozzle tips, applies visual homing,
+        and measures repeated excursion/return residuals. No measured value is
+        accepted from the caller.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [confirmed]
+              required: [lease_id, confirmed_external_safety_checks]
               properties:
-                confirmed: { type: boolean }
-                residuals: { $ref: "#/components/schemas/Residuals" }
-                values: { type: object, additionalProperties: true }
+                lease_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+                camera_sample_count: { type: integer, minimum: 30, maximum: 60, default: 30 }
+                tooling_sample_count: { type: integer, minimum: 5, maximum: 30, default: 5 }
+                visual_homing_sample_count: { type: integer, minimum: 30, maximum: 100, default: 30 }
+                excursion_x_mm: { type: number, default: -10 }
+                excursion_y_mm: { type: number, default: -10 }
+                excursion_feed_mm_per_min: { type: number, exclusiveMinimum: 0, default: 600 }
+                visual_homing_p95_limit_mm: { type: number, exclusiveMinimum: 0, default: 0.05 }
       responses:
-        "200": { description: Updated calibration snapshot, content: { application/json: { schema: { type: object } } } }
+        "202":
+          description: Persisted calibration run and asynchronous operation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, operation]
+                properties:
+                  run: { $ref: "#/components/schemas/AutomatedCalibrationRun" }
+                  operation: { $ref: "#/components/schemas/Operation" }
+  /calibration-runs/{id}:
+    get:
+      operationId: getCalibrationRun
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Current phase, evidence, progress, and report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomatedCalibrationRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /calibrations/{id}/steps/{step}/invalidate:
     post:
       operationId: invalidateCalibrationStep
@@ -645,6 +708,97 @@ components:
         product: { type: [string, "null"] }
         capture_capable: { type: [boolean, "null"] }
         suggested_role: { type: [string, "null"] }
+    CalibrationCheck:
+      type: object
+      required: [id, title, source, status, message, evidence]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        source: { type: string, enum: [controller, vision, operator] }
+        status: { type: string, enum: [pending, passed, failed] }
+        message: { type: string }
+        evidence: {}
+    VisualHomingValidationSample:
+      type: object
+      required:
+        - cycle
+        - observed_at
+        - initial_correction_mm
+        - correction_count
+        - verification_residual_mm
+        - verification_residual_px
+        - return_residual_mm
+        - return_residual_px
+        - return_error_x_px
+        - return_error_y_px
+      properties:
+        cycle: { type: integer, minimum: 1 }
+        observed_at: { type: string, format: date-time }
+        initial_correction_mm: { type: number, minimum: 0 }
+        correction_count: { type: integer, minimum: 0 }
+        verification_residual_mm: { type: number, minimum: 0 }
+        verification_residual_px: { type: number, minimum: 0 }
+        return_residual_mm: { type: number, minimum: 0 }
+        return_residual_px: { type: number, minimum: 0 }
+        return_error_x_px: { type: number }
+        return_error_y_px: { type: number }
+    VisualHomingValidationReport:
+      type: object
+      required:
+        - visual_verification
+        - independent_return
+        - initial_correction_min_mm
+        - initial_correction_mean_mm
+        - initial_correction_max_mm
+        - passed
+      properties:
+        visual_verification: { $ref: "#/components/schemas/Residuals" }
+        independent_return: { $ref: "#/components/schemas/Residuals" }
+        initial_correction_min_mm: { type: number, minimum: 0 }
+        initial_correction_mean_mm: { type: number, minimum: 0 }
+        initial_correction_max_mm: { type: number, minimum: 0 }
+        passed: { type: boolean }
+    AutomatedCalibrationRun:
+      type: object
+      required:
+        - id
+        - calibration_id
+        - operation_id
+        - profile_id
+        - created_at
+        - updated_at
+        - status
+        - phase
+        - config
+        - checks
+        - camera_reports
+        - visual_homing_samples
+        - simulated
+      properties:
+        id: { type: string, format: uuid }
+        calibration_id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        profile_id: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        status: { type: string, enum: [pending, running, succeeded, rejected, failed] }
+        phase:
+          type: string
+          enum: [pending, coarse_homing, actuator_checks, top_camera_reproducibility, tooling_verification, bottom_camera_reproducibility, visual_homing_validation, complete]
+        config: { type: object }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/CalibrationCheck" }
+        camera_reports: { type: object, additionalProperties: true }
+        visual_homing_samples:
+          type: array
+          items: { $ref: "#/components/schemas/VisualHomingValidationSample" }
+        visual_homing_report:
+          oneOf:
+            - { $ref: "#/components/schemas/VisualHomingValidationReport" }
+            - { type: "null" }
+        failure: { type: [string, "null"] }
+        simulated: { type: boolean }
     InspectionReport:
       type: object
       required: [id, job_id, created_at, status, findings]
