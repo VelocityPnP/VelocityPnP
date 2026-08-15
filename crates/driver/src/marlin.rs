@@ -27,6 +27,7 @@ const MIN_MOVE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MOVE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MOVE_TIMEOUT_MARGIN_SECONDS: f64 = 15.0;
 const MOVE_TIMEOUT_SAFETY_FACTOR: f64 = 1.5;
+const STOP_RESTART_SETTLE: Duration = Duration::from_secs(1);
 
 pub struct MarlinDriver {
     path: String,
@@ -35,6 +36,7 @@ pub struct MarlinDriver {
     homing: HomingProfile,
     rev04_integrated_vacuum_sensors: bool,
     emergency_flag: Arc<AtomicBool>,
+    controller_stopped: bool,
     stream: Option<BufReader<SerialStream>>,
 }
 
@@ -53,6 +55,7 @@ impl MarlinDriver {
             homing,
             rev04_integrated_vacuum_sensors,
             emergency_flag: Arc::new(AtomicBool::new(false)),
+            controller_stopped: false,
             stream: None,
         }
     }
@@ -64,7 +67,7 @@ impl MarlinDriver {
             .context("Marlin controller is disconnected")?;
         if self.emergency_flag.swap(false, Ordering::AcqRel) {
             stream.get_mut().write_all(b"M112\n").await?;
-            stream.get_mut().flush().await?;
+            self.controller_stopped = true;
             bail!("command {command} interrupted by emergency stop");
         }
         stream
@@ -72,14 +75,13 @@ impl MarlinDriver {
             .write_all(format!("{command}\n").as_bytes())
             .await
             .with_context(|| format!("writing Marlin command {command}"))?;
-        stream.get_mut().flush().await?;
 
         let deadline = Instant::now() + command_timeout;
         let mut lines = Vec::new();
         loop {
             if self.emergency_flag.swap(false, Ordering::AcqRel) {
                 stream.get_mut().write_all(b"M112\n").await?;
-                stream.get_mut().flush().await?;
+                self.controller_stopped = true;
                 bail!("command {command} interrupted by emergency stop");
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -118,19 +120,41 @@ impl MarlinDriver {
         parse_position_report(&lines)
             .with_context(|| format!("decoding M114 response: {}", lines.join(" | ")))
     }
-}
 
-#[async_trait]
-impl MachineDriver for MarlinDriver {
-    fn simulated(&self) -> bool {
-        false
+    async fn restart_stopped_controller(&mut self) -> Result<()> {
+        let stream = self
+            .stream
+            .as_mut()
+            .context("Marlin controller is disconnected")?;
+        stream
+            .get_mut()
+            .write_all(b"M999\n")
+            .await
+            .context("writing Marlin stop-restart command M999")?;
+        tokio::time::sleep(STOP_RESTART_SETTLE).await;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let mut line = String::new();
+            match timeout(
+                remaining.min(Duration::from_millis(100)),
+                stream.read_line(&mut line),
+            )
+            .await
+            {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => return Err(error).context("draining Marlin M999 reply"),
+            }
+        }
+        self.controller_stopped = false;
+        Ok(())
     }
 
-    fn set_emergency_flag(&mut self, flag: Arc<AtomicBool>) {
-        self.emergency_flag = flag;
-    }
-
-    async fn connect(&mut self) -> Result<String> {
+    async fn connect_inner(&mut self) -> Result<String> {
         let serial = tokio_serial::new(&self.path, self.baud)
             .timeout(Duration::from_secs(5))
             .open_native_async()
@@ -139,12 +163,14 @@ impl MachineDriver for MarlinDriver {
         // Controllers commonly reset on CDC open. Drain startup lines by waiting
         // before the first bounded command instead of treating them as replies.
         tokio::time::sleep(Duration::from_secs(3)).await;
+        self.restart_stopped_controller()
+            .await
+            .context("normalizing Marlin running state before identification")?;
         let firmware = self
             .command("M115", Duration::from_secs(5))
             .await?
             .join("\n");
         if !supported_firmware(&firmware) {
-            self.stream = None;
             bail!("connected device did not identify as a supported Marlin controller");
         }
         for setup in ["G21", "G90", "M82"] {
@@ -161,10 +187,30 @@ impl MachineDriver for MarlinDriver {
         }
         Ok(firmware)
     }
+}
+
+#[async_trait]
+impl MachineDriver for MarlinDriver {
+    fn simulated(&self) -> bool {
+        false
+    }
+
+    fn set_emergency_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.emergency_flag = flag;
+    }
+
+    async fn connect(&mut self) -> Result<String> {
+        let result = self.connect_inner().await;
+        if result.is_err() {
+            self.stream = None;
+            self.controller_stopped = false;
+        }
+        result
+    }
 
     async fn disconnect(&mut self) -> Result<()> {
         let mut failures = Vec::new();
-        if self.stream.is_some() {
+        if self.stream.is_some() && !self.controller_stopped {
             for command in DISCONNECT_FAILSAFE_COMMANDS {
                 if let Err(error) = self.command(command, Duration::from_secs(2)).await {
                     failures.push(format!("{command}: {error}"));
@@ -172,6 +218,7 @@ impl MachineDriver for MarlinDriver {
             }
         }
         self.stream = None;
+        self.controller_stopped = false;
         if failures.is_empty() {
             Ok(())
         } else {
@@ -286,7 +333,7 @@ impl MachineDriver for MarlinDriver {
     async fn emergency_stop(&mut self) -> Result<()> {
         if let Some(stream) = self.stream.as_mut() {
             stream.get_mut().write_all(b"M112\n").await?;
-            stream.get_mut().flush().await?;
+            self.controller_stopped = true;
         }
         Ok(())
     }

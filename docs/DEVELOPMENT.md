@@ -109,6 +109,10 @@ cargo run -p velocitypnpd -- \
 Opening a USB CDC controller may reset it. Connect does only the bounded Marlin
 identity query, unit/mode setup, and documented integrated-vacuum-sensor
 initialization; it does not home, move, or enable an output automatically.
+Before the identity query, connect sends `M999` and consumes its reply with a
+bounded asynchronous read. This normalizes either a running or previously
+stopped Marlin parser and clears stale queued commands. Connect still enters
+preflight with no trusted pose or homing.
 
 The V3.0.4 profile exposes `vacuum_1` and `vacuum_2` as both actuators and raw
 pressure sensors. Reads require a lease and are allowed during preflight,

@@ -20,7 +20,10 @@ VelocityPnP invalidates homing after disconnect, controller fault, emergency
 stop, or uncertain execution. It never resumes a physical job solely from the
 last recorded coordinate. Emergency stop uses an out-of-band flag to interrupt
 a blocking serial operation, sends Marlin `M112`, revokes control, and requires
-controller recovery and a new homing cycle. The polling latency is bounded to
+controller recovery and a new homing cycle. Every later explicit connect first
+sends `M999` to normalize Marlin into its running state and clear stale queued
+commands, then identifies the firmware. Recovery enters preflight and never
+restores the prior pose, lease, or homing. The polling latency is bounded to
 roughly 20 ms in the driver, but USB, firmware, and electrical failures can
 still defeat a software stop.
 

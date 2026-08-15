@@ -247,6 +247,28 @@ intended safety property. The run was already rejected at N1 when software
 emergency stop was requested. The V3.0.4 profile now uses one standard `G28`
 command and verifies its reported X/Y/Z result together.
 
+The same emergency stop exposed a host-recovery defect: shutdown tried ordinary
+actuator-off commands after `M112` had halted the Marlin parser, and a normal
+reconnect could not complete its `M115` probe. The driver now records when it
+has sent `M112`, releases that stopped serial session without redundant cleanup,
+and sends the documented Marlin `M999` stop restart before identification on
+the next explicit connect. Hardware validation of that recovery path follows
+this software change; it is not claimed by the unit suite alone.
+
+The first recovery attempts identified lower-level causes for the apparent
+unbounded probe: serial `flush()` and input-buffer `clear()` entered Linux
+`tty_wait_until_sent` because the stopped USB CDC controller was not draining
+output. Complete short G-code lines are already queued by `write_all()`, so the
+driver no longer requests an unbounded kernel drain. Stale `M999` replies are
+consumed with a bounded asynchronous read-until-quiet.
+
+After a hard controller reset cleared the wedged USB endpoint, the revised
+connect path sent `M999` before `M115`, identified the attached firmware, ran
+the non-motion setup, and completed preflight in 4.2 seconds. Machine state was
+unhomed with no trusted pose, lease, or fault. This validates proactive `M999`
+normalization on a responsive controller; it does not claim that firmware-level
+recovery can succeed after this REV4 build stops servicing its USB endpoint.
+
 The V3.0.4 bottom-vision seed uses the attached machine's observed camera
 center and the tagged Opulo N1/N2 head offsets. The retained N045 fixture
 measures a 0.422 mm bore and is automatically classified as N045. Live N2/N24
