@@ -59,6 +59,40 @@ export interface CameraControl {
   current: number | boolean | string | null;
 }
 
+export type CameraRole = "top_camera" | "bottom_camera";
+
+export interface CameraProfile {
+  machine_profile_id: string;
+  role: CameraRole;
+  width: number;
+  height: number;
+  frames_per_second: number;
+  settle_frames: number;
+  controls: Array<{ id: number; value: number | boolean }>;
+  lighting_enabled: boolean;
+  thresholds: {
+    max_relative_luma_range: number;
+    max_relative_focus_range: number;
+    min_target_detection_rate: number;
+    max_center_jitter_px: number;
+  };
+}
+
+export interface CameraReproducibilityReport {
+  requested_samples: number;
+  captured_samples: number;
+  capture_failures: number;
+  mean_luma: number;
+  relative_luma_range: number;
+  mean_laplacian_variance: number;
+  relative_focus_range: number;
+  target_detection_rate: number;
+  mean_target_x_px: number | null;
+  mean_target_y_px: number | null;
+  center_jitter_p95_px: number | null;
+  passed: boolean;
+}
+
 export interface Operation {
   id: string;
   kind: string;

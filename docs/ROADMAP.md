@@ -25,7 +25,9 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Lock camera exposure, white balance, gain, working-plane focus, and lighting
 - [x] Acquire the top datum and N1 bottom-camera views; measure initial geometry/exposure seeds
 - [ ] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
-- [ ] Record camera capture fixtures without moving the machine
+- [x] Persist role-scoped camera settings and reproducibility thresholds
+- [x] Record actual top-datum and cleaned-N045 camera fixtures
+- [ ] Pass 30-frame luma, focus, detection, and center-jitter checks on both cameras
 
 ## Gate 2 — Motion and homing validation
 

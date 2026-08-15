@@ -1,6 +1,7 @@
 import type {
-  BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, ControlLease, Device,
-  JogTarget, MachineStatus, Operation, Residuals,
+  BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
+  CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
+  Operation, Residuals,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -49,11 +50,19 @@ export async function waitForOperation(operation: Operation): Promise<Operation>
 export const api = {
   status: async () => (await request<{ machine: MachineStatus }>("/machine/status")).machine,
   devices: async () => (await request<{ devices: Device[] }>("/system/devices")).devices,
-  cameraControls: async (role: "top_camera" | "bottom_camera") =>
+  cameraControls: async (role: CameraRole) =>
     (await request<{ controls: CameraControl[] }>(`/cameras/${role}/controls`)).controls,
   setCameraControls: async (
-    role: "top_camera" | "bottom_camera", controls: Array<{ id: number; value: number | boolean }>,
+    role: CameraRole, controls: Array<{ id: number; value: number | boolean }>,
   ) => (await jsonPut<{ controls: CameraControl[] }>(`/cameras/${role}/controls`, { controls })).controls,
+  cameraProfile: (role: CameraRole) => request<CameraProfile>(`/cameras/${role}/profile`),
+  setCameraProfile: (role: CameraRole, profile: CameraProfile) =>
+    jsonPut<CameraProfile>(`/cameras/${role}/profile`, profile),
+  cameraReproducibility: async (role: CameraRole, leaseId: string, sampleCount = 30) =>
+    (await jsonPost<{ report: CameraReproducibilityReport }>(
+      `/cameras/${role}/reproducibility`,
+      { lease_id: leaseId, sample_count: sampleCount },
+    )).report,
   connect: () => jsonPost<Operation>("/machine/connect"),
   disconnect: () => jsonPost<Operation>("/machine/disconnect"),
   preflight: () => jsonPost<Operation>("/machine/preflight", { confirmed: true }),

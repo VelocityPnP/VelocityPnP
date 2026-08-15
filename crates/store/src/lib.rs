@@ -6,7 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    BoardDesign, CalibrationSnapshot, Feeder, InspectionReport, Job, MachineEvent, Operation,
+    BoardDesign, CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job,
+    MachineEvent, Operation,
 };
 
 #[derive(Clone)]
@@ -97,6 +98,21 @@ impl Store {
         self.get("calibration", id)
     }
 
+    pub fn put_camera_profile(&self, profile: &CameraProfile) -> Result<()> {
+        self.put_named("camera_profile", &profile.storage_id(), profile)
+    }
+
+    pub fn get_camera_profile(
+        &self,
+        machine_profile_id: &str,
+        role: CameraRole,
+    ) -> Result<Option<CameraProfile>> {
+        self.get_named(
+            "camera_profile",
+            &format!("{machine_profile_id}:{}", role.as_str()),
+        )
+    }
+
     pub fn put_feeder(&self, feeder: &Feeder) -> Result<()> {
         self.put("feeder", feeder_id(feeder), feeder)
     }
@@ -172,24 +188,32 @@ impl Store {
     }
 
     fn put<T: Serialize>(&self, kind: &str, id: Uuid, value: &T) -> Result<()> {
+        self.put_named(kind, &id.to_string(), value)
+    }
+
+    fn put_named<T: Serialize>(&self, kind: &str, id: &str, value: &T) -> Result<()> {
         self.connection.lock().execute(
             r#"INSERT INTO entities(kind, id, updated_at, document)
                VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3)
                ON CONFLICT(kind, id) DO UPDATE SET
                  updated_at = excluded.updated_at,
                  document = excluded.document"#,
-            params![kind, id.to_string(), serde_json::to_string(value)?],
+            params![kind, id, serde_json::to_string(value)?],
         )?;
         Ok(())
     }
 
     fn get<T: DeserializeOwned>(&self, kind: &str, id: Uuid) -> Result<Option<T>> {
+        self.get_named(kind, &id.to_string())
+    }
+
+    fn get_named<T: DeserializeOwned>(&self, kind: &str, id: &str) -> Result<Option<T>> {
         let document: Option<String> = self
             .connection
             .lock()
             .query_row(
                 "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
-                params![kind, id.to_string()],
+                params![kind, id],
                 |row| row.get(0),
             )
             .optional()?;
@@ -244,5 +268,18 @@ mod tests {
         };
         store.put_board(&board).unwrap();
         assert_eq!(store.get_board(board.id).unwrap().unwrap().name, "fixture");
+    }
+
+    #[test]
+    fn camera_profile_round_trip_uses_machine_and_role_key() {
+        let store = Store::memory().unwrap();
+        let profile = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.4", CameraRole::BottomCamera);
+        store.put_camera_profile(&profile).unwrap();
+        assert_eq!(
+            store
+                .get_camera_profile("lumenpnp-v3.0.4", CameraRole::BottomCamera)
+                .unwrap(),
+            Some(profile)
+        );
     }
 }

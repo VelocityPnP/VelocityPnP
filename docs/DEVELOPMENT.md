@@ -57,6 +57,7 @@ Attached PnP camera roles are available without opening the motion controller:
 wget http://127.0.0.1:4080/api/v1/cameras/top_camera/snapshot -O top.png
 wget http://127.0.0.1:4080/api/v1/cameras/bottom_camera/snapshot -O bottom.png
 wget -qO- http://127.0.0.1:4080/api/v1/cameras/top_camera/controls
+wget -qO- http://127.0.0.1:4080/api/v1/cameras/top_camera/profile
 ```
 
 Snapshots use the stable role assigned during discovery, discard five settling
@@ -65,6 +66,28 @@ Camera control updates use `PUT` on the role-scoped controls endpoint. The
 daemon validates IDs, types, ranges, steps, menu values, and writability before
 applying values in request order, so automatic mode can be disabled before its
 manual value is set.
+
+Role-scoped profiles persist capture format, ordered controls, ring-light use,
+and reproducibility thresholds in SQLite. A missing profile resolves to the
+V3.0.4 seed: 1280x720 YUYV at 10 frames per second, five settling frames,
+manual exposure 200, manual 4600 K white balance, and zero gain. Update a
+profile with `PUT /api/v1/cameras/{role}/profile`.
+
+After homing and acquiring a control lease, a bounded 30-frame check applies
+the profile once, turns on the configured lights, and reports relative luma and
+focus ranges, target detection rate, and p95 target-center jitter:
+
+```bash
+curl -sS -X POST \
+  http://127.0.0.1:4080/api/v1/cameras/top_camera/reproducibility \
+  -H 'content-type: application/json' \
+  -d '{"lease_id":"LEASE_UUID","sample_count":30}'
+```
+
+The top-camera metric tracks the bright center island of the LumenPnP datum;
+the bottom-camera metric tracks the dark nozzle bore. Thresholds are
+provisional until both attached-camera runs pass and are recorded in the
+hardware evidence log.
 
 Build the UI with `npm run build`, then serve it from the daemon using
 `--web-dir web/dist`. The Vite development server is loopback-only and proxies

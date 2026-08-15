@@ -10,7 +10,7 @@ pub use v4l2_capture::*;
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use velocitypnp_domain::{Residuals, Transform2d};
+use velocitypnp_domain::{CameraReproducibilityThresholds, CameraRole, Residuals, Transform2d};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrayFrame {
@@ -35,12 +35,199 @@ pub fn encode_gray_png(frame: &GrayFrame) -> anyhow::Result<Vec<u8>> {
     Ok(encoded)
 }
 
+pub fn decode_gray_png(encoded: &[u8]) -> anyhow::Result<GrayFrame> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(encoded));
+    let mut reader = decoder.read_info()?;
+    anyhow::ensure!(
+        reader.info().color_type == png::ColorType::Grayscale
+            && reader.info().bit_depth == png::BitDepth::Eight,
+        "camera fixture must be an 8-bit grayscale PNG"
+    );
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let output = reader.next_frame(&mut pixels)?;
+    pixels.truncate(output.buffer_size());
+    Ok(GrayFrame {
+        width: output.width,
+        height: output.height,
+        pixels,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FiducialDetection {
     pub x_px: f64,
     pub y_px: f64,
     pub diameter_px: f64,
     pub confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraSampleMetrics {
+    pub mean_luma: f64,
+    pub luma_standard_deviation: f64,
+    pub laplacian_variance: f64,
+    pub target: Option<FiducialDetection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraReproducibilityReport {
+    pub requested_samples: u32,
+    pub captured_samples: u32,
+    pub capture_failures: u32,
+    pub mean_luma: f64,
+    pub relative_luma_range: f64,
+    pub mean_laplacian_variance: f64,
+    pub relative_focus_range: f64,
+    pub target_detection_rate: f64,
+    pub mean_target_x_px: Option<f64>,
+    pub mean_target_y_px: Option<f64>,
+    pub center_jitter_p95_px: Option<f64>,
+    pub passed: bool,
+    pub samples: Vec<CameraSampleMetrics>,
+}
+
+pub fn camera_sample_metrics(frame: &GrayFrame, role: CameraRole) -> Option<CameraSampleMetrics> {
+    if frame.pixels.len() != frame.width as usize * frame.height as usize
+        || frame.width < 3
+        || frame.height < 3
+    {
+        return None;
+    }
+    let count = frame.pixels.len() as f64;
+    let mean_luma = frame
+        .pixels
+        .iter()
+        .map(|value| f64::from(*value))
+        .sum::<f64>()
+        / count;
+    let luma_variance = frame
+        .pixels
+        .iter()
+        .map(|value| (f64::from(*value) - mean_luma).powi(2))
+        .sum::<f64>()
+        / count;
+    let mut laplacian_sum = 0.0;
+    let mut laplacian_squared_sum = 0.0;
+    let mut laplacian_count = 0.0;
+    for y in 1..frame.height - 1 {
+        for x in 1..frame.width - 1 {
+            let index = (y * frame.width + x) as usize;
+            let laplacian = 4.0 * f64::from(frame.pixels[index])
+                - f64::from(frame.pixels[index - 1])
+                - f64::from(frame.pixels[index + 1])
+                - f64::from(frame.pixels[index - frame.width as usize])
+                - f64::from(frame.pixels[index + frame.width as usize]);
+            laplacian_sum += laplacian;
+            laplacian_squared_sum += laplacian * laplacian;
+            laplacian_count += 1.0;
+        }
+    }
+    let laplacian_mean = laplacian_sum / laplacian_count;
+    let laplacian_variance =
+        laplacian_squared_sum / laplacian_count - laplacian_mean * laplacian_mean;
+    let center = (f64::from(frame.width) / 2.0, f64::from(frame.height) / 2.0);
+    let targets = match role {
+        // The LumenPnP calibration datum is a bright circular island inside a
+        // dark annulus. Detecting the island avoids merging the annulus into
+        // the surrounding dark solder mask.
+        CameraRole::TopCamera => detect_bright_fiducials(frame, 170, 50.0, 100.0),
+        // The bottom camera observes the dark center bore of the nozzle tip.
+        CameraRole::BottomCamera => detect_dark_fiducials(frame, 45, 5.0, 45.0),
+    };
+    let target = targets.into_iter().min_by(|left, right| {
+        let left_distance = (left.x_px - center.0).hypot(left.y_px - center.1);
+        let right_distance = (right.x_px - center.0).hypot(right.y_px - center.1);
+        left_distance.total_cmp(&right_distance)
+    });
+    Some(CameraSampleMetrics {
+        mean_luma,
+        luma_standard_deviation: luma_variance.sqrt(),
+        laplacian_variance,
+        target,
+    })
+}
+
+pub fn summarize_camera_reproducibility(
+    requested_samples: u32,
+    capture_failures: u32,
+    samples: Vec<CameraSampleMetrics>,
+    thresholds: &CameraReproducibilityThresholds,
+) -> CameraReproducibilityReport {
+    let captured_samples = samples.len() as u32;
+    let mean_luma = mean(samples.iter().map(|sample| sample.mean_luma));
+    let relative_luma_range = relative_range(samples.iter().map(|sample| sample.mean_luma));
+    let mean_laplacian_variance = mean(samples.iter().map(|sample| sample.laplacian_variance));
+    let relative_focus_range =
+        relative_range(samples.iter().map(|sample| sample.laplacian_variance));
+    let targets = samples
+        .iter()
+        .filter_map(|sample| sample.target)
+        .collect::<Vec<_>>();
+    let target_detection_rate = if requested_samples == 0 {
+        0.0
+    } else {
+        targets.len() as f64 / f64::from(requested_samples)
+    };
+    let (mean_target_x_px, mean_target_y_px, center_jitter_p95_px) = if targets.is_empty() {
+        (None, None, None)
+    } else {
+        let x = mean(targets.iter().map(|target| target.x_px));
+        let y = mean(targets.iter().map(|target| target.y_px));
+        let mut jitter = targets
+            .iter()
+            .map(|target| (target.x_px - x).hypot(target.y_px - y))
+            .collect::<Vec<_>>();
+        jitter.sort_by(f64::total_cmp);
+        (Some(x), Some(y), percentile_95(&jitter))
+    };
+    let passed = requested_samples > 0
+        && captured_samples == requested_samples
+        && capture_failures == 0
+        && relative_luma_range <= thresholds.max_relative_luma_range
+        && relative_focus_range <= thresholds.max_relative_focus_range
+        && target_detection_rate >= thresholds.min_target_detection_rate
+        && center_jitter_p95_px.is_some_and(|jitter| jitter <= thresholds.max_center_jitter_px);
+    CameraReproducibilityReport {
+        requested_samples,
+        captured_samples,
+        capture_failures,
+        mean_luma,
+        relative_luma_range,
+        mean_laplacian_variance,
+        relative_focus_range,
+        target_detection_rate,
+        mean_target_x_px,
+        mean_target_y_px,
+        center_jitter_p95_px,
+        passed,
+        samples,
+    }
+}
+
+fn mean(values: impl Iterator<Item = f64>) -> f64 {
+    let values = values.collect::<Vec<_>>();
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn relative_range(values: impl Iterator<Item = f64>) -> f64 {
+    let values = values.collect::<Vec<_>>();
+    if values.is_empty() {
+        return 0.0;
+    }
+    let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    (maximum - minimum) / mean(values.into_iter()).abs().max(1.0)
+}
+
+fn percentile_95(sorted: &[f64]) -> Option<f64> {
+    (!sorted.is_empty()).then(|| {
+        let index = ((sorted.len() - 1) as f64 * 0.95).ceil() as usize;
+        sorted[index]
+    })
 }
 
 /// Finds dark, approximately circular connected components. This is the
@@ -52,13 +239,43 @@ pub fn detect_dark_fiducials(
     min_diameter_px: f64,
     max_diameter_px: f64,
 ) -> Vec<FiducialDetection> {
+    detect_circular_components(
+        frame,
+        |value| value <= threshold,
+        min_diameter_px,
+        max_diameter_px,
+    )
+}
+
+/// Finds bright, approximately circular connected components. The top-camera
+/// calibration target uses this polarity because its center island is bright.
+pub fn detect_bright_fiducials(
+    frame: &GrayFrame,
+    threshold: u8,
+    min_diameter_px: f64,
+    max_diameter_px: f64,
+) -> Vec<FiducialDetection> {
+    detect_circular_components(
+        frame,
+        |value| value >= threshold,
+        min_diameter_px,
+        max_diameter_px,
+    )
+}
+
+fn detect_circular_components(
+    frame: &GrayFrame,
+    selected: impl Fn(u8) -> bool,
+    min_diameter_px: f64,
+    max_diameter_px: f64,
+) -> Vec<FiducialDetection> {
     if frame.pixels.len() != frame.width as usize * frame.height as usize {
         return Vec::new();
     }
     let mut visited = vec![false; frame.pixels.len()];
     let mut detections = Vec::new();
     for seed in 0..frame.pixels.len() {
-        if visited[seed] || frame.pixels[seed] > threshold {
+        if visited[seed] || !selected(frame.pixels[seed]) {
             continue;
         }
         let mut queue = VecDeque::from([seed]);
@@ -77,7 +294,7 @@ pub fn detect_dark_fiducials(
             max_y = max_y.max(y);
             for (nx, ny) in neighbours(x, y, frame.width, frame.height) {
                 let neighbour = (ny * frame.width + nx) as usize;
-                if !visited[neighbour] && frame.pixels[neighbour] <= threshold {
+                if !visited[neighbour] && selected(frame.pixels[neighbour]) {
                     visited[neighbour] = true;
                     queue.push_back(neighbour);
                 }
@@ -232,6 +449,37 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_stable_camera_samples() {
+        let target = Some(FiducialDetection {
+            x_px: 10.0,
+            y_px: 10.0,
+            diameter_px: 8.0,
+            confidence: 1.0,
+        });
+        let samples = (0..30)
+            .map(|_| CameraSampleMetrics {
+                mean_luma: 80.0,
+                luma_standard_deviation: 10.0,
+                laplacian_variance: 70.0,
+                target,
+            })
+            .collect();
+        let report = summarize_camera_reproducibility(
+            30,
+            0,
+            samples,
+            &CameraReproducibilityThresholds {
+                max_relative_luma_range: 0.05,
+                max_relative_focus_range: 0.15,
+                min_target_detection_rate: 0.9,
+                max_center_jitter_px: 0.5,
+            },
+        );
+        assert!(report.passed);
+        assert_eq!(report.center_jitter_p95_px, Some(0.0));
+    }
+
+    #[test]
     fn recovers_known_rigid_transform() {
         let source = [(0.0, 0.0), (10.0, 0.0), (0.0, 5.0), (10.0, 5.0)];
         let expected = Transform2d::rigid(100.0, 50.0, 12.0);
@@ -272,5 +520,29 @@ mod tests {
         let reader = decoder.read_info().unwrap();
         assert_eq!((reader.info().width, reader.info().height), (2, 2));
         assert_eq!(reader.info().color_type, png::ColorType::Grayscale);
+    }
+
+    #[test]
+    fn detects_targets_in_attached_v3_camera_fixtures() {
+        let top = decode_gray_png(include_bytes!(
+            "../tests/fixtures/lumenpnp-v3.0.4-top-datum-exp200.png"
+        ))
+        .unwrap();
+        let bottom = decode_gray_png(include_bytes!(
+            "../tests/fixtures/lumenpnp-v3.0.4-bottom-n045-exp200.png"
+        ))
+        .unwrap();
+        let top_target = camera_sample_metrics(&top, CameraRole::TopCamera)
+            .unwrap()
+            .target
+            .expect("top datum was not detected");
+        let bottom_target = camera_sample_metrics(&bottom, CameraRole::BottomCamera)
+            .unwrap()
+            .target
+            .expect("N045 bore was not detected");
+        assert!((top_target.x_px - 646.0).abs() < 1.0);
+        assert!((top_target.y_px - 360.0).abs() < 1.0);
+        assert!((bottom_target.x_px - 640.0).abs() < 5.0);
+        assert!((bottom_target.y_px - 360.0).abs() < 10.0);
     }
 }

@@ -61,6 +61,32 @@ class Client:
         ]}
         return self._request("PUT", f"/cameras/{role}/controls", payload)["controls"]
 
+    def camera_profile(self, role: str) -> dict[str, Any]:
+        self._validate_camera_role(role)
+        return self._request("GET", f"/cameras/{role}/profile")
+
+    def set_camera_profile(
+        self, role: str, profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._validate_camera_role(role)
+        return self._request("PUT", f"/cameras/{role}/profile", profile)
+
+    def camera_reproducibility(
+        self,
+        role: str,
+        lease_id: str | uuid.UUID,
+        *,
+        sample_count: int = 30,
+    ) -> dict[str, Any]:
+        self._validate_camera_role(role)
+        if not 1 <= sample_count <= 60:
+            raise ValueError("camera sample_count must be between 1 and 60")
+        return self._request(
+            "POST",
+            f"/cameras/{role}/reproducibility",
+            {"lease_id": str(lease_id), "sample_count": sample_count},
+        )
+
     @staticmethod
     def _validate_camera_role(role: str) -> None:
         if role not in {"top_camera", "bottom_camera"}:

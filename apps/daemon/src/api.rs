@@ -19,9 +19,9 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    lumen_calibration_workflow, BoardDesign, CalibrationSnapshot, CalibrationStepId, Feeder,
-    InspectionReport, InspectionStatus, Job, JogTarget, MachineProfile, Operation, OperationStatus,
-    Pose, Residuals,
+    lumen_calibration_workflow, BoardDesign, CalibrationSnapshot, CalibrationStepId, CameraProfile,
+    CameraProfileControlValue, CameraRole, Feeder, InspectionReport, InspectionStatus, Job,
+    JogTarget, MachineProfile, MachineState, Operation, OperationStatus, Pose, Residuals,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -29,8 +29,9 @@ use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::plan_job;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    apply_camera_controls, capture_gray_frame, encode_gray_png, query_camera_controls,
-    CameraControlUpdate, V4l2CaptureConfig,
+    apply_camera_controls, camera_sample_metrics, capture_gray_frame, encode_gray_png,
+    query_camera_controls, summarize_camera_reproducibility, CameraControlUpdate,
+    CameraControlValue, V4l2CaptureConfig,
 };
 
 #[derive(Clone)]
@@ -80,6 +81,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/cameras/{role}/controls",
             get(camera_controls).put(update_camera_controls),
+        )
+        .route(
+            "/api/v1/cameras/{role}/profile",
+            get(camera_profile).put(update_camera_profile),
+        )
+        .route(
+            "/api/v1/cameras/{role}/reproducibility",
+            post(camera_reproducibility),
         )
         .route("/api/v1/machine/profile", get(machine_profile))
         .route("/api/v1/machine/status", get(machine_status))
@@ -198,11 +207,16 @@ async fn camera_snapshot(
     State(state): State<AppState>,
     Path(role): Path<String>,
 ) -> ApiResult<Response> {
-    let device_path = camera_path_for_role(&role)?;
+    let camera_role = parse_camera_role(&role)?;
+    let device_path = camera_path_for_role(camera_role)?;
+    let profile = stored_camera_profile(&state, camera_role)?;
+    let updates = profile_control_updates(&profile);
+    let config = camera_capture_config(&profile, device_path);
 
     let _capture_guard = state.camera_capture_lock.lock().await;
     let capture = tokio::task::spawn_blocking(move || {
-        let capture = capture_gray_frame(&V4l2CaptureConfig::lumenpnp(device_path))?;
+        apply_camera_controls(&config.device, &updates)?;
+        let capture = capture_gray_frame(&config)?;
         let png = encode_gray_png(&capture.frame)?;
         anyhow::Ok((png, capture.metadata))
     })
@@ -226,7 +240,7 @@ async fn camera_controls(
     State(state): State<AppState>,
     Path(role): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let device_path = camera_path_for_role(&role)?;
+    let device_path = camera_path_for_role(parse_camera_role(&role)?)?;
     let _capture_guard = state.camera_capture_lock.lock().await;
     let controls = tokio::task::spawn_blocking(move || query_camera_controls(device_path))
         .await
@@ -245,7 +259,7 @@ async fn update_camera_controls(
     Path(role): Path<String>,
     Json(body): Json<CameraControlsRequest>,
 ) -> ApiResult<Json<Value>> {
-    let device_path = camera_path_for_role(&role)?;
+    let device_path = camera_path_for_role(parse_camera_role(&role)?)?;
     let _capture_guard = state.camera_capture_lock.lock().await;
     let controls =
         tokio::task::spawn_blocking(move || apply_camera_controls(device_path, &body.controls))
@@ -255,19 +269,165 @@ async fn update_camera_controls(
     Ok(Json(json!({"role": role, "controls": controls})))
 }
 
-fn camera_path_for_role(role: &str) -> ApiResult<String> {
-    if !matches!(role, "top_camera" | "bottom_camera") {
+async fn camera_profile(
+    State(state): State<AppState>,
+    Path(role): Path<String>,
+) -> ApiResult<Json<CameraProfile>> {
+    Ok(Json(stored_camera_profile(
+        &state,
+        parse_camera_role(&role)?,
+    )?))
+}
+
+async fn update_camera_profile(
+    State(state): State<AppState>,
+    Path(role): Path<String>,
+    Json(profile): Json<CameraProfile>,
+) -> ApiResult<Json<CameraProfile>> {
+    let role = parse_camera_role(&role)?;
+    if profile.role != role || profile.machine_profile_id != state.profile.id {
         return Err(ApiError::bad_request(
-            "camera role must be top_camera or bottom_camera",
+            "camera profile role and machine profile must match the active route",
         ));
     }
+    profile
+        .validate()
+        .map_err(|message| ApiError::bad_request(message.to_string()))?;
+    state
+        .store
+        .put_camera_profile(&profile)
+        .map_err(ApiError::internal)?;
+    Ok(Json(profile))
+}
+
+#[derive(Deserialize)]
+struct CameraReproducibilityRequest {
+    lease_id: Uuid,
+    #[serde(default = "default_camera_sample_count")]
+    sample_count: u32,
+}
+
+fn default_camera_sample_count() -> u32 {
+    30
+}
+
+async fn camera_reproducibility(
+    State(state): State<AppState>,
+    Path(role): Path<String>,
+    Json(body): Json<CameraReproducibilityRequest>,
+) -> ApiResult<Json<Value>> {
+    let role = parse_camera_role(&role)?;
+    if !(1..=60).contains(&body.sample_count) {
+        return Err(ApiError::bad_request(
+            "camera sample_count must be between 1 and 60",
+        ));
+    }
+    let sample_count = body.sample_count;
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed {
+        return Err(ApiError::bad_request(
+            "camera reproducibility requires a homed ready machine",
+        ));
+    }
+    let profile = stored_camera_profile(&state, role)?;
+    let device_path = camera_path_for_role(role)?;
+    let config = camera_capture_config(&profile, device_path);
+    let updates = profile_control_updates(&profile);
+
+    if profile.lighting_enabled {
+        state
+            .machine
+            .actuate(body.lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    }
+    let capture_guard = state.camera_capture_lock.lock().await;
+    let thresholds = profile.thresholds.clone();
+    let capture = tokio::task::spawn_blocking(move || {
+        let controls = apply_camera_controls(&config.device, &updates)?;
+        let mut failures = 0;
+        let mut samples = Vec::with_capacity(sample_count as usize);
+        for _ in 0..sample_count {
+            match capture_gray_frame(&config) {
+                Ok(capture) => match camera_sample_metrics(&capture.frame, role) {
+                    Some(metrics) => samples.push(metrics),
+                    None => failures += 1,
+                },
+                Err(_) => failures += 1,
+            }
+        }
+        let report = summarize_camera_reproducibility(sample_count, failures, samples, &thresholds);
+        anyhow::Ok((controls, report))
+    })
+    .await;
+    drop(capture_guard);
+    let lights_off = if profile.lighting_enabled {
+        state
+            .machine
+            .actuate(body.lease_id, "lights".into(), false)
+            .await
+    } else {
+        Ok(())
+    };
+    lights_off.map_err(ApiError::internal)?;
+    let (controls, report) = capture
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "role": role,
+        "profile": profile,
+        "controls": controls,
+        "report": report,
+    })))
+}
+
+fn parse_camera_role(role: &str) -> ApiResult<CameraRole> {
+    CameraRole::try_from(role).map_err(ApiError::bad_request)
+}
+
+fn stored_camera_profile(state: &AppState, role: CameraRole) -> ApiResult<CameraProfile> {
+    Ok(state
+        .store
+        .get_camera_profile(&state.profile.id, role)
+        .map_err(ApiError::internal)?
+        .unwrap_or_else(|| CameraProfile::initial_lumenpnp(state.profile.id.clone(), role)))
+}
+
+fn profile_control_updates(profile: &CameraProfile) -> Vec<CameraControlUpdate> {
+    profile
+        .controls
+        .iter()
+        .map(|control| CameraControlUpdate {
+            id: control.id,
+            value: match control.value {
+                CameraProfileControlValue::Integer(value) => CameraControlValue::Integer(value),
+                CameraProfileControlValue::Boolean(value) => CameraControlValue::Boolean(value),
+            },
+        })
+        .collect()
+}
+
+fn camera_capture_config(profile: &CameraProfile, device_path: String) -> V4l2CaptureConfig {
+    let mut config = V4l2CaptureConfig::lumenpnp(device_path);
+    config.width = profile.width;
+    config.height = profile.height;
+    config.frames_per_second = profile.frames_per_second;
+    config.settle_frames = profile.settle_frames;
+    config
+}
+
+fn camera_path_for_role(role: CameraRole) -> ApiResult<String> {
     let device = discover_linux_devices()
         .map_err(ApiError::internal)?
         .into_iter()
         .find(|device| {
-            device.capture_capable == Some(true) && device.suggested_role.as_deref() == Some(role)
+            device.capture_capable == Some(true)
+                && device.suggested_role.as_deref() == Some(role.as_str())
         })
-        .ok_or_else(|| ApiError::not_found(format!("{role} is not attached")))?;
+        .ok_or_else(|| ApiError::not_found(format!("{} is not attached", role.as_str())))?;
     Ok(device.stable_path.unwrap_or(device.path))
 }
 
@@ -1096,7 +1256,7 @@ async fn disposition_inspection_finding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use tower::ServiceExt;
     use velocitypnp_driver::SimulatorDriver;
@@ -1148,6 +1308,77 @@ mod tests {
                     .uri("/api/v1/cameras/laptop_camera/controls")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"controls":[{"id":1,"value":1}]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn camera_profile_defaults_and_persists_without_hardware_access() {
+        let state = test_state();
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cameras/top_camera/profile")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut profile: CameraProfile = serde_json::from_slice(&body).unwrap();
+        assert_eq!(profile.role, CameraRole::TopCamera);
+        assert_eq!(
+            profile.controls[2].value,
+            CameraProfileControlValue::Integer(200)
+        );
+
+        profile.settle_frames = 7;
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/cameras/top_camera/profile")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&profile).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .store
+                .get_camera_profile(&state.profile.id, CameraRole::TopCamera)
+                .unwrap()
+                .unwrap()
+                .settle_frames,
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn camera_reproducibility_rejects_unhomed_machine_before_camera_access() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        state.machine.complete_preflight(true).await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("camera test".into(), 60)
+            .await
+            .unwrap();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/cameras/top_camera/reproducibility")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"lease_id": lease.id, "sample_count": 30}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await

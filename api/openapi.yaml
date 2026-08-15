@@ -64,6 +64,68 @@ paths:
                       value: { oneOf: [{ type: integer }, { type: boolean }] }
       responses:
         "200": { description: Updated controls and read-back values, content: { application/json: { schema: { type: object } } } }
+  /cameras/{role}/profile:
+    get:
+      operationId: getCameraProfile
+      parameters:
+        - { name: role, in: path, required: true, schema: { $ref: "#/components/schemas/CameraRole" } }
+      responses:
+        "200":
+          description: Persisted profile or the machine-profile default
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CameraProfile" }
+    put:
+      operationId: setCameraProfile
+      parameters:
+        - { name: role, in: path, required: true, schema: { $ref: "#/components/schemas/CameraRole" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CameraProfile" }
+      responses:
+        "200":
+          description: Validated and persisted camera profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CameraProfile" }
+  /cameras/{role}/reproducibility:
+    post:
+      operationId: measureCameraReproducibility
+      description: >-
+        Captures a bounded frame series with the persisted controls and reports
+        luma, focus, target-detection, and center-jitter metrics. Requires a
+        homed ready machine because the configured ring lights are actuated.
+      parameters:
+        - { name: role, in: path, required: true, schema: { $ref: "#/components/schemas/CameraRole" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id]
+              properties:
+                lease_id: { type: string, format: uuid }
+                sample_count:
+                  type: integer
+                  minimum: 1
+                  maximum: 60
+                  default: 30
+      responses:
+        "200":
+          description: Applied controls and reproducibility report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [role, profile, controls, report]
+                properties:
+                  role: { $ref: "#/components/schemas/CameraRole" }
+                  profile: { $ref: "#/components/schemas/CameraProfile" }
+                  controls: { type: array, items: { type: object } }
+                  report: { $ref: "#/components/schemas/CameraReproducibilityReport" }
   /machine/profile:
     get:
       operationId: getMachineProfile
@@ -357,6 +419,78 @@ components:
       description: Resource not found
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
   schemas:
+    CameraRole:
+      type: string
+      enum: [top_camera, bottom_camera]
+    CameraProfile:
+      type: object
+      required:
+        - machine_profile_id
+        - role
+        - width
+        - height
+        - frames_per_second
+        - settle_frames
+        - controls
+        - lighting_enabled
+        - thresholds
+      properties:
+        machine_profile_id: { type: string, minLength: 1 }
+        role: { $ref: "#/components/schemas/CameraRole" }
+        width: { type: integer, minimum: 2 }
+        height: { type: integer, minimum: 1 }
+        frames_per_second: { type: integer, minimum: 1 }
+        settle_frames: { type: integer, minimum: 0, maximum: 120 }
+        controls:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            required: [id, value]
+            properties:
+              id: { type: integer, minimum: 0 }
+              value: { oneOf: [{ type: integer }, { type: boolean }] }
+        lighting_enabled: { type: boolean }
+        thresholds:
+          type: object
+          required:
+            - max_relative_luma_range
+            - max_relative_focus_range
+            - min_target_detection_rate
+            - max_center_jitter_px
+          properties:
+            max_relative_luma_range: { type: number, minimum: 0 }
+            max_relative_focus_range: { type: number, minimum: 0 }
+            min_target_detection_rate: { type: number, minimum: 0, maximum: 1 }
+            max_center_jitter_px: { type: number, minimum: 0 }
+    CameraReproducibilityReport:
+      type: object
+      required:
+        - requested_samples
+        - captured_samples
+        - capture_failures
+        - mean_luma
+        - relative_luma_range
+        - mean_laplacian_variance
+        - relative_focus_range
+        - target_detection_rate
+        - passed
+        - samples
+      properties:
+        requested_samples: { type: integer, minimum: 1 }
+        captured_samples: { type: integer, minimum: 0 }
+        capture_failures: { type: integer, minimum: 0 }
+        mean_luma: { type: number }
+        relative_luma_range: { type: number, minimum: 0 }
+        mean_laplacian_variance: { type: number, minimum: 0 }
+        relative_focus_range: { type: number, minimum: 0 }
+        target_detection_rate: { type: number, minimum: 0, maximum: 1 }
+        mean_target_x_px: { type: [number, "null"] }
+        mean_target_y_px: { type: [number, "null"] }
+        center_jitter_p95_px: { type: [number, "null"], minimum: 0 }
+        passed: { type: boolean }
+        samples: { type: array, items: { type: object } }
     Confirmation:
       type: object
       required: [confirmed]

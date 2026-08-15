@@ -70,6 +70,11 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   stable at mean 44.71 versus 44.07 and Laplacian variance 74.07 versus 72.23.
   The head then returned to X=0/Y=0/Z=31.5 at 600 mm/min and disconnected
   fail-safe with all outputs off.
+- The exposure-200 top-datum and post-cleaning N045 frames are retained as
+  byte-stable vision regression fixtures. Offline tests detect the datum's
+  bright center island at approximately (646, 360) and the nozzle's dark bore
+  at approximately (638, 355). This validates target polarity and fixture
+  usability, not live multi-frame repeatability.
 
 ## First working-plane observations
 
@@ -93,8 +98,10 @@ needed before deciding whether physical focus adjustment is worthwhile.
 For both cameras, automatic exposure 625 (62.5 ms) washed out useful detail.
 Manual trials at 200, 100, and 50 selected 200 (20 ms) as the initial setting;
 dynamic frame rate was disabled and all other controls remained at defaults.
-These V4L2 values and geometry observations are provisional calibration seeds.
-They are not yet persisted by the daemon or production-approved.
+These V4L2 values and geometry observations remain provisional calibration
+seeds. The daemon now supplies and persists a role-scoped fully manual profile,
+but its white-balance, gain, lighting, and reproducibility thresholds are not
+production-approved until the live 30-frame checks pass on both cameras.
 
 ## Camera recovery and pending calibration
 

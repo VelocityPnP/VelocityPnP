@@ -57,6 +57,35 @@ class ClientTests(unittest.TestCase):
             ],
         })
 
+    def test_camera_profile_and_reproducibility_are_role_scoped(self):
+        client = Client(timeout=1)
+        profile = {"role": "top_camera", "settle_frames": 5}
+        with patch.object(client, "_request", side_effect=[profile, profile, {"report": {}}]) as send:
+            self.assertEqual(client.camera_profile("top_camera"), profile)
+            self.assertEqual(client.set_camera_profile("top_camera", profile), profile)
+            self.assertEqual(
+                client.camera_reproducibility(
+                    "top_camera",
+                    "00000000-0000-0000-0000-000000000000",
+                ),
+                {"report": {}},
+            )
+        self.assertEqual(send.call_args_list[0].args, ("GET", "/cameras/top_camera/profile"))
+        self.assertEqual(
+            send.call_args_list[1].args,
+            ("PUT", "/cameras/top_camera/profile", profile),
+        )
+        self.assertEqual(send.call_args_list[2].args, (
+            "POST",
+            "/cameras/top_camera/reproducibility",
+            {
+                "lease_id": "00000000-0000-0000-0000-000000000000",
+                "sample_count": 30,
+            },
+        ))
+        with self.assertRaisesRegex(ValueError, "sample_count"):
+            client.camera_reproducibility("top_camera", "lease", sample_count=0)
+
     def test_home_requires_explicit_physical_confirmation(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:
