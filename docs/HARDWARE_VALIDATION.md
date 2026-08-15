@@ -222,9 +222,9 @@ but above the separate one-pixel apply gate; no `G92` was issued.
 
 Further ad hoc cycling was stopped because a shell loop is not a usable or
 auditable calibration product. The daemon now owns a persisted initial-machine
-calibration run. After one external-safety confirmation, it performs staged
-coarse homing; pulses and reads both vacuum actuator/sensor paths with explicit
-off cleanup; moves to the top and bottom working views; captures camera
+calibration run. After one external-safety confirmation, it performs combined
+XYZ coarse homing; pulses and reads both vacuum actuator/sensor paths with
+explicit off cleanup; moves to the top and bottom working views; captures camera
 reproducibility; presents N1 and N2 to the bottom camera; compares their bore
 diameters with the profile's N045 and N24 assignments; and executes the agreed
 coarse-home, visual-refine, fixed-excursion, return, and independent-observation
@@ -232,6 +232,20 @@ sequence. Progress, per-cycle samples, rejection reasons, and the final report
 are stored in SQLite and exposed through the API, CLI, Python client, and web
 UI. The operator UI no longer accepts calibration metrics. The 30-cycle
 hardware gate will be rerun through this first-class operation.
+
+The first persisted physical run on 2026-08-15 exposed two useful gates before
+the 30-cycle phase. Its top-camera check passed all 30 captures with 0.0391 px
+p95 center jitter, zero capture failures, and stable focus and luma. N1 tooling
+classification then rejected: all five frames produced small, spatially
+inconsistent candidates averaging 0.163 mm rather than the expected N045 bore.
+The run preserved those detections and stopped before presenting N2.
+
+During that run the operator observed that the axis-scoped `G28 Z` command
+moved the gantry toward X/Y zero before homing Z. Because the required operator
+check already levels both nozzles, the staged sequence did not provide its
+intended safety property. The run was already rejected at N1 when software
+emergency stop was requested. The V3.0.4 profile now uses one standard `G28`
+command and verifies its reported X/Y/Z result together.
 
 The V3.0.4 bottom-vision seed uses the attached machine's observed camera
 center and the tagged Opulo N1/N2 head offsets. The retained N045 fixture

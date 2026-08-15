@@ -32,9 +32,11 @@ The project is organized by measurable gates rather than calendar estimates.
 
 ## Gate 2 — Motion and homing validation
 
-- [x] Require explicit preflight/lease gates; home/verify nozzle Z before X/Y using bounded `M114` reports
+- [x] Require explicit preflight/lease gates and verify combined XYZ home with
+  bounded `M114` reports
 - [x] Preserve reported nozzle rotation on jog and reject unvalidated physical angle changes
-- [x] Complete the first physical staged home, safe-Z XY probes, target acquisition, park, and disconnect
+- [x] Complete physical homing, safe-Z XY probes, target acquisition, park, and
+  disconnect
 - [ ] Validate axis signs, safe-Z convention, feed limits, controlled stop, and reconnect
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
 - [x] Implement bounded primary-datum detection, correction, and XY reset

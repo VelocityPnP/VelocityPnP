@@ -156,7 +156,7 @@ velocitypnp calibrate CALIBRATION_UUID \
   --confirm-safety-checks
 ```
 
-The runner performs profile-scoped Z-before-XY coarse homing, pulses and reads
+The runner performs profile-scoped combined XYZ coarse homing, pulses and reads
 back each configured vacuum actuator/sensor pair with explicit off cleanup,
 moves to both camera working views, applies stored camera controls, measures
 reproducibility, and presents N1 and N2 to the bottom camera. Bore diameter

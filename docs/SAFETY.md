@@ -11,6 +11,11 @@ Before homing or motion:
 4. Verify the selected mechanical profile and travel bounds.
 5. Start with conservative feed and acceleration settings.
 
+The V3.0.4 profile uses the firmware's standard combined `G28` command after
+the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the
+attached firmware was observed moving X/Y toward zero before homing Z, which
+defeated the intended Z-before-X/Y safety property.
+
 VelocityPnP invalidates homing after disconnect, controller fault, emergency
 stop, or uncertain execution. It never resumes a physical job solely from the
 last recorded coordinate. Emergency stop uses an out-of-band flag to interrupt

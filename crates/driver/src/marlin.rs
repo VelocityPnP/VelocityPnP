@@ -483,18 +483,11 @@ mod tests {
         HomingProfile {
             method: "sensorless".into(),
             operator_checks: Vec::new(),
-            stages: vec![
-                velocitypnp_domain::HomingStageProfile {
-                    id: "nozzle_z".into(),
-                    command: "G28 Z".into(),
-                    verify_axes: vec![HomingAxis::Z],
-                },
-                velocitypnp_domain::HomingStageProfile {
-                    id: "gantry_xy".into(),
-                    command: "G28 X Y".into(),
-                    verify_axes: vec![HomingAxis::X, HomingAxis::Y, HomingAxis::Z],
-                },
-            ],
+            stages: vec![velocitypnp_domain::HomingStageProfile {
+                id: "machine_xyz".into(),
+                command: "G28".into(),
+                verify_axes: vec![HomingAxis::X, HomingAxis::Y, HomingAxis::Z],
+            }],
             timeout_seconds: 120,
             reported_position_tolerance_mm: 0.05,
             requires_visual_refinement: true,
@@ -705,14 +698,13 @@ mod tests {
     }
 
     #[test]
-    fn v3_profile_homes_and_verifies_z_before_xy() {
+    fn v3_profile_uses_combined_xyz_home_and_verifies_every_linear_axis() {
         let homing = homing_profile();
         assert!(validate_homing_profile(&homing).is_ok());
-        assert_eq!(homing.stages[0].command, "G28 Z");
-        assert_eq!(homing.stages[0].verify_axes, [HomingAxis::Z]);
-        assert_eq!(homing.stages[1].command, "G28 X Y");
+        assert_eq!(homing.stages.len(), 1);
+        assert_eq!(homing.stages[0].command, "G28");
         assert_eq!(
-            homing.stages[1].verify_axes,
+            homing.stages[0].verify_axes,
             [HomingAxis::X, HomingAxis::Y, HomingAxis::Z]
         );
     }
@@ -720,7 +712,7 @@ mod tests {
     #[test]
     fn rejects_homing_profiles_that_do_not_verify_every_linear_axis() {
         let mut homing = homing_profile();
-        homing.stages.pop();
+        homing.stages[0].verify_axes.pop();
         let error = validate_homing_profile(&homing).unwrap_err().to_string();
         assert!(error.contains("verify X, Y, and Z"));
     }

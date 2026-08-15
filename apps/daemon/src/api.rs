@@ -1356,7 +1356,7 @@ fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
             "Profile-scoped coarse homing",
             CalibrationCheckSource::Controller,
             CalibrationCheckStatus::Pending,
-            "Waiting for staged Z-before-XY homing",
+            "Waiting for profile-scoped combined XYZ homing",
         ),
         calibration_check(
             "actuators",
@@ -1446,7 +1446,7 @@ async fn execute_calibration_run(
         &mut run,
         "coarse_homing",
         CalibrationCheckStatus::Passed,
-        "Controller completed staged Z-before-XY homing",
+        "Controller completed profile-scoped combined XYZ homing",
         json!({"pose": pose}),
     );
     persist_calibration_run(&state, &mut run)?;

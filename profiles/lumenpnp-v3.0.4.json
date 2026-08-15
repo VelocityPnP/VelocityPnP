@@ -22,8 +22,7 @@
       "Physical power isolation is within reach"
     ],
     "stages": [
-      {"id": "nozzle_z", "command": "G28 Z", "verify_axes": ["z"]},
-      {"id": "gantry_xy", "command": "G28 X Y", "verify_axes": ["x", "y", "z"]}
+      {"id": "machine_xyz", "command": "G28", "verify_axes": ["x", "y", "z"]}
     ],
     "timeout_seconds": 120,
     "reported_position_tolerance_mm": 0.05,
