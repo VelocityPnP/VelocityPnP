@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn attached_v3_visual_home_seed_is_bounded_but_not_apply_enabled() {
+    fn attached_v3_visual_home_mapping_matches_physical_axis_probes() {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
         let visual = profile.visual_homing.unwrap();
@@ -345,6 +345,10 @@ mod tests {
             z_mm: visual.seed_pose.z_mm,
             rotation_deg: 0.0,
         }));
-        assert!(!visual.axis_mapping_validated);
+        assert!(visual.axis_mapping_validated);
+        assert!(visual.pixel_error_to_machine_mm[0][0] < 0.0);
+        assert!(visual.pixel_error_to_machine_mm[1][1] > 0.0);
+        assert_eq!(visual.pixel_error_to_machine_mm[0][1], 0.0);
+        assert_eq!(visual.pixel_error_to_machine_mm[1][0], 0.0);
     }
 }

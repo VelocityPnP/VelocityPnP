@@ -22,13 +22,13 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Capture stable frames from both attached UVC cameras through the native backend
 - [x] Enumerate native camera formats, controls, and initial automatic settings
 - [x] Define the V3 working-plane views: datum fiducial/top camera and N1 nozzle/bottom camera under ring lighting
-- [ ] Lock camera exposure, white balance, gain, working-plane focus, and lighting
+- [x] Lock camera exposure, white balance, gain, working-plane focus, and lighting
 - [x] Acquire the top datum and N1 bottom-camera views; measure initial geometry/exposure seeds
-- [ ] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
+- [x] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
 - [x] Implement profile-scoped actuator and raw pressure-sensor APIs
 - [x] Persist role-scoped camera settings and reproducibility thresholds
 - [x] Record actual top-datum and cleaned-N045 camera fixtures
-- [ ] Pass 30-frame luma, focus, detection, and center-jitter checks on both cameras
+- [x] Pass 30-frame luma, focus, detection, and center-jitter checks on both cameras
 
 ## Gate 2 — Motion and homing validation
 
@@ -38,8 +38,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Validate axis signs, safe-Z convention, feed limits, controlled stop, and reconnect
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
 - [x] Implement bounded primary-datum detection, correction, and XY reset
-- [ ] Validate both pixel-to-axis signs and measure primary-datum refinement
-- [ ] Pass 30-cycle homing p95 residual of 0.05 mm or better
+- [x] Validate both pixel-to-axis signs and measure primary-datum refinement
+- [ ] Pass 30-cycle visual-refined homing p95 residual of 0.05 mm or better
 
 ## Gate 3 — Full calibration
 

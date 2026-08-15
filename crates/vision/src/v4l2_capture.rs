@@ -249,6 +249,16 @@ fn control_value(value: Value) -> Option<CameraControlValue> {
 }
 
 pub fn capture_gray_frame(config: &V4l2CaptureConfig) -> Result<CapturedGrayFrame> {
+    capture_gray_frames(config, 1)?
+        .pop()
+        .context("camera returned no frames")
+}
+
+pub fn capture_gray_frames(
+    config: &V4l2CaptureConfig,
+    sample_count: u32,
+) -> Result<Vec<CapturedGrayFrame>> {
+    ensure!(sample_count > 0, "camera sample count must be non-zero");
     ensure!(
         config.width > 0 && config.height > 0,
         "camera dimensions must be non-zero"
@@ -292,30 +302,33 @@ pub fn capture_gray_frame(config: &V4l2CaptureConfig) -> Result<CapturedGrayFram
         .context("allocating camera capture buffers")?;
     stream.set_timeout(config.timeout);
 
-    let mut captured = None;
-    for _ in 0..=config.settle_frames {
+    let total_frames = config
+        .settle_frames
+        .checked_add(sample_count)
+        .context("camera frame count overflow")?;
+    let mut captures = Vec::with_capacity(sample_count as usize);
+    for index in 0..total_frames {
         let (buffer, metadata) = stream.next().context("capturing camera frame")?;
+        if index < config.settle_frames {
+            continue;
+        }
         let used = (metadata.bytesused as usize).min(buffer.len());
-        captured = Some((
-            yuyv_to_gray(&buffer[..used], format.width, format.height, format.stride)?,
-            metadata.sequence,
-        ));
+        captures.push(CapturedGrayFrame {
+            frame: yuyv_to_gray(&buffer[..used], format.width, format.height, format.stride)?,
+            metadata: CaptureMetadata {
+                device: config.device.clone(),
+                width: format.width,
+                height: format.height,
+                fourcc: format.fourcc.to_string(),
+                stride: format.stride,
+                interval_numerator: parameters.interval.numerator,
+                interval_denominator: parameters.interval.denominator,
+                sequence: metadata.sequence,
+                settle_frames: config.settle_frames,
+            },
+        });
     }
-    let (frame, sequence) = captured.context("camera returned no frames")?;
-    Ok(CapturedGrayFrame {
-        frame,
-        metadata: CaptureMetadata {
-            device: config.device.clone(),
-            width: format.width,
-            height: format.height,
-            fourcc: format.fourcc.to_string(),
-            stride: format.stride,
-            interval_numerator: parameters.interval.numerator,
-            interval_denominator: parameters.interval.denominator,
-            sequence,
-            settle_frames: config.settle_frames,
-        },
-    })
+    Ok(captures)
 }
 
 fn yuyv_to_gray(buffer: &[u8], width: u32, height: u32, stride: u32) -> Result<GrayFrame> {
@@ -387,6 +400,12 @@ mod tests {
     #[test]
     fn rejects_truncated_yuyv_frame() {
         assert!(yuyv_to_gray(&[0; 7], 4, 1, 8).is_err());
+    }
+
+    #[test]
+    fn rejects_an_empty_capture_series_before_opening_the_device() {
+        let config = V4l2CaptureConfig::lumenpnp("/dev/null");
+        assert!(capture_gray_frames(&config, 0).is_err());
     }
 
     #[test]

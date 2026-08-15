@@ -69,12 +69,14 @@ manual value is set.
 
 Role-scoped profiles persist capture format, ordered controls, ring-light use,
 and reproducibility thresholds in SQLite. A missing profile resolves to the
-V3.0.4 seed: 1280x720 YUYV at 10 frames per second, five settling frames,
-manual exposure 200, manual 4600 K white balance, and zero gain. Update a
-profile with `PUT /api/v1/cameras/{role}/profile`.
+V3.0.4 seed: 1280x720 YUYV at 10 frames per second, five top-camera or 60
+bottom-camera settling frames, manual exposure 200, manual 4600 K white
+balance, and zero gain. Update a profile with
+`PUT /api/v1/cameras/{role}/profile`.
 
 After homing and acquiring a control lease, a bounded 30-frame check applies
-the profile once, turns on the configured lights, and reports relative luma and
+the profile once, turns on the configured lights, opens one capture stream,
+discards its configured settling frames once, and reports relative luma and
 focus ranges, target detection rate, and p95 target-center jitter:
 
 ```bash

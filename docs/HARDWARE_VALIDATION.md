@@ -28,8 +28,9 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   `M82`. The machine remained in preflight with no known pose and was never
   marked homed.
 - The controller acknowledged bounded on/off pulses for the shared ring lights,
-  VAC1, and VAC2. Software cannot confirm the physical light or pump response;
-  that operator observation remains pending.
+  VAC1, and VAC2. On 2026-08-15 the operator observed both ring lights and both
+  vacuum channels working during separate five-second pulses. Each output was
+  explicitly switched off afterward.
 - API disconnect acknowledged explicit off commands for VAC1, VAC2, and the
   lights, then cleared pose, homing, and the control lease.
 - SIGINT while physically connected ran the graceful disconnect path, exited
@@ -76,6 +77,16 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
   bright center island at approximately (646, 360) and the nozzle's dark bore
   at approximately (638, 355). This validates target polarity and fixture
   usability, not live multi-frame repeatability.
+- The current REV04 pressure-sensor initialization and read commands completed
+  on the attached controller. Both channels returned a stable ambient value of
+  255 raw counts. With vacuum enabled and the nozzle opening sealed by the
+  operator, N1/VAC1 returned 226 in all 10 samples and N2/VAC2 returned 235 in
+  8 of 10 samples, with the other samples at 237 and 243. These are clear
+  29-count and typical 20-count sealed-nozzle deltas; they are not calibrated
+  pressure units or part-present thresholds.
+- A fresh operator-confirmed Z-before-XY home completed in 6.2 seconds on
+  2026-08-15. It reported X=0.000, Y=0.000, Z=31.500, and A=720.000 with no
+  fault before the camera validation traverses.
 
 ## First working-plane observations
 
@@ -103,6 +114,24 @@ These V4L2 values and geometry observations remain provisional calibration
 seeds. The daemon now supplies and persists a role-scoped fully manual profile,
 but its white-balance, gain, lighting, and reproducibility thresholds are not
 production-approved until the live 30-frame checks pass on both cameras.
+
+The first live 30-sample runs on 2026-08-15 had no capture failures and detected
+the intended target in every frame. The top camera passed luma and focus range
+but reported 0.990 px p95 center jitter against the provisional 0.5 px limit;
+the first two detections formed a settling transient. The bottom camera passed
+luma and center jitter at 0.120 px p95, but its 16.90 percent focus range
+narrowly exceeded the provisional 15 percent limit. Both overall checks
+therefore remain failed pending a settling/capture diagnosis; their thresholds
+have not been relaxed to manufacture a pass. Those runs also exposed that the
+endpoint reopened the device and discarded five frames for every sample. It now
+collects the series from one stream after a single settling interval; attached
+hardware reruns passed. The top camera detected 30 of 30 targets with 0.050 px
+p95 center jitter, 1.09 percent focus range, and 1.06 percent luma range. The
+bottom camera initially showed a monotonic lighting transient from mean luma
+61.97 to 57.42. Increasing only its settling interval from 5 to 60 frames made
+the subsequent 30-frame run pass with 0.156 px p95 center jitter, 2.54 percent
+focus range, 0.576 percent luma range, and 30 of 30 detections. Exposure, gain,
+white balance, lighting, and every acceptance threshold remained unchanged.
 
 ## Camera recovery and pending calibration
 
@@ -136,26 +165,42 @@ focus/orientation and lock repeatable capture settings.
 Every fresh connection still requires the operator leveling heuristic because
 the V3 has no absolute nozzle-height feedback. Jogging remains prohibited until
 that session's Z-first and XY stages pass. Rotation motion, higher feed limits,
-controlled-stop behavior, repeatability claims, and automated visual-home
-coordinate correction remain unvalidated.
+controlled-stop behavior, homing repeatability claims, and the complete
+automated visual-home correction remain unvalidated.
 Production job execution remains unavailable by design.
 
-The driver now has the current Opulo REV04 initialization and VAC1/VAC2 read
-sequences implemented behind leased, profile-scoped raw sensor reads. The new
+The driver has the current Opulo REV04 initialization and VAC1/VAC2 read
+sequences implemented behind leased, profile-scoped raw sensor reads. The
 connect path writes command register 48 with value 27 on both multiplexer
-channels, then reads register 6 with `M261`. Those commands have unit coverage
-but have not yet been run against this attached controller. No pressure-unit
-conversion or useful vacuum threshold is claimed until ambient and
-sealed-nozzle samples are recorded.
+channels, then reads register 6 with `M261`. Those commands now have both unit
+coverage and the attached-controller ambient/sealed evidence above. Pressure
+conversion and useful per-tip part-detection thresholds remain uncalibrated.
 
-The primary-datum fixture now produces a bounded visual-home observation. At
-the recorded seed, it measures the datum center near (646, 360), corresponding
-to a provisional X correction near -0.081 mm with the measured X scale. The
-profile also carries the tagged V3.0.4 Y scale, but the raw-camera Y sign has
-not been probed on this machine. `axis_mapping_validated` therefore remains
-false, and the daemon rejects correction motion and the XY `G92` reset before
-camera access. Apply mode additionally requires a post-move residual no larger
-than one pixel before resetting the working coordinates.
+The primary-datum fixture produces a bounded visual-home observation. A prior
++1 mm X probe moved the target approximately +75 raw pixels. On 2026-08-15 a
++1 mm Y probe moved it from raw Y=368.33 to Y=297.17, a -71.17 px shift. Thus
+target error converts to machine correction with a negative X coefficient and
+a positive Y coefficient. The probe exposed and corrected the provisional Y
+sign copied from the tagged profile. The attached V3.0.4 profile now marks the
+mapping validated, but apply mode still requires physical verification of its
+bounded correction and a post-move residual no larger than one pixel before an
+XY-only `G92` reset.
+
+The first apply-mode run with the corrected signs completed successfully. Its
+initial 2.238 px error requested a 0.0303 mm correction to X=220.1598 and
+Y=190.2617. The verification target was 0.6985 px from center, so it passed the
+1 px residual gate before the driver issued an XY-only `G92`; reported Z=31.5
+and A=720 remained unchanged. The machine stayed homed, ready, and fault-free.
+
+An exploratory repeatability run was stopped after seven complete coarse-home
+observations because applying a precision p95 target to raw sensorless stall
+homing is the wrong acceptance criterion. All seven coarse homes completed and
+returned the datum within the visual capture and one-millimetre correction
+bounds. Their proposed X corrections ranged from 0.7851 to 0.8157 mm; Y ranged
+from -0.0237 to 0.3856 mm. The eighth already-submitted home completed before
+the client loop stopped, leaving the machine ready at X=0, Y=0, and Z=31.5.
+This is coarse-envelope evidence, not a failed precision claim. The remaining
+30-cycle criterion measures the verified residual after visual refinement.
 
 One conservative X/Y traverse exposed a completion-timeout defect. The
 324 mm move from home to the N1 bottom-camera target needs about 65 seconds at

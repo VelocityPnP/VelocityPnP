@@ -71,7 +71,10 @@ impl CameraProfile {
             width: 1280,
             height: 720,
             frames_per_second: 10,
-            settle_frames: 5,
+            settle_frames: match role {
+                CameraRole::TopCamera => 5,
+                CameraRole::BottomCamera => 60,
+            },
             controls: vec![
                 CameraProfileControl {
                     id: 10_094_849,
@@ -156,9 +159,13 @@ mod tests {
     fn initial_profile_locks_manual_camera_controls() {
         let profile = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.4", CameraRole::TopCamera);
         assert!(profile.validate().is_ok());
+        assert_eq!(profile.settle_frames, 5);
         assert_eq!(profile.controls[0].id, 10_094_849);
         assert_eq!(profile.controls[2].id, 10_094_850);
         assert_eq!(profile.controls[3].id, 9_963_788);
         assert_eq!(profile.storage_id(), "lumenpnp-v3.0.4:top_camera");
+
+        let bottom = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.4", CameraRole::BottomCamera);
+        assert_eq!(bottom.settle_frames, 60);
     }
 }

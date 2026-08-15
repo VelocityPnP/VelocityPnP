@@ -66,13 +66,13 @@
     "frame_center_y_px": 360.0,
     "pixel_error_to_machine_mm": [
       [-0.01351351, 0.0],
-      [0.0, -0.01355014]
+      [0.0, 0.01355014]
     ],
     "max_capture_error_px": 75.0,
     "max_correction_mm": 1.0,
     "acceptance_radius_px": 1.0,
     "feed_mm_per_min": 300.0,
-    "axis_mapping_validated": false
+    "axis_mapping_validated": true
   },
   "capabilities": {
     "dual_nozzle": true,

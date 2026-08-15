@@ -30,8 +30,8 @@ use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::plan_job;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    apply_camera_controls, camera_sample_metrics, capture_gray_frame, encode_gray_png,
-    plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
+    apply_camera_controls, camera_sample_metrics, capture_gray_frame, capture_gray_frames,
+    encode_gray_png, plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
     CameraControlUpdate, CameraControlValue, GrayFrame, V4l2CaptureConfig,
 };
 
@@ -356,14 +356,16 @@ async fn camera_reproducibility(
         let controls = apply_camera_controls(&config.device, &updates)?;
         let mut failures = 0;
         let mut samples = Vec::with_capacity(sample_count as usize);
-        for _ in 0..sample_count {
-            match capture_gray_frame(&config) {
-                Ok(capture) => match camera_sample_metrics(&capture.frame, role) {
-                    Some(metrics) => samples.push(metrics),
-                    None => failures += 1,
-                },
-                Err(_) => failures += 1,
+        match capture_gray_frames(&config, sample_count) {
+            Ok(captures) => {
+                for capture in captures {
+                    match camera_sample_metrics(&capture.frame, role) {
+                        Some(metrics) => samples.push(metrics),
+                        None => failures += 1,
+                    }
+                }
             }
+            Err(_) => failures = sample_count,
         }
         let report = summarize_camera_reproducibility(sample_count, failures, samples, &thresholds);
         anyhow::Ok((controls, report))

@@ -770,10 +770,33 @@ mod tests {
 
     #[tokio::test]
     async fn visual_offset_requires_validated_mapping_and_resets_only_xy() {
-        let mut profile = profile();
-        let visual_homing = profile.visual_homing.as_mut().unwrap();
-        assert!(!visual_homing.axis_mapping_validated);
-        visual_homing.axis_mapping_validated = true;
+        let mut unvalidated = profile();
+        unvalidated
+            .visual_homing
+            .as_mut()
+            .unwrap()
+            .axis_mapping_validated = false;
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(
+                unvalidated.bounds,
+                unvalidated.safe_z_mm,
+            )),
+            unvalidated,
+        );
+        handle.connect().await.unwrap();
+        handle.complete_preflight(true).await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.home(lease.id, true).await.unwrap();
+        assert!(handle.apply_visual_homing_offset(lease.id).await.is_err());
+
+        let profile = profile();
+        assert!(
+            profile
+                .visual_homing
+                .as_ref()
+                .unwrap()
+                .axis_mapping_validated
+        );
         let handle = MachineHandle::spawn(
             Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
             profile.clone(),
