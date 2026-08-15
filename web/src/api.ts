@@ -1,7 +1,7 @@
 import type {
   BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, Residuals, SensorReading,
+  Operation, Residuals, SensorReading, VisualHomingResult,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -75,6 +75,12 @@ export const api = {
     jsonPost<Operation>(`/machine/actuators/${actuatorId}`, { lease_id: leaseId, enabled }),
   readSensor: (leaseId: string, sensorId: string) =>
     jsonPost<SensorReading>(`/machine/sensors/${sensorId}/read`, { lease_id: leaseId }),
+  visualHome: (leaseId: string, applyOffset = false, moveToSeed = true) =>
+    jsonPost<VisualHomingResult>("/machine/visual-home", {
+      lease_id: leaseId,
+      apply_offset: applyOffset,
+      move_to_seed: moveToSeed,
+    }),
   emergencyStop: () => jsonPost<Operation>("/machine/emergency-stop"),
   workflow: async () => (await request<{ steps: CalibrationStep[] }>("/calibration/workflow")).steps,
   calibrations: async () =>

@@ -74,6 +74,16 @@ impl MachineDriver for SimulatorDriver {
         Ok(self.pose)
     }
 
+    async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose> {
+        self.require_connected()?;
+        if !x_mm.is_finite() || !y_mm.is_finite() {
+            bail!("simulator rejected non-finite XY coordinate reset");
+        }
+        self.pose.x_mm = x_mm;
+        self.pose.y_mm = y_mm;
+        Ok(self.pose)
+    }
+
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()> {
         self.require_connected()?;
         match actuator_id {

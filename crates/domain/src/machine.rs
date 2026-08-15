@@ -1,4 +1,4 @@
-use crate::{Bounds, Pose};
+use crate::{Bounds, CameraRole, JogTarget, Pose};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -127,6 +127,8 @@ pub struct MachineProfile {
     pub actuators: Vec<ActuatorProfile>,
     #[serde(default)]
     pub sensors: Vec<SensorProfile>,
+    #[serde(default)]
+    pub visual_homing: Option<VisualHomingProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -184,6 +186,59 @@ pub struct SensorReading {
     pub raw_value: i64,
     pub unit: String,
     pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisualHomingProfile {
+    pub camera_role: CameraRole,
+    pub seed_pose: JogTarget,
+    pub fiducial_x_mm: f64,
+    pub fiducial_y_mm: f64,
+    pub frame_center_x_px: f64,
+    pub frame_center_y_px: f64,
+    /// Converts target-minus-frame-center pixels into a relative XY move.
+    pub pixel_error_to_machine_mm: [[f64; 2]; 2],
+    pub max_capture_error_px: f64,
+    pub max_correction_mm: f64,
+    pub acceptance_radius_px: f64,
+    pub feed_mm_per_min: f64,
+    pub axis_mapping_validated: bool,
+}
+
+impl VisualHomingProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let values = [
+            self.seed_pose.x_mm,
+            self.seed_pose.y_mm,
+            self.seed_pose.z_mm,
+            self.fiducial_x_mm,
+            self.fiducial_y_mm,
+            self.frame_center_x_px,
+            self.frame_center_y_px,
+            self.pixel_error_to_machine_mm[0][0],
+            self.pixel_error_to_machine_mm[0][1],
+            self.pixel_error_to_machine_mm[1][0],
+            self.pixel_error_to_machine_mm[1][1],
+            self.max_capture_error_px,
+            self.max_correction_mm,
+            self.acceptance_radius_px,
+            self.feed_mm_per_min,
+        ];
+        let matrix_determinant = self.pixel_error_to_machine_mm[0][0]
+            * self.pixel_error_to_machine_mm[1][1]
+            - self.pixel_error_to_machine_mm[0][1] * self.pixel_error_to_machine_mm[1][0];
+        if values.iter().any(|value| !value.is_finite())
+            || self.seed_pose.rotation_deg.is_some()
+            || matrix_determinant.abs() < 1e-12
+            || self.max_capture_error_px <= 0.0
+            || self.max_correction_mm <= 0.0
+            || self.acceptance_radius_px < 0.0
+            || self.feed_mm_per_min <= 0.0
+        {
+            return Err("visual homing profile is invalid");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,5 +331,20 @@ mod tests {
             ),
             Err(SafetyError::OutsideBounds)
         );
+    }
+
+    #[test]
+    fn attached_v3_visual_home_seed_is_bounded_but_not_apply_enabled() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let visual = profile.visual_homing.unwrap();
+        assert!(visual.validate().is_ok());
+        assert!(profile.bounds.contains(Pose {
+            x_mm: visual.seed_pose.x_mm,
+            y_mm: visual.seed_pose.y_mm,
+            z_mm: visual.seed_pose.z_mm,
+            rotation_deg: 0.0,
+        }));
+        assert!(!visual.axis_mapping_validated);
     }
 }

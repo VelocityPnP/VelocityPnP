@@ -22,7 +22,7 @@ use velocitypnp_domain::{
     lumen_calibration_workflow, BoardDesign, CalibrationSnapshot, CalibrationStepId, CameraProfile,
     CameraProfileControlValue, CameraRole, Feeder, InspectionReport, InspectionStatus, Job,
     JogTarget, MachineProfile, MachineState, Operation, OperationStatus, Pose, Residuals,
-    SensorReading,
+    SensorReading, VisualHomingProfile,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -31,8 +31,8 @@ use velocitypnp_planner::plan_job;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
     apply_camera_controls, camera_sample_metrics, capture_gray_frame, encode_gray_png,
-    query_camera_controls, summarize_camera_reproducibility, CameraControlUpdate,
-    CameraControlValue, V4l2CaptureConfig,
+    plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
+    CameraControlUpdate, CameraControlValue, GrayFrame, V4l2CaptureConfig,
 };
 
 #[derive(Clone)]
@@ -98,6 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/machine/preflight", post(complete_preflight))
         .route("/api/v1/machine/home", post(home))
         .route("/api/v1/machine/jog", post(jog))
+        .route("/api/v1/machine/visual-home", post(visual_home))
         .route("/api/v1/machine/actuators/{actuator_id}", post(actuate))
         .route(
             "/api/v1/machine/sensors/{sensor_id}/read",
@@ -370,10 +371,7 @@ async fn camera_reproducibility(
     .await;
     drop(capture_guard);
     let lights_off = if profile.lighting_enabled {
-        state
-            .machine
-            .actuate(body.lease_id, "lights".into(), false)
-            .await
+        state.machine.disable_actuator("lights".into()).await
     } else {
         Ok(())
     };
@@ -611,6 +609,175 @@ async fn read_sensor(
         .await
         .map(Json)
         .map_err(|error| ApiError::bad_request(error.to_string()))
+}
+
+#[derive(Deserialize)]
+struct VisualHomingRequest {
+    lease_id: Uuid,
+    #[serde(default)]
+    apply_offset: bool,
+    #[serde(default = "default_true")]
+    move_to_seed: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+async fn visual_home(
+    State(state): State<AppState>,
+    Json(body): Json<VisualHomingRequest>,
+) -> ApiResult<Json<Value>> {
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed {
+        return Err(ApiError::bad_request(
+            "visual homing requires a homed ready machine",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    visual
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if body.apply_offset && !visual.axis_mapping_validated {
+        return Err(ApiError::bad_request(
+            "visual homing correction is disabled until both axis signs are hardware-validated",
+        ));
+    }
+    if body.apply_offset && !body.move_to_seed {
+        return Err(ApiError::bad_request(
+            "applying visual homing requires a deterministic move to the configured seed",
+        ));
+    }
+    let camera_profile = stored_camera_profile(&state, visual.camera_role)?;
+    let device_path = camera_path_for_role(visual.camera_role)?;
+    let seed_pose = if body.move_to_seed {
+        state
+            .machine
+            .jog(body.lease_id, visual.seed_pose, visual.feed_mm_per_min)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+    } else {
+        status
+            .pose
+            .ok_or_else(|| ApiError::bad_request("visual observation requires a known pose"))?
+    };
+
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(body.lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    }
+    let result = run_visual_homing(
+        &state,
+        body.lease_id,
+        body.apply_offset,
+        &visual,
+        &camera_profile,
+        &device_path,
+        seed_pose,
+    )
+    .await;
+    let lights_off = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = lights_off {
+        if result.is_ok() {
+            return Err(ApiError::internal(error));
+        }
+        tracing::error!(%error, "visual homing also failed to turn lights off");
+    }
+    result.map(Json)
+}
+
+async fn run_visual_homing(
+    state: &AppState,
+    lease_id: Uuid,
+    apply_offset: bool,
+    visual: &VisualHomingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    seed_pose: Pose,
+) -> ApiResult<Value> {
+    let initial_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
+    let initial = plan_visual_homing(&initial_frame, visual)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if !apply_offset {
+        return Ok(json!({
+            "applied": false,
+            "seed_pose": seed_pose,
+            "initial": initial,
+        }));
+    }
+    if !initial.within_capture_bound || !initial.within_correction_bound {
+        return Err(ApiError::bad_request(
+            "visual homing observation exceeds the configured correction bounds",
+        ));
+    }
+    let corrected_pose = state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: seed_pose.x_mm + initial.correction_x_mm,
+                y_mm: seed_pose.y_mm + initial.correction_y_mm,
+                z_mm: seed_pose.z_mm,
+                rotation_deg: None,
+            },
+            visual.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let verification_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
+    let verification = plan_visual_homing(&verification_frame, visual)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if !verification.accepted {
+        return Err(ApiError::bad_request(format!(
+            "visual homing verification error {:.3}px exceeds {:.3}px",
+            verification.error_radius_px, visual.acceptance_radius_px
+        )));
+    }
+    let final_pose = state
+        .machine
+        .apply_visual_homing_offset(lease_id)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(json!({
+        "applied": true,
+        "seed_pose": seed_pose,
+        "initial": initial,
+        "corrected_pose": corrected_pose,
+        "verification": verification,
+        "final_pose": final_pose,
+    }))
+}
+
+async fn capture_profiled_frame(
+    state: &AppState,
+    profile: &CameraProfile,
+    device_path: &str,
+) -> ApiResult<GrayFrame> {
+    let updates = profile_control_updates(profile);
+    let config = camera_capture_config(profile, device_path.to_owned());
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    tokio::task::spawn_blocking(move || {
+        apply_camera_controls(&config.device, &updates)?;
+        anyhow::Ok(capture_gray_frame(&config)?.frame)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)
 }
 
 async fn emergency_stop(State(state): State<AppState>) -> ApiResult<(StatusCode, Json<Operation>)> {
@@ -1435,6 +1602,33 @@ mod tests {
         assert_eq!(reading.sensor_id, "vacuum_1");
         assert_eq!(reading.raw_value, 0);
         assert_eq!(reading.unit, "raw_counts");
+    }
+
+    #[tokio::test]
+    async fn visual_home_apply_rejects_unvalidated_mapping_before_camera_access() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        state.machine.complete_preflight(true).await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("visual home test".into(), 60)
+            .await
+            .unwrap();
+        state.machine.home(lease.id, true).await.unwrap();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/machine/visual-home")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"lease_id": lease.id, "apply_offset": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

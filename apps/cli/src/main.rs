@@ -67,6 +67,16 @@ enum Command {
         lease: Uuid,
         sensor_id: String,
     },
+    VisualHome {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Apply the bounded move and G92 coordinate reset after verification.
+        #[arg(long)]
+        apply_offset: bool,
+        /// Observe at the current known pose instead of moving to the seed.
+        #[arg(long)]
+        current_pose: bool,
+    },
     EmergencyStop,
     ImportBoard {
         pcb: PathBuf,
@@ -203,6 +213,22 @@ async fn main() -> Result<()> {
                 &client,
                 &format!("{base}/machine/sensors/{sensor_id}/read"),
                 Some(json!({"lease_id": lease})),
+            )
+            .await?
+        }
+        Command::VisualHome {
+            lease,
+            apply_offset,
+            current_pose,
+        } => {
+            post(
+                &client,
+                &format!("{base}/machine/visual-home"),
+                Some(json!({
+                    "lease_id": lease,
+                    "apply_offset": apply_offset,
+                    "move_to_seed": !current_pose,
+                })),
             )
             .await?
         }

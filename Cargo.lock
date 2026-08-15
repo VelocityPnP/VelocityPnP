@@ -2278,6 +2278,7 @@ dependencies = [
  "opencv",
  "png",
  "serde",
+ "serde_json",
  "v4l",
  "velocitypnp-domain",
 ]

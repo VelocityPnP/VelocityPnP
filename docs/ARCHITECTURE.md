@@ -39,6 +39,12 @@ frame. Board instances hold a fiducial-derived design-to-machine transform and
 a separately measured surface Z. Bottom-side execution gets a new transform
 after the guided board flip; it does not reuse a mirrored top-side guess.
 
+Visual homing first centers the profile-defined machine datum in the top
+camera, then resets the controller's current X/Y working coordinates to the
+datum's calibrated machine location. The reset is applied only after a second
+image passes the configured residual gate; Z and rotation coordinates remain
+controller-reported and untouched.
+
 ## Persistence and reproducibility
 
 SQLite stores versioned JSON documents for boards, feeders, jobs, operations,

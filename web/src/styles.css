@@ -75,6 +75,13 @@ h3 { font-size: 15px; margin: 3px 0 7px; }
 .jog-grid button:first-child { grid-column: 2; }
 .jog-grid button:nth-child(2) { grid-column: 1; }
 .jog-grid button:nth-child(4) { grid-column: 2; }
+.hardware-checks { display: grid; gap: 10px; }
+.hardware-checks > div { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.hardware-checks strong { font-size: 11px; }
+.hardware-checks code { color: var(--green); font: 10px "DM Mono", monospace; }
+.hardware-checks span { display: flex; gap: 5px; }
+.hardware-checks button, .datum-observe { padding: 7px 9px; border-radius: 5px; color: #bdcbc5; background: #202b27; font-size: 10px; }
+.datum-observe { width: 100%; margin-top: 14px; background: var(--green); color: #0c1511; font-weight: 700; }
 .hint { color: var(--muted); font-size: 10px; text-align: center; margin: 13px 0 0; }
 .count { background: #26342f; color: var(--green); border-radius: 15px; min-width: 28px; height: 25px; display: grid; place-items: center; font: 10px "DM Mono", monospace; }
 .device-list, .event-list { display: grid; gap: 7px; }

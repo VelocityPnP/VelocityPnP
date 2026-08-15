@@ -238,6 +238,24 @@ impl MachineDriver for MarlinDriver {
         Ok(target)
     }
 
+    async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose> {
+        let command = set_xy_coordinates_command(x_mm, y_mm)?;
+        self.command(&command, Duration::from_secs(5)).await?;
+        let reported = self
+            .reported_position()
+            .await
+            .context("reading position after XY coordinate reset")?
+            .primary_pose;
+        if (reported.x_mm - x_mm).abs() > 0.01 || (reported.y_mm - y_mm).abs() > 0.01 {
+            bail!(
+                "XY coordinate reset reported X{:.3} Y{:.3}, expected X{x_mm:.3} Y{y_mm:.3}",
+                reported.x_mm,
+                reported.y_mm
+            );
+        }
+        Ok(reported)
+    }
+
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()> {
         for line in actuator_commands(actuator_id, enabled)? {
             if let Err(error) = self.command(line, Duration::from_secs(5)).await {
@@ -287,6 +305,13 @@ fn move_completion_timeout(start: Pose, target: Pose, feed_mm_per_min: f64) -> D
         MIN_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
         MAX_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
     ))
+}
+
+fn set_xy_coordinates_command(x_mm: f64, y_mm: f64) -> Result<String> {
+    if !x_mm.is_finite() || !y_mm.is_finite() {
+        bail!("XY coordinate reset values must be finite");
+    }
+    Ok(format!("G92 X{x_mm:.4} Y{y_mm:.4}"))
 }
 
 fn actuator_commands(actuator_id: &str, enabled: bool) -> Result<&'static [&'static str]> {
@@ -588,6 +613,15 @@ mod tests {
             ),
             MAX_MOVE_COMPLETION_TIMEOUT
         );
+    }
+
+    #[test]
+    fn xy_coordinate_reset_is_bounded_to_the_linear_axes() {
+        assert_eq!(
+            set_xy_coordinates_command(220.131, 190.271).unwrap(),
+            "G92 X220.1310 Y190.2710"
+        );
+        assert!(set_xy_coordinates_command(f64::NAN, 0.0).is_err());
     }
 
     #[test]

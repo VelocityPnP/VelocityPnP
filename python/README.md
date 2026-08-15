@@ -22,4 +22,5 @@ with Client("http://127.0.0.1:4080/api/v1") as pnp:
     ambient = pnp.read_sensor(lease["id"], "vacuum_1")
     # Set this only after physically checking the nozzles and travel envelope.
     pnp.home(lease["id"], safety_checks_confirmed=True)
+    datum = pnp.visual_home(lease["id"])  # observation only by default
 ```

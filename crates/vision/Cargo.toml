@@ -17,3 +17,6 @@ png.workspace = true
 serde.workspace = true
 v4l = { workspace = true, optional = true }
 velocitypnp-domain = { path = "../domain" }
+
+[dev-dependencies]
+serde_json.workspace = true

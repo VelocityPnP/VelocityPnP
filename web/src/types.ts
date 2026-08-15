@@ -100,6 +100,28 @@ export interface SensorReading {
   observed_at: string;
 }
 
+export interface VisualHomingPlan {
+  target: { x_px: number; y_px: number; diameter_px: number; confidence: number };
+  error_x_px: number;
+  error_y_px: number;
+  error_radius_px: number;
+  correction_x_mm: number;
+  correction_y_mm: number;
+  correction_distance_mm: number;
+  within_capture_bound: boolean;
+  within_correction_bound: boolean;
+  accepted: boolean;
+}
+
+export interface VisualHomingResult {
+  applied: boolean;
+  seed_pose: Pose;
+  initial: VisualHomingPlan;
+  corrected_pose?: Pose;
+  verification?: VisualHomingPlan;
+  final_pose?: Pose;
+}
+
 export interface Operation {
   id: string;
   kind: string;

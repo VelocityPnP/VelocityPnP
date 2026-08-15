@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, waitForOperation } from "./api";
 import type {
   BoardDesign, CalibrationSnapshot, CalibrationStep, Device, MachineEvent,
-  MachineStatus, Pose, Residuals,
+  MachineStatus, Pose, Residuals, SensorReading, VisualHomingResult,
 } from "./types";
 import "./styles.css";
 
@@ -32,7 +32,7 @@ export default function App() {
     void api.devices().then(setDevices).catch(() => undefined);
     const timer = window.setInterval(() => void refresh(), 1000);
     const source = new EventSource("/api/v1/events");
-    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.position", "machine.actuator", "machine.fault", "machine.emergency_stopped", "control.lease_acquired"];
+    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.position", "machine.actuator", "machine.sensor", "machine.visual_home_applied", "machine.fault", "machine.emergency_stopped", "control.lease_acquired"];
     for (const kind of kinds) {
       source.addEventListener(kind, (message) => {
         const event = message as MessageEvent;
@@ -89,6 +89,8 @@ function MachinePanel({ status, devices, events, busy, run }: {
   status: MachineStatus; devices: Device[]; events: MachineEvent[]; busy: boolean;
   run: (task: () => Promise<unknown>) => Promise<void>;
 }) {
+  const [readings, setReadings] = useState<Record<string, SensorReading>>({});
+  const [visualHome, setVisualHome] = useState<VisualHomingResult | null>(null);
   const lease = status.control_lease;
   const pose = status.pose ?? EMPTY_POSE;
   const machineAction = (action: () => Promise<Parameters<typeof waitForOperation>[0]>) => run(async () => waitForOperation(await action()));
@@ -99,6 +101,21 @@ function MachinePanel({ status, devices, events, busy, run }: {
       y_mm: pose.y_mm + dy,
       z_mm: pose.z_mm + dz,
     }));
+  };
+  const actuatorAllowed = Boolean(lease)
+    && ["preflight", "unhomed", "ready"].includes(status.state);
+  const setActuator = (actuatorId: string, enabled: boolean) => {
+    if (!lease) return;
+    if (enabled && actuatorId.startsWith("vacuum_")
+      && !window.confirm(`Enable ${pretty(actuatorId)}? Use Off immediately after the check.`)) return;
+    void machineAction(() => api.actuate(lease.id, actuatorId, enabled));
+  };
+  const readSensor = (sensorId: string) => {
+    if (!lease) return;
+    void run(async () => {
+      const reading = await api.readSensor(lease.id, sensorId);
+      setReadings((current) => ({ ...current, [sensorId]: reading }));
+    });
   };
 
   return <div className="content-grid">
@@ -144,6 +161,18 @@ function MachinePanel({ status, devices, events, busy, run }: {
         <div><strong>{device.product ?? device.kind}</strong><small>{device.suggested_role ? pretty(device.suggested_role) : device.path}</small></div>
         <code>{device.vendor_id}:{device.product_id}</code>
       </div>)}</div>
+    </section>
+
+    <section className="card hardware-check-card">
+      <div className="card-heading"><div><p className="eyebrow">Initial validation</p><h2>Actuators and datum</h2></div></div>
+      <div className="hardware-checks">
+        <div><strong>Ring lights</strong><span><button disabled={busy || !actuatorAllowed} onClick={() => setActuator("lights", true)}>On</button><button disabled={busy || !actuatorAllowed} onClick={() => setActuator("lights", false)}>Off</button></span></div>
+        {(["vacuum_1", "vacuum_2"] as const).map((sensorId) => <div key={sensorId}><strong>{pretty(sensorId)}</strong><code>{readings[sensorId]?.raw_value ?? "—"} raw</code><span><button disabled={busy || !actuatorAllowed} onClick={() => setActuator(sensorId, true)}>On</button><button disabled={busy || !actuatorAllowed} onClick={() => setActuator(sensorId, false)}>Off</button><button disabled={busy || !actuatorAllowed} onClick={() => readSensor(sensorId)}>Read</button></span></div>)}
+      </div>
+      <button className="datum-observe" disabled={busy || !lease || status.state !== "ready"} onClick={() => {
+        if (lease && window.confirm("Move to the primary datum seed and capture an observation?")) void run(async () => setVisualHome(await api.visualHome(lease.id)));
+      }}>Observe primary datum</button>
+      {visualHome && <p className="hint">Datum error {visualHome.initial.error_x_px.toFixed(2)}, {visualHome.initial.error_y_px.toFixed(2)} px; proposed move {visualHome.initial.correction_x_mm.toFixed(3)}, {visualHome.initial.correction_y_mm.toFixed(3)} mm. Coordinate reset not applied.</p>}
     </section>
 
     <section className="card events-card">

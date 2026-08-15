@@ -155,6 +155,25 @@ class Client:
             {"lease_id": str(lease_id)},
         )
 
+    def visual_home(
+        self,
+        lease_id: str | uuid.UUID,
+        *,
+        apply_offset: bool = False,
+        move_to_seed: bool = True,
+    ) -> dict[str, Any]:
+        if apply_offset and not move_to_seed:
+            raise ValueError("visual homing cannot apply an offset without moving to the seed")
+        return self._request(
+            "POST",
+            "/machine/visual-home",
+            {
+                "lease_id": str(lease_id),
+                "apply_offset": apply_offset,
+                "move_to_seed": move_to_seed,
+            },
+        )
+
     def emergency_stop(self) -> dict[str, Any]:
         return self.wait(self._request("POST", "/machine/emergency-stop"))
 

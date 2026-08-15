@@ -123,3 +123,18 @@ Sensor readings are signed controller counts, not pressure units. Establish
 the ambient and sealed-nozzle distributions on the attached machine before
 using them for part detection. An actuator-on validation must always include
 an explicit off command and a fail-safe disconnect.
+
+Primary-datum visual homing defaults to observation mode. It moves to the
+profile seed, applies the top-camera profile and lights, detects the datum, and
+returns the proposed correction without changing the coordinate frame:
+
+```bash
+velocitypnp visual-home --lease "$VELOCITYPNP_LEASE"
+```
+
+`--current-pose` skips the seed move for controlled axis-sign probes.
+`--apply-offset` is rejected while `axis_mapping_validated` is false. Once the
+mapping has physical evidence, apply mode permits only a one-millimetre
+correction, captures a verification frame with at most one pixel residual, and
+then sends a profile-defined XY-only coordinate reset. Z and both nozzle angles
+are never included in that reset.

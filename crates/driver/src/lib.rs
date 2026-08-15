@@ -26,6 +26,7 @@ pub trait MachineDriver: Send {
     async fn disconnect(&mut self) -> Result<()>;
     async fn home(&mut self) -> Result<Pose>;
     async fn move_to(&mut self, target: Pose, feed_mm_per_min: f64) -> Result<Pose>;
+    async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose>;
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()>;
     async fn read_sensor(&mut self, sensor_id: &str) -> Result<i64>;
     async fn emergency_stop(&mut self) -> Result<()>;

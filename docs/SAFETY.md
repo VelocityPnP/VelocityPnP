@@ -25,6 +25,13 @@ is separately hardware-validated, and the machine actor rejects an explicit
 angle change before any command reaches the driver. This interlock applies to
 all API, CLI, UI, Python, and internal job callers.
 
+Visual homing is observation-only until both raw-camera axis signs have
+physical evidence. Apply mode bounds the initial target and XY correction,
+verifies the target again after moving, and changes only the controller's X/Y
+working coordinates. A failed detection or verification never applies the
+coordinate reset. Any disconnect, fault, or emergency stop still invalidates
+the resulting homed state.
+
 Physical disconnect and graceful daemon shutdown command both vacuum channels
 and the shared lights off before releasing serial. SIGINT and SIGTERM use this
 path. A process crash, `SIGKILL`, USB failure, controller failure, or loss of
@@ -44,6 +51,7 @@ primary sources before changing a hardware profile:
 
 - https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml
 - https://docs.opulo.io/byop/testing/actuator-check/
+- https://docs.opulo.io/misc/calibration/4-homing-fiducial/
 - https://docs.opulo.io/misc/photon/
 
 Even source-backed values require non-moving actuator tests and conservative

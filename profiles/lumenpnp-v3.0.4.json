@@ -57,6 +57,23 @@
       "actuator_id": "vacuum_2"
     }
   ],
+  "visual_homing": {
+    "camera_role": "top_camera",
+    "seed_pose": {"x_mm": 220.131, "y_mm": 190.271, "z_mm": 31.5},
+    "fiducial_x_mm": 220.131,
+    "fiducial_y_mm": 190.271,
+    "frame_center_x_px": 640.0,
+    "frame_center_y_px": 360.0,
+    "pixel_error_to_machine_mm": [
+      [-0.01351351, 0.0],
+      [0.0, -0.01355014]
+    ],
+    "max_capture_error_px": 75.0,
+    "max_correction_mm": 1.0,
+    "acceptance_radius_px": 1.0,
+    "feed_mm_per_min": 300.0,
+    "axis_mapping_validated": false
+  },
   "capabilities": {
     "dual_nozzle": true,
     "rotation_motion": false,

@@ -10,7 +10,9 @@ pub use v4l2_capture::*;
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use velocitypnp_domain::{CameraReproducibilityThresholds, CameraRole, Residuals, Transform2d};
+use velocitypnp_domain::{
+    CameraReproducibilityThresholds, CameraRole, Residuals, Transform2d, VisualHomingProfile,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrayFrame {
@@ -86,6 +88,20 @@ pub struct CameraReproducibilityReport {
     pub samples: Vec<CameraSampleMetrics>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisualHomingPlan {
+    pub target: FiducialDetection,
+    pub error_x_px: f64,
+    pub error_y_px: f64,
+    pub error_radius_px: f64,
+    pub correction_x_mm: f64,
+    pub correction_y_mm: f64,
+    pub correction_distance_mm: f64,
+    pub within_capture_bound: bool,
+    pub within_correction_bound: bool,
+    pub accepted: bool,
+}
+
 pub fn camera_sample_metrics(frame: &GrayFrame, role: CameraRole) -> Option<CameraSampleMetrics> {
     if frame.pixels.len() != frame.width as usize * frame.height as usize
         || frame.width < 3
@@ -125,6 +141,19 @@ pub fn camera_sample_metrics(frame: &GrayFrame, role: CameraRole) -> Option<Came
     let laplacian_mean = laplacian_sum / laplacian_count;
     let laplacian_variance =
         laplacian_squared_sum / laplacian_count - laplacian_mean * laplacian_mean;
+    let target = detect_camera_target(frame, role);
+    Some(CameraSampleMetrics {
+        mean_luma,
+        luma_standard_deviation: luma_variance.sqrt(),
+        laplacian_variance,
+        target,
+    })
+}
+
+pub fn detect_camera_target(frame: &GrayFrame, role: CameraRole) -> Option<FiducialDetection> {
+    if frame.pixels.len() != frame.width as usize * frame.height as usize {
+        return None;
+    }
     let center = (f64::from(frame.width) / 2.0, f64::from(frame.height) / 2.0);
     let targets = match role {
         // The LumenPnP calibration datum is a bright circular island inside a
@@ -134,16 +163,41 @@ pub fn camera_sample_metrics(frame: &GrayFrame, role: CameraRole) -> Option<Came
         // The bottom camera observes the dark center bore of the nozzle tip.
         CameraRole::BottomCamera => detect_dark_fiducials(frame, 45, 5.0, 45.0),
     };
-    let target = targets.into_iter().min_by(|left, right| {
+    targets.into_iter().min_by(|left, right| {
         let left_distance = (left.x_px - center.0).hypot(left.y_px - center.1);
         let right_distance = (right.x_px - center.0).hypot(right.y_px - center.1);
         left_distance.total_cmp(&right_distance)
-    });
-    Some(CameraSampleMetrics {
-        mean_luma,
-        luma_standard_deviation: luma_variance.sqrt(),
-        laplacian_variance,
+    })
+}
+
+pub fn plan_visual_homing(
+    frame: &GrayFrame,
+    profile: &VisualHomingProfile,
+) -> anyhow::Result<VisualHomingPlan> {
+    profile.validate().map_err(anyhow::Error::msg)?;
+    let target = detect_camera_target(frame, profile.camera_role)
+        .ok_or_else(|| anyhow::anyhow!("primary datum target was not detected"))?;
+    let error_x_px = target.x_px - profile.frame_center_x_px;
+    let error_y_px = target.y_px - profile.frame_center_y_px;
+    let error_radius_px = error_x_px.hypot(error_y_px);
+    let correction_x_mm = profile.pixel_error_to_machine_mm[0][0] * error_x_px
+        + profile.pixel_error_to_machine_mm[0][1] * error_y_px;
+    let correction_y_mm = profile.pixel_error_to_machine_mm[1][0] * error_x_px
+        + profile.pixel_error_to_machine_mm[1][1] * error_y_px;
+    let correction_distance_mm = correction_x_mm.hypot(correction_y_mm);
+    let within_capture_bound = error_radius_px <= profile.max_capture_error_px;
+    let within_correction_bound = correction_distance_mm <= profile.max_correction_mm;
+    Ok(VisualHomingPlan {
         target,
+        error_x_px,
+        error_y_px,
+        error_radius_px,
+        correction_x_mm,
+        correction_y_mm,
+        correction_distance_mm,
+        within_capture_bound,
+        within_correction_bound,
+        accepted: error_radius_px <= profile.acceptance_radius_px,
     })
 }
 
@@ -544,5 +598,23 @@ mod tests {
         assert!((top_target.y_px - 360.0).abs() < 1.0);
         assert!((bottom_target.x_px - 640.0).abs() < 5.0);
         assert!((bottom_target.y_px - 360.0).abs() < 10.0);
+    }
+
+    #[test]
+    fn plans_a_bounded_correction_from_the_attached_top_fixture() {
+        let frame = decode_gray_png(include_bytes!(
+            "../tests/fixtures/lumenpnp-v3.0.4-top-datum-exp200.png"
+        ))
+        .unwrap();
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let plan = plan_visual_homing(&frame, machine.visual_homing.as_ref().unwrap()).unwrap();
+        assert!((plan.error_x_px - 6.0).abs() < 1.0);
+        assert!(plan.error_y_px.abs() < 1.0);
+        assert!((plan.correction_x_mm + 0.081).abs() < 0.01);
+        assert!(plan.correction_y_mm.abs() < 0.01);
+        assert!(plan.within_capture_bound);
+        assert!(plan.within_correction_bound);
+        assert!(!plan.accepted);
     }
 }

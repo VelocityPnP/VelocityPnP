@@ -204,6 +204,35 @@ paths:
                 feed_mm_per_min: { type: number, exclusiveMinimum: 0, default: 300 }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /machine/visual-home:
+    post:
+      operationId: visualHomeMachine
+      description: >-
+        Moves to the profile seed by default, detects the primary datum, and
+        returns a bounded correction plan. Applying the correction also moves,
+        captures a verification frame, and resets only the controller XY
+        working coordinates after the residual passes. Application remains
+        disabled until the profile's camera-to-axis mapping is validated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id]
+              properties:
+                lease_id: { type: string, format: uuid }
+                apply_offset: { type: boolean, default: false }
+                move_to_seed:
+                  type: boolean
+                  default: true
+                  description: False observes at the current known pose.
+      responses:
+        "200":
+          description: Datum observation or applied and verified XY reset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VisualHomingResult" }
   /machine/actuators/{actuator_id}:
     post:
       operationId: setActuator
@@ -521,6 +550,40 @@ components:
           description: Signed raw controller count; not calibrated pressure.
         unit: { type: string, const: raw_counts }
         observed_at: { type: string, format: date-time }
+    VisualHomingPlan:
+      type: object
+      required:
+        - target
+        - error_x_px
+        - error_y_px
+        - error_radius_px
+        - correction_x_mm
+        - correction_y_mm
+        - correction_distance_mm
+        - within_capture_bound
+        - within_correction_bound
+        - accepted
+      properties:
+        target: { type: object }
+        error_x_px: { type: number }
+        error_y_px: { type: number }
+        error_radius_px: { type: number, minimum: 0 }
+        correction_x_mm: { type: number }
+        correction_y_mm: { type: number }
+        correction_distance_mm: { type: number, minimum: 0 }
+        within_capture_bound: { type: boolean }
+        within_correction_bound: { type: boolean }
+        accepted: { type: boolean }
+    VisualHomingResult:
+      type: object
+      required: [applied, seed_pose, initial]
+      properties:
+        applied: { type: boolean }
+        seed_pose: { $ref: "#/components/schemas/Pose" }
+        initial: { $ref: "#/components/schemas/VisualHomingPlan" }
+        corrected_pose: { $ref: "#/components/schemas/Pose" }
+        verification: { $ref: "#/components/schemas/VisualHomingPlan" }
+        final_pose: { $ref: "#/components/schemas/Pose" }
     Confirmation:
       type: object
       required: [confirmed]

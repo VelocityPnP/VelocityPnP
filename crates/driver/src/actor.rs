@@ -121,10 +121,28 @@ impl MachineHandle {
         .await
     }
 
+    /// Requests an off transition without a lease. This is intentionally not
+    /// exposed by the HTTP API and cannot enable an output.
+    pub async fn disable_actuator(&self, actuator_id: String) -> Result<()> {
+        request(&self.tx, |reply| Command::DisableActuator {
+            actuator_id,
+            reply,
+        })
+        .await
+    }
+
     pub async fn read_sensor(&self, lease_id: Uuid, sensor_id: String) -> Result<SensorReading> {
         request(&self.tx, |reply| Command::ReadSensor {
             lease_id,
             sensor_id,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn apply_visual_homing_offset(&self, lease_id: Uuid) -> Result<Pose> {
+        request(&self.tx, |reply| Command::ApplyVisualHomingOffset {
+            lease_id,
             reply,
         })
         .await
@@ -184,10 +202,18 @@ enum Command {
         enabled: bool,
         reply: oneshot::Sender<Result<()>>,
     },
+    DisableActuator {
+        actuator_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     ReadSensor {
         lease_id: Uuid,
         sensor_id: String,
         reply: oneshot::Sender<Result<SensorReading>>,
+    },
+    ApplyVisualHomingOffset {
+        lease_id: Uuid,
+        reply: oneshot::Sender<Result<Pose>>,
     },
     EmergencyStop {
         reply: oneshot::Sender<Result<()>>,
@@ -267,12 +293,18 @@ impl MachineActor {
                 } => {
                     let _ = reply.send(self.actuate(lease_id, actuator_id, enabled).await);
                 }
+                Command::DisableActuator { actuator_id, reply } => {
+                    let _ = reply.send(self.disable_actuator(actuator_id).await);
+                }
                 Command::ReadSensor {
                     lease_id,
                     sensor_id,
                     reply,
                 } => {
                     let _ = reply.send(self.read_sensor(lease_id, sensor_id).await);
+                }
+                Command::ApplyVisualHomingOffset { lease_id, reply } => {
+                    let _ = reply.send(self.apply_visual_homing_offset(lease_id).await);
                 }
                 Command::EmergencyStop { reply } => {
                     let result = self.driver.emergency_stop().await;
@@ -430,6 +462,27 @@ impl MachineActor {
         Ok(())
     }
 
+    async fn disable_actuator(&mut self, actuator_id: String) -> Result<()> {
+        if !self
+            .profile
+            .actuators
+            .iter()
+            .any(|actuator| actuator.id == actuator_id)
+        {
+            bail!("actuator {actuator_id} is not present in the active profile");
+        }
+        self.driver.actuate(&actuator_id, false).await?;
+        self.emit(
+            "machine.actuator",
+            json!({
+                "actuator_id": actuator_id,
+                "enabled": false,
+                "fail_safe": true,
+            }),
+        );
+        Ok(())
+    }
+
     async fn read_sensor(&mut self, lease_id: Uuid, sensor_id: String) -> Result<SensorReading> {
         self.status().assert_lease(lease_id, Utc::now())?;
         if !matches!(
@@ -453,6 +506,56 @@ impl MachineActor {
         };
         self.emit("machine.sensor", json!({"reading": reading}));
         Ok(reading)
+    }
+
+    async fn apply_visual_homing_offset(&mut self, lease_id: Uuid) -> Result<Pose> {
+        let status = self.status();
+        status.assert_lease(lease_id, Utc::now())?;
+        if status.state != MachineState::Ready || !status.homed {
+            bail!("visual homing offset requires a homed ready machine");
+        }
+        let profile = self
+            .profile
+            .visual_homing
+            .as_ref()
+            .cloned()
+            .context("active profile does not define visual homing")?;
+        profile.validate().map_err(anyhow::Error::msg)?;
+        if !profile.axis_mapping_validated {
+            bail!("visual homing axis mapping has not been hardware-validated");
+        }
+        let current = status
+            .pose
+            .context("visual homing offset requires a known pose")?;
+        if !self.profile.bounds.contains(Pose {
+            x_mm: profile.fiducial_x_mm,
+            y_mm: profile.fiducial_y_mm,
+            ..current
+        }) {
+            bail!("visual homing fiducial coordinates are outside machine bounds");
+        }
+        match self
+            .driver
+            .set_xy_coordinates(profile.fiducial_x_mm, profile.fiducial_y_mm)
+            .await
+        {
+            Ok(pose) => {
+                self.update(|status| status.pose = Some(pose));
+                self.emit(
+                    "machine.visual_home_applied",
+                    json!({
+                        "pose": pose,
+                        "fiducial_x_mm": profile.fiducial_x_mm,
+                        "fiducial_y_mm": profile.fiducial_y_mm,
+                    }),
+                );
+                Ok(pose)
+            }
+            Err(error) => {
+                self.set_fault("visual_home_offset_failed", error.to_string(), true);
+                Err(error)
+            }
+        }
     }
 
     fn status(&self) -> MachineStatus {
@@ -557,6 +660,15 @@ mod tests {
             Ok(target)
         }
 
+        async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose> {
+            Ok(Pose {
+                x_mm,
+                y_mm,
+                z_mm: 31.5,
+                rotation_deg: 720.0,
+            })
+        }
+
         async fn actuate(&mut self, _actuator_id: &str, _enabled: bool) -> Result<()> {
             Ok(())
         }
@@ -622,6 +734,7 @@ mod tests {
         handle.emergency_stop().await.unwrap();
         assert_eq!(handle.status().state, MachineState::EStopped);
         assert!(handle.status().control_lease.is_none());
+        handle.disable_actuator("lights".into()).await.unwrap();
     }
 
     #[tokio::test]
@@ -653,6 +766,27 @@ mod tests {
                 .raw_value,
             -80
         );
+    }
+
+    #[tokio::test]
+    async fn visual_offset_requires_validated_mapping_and_resets_only_xy() {
+        let mut profile = profile();
+        let visual_homing = profile.visual_homing.as_mut().unwrap();
+        assert!(!visual_homing.axis_mapping_validated);
+        visual_homing.axis_mapping_validated = true;
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile.clone(),
+        );
+        handle.connect().await.unwrap();
+        handle.complete_preflight(true).await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.home(lease.id, true).await.unwrap();
+        let pose = handle.apply_visual_homing_offset(lease.id).await.unwrap();
+        let expected = profile.visual_homing.unwrap();
+        assert_eq!(pose.x_mm, expected.fiducial_x_mm);
+        assert_eq!(pose.y_mm, expected.fiducial_y_mm);
+        assert_eq!(pose.z_mm, 31.5);
     }
 
     struct InterruptibleDriver {
@@ -688,6 +822,14 @@ mod tests {
 
         async fn move_to(&mut self, target: Pose, _feed_mm_per_min: f64) -> Result<Pose> {
             Ok(target)
+        }
+
+        async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose> {
+            Ok(Pose {
+                x_mm,
+                y_mm,
+                ..Pose::ORIGIN
+            })
         }
 
         async fn actuate(&mut self, _actuator_id: &str, _enabled: bool) -> Result<()> {

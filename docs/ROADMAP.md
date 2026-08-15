@@ -37,7 +37,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Complete the first physical staged home, safe-Z XY probes, target acquisition, park, and disconnect
 - [ ] Validate axis signs, safe-Z convention, feed limits, controlled stop, and reconnect
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
-- [ ] Implement and measure primary-datum visual refinement
+- [x] Implement bounded primary-datum detection, correction, and XY reset
+- [ ] Validate both pixel-to-axis signs and measure primary-datum refinement
 - [ ] Pass 30-cycle homing p95 residual of 0.05 mm or better
 
 ## Gate 3 — Full calibration

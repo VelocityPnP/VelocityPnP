@@ -120,6 +120,19 @@ class ClientTests(unittest.TestCase):
             {"lease_id": "lease"},
         )
 
+    def test_visual_home_defaults_to_observation_at_seed(self):
+        client = Client(timeout=1)
+        observation = {"applied": False, "initial": {"error_x_px": 1.0}}
+        with patch.object(client, "_request", return_value=observation) as send:
+            self.assertEqual(client.visual_home("lease"), observation)
+        send.assert_called_once_with("POST", "/machine/visual-home", {
+            "lease_id": "lease",
+            "apply_offset": False,
+            "move_to_seed": True,
+        })
+        with self.assertRaisesRegex(ValueError, "without moving"):
+            client.visual_home("lease", apply_offset=True, move_to_seed=False)
+
 
 if __name__ == "__main__":
     unittest.main()

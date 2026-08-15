@@ -148,6 +148,15 @@ but have not yet been run against this attached controller. No pressure-unit
 conversion or useful vacuum threshold is claimed until ambient and
 sealed-nozzle samples are recorded.
 
+The primary-datum fixture now produces a bounded visual-home observation. At
+the recorded seed, it measures the datum center near (646, 360), corresponding
+to a provisional X correction near -0.081 mm with the measured X scale. The
+profile also carries the tagged V3.0.4 Y scale, but the raw-camera Y sign has
+not been probed on this machine. `axis_mapping_validated` therefore remains
+false, and the daemon rejects correction motion and the XY `G92` reset before
+camera access. Apply mode additionally requires a post-move residual no larger
+than one pixel before resetting the working coordinates.
+
 One conservative X/Y traverse exposed a completion-timeout defect. The
 324 mm move from home to the N1 bottom-camera target needs about 65 seconds at
 300 mm/min, but the original driver allowed only 60 seconds for `M400`. The
