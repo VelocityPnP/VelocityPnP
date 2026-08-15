@@ -12,6 +12,7 @@ pub struct SimulatorDriver {
     safe_z_mm: f64,
     vacuum_1_enabled: bool,
     vacuum_2_enabled: bool,
+    secondary_rotation_deg: f64,
 }
 
 impl SimulatorDriver {
@@ -23,6 +24,7 @@ impl SimulatorDriver {
             safe_z_mm,
             vacuum_1_enabled: false,
             vacuum_2_enabled: false,
+            secondary_rotation_deg: 0.0,
         }
     }
 
@@ -72,6 +74,34 @@ impl MachineDriver for SimulatorDriver {
         sleep(Duration::from_millis(40)).await;
         self.pose = target;
         Ok(self.pose)
+    }
+
+    async fn rotation_position(&mut self, controller_axis: char) -> Result<f64> {
+        self.require_connected()?;
+        match controller_axis {
+            'A' => Ok(self.pose.rotation_deg),
+            'B' => Ok(self.secondary_rotation_deg),
+            _ => bail!("simulator has no rotation axis {controller_axis}"),
+        }
+    }
+
+    async fn rotate_nozzle(
+        &mut self,
+        controller_axis: char,
+        target_deg: f64,
+        feed_deg_per_min: f64,
+    ) -> Result<f64> {
+        self.require_connected()?;
+        if !target_deg.is_finite() || !feed_deg_per_min.is_finite() || feed_deg_per_min <= 0.0 {
+            bail!("simulator rejected invalid rotation values");
+        }
+        match controller_axis {
+            'A' => self.pose.rotation_deg = target_deg,
+            'B' => self.secondary_rotation_deg = target_deg,
+            _ => bail!("simulator has no rotation axis {controller_axis}"),
+        }
+        sleep(Duration::from_millis(20)).await;
+        Ok(target_deg)
     }
 
     async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose> {

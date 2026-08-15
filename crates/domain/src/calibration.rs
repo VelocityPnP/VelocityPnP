@@ -65,12 +65,12 @@ pub fn lumen_calibration_workflow() -> Vec<CalibrationStepDefinition> {
         step(CoarseHoming, "Coarse hardware homing", "Establish controller coordinates using the profile-specific homing method.", &[], true, false, Automated),
         step(CameraReproducibility, "Camera and tooling verification", "Move the top camera over the 1 mm datum and each nozzle over the bottom camera; apply locked controls, identify the installed tips, and measure capture stability.", &[CoarseHoming], true, false, Automated),
         step(VisualHoming, "Visual-refined homing", "Refine coarse home against the fixed 1 mm datum, make a controlled excursion, and measure independent return error over repeated cycles.", &[CoarseHoming, CameraReproducibility], true, false, Automated),
+        step(BottomCameraGeometry, "Bottom camera geometry", "Measure the local two-axis image-to-motion map and locate the bottom camera in visual-home coordinates.", &[VisualHoming, CameraReproducibility], true, false, Automated),
+        step(NozzleOffsets, "Head and nozzle offsets", "Use the bottom camera as a common comparator for the top camera and both nozzle rotation axes.", &[BottomCameraGeometry], true, false, Automated),
+        step(NozzleRunout, "Nozzle runout", "Rotate each identified tip through the bounded profile angles and fit its correction curve.", &[NozzleOffsets], true, false, Automated),
         step(TopCameraIntrinsics, "Top camera intrinsics", "Measure lens distortion and camera matrix from a known target after visual homing.", &[VisualHoming], true, true, Planned),
         step(MotionGeometry, "Motion geometry", "Measure scale, skew, backlash, and direction-dependent residuals over the work envelope.", &[VisualHoming, TopCameraIntrinsics], true, true, Planned),
         step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to corrected machine coordinates at calibrated Z planes.", &[MotionGeometry], true, true, Planned),
-        step(NozzleOffsets, "Nozzle offsets", "Measure each nozzle relative to the down-looking camera.", &[TopCameraScale], true, false, Planned),
-        step(BottomCameraGeometry, "Bottom camera geometry", "Locate and calibrate the up-looking camera.", &[NozzleOffsets], true, true, Planned),
-        step(NozzleRunout, "Nozzle runout", "Measure nozzle center versus rotation and fit a compensation curve.", &[BottomCameraGeometry], true, false, Planned),
         step(ZPlanes, "Z planes", "Capture safe, board, feeder, discard, and camera-clearance planes.", &[NozzleOffsets], true, false, Planned),
         step(VacuumThresholds, "Vacuum thresholds", "Learn empty and known-part pressure distributions per nozzle and tip.", &[ZPlanes], true, false, Planned),
         step(Validation, "Known-board validation", "Measure homing, geometry, pick, alignment, and placement acceptance metrics.", &[NozzleRunout, VacuumThresholds], true, true, Planned),
@@ -130,6 +130,7 @@ pub enum CalibrationRunPhase {
     ToolingVerification,
     BottomCameraReproducibility,
     VisualHomingValidation,
+    HeadGeometryCalibration,
     Complete,
 }
 
@@ -196,6 +197,71 @@ pub struct VisualHomingValidationReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BottomCameraMappingReport {
+    /// Converts feature-minus-frame-center pixels into a corrective XY move.
+    pub pixel_error_to_machine_mm: [[f64; 2]; 2],
+    pub observed_pixel_per_machine_mm: [[f64; 2]; 2],
+    pub probe_distance_mm: f64,
+    pub returned_center_error_px: f64,
+    pub returned_center_error_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeadFeatureCenterReport {
+    pub feature_id: String,
+    pub controller_x_mm: f64,
+    pub controller_y_mm: f64,
+    pub target_x_px: f64,
+    pub target_y_px: f64,
+    pub target_diameter_px: f64,
+    pub correction_count: u32,
+    pub verification_residual_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NozzleRunoutSample {
+    pub angle_offset_deg: f64,
+    pub controller_angle_deg: f64,
+    pub target_x_px: f64,
+    pub target_y_px: f64,
+    pub correction_x_mm: f64,
+    pub correction_y_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NozzleRunoutReport {
+    pub nozzle_id: String,
+    pub tip_id: String,
+    pub rotation_axis: String,
+    pub reference_controller_angle_deg: f64,
+    pub axis_controller_x_mm: f64,
+    pub axis_controller_y_mm: f64,
+    pub head_offset_x_mm: f64,
+    pub head_offset_y_mm: f64,
+    pub correction_cos_x_mm: f64,
+    pub correction_sin_x_mm: f64,
+    pub correction_cos_y_mm: f64,
+    pub correction_sin_y_mm: f64,
+    pub runout_radius_mm: f64,
+    pub runout_phase_deg: f64,
+    pub fit_residuals: Residuals,
+    pub samples: Vec<NozzleRunoutSample>,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeadGeometryReport {
+    pub bottom_camera_mapping: BottomCameraMappingReport,
+    pub top_camera_center: HeadFeatureCenterReport,
+    pub bottom_camera_reciprocal_observation: HeadFeatureCenterReport,
+    pub nozzles: Vec<NozzleRunoutReport>,
+    pub n1_to_n2_x_mm: f64,
+    pub n1_to_n2_y_mm: f64,
+    pub combined_runout_fit_residuals: Residuals,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomatedCalibrationRun {
     pub id: Uuid,
     pub calibration_id: Uuid,
@@ -211,6 +277,8 @@ pub struct AutomatedCalibrationRun {
     pub camera_reports: BTreeMap<String, serde_json::Value>,
     pub visual_homing_samples: Vec<VisualHomingValidationSample>,
     pub visual_homing_report: Option<VisualHomingValidationReport>,
+    #[serde(default)]
+    pub head_geometry_report: Option<HeadGeometryReport>,
     pub failure: Option<String>,
     pub simulated: bool,
 }
@@ -358,6 +426,38 @@ mod tests {
             .completed_steps
             .contains(&CalibrationStepId::TopCameraIntrinsics));
         assert!(!snapshot.production_ready);
+    }
+
+    #[test]
+    fn automated_head_geometry_follows_visual_homing() {
+        let workflow = lumen_calibration_workflow();
+        let ids = workflow.iter().map(|step| step.id).collect::<Vec<_>>();
+        let visual = ids
+            .iter()
+            .position(|id| *id == CalibrationStepId::VisualHoming)
+            .unwrap();
+        let offsets = ids
+            .iter()
+            .position(|id| *id == CalibrationStepId::NozzleOffsets)
+            .unwrap();
+        let bottom = ids
+            .iter()
+            .position(|id| *id == CalibrationStepId::BottomCameraGeometry)
+            .unwrap();
+        let runout = ids
+            .iter()
+            .position(|id| *id == CalibrationStepId::NozzleRunout)
+            .unwrap();
+
+        assert!(visual < bottom && bottom < offsets && offsets < runout);
+        for id in [
+            CalibrationStepId::NozzleOffsets,
+            CalibrationStepId::BottomCameraGeometry,
+            CalibrationStepId::NozzleRunout,
+        ] {
+            let step = workflow.iter().find(|step| step.id == id).unwrap();
+            assert_eq!(step.automation, CalibrationAutomation::Automated);
+        }
     }
 
     #[test]

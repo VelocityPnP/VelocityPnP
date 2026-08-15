@@ -65,6 +65,15 @@ Installed tooling is a vision check: the runner presents each configured
 nozzle to the bottom camera and compares its bore measurement with the
 profile-scoped expected tip.
 
+Head geometry uses the bottom camera as a common comparator. Small X/Y probes
+measure its local image-to-motion Jacobian. At the shared camera pose, the
+bottom camera locates the top-camera lens and the top camera locates the bottom
+camera lens. Their corrections are combined and verified. Each detected nozzle
+then rotates through bounded profile offsets. A harmonic fit separates the
+stationary rotation axis and head offset from periodic nozzle-tip runout. The
+raw samples, coefficients, and physical residuals are stored in the calibration
+snapshot.
+
 ## Crates and applications
 
 - `velocitypnp-domain`: geometry, machine state, manufacturing entities, and calibration graph

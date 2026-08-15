@@ -84,9 +84,25 @@
     "units_per_pixel_y_mm": 0.03149606,
     "max_center_error_px": 100.0,
     "feed_mm_per_min": 300.0,
+    "head_geometry": {
+      "probe_distance_mm": 0.5,
+      "centering_sample_count": 5,
+      "max_centering_corrections": 3,
+      "max_centering_correction_mm": 4.0,
+      "verification_limit_mm": 0.05,
+      "top_camera_feature_min_diameter_px": 40.0,
+      "top_camera_feature_max_diameter_px": 400.0,
+      "rotation_angle_offsets_deg": [
+        -15.0, 15.0, -45.0, 45.0, -75.0, 75.0,
+        -105.0, 105.0, -135.0, 135.0, -165.0, 165.0
+      ],
+      "rotation_feed_deg_per_min": 600.0,
+      "runout_fit_p95_limit_mm": 0.05
+    },
     "nozzles": [
       {
         "nozzle_id": "N1",
+        "rotation_axis": "rotation1",
         "head_offset_x_mm": -23.761,
         "head_offset_y_mm": -66.619,
         "expected_tip_id": "N045",
@@ -95,6 +111,7 @@
       },
       {
         "nozzle_id": "N2",
+        "rotation_axis": "rotation2",
         "head_offset_x_mm": 25.692,
         "head_offset_y_mm": -66.46,
         "expected_tip_id": "N24",
@@ -108,6 +125,7 @@
     "rotation_motion": false,
     "rev04_integrated_vacuum_sensors": true,
     "visual_homing": true,
+    "rotation_calibration": true,
     "photon_bus": false,
     "physical_endstops": false,
     "contact_probe": false

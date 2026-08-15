@@ -45,15 +45,18 @@ The project is organized by measurable gates rather than calendar estimates.
   and guided web progress
 - [x] Remove operator-entered calibration metrics from the supported workflow
 - [x] Add bottom-camera detection of configured N045/N24 tooling assignments
-- [ ] Pass 30-cycle visual-refined homing p95 residual of 0.05 mm or better
+- [x] Pass 30-cycle visual-refined homing p95 residual of 0.05 mm or better
 
 ## Gate 3 — Full calibration
 
 - [ ] Fabricate and publish the known-dimension multi-fiducial calibration PCB
 - [ ] Bind OpenCV camera intrinsics/distortion calibration to recorded workflow steps
-- [ ] Add machine runners for XY scale, skew, backlash, camera scale, nozzle
-  offsets, and bottom-camera location
-- [ ] Fit nozzle runout compensation and vacuum classification per nozzle/tip
+- [ ] Add machine runners for XY scale, skew, backlash, and camera scale
+- [x] Add automatic bottom-camera local mapping, reciprocal camera centering,
+  and N1/N2 head-offset measurement
+- [x] Fit and persist nozzle runout coefficients per detected nozzle/tip
+- [ ] Pass attached-hardware head geometry and nozzle runout validation
+- [ ] Fit vacuum classification per nozzle/tip
 - [ ] Pass full-bed and nozzle p95 residual of 0.05 mm or better
 
 ## Gate 4 — Feeder and job production validation

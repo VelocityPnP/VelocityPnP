@@ -113,7 +113,8 @@ enum Command {
         calibration: Uuid,
         #[arg(long, env = "VELOCITYPNP_LEASE")]
         lease: Uuid,
-        /// Confirm level nozzles, a clear envelope, and reachable power isolation.
+        /// Confirm level nozzles, a clear envelope, correctly routed nozzle
+        /// tubes, and reachable power isolation.
         #[arg(long)]
         confirm_safety_checks: bool,
         #[arg(long, default_value_t = 30)]
@@ -349,7 +350,9 @@ async fn main() -> Result<()> {
             visual_homing_samples,
         } => {
             if !confirm_safety_checks {
-                bail!("calibration requires --confirm-safety-checks after physical inspection");
+                bail!(
+                    "calibration requires --confirm-safety-checks after inspecting the envelope, nozzles, tube routing, and power isolation"
+                );
             }
             let started = post(
                 &client,

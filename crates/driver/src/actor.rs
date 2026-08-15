@@ -2,6 +2,7 @@ use crate::MachineDriver;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -38,6 +39,7 @@ impl MachineHandle {
                 status_tx,
                 events: events.clone(),
                 emergency_flag: emergency_flag.clone(),
+                calibration_rotation_references: BTreeMap::new(),
                 sequence: 0,
             }
             .run(),
@@ -115,6 +117,38 @@ impl MachineHandle {
             lease_id,
             target,
             feed_mm_per_min,
+            reply,
+        })
+        .await
+    }
+
+    /// Reads a profile-scoped rotation reference for the automated calibration
+    /// runner. This operation is not exposed as unrestricted HTTP motion.
+    pub async fn calibration_rotation_reference(
+        &self,
+        lease_id: Uuid,
+        nozzle_id: String,
+    ) -> Result<f64> {
+        request(&self.tx, |reply| Command::CalibrationRotationReference {
+            lease_id,
+            nozzle_id,
+            reply,
+        })
+        .await
+    }
+
+    /// Moves one nozzle within the bounded offsets in the active calibration
+    /// profile. Normal jog rotation remains independently interlocked.
+    pub async fn calibration_rotate_nozzle(
+        &self,
+        lease_id: Uuid,
+        nozzle_id: String,
+        angle_offset_deg: f64,
+    ) -> Result<f64> {
+        request(&self.tx, |reply| Command::CalibrationRotateNozzle {
+            lease_id,
+            nozzle_id,
+            angle_offset_deg,
             reply,
         })
         .await
@@ -210,6 +244,17 @@ enum Command {
         feed_mm_per_min: f64,
         reply: oneshot::Sender<Result<Pose>>,
     },
+    CalibrationRotationReference {
+        lease_id: Uuid,
+        nozzle_id: String,
+        reply: oneshot::Sender<Result<f64>>,
+    },
+    CalibrationRotateNozzle {
+        lease_id: Uuid,
+        nozzle_id: String,
+        angle_offset_deg: f64,
+        reply: oneshot::Sender<Result<f64>>,
+    },
     Actuate {
         lease_id: Uuid,
         actuator_id: String,
@@ -241,6 +286,7 @@ struct MachineActor {
     status_tx: watch::Sender<MachineStatus>,
     events: broadcast::Sender<MachineEvent>,
     emergency_flag: Arc<AtomicBool>,
+    calibration_rotation_references: BTreeMap<String, (Uuid, f64)>,
     sequence: u64,
 }
 
@@ -253,6 +299,7 @@ impl MachineActor {
                 }
                 Command::Disconnect { reply } => {
                     let result = self.driver.disconnect().await;
+                    self.calibration_rotation_references.clear();
                     self.update(|s| {
                         s.state = MachineState::Disconnected;
                         s.homed = false;
@@ -306,6 +353,27 @@ impl MachineActor {
                 } => {
                     let _ = reply.send(self.jog(lease_id, target, feed_mm_per_min).await);
                 }
+                Command::CalibrationRotationReference {
+                    lease_id,
+                    nozzle_id,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        self.calibration_rotation_reference(lease_id, &nozzle_id)
+                            .await,
+                    );
+                }
+                Command::CalibrationRotateNozzle {
+                    lease_id,
+                    nozzle_id,
+                    angle_offset_deg,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        self.calibration_rotate_nozzle(lease_id, &nozzle_id, angle_offset_deg)
+                            .await,
+                    );
+                }
                 Command::Actuate {
                     lease_id,
                     actuator_id,
@@ -330,6 +398,7 @@ impl MachineActor {
                 Command::EmergencyStop { reply } => {
                     let result = self.driver.emergency_stop().await;
                     self.emergency_flag.store(false, Ordering::Release);
+                    self.calibration_rotation_references.clear();
                     self.update(|s| {
                         s.state = MachineState::EStopped;
                         s.homed = false;
@@ -348,6 +417,7 @@ impl MachineActor {
         }
         match self.driver.connect().await {
             Ok(firmware) => {
+                self.calibration_rotation_references.clear();
                 self.update(|s| {
                     s.state = MachineState::Preflight;
                     s.fault = None;
@@ -387,6 +457,7 @@ impl MachineActor {
             acquired_at: now,
             expires_at: now + ChronoDuration::seconds(i64::from(duration_seconds)),
         };
+        self.calibration_rotation_references.clear();
         self.update(|s| s.control_lease = Some(lease.clone()));
         self.emit("control.lease_acquired", json!({"lease": lease}));
         Ok(lease)
@@ -409,6 +480,7 @@ impl MachineActor {
         if !checks_confirmed {
             bail!("operator homing safety checks were not confirmed");
         }
+        self.calibration_rotation_references.clear();
         self.update(|s| s.state = MachineState::Homing);
         self.emit("machine.homing_started", json!({}));
         match self.driver.home().await {
@@ -468,6 +540,144 @@ impl MachineActor {
                 Err(error)
             }
         }
+    }
+
+    async fn calibration_rotation_reference(
+        &mut self,
+        lease_id: Uuid,
+        nozzle_id: &str,
+    ) -> Result<f64> {
+        self.assert_can_calibrate_rotation(lease_id)?;
+        if let Some((stored_lease, reference)) = self.calibration_rotation_references.get(nozzle_id)
+        {
+            if *stored_lease == lease_id {
+                return Ok(*reference);
+            }
+        }
+        let controller_axis = self.nozzle_rotation_axis(nozzle_id)?;
+        let reference = self.driver.rotation_position(controller_axis).await?;
+        self.calibration_rotation_references
+            .insert(nozzle_id.into(), (lease_id, reference));
+        Ok(reference)
+    }
+
+    async fn calibration_rotate_nozzle(
+        &mut self,
+        lease_id: Uuid,
+        nozzle_id: &str,
+        angle_offset_deg: f64,
+    ) -> Result<f64> {
+        self.assert_can_calibrate_rotation(lease_id)?;
+        if !angle_offset_deg.is_finite() {
+            bail!("nozzle rotation offset must be finite");
+        }
+        let bottom = self
+            .profile
+            .bottom_vision
+            .as_ref()
+            .context("active profile does not define bottom vision")?;
+        let geometry = &bottom.head_geometry;
+        let max_offset = geometry
+            .rotation_angle_offsets_deg
+            .iter()
+            .map(|angle| angle.abs())
+            .fold(0.0, f64::max);
+        if angle_offset_deg.abs() > max_offset + 1e-6 {
+            bail!("nozzle rotation target exceeds the {max_offset:.1} degree calibration bound");
+        }
+        let (reference_lease, reference_deg) = self
+            .calibration_rotation_references
+            .get(nozzle_id)
+            .copied()
+            .context("capture the nozzle rotation reference before moving it")?;
+        if reference_lease != lease_id {
+            bail!("nozzle rotation reference belongs to a different control lease");
+        }
+        let target_deg = reference_deg + angle_offset_deg;
+        let feed = geometry.rotation_feed_deg_per_min;
+        let controller_axis = self.nozzle_rotation_axis(nozzle_id)?;
+        match self
+            .driver
+            .rotate_nozzle(controller_axis, target_deg, feed)
+            .await
+        {
+            Ok(actual) => {
+                if controller_axis == 'A' {
+                    self.update(|status| {
+                        if let Some(pose) = status.pose.as_mut() {
+                            pose.rotation_deg = actual;
+                        }
+                    });
+                }
+                self.emit(
+                    "machine.nozzle_rotated",
+                    json!({
+                        "nozzle_id": nozzle_id,
+                        "controller_axis": controller_axis,
+                        "reference_deg": reference_deg,
+                        "angle_offset_deg": angle_offset_deg,
+                        "target_deg": target_deg,
+                        "actual_deg": actual,
+                        "calibration": true,
+                    }),
+                );
+                Ok(actual)
+            }
+            Err(error) => {
+                self.set_fault("rotation_motion_failed", error.to_string(), true);
+                Err(error)
+            }
+        }
+    }
+
+    fn assert_can_calibrate_rotation(&self, lease_id: Uuid) -> Result<()> {
+        let status = self.status();
+        status.assert_lease(lease_id, Utc::now())?;
+        if status.state != MachineState::Ready || !status.homed {
+            bail!("nozzle rotation calibration requires a homed ready machine");
+        }
+        if !self
+            .profile
+            .capabilities
+            .get("rotation_calibration")
+            .copied()
+            .unwrap_or(false)
+        {
+            bail!("active profile does not permit bounded rotation calibration");
+        }
+        Ok(())
+    }
+
+    fn nozzle_rotation_axis(&self, nozzle_id: &str) -> Result<char> {
+        let bottom = self
+            .profile
+            .bottom_vision
+            .as_ref()
+            .context("active profile does not define bottom vision")?;
+        let nozzle = bottom
+            .nozzles
+            .iter()
+            .find(|nozzle| nozzle.nozzle_id == nozzle_id)
+            .with_context(|| format!("unknown nozzle {nozzle_id}"))?;
+        let axis = self
+            .profile
+            .axes
+            .iter()
+            .find(|axis| axis.name == nozzle.rotation_axis && axis.kind == "rotation")
+            .with_context(|| {
+                format!(
+                    "nozzle {nozzle_id} references missing rotation axis {}",
+                    nozzle.rotation_axis
+                )
+            })?;
+        let mut letters = axis.controller_letter.chars();
+        let controller_axis = letters
+            .next()
+            .context("rotation axis has no controller letter")?;
+        if letters.next().is_some() || !matches!(controller_axis, 'A' | 'B') {
+            bail!("rotation axis controller letter must be A or B");
+        }
+        Ok(controller_axis)
     }
 
     async fn actuate(&mut self, lease_id: Uuid, actuator_id: String, enabled: bool) -> Result<()> {
@@ -613,6 +823,7 @@ impl MachineActor {
     }
 
     fn set_fault(&mut self, code: &str, message: String, recoverable: bool) {
+        self.calibration_rotation_references.clear();
         let fault = velocitypnp_domain::Fault {
             code: code.into(),
             message,
@@ -759,6 +970,60 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("rotation is disabled"));
+        assert_eq!(handle.status().state, MachineState::Ready);
+    }
+
+    #[tokio::test]
+    async fn calibration_rotation_is_profile_scoped_and_bounded() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile,
+        );
+        handle.connect().await.unwrap();
+        handle.complete_preflight(true).await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.home(lease.id, true).await.unwrap();
+
+        let n1_reference = handle
+            .calibration_rotation_reference(lease.id, "N1".into())
+            .await
+            .unwrap();
+        let n2_reference = handle
+            .calibration_rotation_reference(lease.id, "N2".into())
+            .await
+            .unwrap();
+        assert_eq!(n1_reference, 0.0);
+        assert_eq!(n2_reference, 0.0);
+        assert_eq!(
+            handle
+                .calibration_rotate_nozzle(lease.id, "N1".into(), 165.0)
+                .await
+                .unwrap(),
+            165.0
+        );
+        assert_eq!(
+            handle
+                .calibration_rotate_nozzle(lease.id, "N2".into(), -165.0)
+                .await
+                .unwrap(),
+            -165.0
+        );
+        assert_eq!(
+            handle
+                .calibration_rotation_reference(lease.id, "N1".into())
+                .await
+                .unwrap(),
+            n1_reference
+        );
+        assert_eq!(handle.status().pose.unwrap().rotation_deg, 165.0);
+
+        let error = handle
+            .calibration_rotate_nozzle(lease.id, "N1".into(), 165.1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exceeds the 165.0 degree calibration bound"));
         assert_eq!(handle.status().state, MachineState::Ready);
     }
 

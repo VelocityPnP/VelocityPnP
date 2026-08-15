@@ -141,9 +141,10 @@ velocitypnp visual-home --lease "$VELOCITYPNP_LEASE"
 `--apply-offset` is rejected while `axis_mapping_validated` is false. Once the
 mapping has physical evidence, apply mode permits up to three corrections while
 keeping the total offset from the seed within one millimetre. Every correction
-uses a fresh frame; the final frame must have at most one pixel residual before
-the profile-defined XY-only coordinate reset is sent. Z and both nozzle angles
-are never included in that reset.
+uses a fresh frame; the final correction distance must pass the profile limit
+in millimetres before the profile-defined XY-only coordinate reset is sent.
+Pixel error remains diagnostic evidence. Z and both nozzle angles are never
+included in that reset.
 
 ## Automated calibration runs
 
@@ -151,7 +152,8 @@ The supported calibration path does not accept operator-entered measurements.
 Create a snapshot, then start its initial machine runner from the web UI or the
 CLI. The only confirmation covers conditions the V3 cannot observe before its
 first motion: level nozzles, a clear travel envelope, and reachable physical
-power isolation.
+power isolation. The nozzle tubes must also be seated, routed normally, and
+free of snags.
 
 ```bash
 velocitypnp new-calibration --machine-serial 3286336D3331
@@ -167,7 +169,21 @@ reproducibility, and presents N1 and N2 to the bottom camera. Bore diameter
 distinguishes the configured N045 and N24 assignments; the operator does not
 declare the loaded tips. It then repeats coarse home, bounded visual refinement,
 a deterministic -10/-10 mm excursion, return, and observation for 30 cycles by
-default.
+default. After the first successful cycle, the runner performs head geometry
+early so a camera or rotation problem does not waste the full repeatability
+run. The evidence remains provisional until all 30 cycles pass. The runner:
+
+1. Uses bounded local X/Y probes to learn the bottom-camera pixel-to-motion map.
+2. Uses each camera to locate the opposing lens and centers the pair.
+3. Locates each detected nozzle tip from the prior profile offset seed.
+4. Rotates N1/A and N2/B through 12 alternating offsets from ±15 to
+   ±165 degrees.
+5. Restores each starting angle and fits the rotation-axis position, head
+   offset, and first-harmonic nozzle-tip runout coefficients.
+
+Only the calibration runner can request these profile-bounded rotations.
+Normal physical jog rotation remains disabled by `rotation_motion: false`.
+There is no unrestricted HTTP nozzle-rotation endpoint.
 
 Every phase and sample is persisted under
 `GET /api/v1/calibration-runs/{id}`. A completed measurement outside its gate is

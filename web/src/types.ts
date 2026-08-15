@@ -188,6 +188,55 @@ export interface VisualHomingValidationReport {
   passed: boolean;
 }
 
+export interface BottomCameraMappingReport {
+  pixel_error_to_machine_mm: [[number, number], [number, number]];
+  observed_pixel_per_machine_mm: [[number, number], [number, number]];
+  probe_distance_mm: number;
+  returned_center_error_px: number;
+  returned_center_error_mm: number;
+}
+
+export interface HeadFeatureCenterReport {
+  feature_id: string;
+  controller_x_mm: number;
+  controller_y_mm: number;
+  target_x_px: number;
+  target_y_px: number;
+  target_diameter_px: number;
+  correction_count: number;
+  verification_residual_mm: number;
+}
+
+export interface NozzleRunoutReport {
+  nozzle_id: string;
+  tip_id: string;
+  rotation_axis: string;
+  reference_controller_angle_deg: number;
+  axis_controller_x_mm: number;
+  axis_controller_y_mm: number;
+  head_offset_x_mm: number;
+  head_offset_y_mm: number;
+  correction_cos_x_mm: number;
+  correction_sin_x_mm: number;
+  correction_cos_y_mm: number;
+  correction_sin_y_mm: number;
+  runout_radius_mm: number;
+  runout_phase_deg: number;
+  fit_residuals: Residuals;
+  passed: boolean;
+}
+
+export interface HeadGeometryReport {
+  bottom_camera_mapping: BottomCameraMappingReport;
+  top_camera_center: HeadFeatureCenterReport;
+  bottom_camera_reciprocal_observation: HeadFeatureCenterReport;
+  nozzles: NozzleRunoutReport[];
+  n1_to_n2_x_mm: number;
+  n1_to_n2_y_mm: number;
+  combined_runout_fit_residuals: Residuals;
+  passed: boolean;
+}
+
 export interface AutomatedCalibrationRun {
   id: string;
   calibration_id: string;
@@ -210,6 +259,7 @@ export interface AutomatedCalibrationRun {
   camera_reports: Record<string, unknown>;
   visual_homing_samples: VisualHomingValidationSample[];
   visual_homing_report: VisualHomingValidationReport | null;
+  head_geometry_report: HeadGeometryReport | null;
   failure: string | null;
   simulated: boolean;
 }

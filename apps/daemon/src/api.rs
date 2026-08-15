@@ -23,7 +23,8 @@ use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, CalibrationCheck, CalibrationCheckSource,
     CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
     CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRole, Feeder,
-    InspectionReport, InspectionStatus, Job, JogTarget, MachineProfile, MachineState, Operation,
+    HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus, Job,
+    JogTarget, MachineProfile, MachineState, NozzleRunoutReport, NozzleRunoutSample, Operation,
     OperationStatus, Pose, Residuals, SensorReading, VisualHomingProfile,
     VisualHomingValidationSample,
 };
@@ -33,10 +34,13 @@ use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::plan_job;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    apply_camera_controls, camera_sample_metrics, capture_gray_frame, capture_gray_frames,
-    encode_gray_png, plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
-    summarize_nozzle_tooling, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    GrayFrame, NozzleToolingReport, V4l2CaptureConfig, VisualHomingPlan,
+    apply_camera_controls, calibrate_bottom_camera_mapping, camera_sample_metrics,
+    capture_gray_frame, capture_gray_frames, encode_gray_png, fit_nozzle_runout,
+    mean_nozzle_detection, plan_bottom_camera_correction, plan_pixel_correction,
+    plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
+    summarize_head_camera_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
+    summarize_residuals, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    FiducialDetection, GrayFrame, NozzleToolingReport, V4l2CaptureConfig, VisualHomingPlan,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -1172,7 +1176,7 @@ async fn start_calibration_run(
 ) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
     if !body.confirmed_external_safety_checks {
         return Err(ApiError::bad_request(
-            "calibration requires confirmation that the travel envelope is clear, both nozzles are level, and power isolation is reachable",
+            "calibration requires confirmation that the travel envelope is clear, both nozzles are level, nozzle tubes are routed normally and free of snags, and power isolation is reachable",
         ));
     }
     let snapshot = state
@@ -1267,6 +1271,7 @@ async fn start_calibration_run(
         camera_reports: BTreeMap::new(),
         visual_homing_samples: Vec::new(),
         visual_homing_report: None,
+        head_geometry_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -1350,17 +1355,68 @@ fn validate_calibration_targets(
         ));
     }
     let bottom = profile.bottom_vision.as_ref().unwrap();
+    if bottom.nozzles.len() != 2
+        || !["N1", "N2"]
+            .iter()
+            .all(|id| bottom.nozzles.iter().any(|nozzle| nozzle.nozzle_id == *id))
+    {
+        return Err(ApiError::bad_request(
+            "head geometry requires configured N1 and N2 nozzles",
+        ));
+    }
+    let rotation_letters = ["N1", "N2"]
+        .iter()
+        .map(|nozzle_id| {
+            let nozzle = bottom
+                .nozzles
+                .iter()
+                .find(|nozzle| nozzle.nozzle_id == *nozzle_id)?;
+            profile
+                .axes
+                .iter()
+                .find(|axis| axis.name == nozzle.rotation_axis && axis.kind == "rotation")
+                .map(|axis| axis.controller_letter.as_str())
+        })
+        .collect::<Option<Vec<_>>>();
+    if rotation_letters.as_deref() != Some(&["A", "B"][..]) {
+        return Err(ApiError::bad_request(
+            "N1 and N2 must map to rotation controller axes A and B",
+        ));
+    }
     if bottom.nozzles.iter().any(|nozzle| {
         let target = bottom.nozzle_target(nozzle);
-        !profile.bounds.contains(Pose {
-            x_mm: target.x_mm,
-            y_mm: target.y_mm,
-            z_mm: target.z_mm,
-            rotation_deg: 0.0,
+        let margin = bottom
+            .head_geometry
+            .probe_distance_mm
+            .max(bottom.head_geometry.max_centering_correction_mm);
+        [-margin, margin].into_iter().any(|x_offset| {
+            [-margin, margin].into_iter().any(|y_offset| {
+                !profile.bounds.contains(Pose {
+                    x_mm: target.x_mm + x_offset,
+                    y_mm: target.y_mm + y_offset,
+                    z_mm: target.z_mm,
+                    rotation_deg: 0.0,
+                })
+            })
         })
     }) {
         return Err(ApiError::bad_request(
-            "bottom-camera nozzle target is outside machine bounds",
+            "bottom-camera nozzle target or correction margin is outside machine bounds",
+        ));
+    }
+    let camera_margin = bottom.head_geometry.max_centering_correction_mm;
+    if [-camera_margin, camera_margin].into_iter().any(|x_offset| {
+        [-camera_margin, camera_margin].into_iter().any(|y_offset| {
+            !profile.bounds.contains(Pose {
+                x_mm: bottom.camera_x_mm + x_offset,
+                y_mm: bottom.camera_y_mm + y_offset,
+                z_mm: bottom.working_z_mm,
+                rotation_deg: 0.0,
+            })
+        })
+    }) {
+        return Err(ApiError::bad_request(
+            "reciprocal camera target or correction margin is outside machine bounds",
         ));
     }
     Ok(())
@@ -1373,7 +1429,7 @@ fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
             "External safety conditions",
             CalibrationCheckSource::Operator,
             CalibrationCheckStatus::Passed,
-            "Operator confirmed a clear envelope, level nozzles, and reachable power isolation",
+            "Operator confirmed a clear envelope, level nozzles, normal nozzle-tube routing, and reachable power isolation",
         ),
         CalibrationCheck {
             id: "device_discovery".into(),
@@ -1431,6 +1487,41 @@ fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
             CalibrationCheckSource::Vision,
             CalibrationCheckStatus::Pending,
             "Waiting for repeated visual homing and excursion cycles",
+        ),
+        calibration_check(
+            "bottom_camera_mapping",
+            "Bottom-camera image-to-motion mapping",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for automatic bounded X/Y probe moves",
+        ),
+        calibration_check(
+            "reciprocal_camera_center",
+            "Reciprocal camera centering",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for both cameras to locate the opposing lens",
+        ),
+        calibration_check(
+            "nozzle_offsets",
+            "Top-camera and nozzle-axis offsets",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for bottom-camera rotation-axis measurements",
+        ),
+        calibration_check(
+            "runout_N1",
+            "N1 nozzle-tip runout",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for bounded multi-angle measurement",
+        ),
+        calibration_check(
+            "runout_N2",
+            "N2 nozzle-tip runout",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for bounded multi-angle measurement",
         ),
     ]
 }
@@ -1536,6 +1627,7 @@ async fn execute_calibration_run(
         CalibrationRunPhase::VisualHomingValidation,
     )?;
     let visual = state.profile.visual_homing.as_ref().unwrap().clone();
+    let mut head_geometry_report = None;
     for cycle in 1..=run.config.visual_homing_sample_count {
         if let Err(error) = state.machine.home(lease_id, true).await {
             return fail_calibration_run(&state, &mut run, error.to_string());
@@ -1650,6 +1742,42 @@ async fn execute_calibration_run(
         if let Err(error) = persist_calibration_run(&state, &mut run) {
             return fail_calibration_run(&state, &mut run, error);
         }
+        if cycle == 1 {
+            if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
+                if let Err(cleanup_error) = state.machine.disable_actuator("lights".into()).await {
+                    tracing::error!(%cleanup_error, "head-geometry light cleanup also failed");
+                }
+                return fail_calibration_run(&state, &mut run, error.to_string());
+            }
+            let geometry_result =
+                execute_head_geometry_calibration(&state, &mut run, lease_id).await;
+            if let Err(error) = state.machine.disable_actuator("lights".into()).await {
+                return fail_calibration_run(&state, &mut run, error.to_string());
+            }
+            let geometry_report = match geometry_result {
+                Ok(report) => report,
+                Err(CalibrationStop::Rejected(message)) => {
+                    return reject_calibration_run(&state, &mut run, message)
+                }
+                Err(CalibrationStop::Failed(message)) => {
+                    return fail_calibration_run(&state, &mut run, message)
+                }
+            };
+            run.head_geometry_report = Some(geometry_report.clone());
+            if let Err(error) = persist_calibration_run(&state, &mut run) {
+                return fail_calibration_run(&state, &mut run, error);
+            }
+            head_geometry_report = Some(geometry_report);
+            if run.config.visual_homing_sample_count > 1 {
+                if let Err(error) = set_run_phase(
+                    &state,
+                    &mut run,
+                    CalibrationRunPhase::VisualHomingValidation,
+                ) {
+                    return fail_calibration_run(&state, &mut run, error);
+                }
+            }
+        }
     }
     let report = match summarize_visual_homing_validation(
         &run.visual_homing_samples,
@@ -1699,14 +1827,724 @@ async fn execute_calibration_run(
     ) {
         return fail_calibration_run(&state, &mut run, error);
     }
+
+    let geometry_report = match head_geometry_report {
+        Some(report) => report,
+        None => {
+            return fail_calibration_run(
+                &state,
+                &mut run,
+                "head-geometry report is missing after visual homing".into(),
+            )
+        }
+    };
+    if let Err(error) = record_head_geometry_steps(&state, &run, &geometry_report) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
     run.phase = CalibrationRunPhase::Complete;
     run.status = CalibrationRunStatus::Succeeded;
     run.failure = None;
     persist_calibration_run(&state, &mut run)?;
     Ok(Some(format!(
-        "Initial machine calibration passed {} visual-homing cycles",
-        run.config.visual_homing_sample_count
+        "Initial machine calibration passed {} visual-homing cycles and {} nozzle runout fits",
+        run.config.visual_homing_sample_count,
+        geometry_report.nozzles.len(),
     )))
+}
+
+async fn execute_head_geometry_calibration(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+) -> Result<HeadGeometryReport, CalibrationStop> {
+    set_run_phase(state, run, CalibrationRunPhase::HeadGeometryCalibration)
+        .map_err(CalibrationStop::Failed)?;
+    let bottom = state.profile.bottom_vision.as_ref().unwrap().clone();
+    let visual = state.profile.visual_homing.as_ref().unwrap().clone();
+    let bottom_camera_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(api_calibration_stop)?;
+    let top_camera_profile =
+        stored_camera_profile(state, CameraRole::TopCamera).map_err(api_calibration_stop)?;
+    let bottom_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(api_calibration_stop)?;
+    let top_path = camera_path_for_role(CameraRole::TopCamera).map_err(api_calibration_stop)?;
+    let reference_nozzle = bottom
+        .nozzles
+        .first()
+        .ok_or_else(|| CalibrationStop::Failed("bottom-vision profile has no nozzles".into()))?;
+
+    let mapping = measure_bottom_camera_mapping(
+        state,
+        lease_id,
+        &bottom,
+        reference_nozzle,
+        &bottom_camera_profile,
+        &bottom_path,
+    )
+    .await?;
+    let mapping_passed =
+        mapping.returned_center_error_mm <= bottom.head_geometry.verification_limit_mm;
+    update_run_check(
+        run,
+        "bottom_camera_mapping",
+        if mapping_passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        if mapping_passed {
+            "Bounded X/Y probes produced a stable invertible image-to-motion map"
+        } else {
+            "Bottom-camera target did not return to its probe baseline"
+        },
+        serde_json::to_value(&mapping).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+    if !mapping_passed {
+        return Err(CalibrationStop::Rejected(format!(
+            "bottom-camera probe return error {:.4}mm exceeds {:.4}mm",
+            mapping.returned_center_error_mm, bottom.head_geometry.verification_limit_mm,
+        )));
+    }
+
+    let (top_camera_center, bottom_camera_observation) = center_opposed_cameras(
+        state,
+        lease_id,
+        &bottom,
+        &visual,
+        &bottom_camera_profile,
+        &top_camera_profile,
+        &bottom_path,
+        &top_path,
+        mapping.pixel_error_to_machine_mm,
+    )
+    .await?;
+    update_run_check(
+        run,
+        "reciprocal_camera_center",
+        CalibrationCheckStatus::Passed,
+        "Both cameras located the opposing lens within the physical limit",
+        json!({
+            "top_camera": top_camera_center,
+            "bottom_camera": bottom_camera_observation,
+        }),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+
+    let mut nozzle_reports = Vec::new();
+    for nozzle in &bottom.nozzles {
+        let report = measure_nozzle_runout(
+            state,
+            run,
+            lease_id,
+            &bottom,
+            nozzle,
+            &bottom_camera_profile,
+            &bottom_path,
+            mapping.pixel_error_to_machine_mm,
+            top_camera_center.controller_x_mm,
+            top_camera_center.controller_y_mm,
+        )
+        .await?;
+        nozzle_reports.push(report);
+    }
+    if nozzle_reports.len() != 2 {
+        return Err(CalibrationStop::Rejected(
+            "head geometry currently requires exactly two configured nozzles".into(),
+        ));
+    }
+    let n1 = nozzle_reports
+        .iter()
+        .find(|report| report.nozzle_id == "N1")
+        .ok_or_else(|| CalibrationStop::Rejected("N1 runout report is missing".into()))?;
+    let n2 = nozzle_reports
+        .iter()
+        .find(|report| report.nozzle_id == "N2")
+        .ok_or_else(|| CalibrationStop::Rejected("N2 runout report is missing".into()))?;
+    let combined_runout_fit_residuals = combine_runout_residuals(&nozzle_reports);
+    update_run_check(
+        run,
+        "nozzle_offsets",
+        CalibrationCheckStatus::Passed,
+        "Both nozzle rotation axes were measured relative to the top camera",
+        json!({
+            "N1": {"x_mm": n1.head_offset_x_mm, "y_mm": n1.head_offset_y_mm},
+            "N2": {"x_mm": n2.head_offset_x_mm, "y_mm": n2.head_offset_y_mm},
+            "N1_to_N2": {
+                "x_mm": n1.axis_controller_x_mm - n2.axis_controller_x_mm,
+                "y_mm": n1.axis_controller_y_mm - n2.axis_controller_y_mm,
+            },
+        }),
+    );
+    let report = HeadGeometryReport {
+        bottom_camera_mapping: mapping,
+        top_camera_center,
+        bottom_camera_reciprocal_observation: bottom_camera_observation,
+        n1_to_n2_x_mm: n1.axis_controller_x_mm - n2.axis_controller_x_mm,
+        n1_to_n2_y_mm: n1.axis_controller_y_mm - n2.axis_controller_y_mm,
+        combined_runout_fit_residuals,
+        passed: nozzle_reports.iter().all(|report| report.passed),
+        nozzles: nozzle_reports,
+    };
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+    Ok(report)
+}
+
+async fn measure_bottom_camera_mapping(
+    state: &AppState,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> Result<velocitypnp_domain::BottomCameraMappingReport, CalibrationStop> {
+    let base_pose = state
+        .machine
+        .jog(
+            lease_id,
+            bottom.nozzle_target(nozzle),
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let base = capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
+    let probe = bottom.head_geometry.probe_distance_mm;
+    let x_minus = capture_nozzle_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm - probe,
+        base_pose.y_mm,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    let x_plus = capture_nozzle_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm + probe,
+        base_pose.y_mm,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    let y_minus = capture_nozzle_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm,
+        base_pose.y_mm - probe,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    let y_plus = capture_nozzle_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm,
+        base_pose.y_mm + probe,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    state
+        .machine
+        .jog(lease_id, base_pose.into(), bottom.feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let returned =
+        capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
+    calibrate_bottom_camera_mapping(base, x_minus, x_plus, y_minus, y_plus, returned, probe)
+        .ok_or_else(|| {
+            CalibrationStop::Rejected(
+                "bottom-camera probe did not produce a plausible invertible map".into(),
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_nozzle_at_xy(
+    state: &AppState,
+    lease_id: Uuid,
+    base_pose: Pose,
+    x_mm: f64,
+    y_mm: f64,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> Result<FiducialDetection, CalibrationStop> {
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm,
+                y_mm,
+                z_mm: base_pose.z_mm,
+                rotation_deg: None,
+            },
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await
+}
+
+async fn capture_geometry_nozzle(
+    state: &AppState,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> Result<FiducialDetection, CalibrationStop> {
+    let frames = capture_profiled_frames(
+        state,
+        camera_profile,
+        device_path,
+        bottom.head_geometry.centering_sample_count,
+    )
+    .await
+    .map_err(api_calibration_stop)?;
+    let report = summarize_nozzle_tooling(&frames, bottom, nozzle);
+    if !report.passed {
+        return Err(CalibrationStop::Rejected(format!(
+            "{} was not stably identified as {} during geometry calibration",
+            nozzle.nozzle_id, nozzle.expected_tip_id
+        )));
+    }
+    mean_nozzle_detection(&report).ok_or_else(|| {
+        CalibrationStop::Rejected(format!(
+            "{} produced no mean bore detection",
+            nozzle.nozzle_id
+        ))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn center_opposed_cameras(
+    state: &AppState,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    visual: &VisualHomingProfile,
+    bottom_camera_profile: &CameraProfile,
+    top_camera_profile: &CameraProfile,
+    bottom_path: &str,
+    top_path: &str,
+    bottom_mapping: [[f64; 2]; 2],
+) -> Result<(HeadFeatureCenterReport, HeadFeatureCenterReport), CalibrationStop> {
+    let geometry = &bottom.head_geometry;
+    let mut pose = state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: bottom.camera_x_mm,
+                y_mm: bottom.camera_y_mm,
+                z_mm: bottom.working_z_mm,
+                rotation_deg: None,
+            },
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    for correction_count in 0..=geometry.max_centering_corrections {
+        let bottom_frames = capture_profiled_frames(
+            state,
+            bottom_camera_profile,
+            bottom_path,
+            geometry.centering_sample_count,
+        )
+        .await
+        .map_err(api_calibration_stop)?;
+        let top_lens = summarize_head_camera_feature(&bottom_frames, bottom).ok_or_else(|| {
+            CalibrationStop::Rejected("bottom camera could not locate the top-camera lens".into())
+        })?;
+        let top_frames = capture_profiled_frames(
+            state,
+            top_camera_profile,
+            top_path,
+            geometry.centering_sample_count,
+        )
+        .await
+        .map_err(api_calibration_stop)?;
+        let bottom_lens = summarize_opposed_camera_feature(
+            &top_frames,
+            visual.frame_center_x_px,
+            visual.frame_center_y_px,
+            visual.max_capture_error_px,
+            geometry.top_camera_feature_min_diameter_px,
+            geometry.top_camera_feature_max_diameter_px,
+        )
+        .ok_or_else(|| {
+            CalibrationStop::Rejected("top camera could not locate the bottom-camera lens".into())
+        })?;
+        let bottom_correction = plan_bottom_camera_correction(top_lens, bottom, bottom_mapping)
+            .ok_or_else(|| CalibrationStop::Failed("invalid bottom-camera correction".into()))?;
+        let top_correction = plan_pixel_correction(
+            bottom_lens,
+            visual.frame_center_x_px,
+            visual.frame_center_y_px,
+            visual.pixel_error_to_machine_mm,
+        )
+        .ok_or_else(|| CalibrationStop::Failed("invalid top-camera correction".into()))?;
+        if bottom_correction.distance_mm > geometry.max_centering_correction_mm
+            || top_correction.distance_mm > geometry.max_centering_correction_mm
+        {
+            return Err(CalibrationStop::Rejected(
+                "reciprocal camera correction exceeds the profile bound".into(),
+            ));
+        }
+        if bottom_correction.distance_mm <= geometry.verification_limit_mm
+            && top_correction.distance_mm <= geometry.verification_limit_mm
+        {
+            return Ok((
+                head_feature_report(
+                    "top_camera_lens",
+                    pose,
+                    top_lens,
+                    correction_count,
+                    bottom_correction.distance_mm,
+                ),
+                head_feature_report(
+                    "bottom_camera_lens",
+                    pose,
+                    bottom_lens,
+                    correction_count,
+                    top_correction.distance_mm,
+                ),
+            ));
+        }
+        if correction_count == geometry.max_centering_corrections {
+            return Err(CalibrationStop::Rejected(format!(
+                "reciprocal camera residuals {:.4}mm and {:.4}mm exceed {:.4}mm",
+                bottom_correction.distance_mm,
+                top_correction.distance_mm,
+                geometry.verification_limit_mm,
+            )));
+        }
+        pose = state
+            .machine
+            .jog(
+                lease_id,
+                JogTarget {
+                    x_mm: pose.x_mm + (bottom_correction.x_mm + top_correction.x_mm) / 2.0,
+                    y_mm: pose.y_mm + (bottom_correction.y_mm + top_correction.y_mm) / 2.0,
+                    z_mm: pose.z_mm,
+                    rotation_deg: None,
+                },
+                bottom.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    }
+    Err(CalibrationStop::Failed(
+        "reciprocal camera centering ended without a result".into(),
+    ))
+}
+
+fn head_feature_report(
+    feature_id: &str,
+    pose: Pose,
+    target: FiducialDetection,
+    correction_count: u32,
+    verification_residual_mm: f64,
+) -> HeadFeatureCenterReport {
+    HeadFeatureCenterReport {
+        feature_id: feature_id.into(),
+        controller_x_mm: pose.x_mm,
+        controller_y_mm: pose.y_mm,
+        target_x_px: target.x_px,
+        target_y_px: target.y_px,
+        target_diameter_px: target.diameter_px,
+        correction_count,
+        verification_residual_mm,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_nozzle_runout(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    top_camera_x_mm: f64,
+    top_camera_y_mm: f64,
+) -> Result<NozzleRunoutReport, CalibrationStop> {
+    let seed_pose = state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: top_camera_x_mm - nozzle.head_offset_x_mm,
+                y_mm: top_camera_y_mm - nozzle.head_offset_y_mm,
+                z_mm: bottom.working_z_mm,
+                rotation_deg: None,
+            },
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let base_pose = center_nozzle_for_runout(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+        pixel_error_to_machine_mm,
+        seed_pose,
+    )
+    .await?;
+    let reference_angle = state
+        .machine
+        .calibration_rotation_reference(lease_id, nozzle.nozzle_id.clone())
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let measurement = async {
+        let mut samples = Vec::new();
+        for angle_offset in &bottom.head_geometry.rotation_angle_offsets_deg {
+            let controller_angle = state
+                .machine
+                .calibration_rotate_nozzle(lease_id, nozzle.nozzle_id.clone(), *angle_offset)
+                .await
+                .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+            let target =
+                capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
+            let correction =
+                plan_bottom_camera_correction(target, bottom, pixel_error_to_machine_mm)
+                    .ok_or_else(|| CalibrationStop::Failed("invalid nozzle correction".into()))?;
+            if correction.distance_mm > bottom.head_geometry.max_centering_correction_mm {
+                return Err(CalibrationStop::Rejected(format!(
+                    "{} correction {:.3}mm exceeds the geometry bound",
+                    nozzle.nozzle_id, correction.distance_mm
+                )));
+            }
+            samples.push(NozzleRunoutSample {
+                angle_offset_deg: *angle_offset,
+                controller_angle_deg: controller_angle,
+                target_x_px: target.x_px,
+                target_y_px: target.y_px,
+                correction_x_mm: correction.x_mm,
+                correction_y_mm: correction.y_mm,
+            });
+            update_run_check(
+                run,
+                &format!("runout_{}", nozzle.nozzle_id),
+                CalibrationCheckStatus::Pending,
+                &format!(
+                    "Measured {} of {} bounded angles",
+                    samples.len(),
+                    bottom.head_geometry.rotation_angle_offsets_deg.len()
+                ),
+                serde_json::to_value(&samples).unwrap_or(Value::Null),
+            );
+            persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+        }
+        Ok::<_, CalibrationStop>(samples)
+    }
+    .await;
+    let restore = state
+        .machine
+        .calibration_rotate_nozzle(lease_id, nozzle.nozzle_id.clone(), 0.0)
+        .await;
+    if let Err(error) = restore {
+        return Err(CalibrationStop::Failed(format!(
+            "failed to restore {} rotation reference: {error}",
+            nozzle.nozzle_id
+        )));
+    }
+    let samples = measurement?;
+    let report = fit_nozzle_runout(
+        nozzle,
+        reference_angle,
+        [base_pose.x_mm, base_pose.y_mm],
+        [top_camera_x_mm, top_camera_y_mm],
+        samples,
+        bottom.head_geometry.runout_fit_p95_limit_mm,
+    )
+    .ok_or_else(|| {
+        CalibrationStop::Rejected(format!("{} runout fit is singular", nozzle.nozzle_id))
+    })?;
+    update_run_check(
+        run,
+        &format!("runout_{}", nozzle.nozzle_id),
+        if report.passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        if report.passed {
+            "Runout fit met the configured physical residual limit"
+        } else {
+            "Runout fit exceeded the configured physical residual limit"
+        },
+        serde_json::to_value(&report).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+    if !report.passed {
+        return Err(CalibrationStop::Rejected(format!(
+            "{} runout fit p95 {:.4}mm exceeds {:.4}mm",
+            nozzle.nozzle_id,
+            report.fit_residuals.p95_mm,
+            bottom.head_geometry.runout_fit_p95_limit_mm,
+        )));
+    }
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn center_nozzle_for_runout(
+    state: &AppState,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    mut pose: Pose,
+) -> Result<Pose, CalibrationStop> {
+    let geometry = &bottom.head_geometry;
+    for correction_count in 0..=geometry.max_centering_corrections {
+        let target =
+            capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
+        let correction =
+            plan_bottom_camera_correction(target, bottom, pixel_error_to_machine_mm)
+                .ok_or_else(|| CalibrationStop::Failed("invalid nozzle correction".into()))?;
+        if correction.distance_mm > geometry.max_centering_correction_mm {
+            return Err(CalibrationStop::Rejected(format!(
+                "{} centering correction {:.3}mm exceeds the geometry bound",
+                nozzle.nozzle_id, correction.distance_mm
+            )));
+        }
+        if correction.distance_mm <= geometry.verification_limit_mm {
+            return Ok(pose);
+        }
+        if correction_count == geometry.max_centering_corrections {
+            return Err(CalibrationStop::Rejected(format!(
+                "{} centering residual {:.4}mm exceeds {:.4}mm",
+                nozzle.nozzle_id, correction.distance_mm, geometry.verification_limit_mm,
+            )));
+        }
+        pose = state
+            .machine
+            .jog(
+                lease_id,
+                JogTarget {
+                    x_mm: pose.x_mm + correction.x_mm,
+                    y_mm: pose.y_mm + correction.y_mm,
+                    z_mm: pose.z_mm,
+                    rotation_deg: None,
+                },
+                bottom.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    }
+    Err(CalibrationStop::Failed(
+        "nozzle centering ended without a result".into(),
+    ))
+}
+
+fn combine_runout_residuals(reports: &[NozzleRunoutReport]) -> Residuals {
+    let sample_count = reports
+        .iter()
+        .map(|report| report.fit_residuals.sample_count)
+        .sum::<u32>();
+    let squared_sum = reports
+        .iter()
+        .map(|report| {
+            report.fit_residuals.rms_mm.powi(2) * f64::from(report.fit_residuals.sample_count)
+        })
+        .sum::<f64>();
+    Residuals {
+        sample_count,
+        rms_mm: if sample_count == 0 {
+            0.0
+        } else {
+            (squared_sum / f64::from(sample_count)).sqrt()
+        },
+        p95_mm: reports
+            .iter()
+            .map(|report| report.fit_residuals.p95_mm)
+            .fold(0.0, f64::max),
+        max_mm: reports
+            .iter()
+            .map(|report| report.fit_residuals.max_mm)
+            .fold(0.0, f64::max),
+    }
+}
+
+fn record_head_geometry_steps(
+    state: &AppState,
+    run: &AutomatedCalibrationRun,
+    report: &HeadGeometryReport,
+) -> Result<(), String> {
+    let camera_residuals = summarize_residuals(
+        [
+            report.top_camera_center.verification_residual_mm,
+            report
+                .bottom_camera_reciprocal_observation
+                .verification_residual_mm,
+        ]
+        .into_iter(),
+    );
+    record_automated_calibration_step(
+        state,
+        run.calibration_id,
+        CalibrationStepId::BottomCameraGeometry,
+        camera_residuals,
+        json!({
+            "run_id": run.id,
+            "camera_x_mm": report.top_camera_center.controller_x_mm,
+            "camera_y_mm": report.top_camera_center.controller_y_mm,
+            "mapping": report.bottom_camera_mapping,
+            "reciprocal_observation": report.bottom_camera_reciprocal_observation,
+        }),
+    )?;
+    record_automated_calibration_step(
+        state,
+        run.calibration_id,
+        CalibrationStepId::NozzleOffsets,
+        None,
+        json!({
+            "run_id": run.id,
+            "top_camera_center": report.top_camera_center,
+            "nozzles": report.nozzles.iter().map(|nozzle| json!({
+                "nozzle_id": nozzle.nozzle_id,
+                "head_offset_x_mm": nozzle.head_offset_x_mm,
+                "head_offset_y_mm": nozzle.head_offset_y_mm,
+                "axis_controller_x_mm": nozzle.axis_controller_x_mm,
+                "axis_controller_y_mm": nozzle.axis_controller_y_mm,
+            })).collect::<Vec<_>>(),
+            "n1_to_n2_x_mm": report.n1_to_n2_x_mm,
+            "n1_to_n2_y_mm": report.n1_to_n2_y_mm,
+        }),
+    )?;
+    record_automated_calibration_step(
+        state,
+        run.calibration_id,
+        CalibrationStepId::NozzleRunout,
+        Some(report.combined_runout_fit_residuals),
+        json!({
+            "run_id": run.id,
+            "reports": report.nozzles,
+        }),
+    )
 }
 
 async fn execute_initial_actuator_checks(
@@ -2529,6 +3367,7 @@ mod tests {
             camera_reports: BTreeMap::new(),
             visual_homing_samples: vec![],
             visual_homing_report: None,
+            head_geometry_report: None,
             failure: None,
             simulated: true,
         }

@@ -10,7 +10,7 @@ pub use marlin::*;
 pub use photon::*;
 pub use simulator::*;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -26,6 +26,17 @@ pub trait MachineDriver: Send {
     async fn disconnect(&mut self) -> Result<()>;
     async fn home(&mut self) -> Result<Pose>;
     async fn move_to(&mut self, target: Pose, feed_mm_per_min: f64) -> Result<Pose>;
+    async fn rotation_position(&mut self, _controller_axis: char) -> Result<f64> {
+        bail!("driver does not support independent nozzle rotation")
+    }
+    async fn rotate_nozzle(
+        &mut self,
+        _controller_axis: char,
+        _target_deg: f64,
+        _feed_deg_per_min: f64,
+    ) -> Result<f64> {
+        bail!("driver does not support independent nozzle rotation")
+    }
     async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose>;
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()>;
     async fn read_sensor(&mut self, sensor_id: &str) -> Result<i64>;

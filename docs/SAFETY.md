@@ -10,6 +10,8 @@ Before homing or motion:
 3. Keep physical power isolation within immediate reach.
 4. Verify the selected mechanical profile and travel bounds.
 5. Start with conservative feed and acceleration settings.
+6. Before runout calibration, make sure each nozzle tube is fully seated,
+   follows its normal routing, and is not kinked or caught on another cable.
 
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the
@@ -32,6 +34,13 @@ when rotation is omitted. The V3.0.4 profile disables rotation motion until it
 is separately hardware-validated, and the machine actor rejects an explicit
 angle change before any command reaches the driver. This interlock applies to
 all API, CLI, UI, Python, and internal job callers.
+
+The automated calibration runner has a narrower rotation capability. It reads
+the current A or B angle, permits only the profile offsets up to ±165 degrees,
+uses a conservative 600 degrees/minute feed, verifies the reported result, and
+returns the nozzle to its starting angle. The mapping from N1/N2 to A/B comes
+from the active machine profile. A driver error faults the machine and revokes
+control. This capability does not enable normal jog or job rotation.
 
 Visual homing is observation-only until both raw-camera axis signs have
 physical evidence. Apply mode bounds the initial target and XY correction,

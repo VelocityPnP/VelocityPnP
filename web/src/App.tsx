@@ -237,7 +237,7 @@ function CalibrationPanel({ status, devices, setError }: {
   const start = async () => {
     if (!active) return;
     if (!window.confirm(
-      "Start automated calibration? Confirm both nozzles are level, the travel envelope is clear, and power isolation is within reach. Installed nozzle tips will be identified by the bottom camera.",
+      "Start automated calibration? Confirm both nozzles are level, the travel envelope is clear, power isolation is within reach, and both nozzle tubes are seated, routed normally, and free of snags. The bottom camera will identify each tip before any rotation.",
     )) return;
     setStarting(true); setError(null);
     try {
@@ -266,8 +266,14 @@ function CalibrationPanel({ status, devices, setError }: {
       {activeRun && <div className="calibration-run">
         <div className="run-heading"><strong>{pretty(activeRun.status)}</strong><span>{pretty(activeRun.phase)}</span></div>
         {activeRun.phase === "visual_homing_validation" && <p>{activeRun.visual_homing_samples.length} / {activeRun.config.visual_homing_sample_count} homing cycles measured</p>}
+        {activeRun.phase === "head_geometry_calibration" && <p>Mapping cameras and measuring both nozzle rotation axes</p>}
         <div className="calibration-checks">{activeRun.checks.map((check) => <div key={check.id} className={`check-${check.status}`}><span>{check.status === "passed" ? "✓" : check.status === "failed" ? "!" : "·"}</span><div><strong>{check.title}</strong><small>{check.message}</small></div></div>)}</div>
         {activeRun.visual_homing_report && <p className="run-result">Independent return p95 <strong>{activeRun.visual_homing_report.independent_return.p95_mm.toFixed(4)} mm</strong></p>}
+        {activeRun.head_geometry_report && <div className="run-result">
+          <p>Bottom camera <strong>{activeRun.head_geometry_report.top_camera_center.controller_x_mm.toFixed(3)}, {activeRun.head_geometry_report.top_camera_center.controller_y_mm.toFixed(3)} mm</strong></p>
+          <p>N1 to N2 <strong>{activeRun.head_geometry_report.n1_to_n2_x_mm.toFixed(3)}, {activeRun.head_geometry_report.n1_to_n2_y_mm.toFixed(3)} mm</strong></p>
+          {activeRun.head_geometry_report.nozzles.map((nozzle) => <p key={nozzle.nozzle_id}>{nozzle.nozzle_id} {nozzle.tip_id} runout <strong>{nozzle.runout_radius_mm.toFixed(4)} mm</strong>; fit p95 <strong>{nozzle.fit_residuals.p95_mm.toFixed(4)} mm</strong></p>)}
+        </div>}
         {activeRun.failure && <div className="notice">{activeRun.failure}</div>}
       </div>}
       <small>No calibration metric can be entered manually. A step completes only from a successful machine runner.</small>

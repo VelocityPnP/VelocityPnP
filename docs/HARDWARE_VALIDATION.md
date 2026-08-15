@@ -361,6 +361,31 @@ completes the persisted initial-machine runner and its visual-homing workflow
 step. It does not make the calibration production-ready: motion geometry,
 nozzle runout, and final placement validation still require their own evidence.
 
+## Head geometry implementation pending physical validation
+
+On 2026-08-15 the initial-machine runner was extended beyond the validated
+visual-home stage. The new software first identifies N1/N045 and N2/N24 without
+operator tip entry. It uses central ±0.5 mm X/Y probes to measure the local
+bottom-camera image-to-motion map. It then has both cameras locate the opposing
+lens and applies at most three reciprocal corrections, each bounded to 4 mm.
+This phase runs after the first successful visual-home cycle, but its snapshot
+steps are not committed unless the complete 30-cycle repeatability gate passes.
+
+For each detected nozzle, the runner reads its current controller angle and
+uses 12 alternating relative offsets from ±15 to ±165 degrees at 600
+degrees/minute. This makes the first rotation small while retaining a broad
+fit. N1 is mapped to controller axis A and N2 to B from the tagged V3.0.4
+profile. The runner returns each axis to its captured start angle and fits the
+stationary axis, top-camera head offset, and periodic tip-runout coefficients.
+The runout fit must have a p95 physical residual no larger than 0.05 mm. Normal
+physical jog rotation remains disabled, and no unrestricted rotation endpoint
+exists.
+
+Synthetic vision and fit tests, simulator actor tests, and command-generation
+tests pass. This section is implementation evidence only. The opposing-lens
+detector, A/B motion, measured offsets, and runout residuals do not yet have
+attached-machine evidence.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

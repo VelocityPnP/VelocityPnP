@@ -325,6 +325,7 @@ mod tests {
             camera_reports: BTreeMap::new(),
             visual_homing_samples: vec![],
             visual_homing_report: None,
+            head_geometry_report: None,
             failure: None,
             simulated: true,
         };

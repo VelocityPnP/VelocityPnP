@@ -285,6 +285,52 @@ impl MachineDriver for MarlinDriver {
         Ok(target)
     }
 
+    async fn rotation_position(&mut self, controller_axis: char) -> Result<f64> {
+        let reported = self
+            .reported_position()
+            .await
+            .context("reading nozzle rotation position")?;
+        rotation_axis_value(reported, controller_axis)
+    }
+
+    async fn rotate_nozzle(
+        &mut self,
+        controller_axis: char,
+        target_deg: f64,
+        feed_deg_per_min: f64,
+    ) -> Result<f64> {
+        if !target_deg.is_finite() || !feed_deg_per_min.is_finite() || feed_deg_per_min <= 0.0 {
+            bail!("invalid nozzle rotation values");
+        }
+        let reported = self
+            .reported_position()
+            .await
+            .context("reading position before nozzle rotation")?;
+        let start_deg = rotation_axis_value(reported, controller_axis)?;
+        let completion_timeout =
+            rotation_completion_timeout(start_deg, target_deg, feed_deg_per_min);
+        let command = nozzle_rotation_command(controller_axis, target_deg, feed_deg_per_min)?;
+        self.command(&command, Duration::from_secs(30)).await?;
+        self.command("M400", completion_timeout)
+            .await
+            .with_context(|| {
+                format!(
+                    "waiting up to {:.1}s for nozzle rotation",
+                    completion_timeout.as_secs_f64()
+                )
+            })?;
+        let actual = rotation_axis_value(
+            self.reported_position()
+                .await
+                .context("reading position after nozzle rotation")?,
+            controller_axis,
+        )?;
+        if (actual - target_deg).abs() > 0.05 {
+            bail!("rotation axis {controller_axis} reported {actual:.3}, expected {target_deg:.3}");
+        }
+        Ok(actual)
+    }
+
     async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose> {
         let command = set_xy_coordinates_command(x_mm, y_mm)?;
         self.command(&command, Duration::from_secs(5)).await?;
@@ -351,6 +397,32 @@ fn move_completion_timeout(start: Pose, target: Pose, feed_mm_per_min: f64) -> D
     Duration::from_secs_f64(timeout_seconds.clamp(
         MIN_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
         MAX_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
+    ))
+}
+
+fn rotation_completion_timeout(start_deg: f64, target_deg: f64, feed_deg_per_min: f64) -> Duration {
+    let nominal_seconds = (target_deg - start_deg).abs() * 60.0 / feed_deg_per_min;
+    let timeout_seconds =
+        nominal_seconds * MOVE_TIMEOUT_SAFETY_FACTOR + MOVE_TIMEOUT_MARGIN_SECONDS;
+    Duration::from_secs_f64(timeout_seconds.clamp(
+        MIN_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
+        MAX_MOVE_COMPLETION_TIMEOUT.as_secs_f64(),
+    ))
+}
+
+fn nozzle_rotation_command(
+    controller_axis: char,
+    target_deg: f64,
+    feed_deg_per_min: f64,
+) -> Result<String> {
+    if !matches!(controller_axis, 'A' | 'B') {
+        bail!("unsupported nozzle rotation axis {controller_axis}");
+    }
+    if !target_deg.is_finite() || !feed_deg_per_min.is_finite() || feed_deg_per_min <= 0.0 {
+        bail!("invalid nozzle rotation values");
+    }
+    Ok(format!(
+        "G0 {controller_axis}{target_deg:.4} F{feed_deg_per_min:.0}"
     ))
 }
 
@@ -441,6 +513,14 @@ fn validate_homing_profile(homing: &HomingProfile) -> Result<()> {
 struct MarlinPosition {
     primary_pose: Pose,
     secondary_rotation_deg: f64,
+}
+
+fn rotation_axis_value(reported: MarlinPosition, controller_axis: char) -> Result<f64> {
+    match controller_axis {
+        'A' => Ok(reported.primary_pose.rotation_deg),
+        'B' => Ok(reported.secondary_rotation_deg),
+        _ => bail!("unsupported nozzle rotation axis {controller_axis}"),
+    }
 }
 
 fn parse_position_report(lines: &[String]) -> Result<MarlinPosition> {
@@ -651,6 +731,28 @@ mod tests {
                 },
                 1.0,
             ),
+            MAX_MOVE_COMPLETION_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn nozzle_rotation_commands_are_axis_specific_and_bounded_in_time() {
+        assert_eq!(
+            nozzle_rotation_command('A', 555.0, 600.0).unwrap(),
+            "G0 A555.0000 F600"
+        );
+        assert_eq!(
+            nozzle_rotation_command('B', 885.0, 600.0).unwrap(),
+            "G0 B885.0000 F600"
+        );
+        assert!(nozzle_rotation_command('C', 0.0, 600.0).is_err());
+        assert!(nozzle_rotation_command('A', f64::NAN, 600.0).is_err());
+        assert!(nozzle_rotation_command('A', 0.0, 0.0).is_err());
+
+        let timeout = rotation_completion_timeout(720.0, 555.0, 600.0);
+        assert_eq!(timeout, MIN_MOVE_COMPLETION_TIMEOUT);
+        assert_eq!(
+            rotation_completion_timeout(0.0, 100_000.0, 1.0),
             MAX_MOVE_COMPLETION_TIMEOUT
         );
     }

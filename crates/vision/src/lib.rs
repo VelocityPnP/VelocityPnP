@@ -11,8 +11,9 @@ pub use v4l2_capture::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use velocitypnp_domain::{
-    BottomVisionProfile, CameraReproducibilityThresholds, CameraRole, NozzleToolingProfile,
-    Residuals, Transform2d, VisualHomingProfile,
+    BottomCameraMappingReport, BottomVisionProfile, CameraReproducibilityThresholds, CameraRole,
+    NozzleRunoutReport, NozzleRunoutSample, NozzleToolingProfile, Residuals, Transform2d,
+    VisualHomingProfile,
 };
 
 const TOOLING_CENTER_JITTER_P95_LIMIT_PX: f64 = 3.0;
@@ -20,6 +21,7 @@ const TOOLING_CLUSTER_DIAMETER_LIMIT_PX: f64 = 2.0;
 const TOOLING_CONCENTRIC_CENTER_LIMIT_PX: f64 = 8.0;
 const TOOLING_CONCENTRIC_DIAMETER_GAP_PX: f64 = 8.0;
 const TOOLING_DARK_THRESHOLDS: [u8; 2] = [45, 90];
+const HEAD_CAMERA_THRESHOLDS: [u8; 6] = [30, 45, 60, 90, 120, 150];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrayFrame {
@@ -123,6 +125,13 @@ pub struct NozzleToolingReport {
     pub center_jitter_p95_px: Option<f64>,
     pub passed: bool,
     pub detections: Vec<Option<FiducialDetection>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BottomCameraCorrection {
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub distance_mm: f64,
 }
 
 pub fn camera_sample_metrics(frame: &GrayFrame, role: CameraRole) -> Option<CameraSampleMetrics> {
@@ -376,6 +385,377 @@ pub fn detect_nozzle_bore(
         .next()
 }
 
+pub fn mean_nozzle_detection(report: &NozzleToolingReport) -> Option<FiducialDetection> {
+    let detections = report.detections.iter().flatten().collect::<Vec<_>>();
+    (!detections.is_empty()).then(|| FiducialDetection {
+        x_px: mean(detections.iter().map(|detection| detection.x_px)),
+        y_px: mean(detections.iter().map(|detection| detection.y_px)),
+        diameter_px: mean(detections.iter().map(|detection| detection.diameter_px)),
+        confidence: mean(detections.iter().map(|detection| detection.confidence)),
+    })
+}
+
+pub fn detect_head_camera_feature(
+    frame: &GrayFrame,
+    bottom_vision: &BottomVisionProfile,
+) -> Option<FiducialDetection> {
+    let geometry = &bottom_vision.head_geometry;
+    detect_opposed_camera_feature(
+        frame,
+        bottom_vision.frame_center_x_px,
+        bottom_vision.frame_center_y_px,
+        bottom_vision.max_center_error_px,
+        geometry.top_camera_feature_min_diameter_px,
+        geometry.top_camera_feature_max_diameter_px,
+    )
+}
+
+pub fn detect_opposed_camera_feature(
+    frame: &GrayFrame,
+    frame_center_x_px: f64,
+    frame_center_y_px: f64,
+    max_center_error_px: f64,
+    min_diameter_px: f64,
+    max_diameter_px: f64,
+) -> Option<FiducialDetection> {
+    let mut targets = HEAD_CAMERA_THRESHOLDS
+        .into_iter()
+        .flat_map(|threshold| {
+            detect_dark_fiducials(frame, threshold, min_diameter_px, max_diameter_px)
+                .into_iter()
+                .chain(detect_bright_fiducials(
+                    frame,
+                    255 - threshold,
+                    min_diameter_px,
+                    max_diameter_px,
+                ))
+        })
+        .filter(|target| {
+            (target.x_px - frame_center_x_px).hypot(target.y_px - frame_center_y_px)
+                <= max_center_error_px
+        })
+        .collect::<Vec<_>>();
+    let all_targets = targets.clone();
+    targets.retain(|target| has_concentric_companion(*target, &all_targets));
+    targets.into_iter().min_by(|left, right| {
+        let left_distance = (left.x_px - frame_center_x_px).hypot(left.y_px - frame_center_y_px);
+        let right_distance = (right.x_px - frame_center_x_px).hypot(right.y_px - frame_center_y_px);
+        left_distance
+            .total_cmp(&right_distance)
+            .then_with(|| right.confidence.total_cmp(&left.confidence))
+    })
+}
+
+pub fn summarize_head_camera_feature(
+    frames: &[GrayFrame],
+    bottom_vision: &BottomVisionProfile,
+) -> Option<FiducialDetection> {
+    let detections = frames
+        .iter()
+        .map(|frame| detect_head_camera_feature(frame, bottom_vision))
+        .collect::<Option<Vec<_>>>()?;
+    let mean_x = mean(detections.iter().map(|target| target.x_px));
+    let mean_y = mean(detections.iter().map(|target| target.y_px));
+    let max_jitter = detections
+        .iter()
+        .map(|target| (target.x_px - mean_x).hypot(target.y_px - mean_y))
+        .fold(0.0, f64::max);
+    (max_jitter <= TOOLING_CENTER_JITTER_P95_LIMIT_PX).then(|| FiducialDetection {
+        x_px: mean_x,
+        y_px: mean_y,
+        diameter_px: mean(detections.iter().map(|target| target.diameter_px)),
+        confidence: mean(detections.iter().map(|target| target.confidence)),
+    })
+}
+
+pub fn summarize_opposed_camera_feature(
+    frames: &[GrayFrame],
+    frame_center_x_px: f64,
+    frame_center_y_px: f64,
+    max_center_error_px: f64,
+    min_diameter_px: f64,
+    max_diameter_px: f64,
+) -> Option<FiducialDetection> {
+    let detections = frames
+        .iter()
+        .map(|frame| {
+            detect_opposed_camera_feature(
+                frame,
+                frame_center_x_px,
+                frame_center_y_px,
+                max_center_error_px,
+                min_diameter_px,
+                max_diameter_px,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mean_x = mean(detections.iter().map(|target| target.x_px));
+    let mean_y = mean(detections.iter().map(|target| target.y_px));
+    let max_jitter = detections
+        .iter()
+        .map(|target| (target.x_px - mean_x).hypot(target.y_px - mean_y))
+        .fold(0.0, f64::max);
+    (max_jitter <= TOOLING_CENTER_JITTER_P95_LIMIT_PX).then(|| FiducialDetection {
+        x_px: mean_x,
+        y_px: mean_y,
+        diameter_px: mean(detections.iter().map(|target| target.diameter_px)),
+        confidence: mean(detections.iter().map(|target| target.confidence)),
+    })
+}
+
+pub fn calibrate_bottom_camera_mapping(
+    base: FiducialDetection,
+    x_minus: FiducialDetection,
+    x_plus: FiducialDetection,
+    y_minus: FiducialDetection,
+    y_plus: FiducialDetection,
+    returned: FiducialDetection,
+    probe_distance_mm: f64,
+) -> Option<BottomCameraMappingReport> {
+    if !probe_distance_mm.is_finite() || probe_distance_mm <= 0.0 {
+        return None;
+    }
+    let span = 2.0 * probe_distance_mm;
+    let image_motion = [
+        [
+            (x_plus.x_px - x_minus.x_px) / span,
+            (y_plus.x_px - y_minus.x_px) / span,
+        ],
+        [
+            (x_plus.y_px - x_minus.y_px) / span,
+            (y_plus.y_px - y_minus.y_px) / span,
+        ],
+    ];
+    let determinant =
+        image_motion[0][0] * image_motion[1][1] - image_motion[0][1] * image_motion[1][0];
+    if !determinant.is_finite() || determinant.abs() < 25.0 {
+        return None;
+    }
+    let inverse = [
+        [
+            image_motion[1][1] / determinant,
+            -image_motion[0][1] / determinant,
+        ],
+        [
+            -image_motion[1][0] / determinant,
+            image_motion[0][0] / determinant,
+        ],
+    ];
+    let correction = [
+        [-inverse[0][0], -inverse[0][1]],
+        [-inverse[1][0], -inverse[1][1]],
+    ];
+    let axis_scales = [
+        image_motion[0][0].hypot(image_motion[1][0]),
+        image_motion[0][1].hypot(image_motion[1][1]),
+    ];
+    if axis_scales
+        .iter()
+        .any(|scale| !scale.is_finite() || !(10.0..=100.0).contains(scale))
+    {
+        return None;
+    }
+    let return_error_px = [returned.x_px - base.x_px, returned.y_px - base.y_px];
+    let return_error_mm = [
+        correction[0][0] * return_error_px[0] + correction[0][1] * return_error_px[1],
+        correction[1][0] * return_error_px[0] + correction[1][1] * return_error_px[1],
+    ];
+    Some(BottomCameraMappingReport {
+        pixel_error_to_machine_mm: correction,
+        observed_pixel_per_machine_mm: image_motion,
+        probe_distance_mm,
+        returned_center_error_px: return_error_px[0].hypot(return_error_px[1]),
+        returned_center_error_mm: return_error_mm[0].hypot(return_error_mm[1]),
+    })
+}
+
+pub fn plan_bottom_camera_correction(
+    target: FiducialDetection,
+    bottom_vision: &BottomVisionProfile,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+) -> Option<BottomCameraCorrection> {
+    plan_pixel_correction(
+        target,
+        bottom_vision.frame_center_x_px,
+        bottom_vision.frame_center_y_px,
+        pixel_error_to_machine_mm,
+    )
+}
+
+pub fn plan_pixel_correction(
+    target: FiducialDetection,
+    frame_center_x_px: f64,
+    frame_center_y_px: f64,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+) -> Option<BottomCameraCorrection> {
+    let error_x_px = target.x_px - frame_center_x_px;
+    let error_y_px = target.y_px - frame_center_y_px;
+    let x_mm =
+        pixel_error_to_machine_mm[0][0] * error_x_px + pixel_error_to_machine_mm[0][1] * error_y_px;
+    let y_mm =
+        pixel_error_to_machine_mm[1][0] * error_x_px + pixel_error_to_machine_mm[1][1] * error_y_px;
+    let distance_mm = x_mm.hypot(y_mm);
+    (x_mm.is_finite() && y_mm.is_finite() && distance_mm.is_finite()).then_some(
+        BottomCameraCorrection {
+            x_mm,
+            y_mm,
+            distance_mm,
+        },
+    )
+}
+
+pub fn fit_nozzle_runout(
+    nozzle: &NozzleToolingProfile,
+    reference_controller_angle_deg: f64,
+    base_controller_mm: [f64; 2],
+    top_camera_controller_mm: [f64; 2],
+    samples: Vec<NozzleRunoutSample>,
+    p95_limit_mm: f64,
+) -> Option<NozzleRunoutReport> {
+    if samples.len() < 12
+        || !reference_controller_angle_deg.is_finite()
+        || !p95_limit_mm.is_finite()
+        || p95_limit_mm <= 0.0
+    {
+        return None;
+    }
+    let design = samples
+        .iter()
+        .map(|sample| {
+            let angle = sample.angle_offset_deg.to_radians();
+            [1.0, angle.cos(), angle.sin()]
+        })
+        .collect::<Vec<_>>();
+    let fit_x = fit_three_parameter_model(
+        &design,
+        &samples
+            .iter()
+            .map(|sample| sample.correction_x_mm)
+            .collect::<Vec<_>>(),
+    )?;
+    let fit_y = fit_three_parameter_model(
+        &design,
+        &samples
+            .iter()
+            .map(|sample| sample.correction_y_mm)
+            .collect::<Vec<_>>(),
+    )?;
+    let residual_values = design
+        .iter()
+        .zip(&samples)
+        .map(|(row, sample)| {
+            let predicted_x = dot3(*row, fit_x);
+            let predicted_y = dot3(*row, fit_y);
+            (sample.correction_x_mm - predicted_x).hypot(sample.correction_y_mm - predicted_y)
+        })
+        .collect::<Vec<_>>();
+    let fit_residuals = summarize_residuals(residual_values.into_iter())?;
+    let runout_radius_mm = design
+        .iter()
+        .map(|row| {
+            (row[1] * fit_x[1] + row[2] * fit_x[2]).hypot(row[1] * fit_y[1] + row[2] * fit_y[2])
+        })
+        .sum::<f64>()
+        / samples.len() as f64;
+    let axis_controller_x_mm = base_controller_mm[0] + fit_x[0];
+    let axis_controller_y_mm = base_controller_mm[1] + fit_y[0];
+    Some(NozzleRunoutReport {
+        nozzle_id: nozzle.nozzle_id.clone(),
+        tip_id: nozzle.expected_tip_id.clone(),
+        rotation_axis: nozzle.rotation_axis.clone(),
+        reference_controller_angle_deg,
+        axis_controller_x_mm,
+        axis_controller_y_mm,
+        head_offset_x_mm: top_camera_controller_mm[0] - axis_controller_x_mm,
+        head_offset_y_mm: top_camera_controller_mm[1] - axis_controller_y_mm,
+        correction_cos_x_mm: fit_x[1],
+        correction_sin_x_mm: fit_x[2],
+        correction_cos_y_mm: fit_y[1],
+        correction_sin_y_mm: fit_y[2],
+        runout_radius_mm,
+        runout_phase_deg: fit_y[1].atan2(fit_x[1]).to_degrees(),
+        fit_residuals,
+        passed: fit_residuals.p95_mm <= p95_limit_mm,
+        samples,
+    })
+}
+
+pub fn summarize_residuals(values: impl Iterator<Item = f64>) -> Option<Residuals> {
+    let mut values = values.collect::<Vec<_>>();
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let rms_mm =
+        (values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64).sqrt();
+    let p95_index = ((values.len() - 1) as f64 * 0.95).ceil() as usize;
+    Some(Residuals {
+        sample_count: values.len() as u32,
+        rms_mm,
+        p95_mm: values[p95_index],
+        max_mm: *values.last()?,
+    })
+}
+
+fn fit_three_parameter_model(design: &[[f64; 3]], values: &[f64]) -> Option<[f64; 3]> {
+    if design.len() != values.len() || design.len() < 3 {
+        return None;
+    }
+    let mut normal = [[0.0; 3]; 3];
+    let mut right = [0.0; 3];
+    for (row, value) in design.iter().zip(values) {
+        if !value.is_finite() || row.iter().any(|item| !item.is_finite()) {
+            return None;
+        }
+        for i in 0..3 {
+            right[i] += row[i] * value;
+            for j in 0..3 {
+                normal[i][j] += row[i] * row[j];
+            }
+        }
+    }
+    solve_three_by_three(normal, right)
+}
+
+fn solve_three_by_three(mut matrix: [[f64; 3]; 3], mut right: [f64; 3]) -> Option<[f64; 3]> {
+    for pivot in 0..3 {
+        let selected = (pivot..3).max_by(|left, right_index| {
+            matrix[*left][pivot]
+                .abs()
+                .total_cmp(&matrix[*right_index][pivot].abs())
+        })?;
+        if matrix[selected][pivot].abs() < 1e-12 {
+            return None;
+        }
+        matrix.swap(pivot, selected);
+        right.swap(pivot, selected);
+        let divisor = matrix[pivot][pivot];
+        for column in pivot..3 {
+            matrix[pivot][column] /= divisor;
+        }
+        right[pivot] /= divisor;
+        for row in 0..3 {
+            if row == pivot {
+                continue;
+            }
+            let factor = matrix[row][pivot];
+            for column in pivot..3 {
+                matrix[row][column] -= factor * matrix[pivot][column];
+            }
+            right[row] -= factor * right[pivot];
+        }
+    }
+    Some(right)
+}
+
+fn dot3(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
 fn detect_nozzle_bore_candidates(
     frame: &GrayFrame,
     bottom_vision: &BottomVisionProfile,
@@ -617,7 +997,10 @@ fn detect_circular_components(
         let diameter = (width + height) / 2.0;
         let aspect = width.min(height) / width.max(height);
         let fill = count as f64 / (width * height);
-        if (min_diameter_px..=max_diameter_px).contains(&diameter)
+        let touches_border =
+            min_x == 0 || min_y == 0 || max_x + 1 == frame.width || max_y + 1 == frame.height;
+        if !touches_border
+            && (min_diameter_px..=max_diameter_px).contains(&diameter)
             && aspect >= 0.75
             && (0.45..=0.95).contains(&fill)
         {
@@ -850,6 +1233,105 @@ mod tests {
             }
         }
         frame
+    }
+
+    #[test]
+    fn bottom_camera_probe_recovers_cross_axis_correction() {
+        let target = |x_px, y_px| FiducialDetection {
+            x_px,
+            y_px,
+            diameter_px: 20.0,
+            confidence: 1.0,
+        };
+        let mapping = calibrate_bottom_camera_mapping(
+            target(640.0, 360.0),
+            target(624.0, 360.5),
+            target(656.0, 359.5),
+            target(639.0, 344.5),
+            target(641.0, 375.5),
+            target(640.2, 359.9),
+            0.5,
+        )
+        .unwrap();
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let bottom = machine.bottom_vision.unwrap();
+        let error = target(652.4, 353.4);
+        let correction =
+            plan_bottom_camera_correction(error, &bottom, mapping.pixel_error_to_machine_mm)
+                .unwrap();
+
+        assert!((correction.x_mm + 0.4).abs() < 1e-12);
+        assert!((correction.y_mm - 0.2).abs() < 1e-12);
+        assert!((mapping.returned_center_error_px - 5.0_f64.sqrt() / 10.0).abs() < 1e-12);
+        assert!(mapping.returned_center_error_mm < 0.01);
+    }
+
+    #[test]
+    fn head_camera_detector_requires_concentric_evidence() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom = machine.bottom_vision.unwrap();
+        bottom.frame_center_x_px = 90.0;
+        bottom.frame_center_y_px = 90.0;
+        bottom.max_center_error_px = 80.0;
+        let mut frame = GrayFrame {
+            width: 180,
+            height: 180,
+            pixels: vec![180; 180 * 180],
+        };
+        for y in 0..180_i32 {
+            for x in 0..180_i32 {
+                let radius_squared = (x - 87).pow(2) + (y - 94).pow(2);
+                if radius_squared <= 50_i32.pow(2) {
+                    frame.pixels[(y * 180 + x) as usize] = 10;
+                }
+                if radius_squared <= 30_i32.pow(2) {
+                    frame.pixels[(y * 180 + x) as usize] = 210;
+                }
+            }
+        }
+
+        let target = detect_head_camera_feature(&frame, &bottom).unwrap();
+
+        assert!((target.x_px - 87.0).abs() < 0.1);
+        assert!((target.y_px - 94.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn runout_fit_separates_axis_offset_and_periodic_tip_error() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let bottom = machine.bottom_vision.unwrap();
+        let nozzle = &bottom.nozzles[0];
+        let samples = bottom
+            .head_geometry
+            .rotation_angle_offsets_deg
+            .iter()
+            .map(|angle_offset_deg| {
+                let angle = angle_offset_deg.to_radians();
+                NozzleRunoutSample {
+                    angle_offset_deg: *angle_offset_deg,
+                    controller_angle_deg: 720.0 + angle_offset_deg,
+                    target_x_px: 640.0,
+                    target_y_px: 360.0,
+                    correction_x_mm: 0.7 + 0.03 * angle.cos() - 0.01 * angle.sin(),
+                    correction_y_mm: -0.2 + 0.01 * angle.cos() + 0.03 * angle.sin(),
+                }
+            })
+            .collect();
+
+        let report =
+            fit_nozzle_runout(nozzle, 720.0, [100.0, 200.0], [120.0, 230.0], samples, 0.05)
+                .unwrap();
+
+        assert!((report.axis_controller_x_mm - 100.7).abs() < 1e-12);
+        assert!((report.axis_controller_y_mm - 199.8).abs() < 1e-12);
+        assert!((report.head_offset_x_mm - 19.3).abs() < 1e-12);
+        assert!((report.head_offset_y_mm - 30.2).abs() < 1e-12);
+        assert!((report.runout_radius_mm - 0.01_f64.hypot(0.03)).abs() < 1e-12);
+        assert!(report.fit_residuals.max_mm < 1e-12);
+        assert!(report.passed);
     }
 
     #[test]

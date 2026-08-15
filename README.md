@@ -22,6 +22,7 @@ This repository contains the first working platform slice:
 - versioned REST/SSE API, CLI and Python client
 - React operator UI with discovery, control, calibration and board import
 - persisted machine-executed calibration runs with progress and evidence
+- automatic reciprocal camera, N1/N2 offset, and nozzle-runout calibration
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 
 Supported physical calibration stages are executed by the daemon; callers

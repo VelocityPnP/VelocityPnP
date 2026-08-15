@@ -255,12 +255,28 @@ pub struct BottomVisionProfile {
     pub units_per_pixel_y_mm: f64,
     pub max_center_error_px: f64,
     pub feed_mm_per_min: f64,
+    pub head_geometry: HeadGeometryProfile,
     pub nozzles: Vec<NozzleToolingProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeadGeometryProfile {
+    pub probe_distance_mm: f64,
+    pub centering_sample_count: u32,
+    pub max_centering_corrections: u32,
+    pub max_centering_correction_mm: f64,
+    pub verification_limit_mm: f64,
+    pub top_camera_feature_min_diameter_px: f64,
+    pub top_camera_feature_max_diameter_px: f64,
+    pub rotation_angle_offsets_deg: Vec<f64>,
+    pub rotation_feed_deg_per_min: f64,
+    pub runout_fit_p95_limit_mm: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NozzleToolingProfile {
     pub nozzle_id: String,
+    pub rotation_axis: String,
     pub head_offset_x_mm: f64,
     pub head_offset_y_mm: f64,
     pub expected_tip_id: String,
@@ -287,9 +303,11 @@ impl BottomVisionProfile {
             || self.units_per_pixel_y_mm <= 0.0
             || self.max_center_error_px <= 0.0
             || self.feed_mm_per_min <= 0.0
+            || self.head_geometry.validate().is_err()
             || self.nozzles.is_empty()
             || self.nozzles.iter().any(|nozzle| {
                 nozzle.nozzle_id.trim().is_empty()
+                    || nozzle.rotation_axis.trim().is_empty()
                     || nozzle.expected_tip_id.trim().is_empty()
                     || !nozzle.head_offset_x_mm.is_finite()
                     || !nozzle.head_offset_y_mm.is_finite()
@@ -311,6 +329,41 @@ impl BottomVisionProfile {
             z_mm: self.working_z_mm,
             rotation_deg: None,
         }
+    }
+}
+
+impl HeadGeometryProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let values = [
+            self.probe_distance_mm,
+            self.max_centering_correction_mm,
+            self.verification_limit_mm,
+            self.top_camera_feature_min_diameter_px,
+            self.top_camera_feature_max_diameter_px,
+            self.rotation_feed_deg_per_min,
+            self.runout_fit_p95_limit_mm,
+        ];
+        if values.iter().any(|value| !value.is_finite())
+            || !(0.1..=2.0).contains(&self.probe_distance_mm)
+            || !(3..=15).contains(&self.centering_sample_count)
+            || !(1..=5).contains(&self.max_centering_corrections)
+            || self.max_centering_correction_mm <= 0.0
+            || self.max_centering_correction_mm > 10.0
+            || self.verification_limit_mm <= 0.0
+            || self.top_camera_feature_min_diameter_px <= 0.0
+            || self.top_camera_feature_max_diameter_px <= self.top_camera_feature_min_diameter_px
+            || self.rotation_angle_offsets_deg.len() < 12
+            || self.rotation_angle_offsets_deg.len() > 36
+            || self
+                .rotation_angle_offsets_deg
+                .iter()
+                .any(|angle| !angle.is_finite() || angle.abs() > 165.0)
+            || self.rotation_feed_deg_per_min <= 0.0
+            || self.runout_fit_p95_limit_mm <= 0.0
+        {
+            return Err("head-geometry profile is invalid");
+        }
+        Ok(())
     }
 }
 
@@ -433,6 +486,10 @@ mod tests {
         assert!(bottom.validate().is_ok());
         assert_eq!(bottom.nozzles[0].expected_tip_id, "N045");
         assert_eq!(bottom.nozzles[1].expected_tip_id, "N24");
+        assert_eq!(
+            bottom.head_geometry.rotation_angle_offsets_deg,
+            [-15.0, 15.0, -45.0, 45.0, -75.0, 75.0, -105.0, 105.0, -135.0, 135.0, -165.0, 165.0,]
+        );
         for nozzle in &bottom.nozzles {
             let target = bottom
                 .nozzle_target(nozzle)
