@@ -15,6 +15,12 @@ use velocitypnp_domain::{
     Residuals, Transform2d, VisualHomingProfile,
 };
 
+const TOOLING_CENTER_JITTER_P95_LIMIT_PX: f64 = 3.0;
+const TOOLING_CLUSTER_DIAMETER_LIMIT_PX: f64 = 2.0;
+const TOOLING_CONCENTRIC_CENTER_LIMIT_PX: f64 = 8.0;
+const TOOLING_CONCENTRIC_DIAMETER_GAP_PX: f64 = 8.0;
+const TOOLING_DARK_THRESHOLDS: [u8; 2] = [45, 90];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrayFrame {
     pub width: u32,
@@ -114,6 +120,7 @@ pub struct NozzleToolingReport {
     pub mean_bore_diameter_mm: Option<f64>,
     pub bore_diameter_range_mm: Option<f64>,
     pub center_error_p95_px: Option<f64>,
+    pub center_jitter_p95_px: Option<f64>,
     pub passed: bool,
     pub detections: Vec<Option<FiducialDetection>>,
 }
@@ -213,7 +220,7 @@ pub fn plan_visual_homing(
         correction_distance_mm,
         within_capture_bound,
         within_correction_bound,
-        accepted: error_radius_px <= profile.acceptance_radius_px,
+        accepted: correction_distance_mm <= profile.max_verification_error_mm,
     })
 }
 
@@ -279,10 +286,11 @@ pub fn summarize_nozzle_tooling(
     bottom_vision: &BottomVisionProfile,
     nozzle: &NozzleToolingProfile,
 ) -> NozzleToolingReport {
-    let detections = frames
+    let candidates = frames
         .iter()
-        .map(|frame| detect_nozzle_bore(frame, bottom_vision))
+        .map(|frame| detect_nozzle_bore_candidates(frame, bottom_vision))
         .collect::<Vec<_>>();
+    let detections = select_stable_nozzle_cluster(&candidates);
     let detected = detections.iter().flatten().copied().collect::<Vec<_>>();
     let requested_samples = frames.len() as u32;
     let detected_samples = detected.len() as u32;
@@ -311,6 +319,18 @@ pub fn summarize_nozzle_tooling(
         .collect::<Vec<_>>();
     center_errors.sort_by(f64::total_cmp);
     let center_error_p95_px = percentile_95(&center_errors);
+    let center_jitter_p95_px = if detected.is_empty() {
+        None
+    } else {
+        let mean_x_px = mean(detected.iter().map(|detection| detection.x_px));
+        let mean_y_px = mean(detected.iter().map(|detection| detection.y_px));
+        let mut jitter = detected
+            .iter()
+            .map(|detection| (detection.x_px - mean_x_px).hypot(detection.y_px - mean_y_px))
+            .collect::<Vec<_>>();
+        jitter.sort_by(f64::total_cmp);
+        percentile_95(&jitter)
+    };
     let detected_tip_id = mean_bore_diameter_mm.and_then(|diameter| {
         bottom_vision
             .nozzles
@@ -328,7 +348,9 @@ pub fn summarize_nozzle_tooling(
         && mean_bore_diameter_mm.is_some_and(|diameter| {
             (diameter - nozzle.expected_bore_diameter_mm).abs() <= nozzle.bore_diameter_tolerance_mm
         })
-        && center_error_p95_px.is_some_and(|error| error <= bottom_vision.max_center_error_px);
+        && bore_diameter_range_mm.is_some_and(|range| range <= nozzle.bore_diameter_tolerance_mm)
+        && center_error_p95_px.is_some_and(|error| error <= bottom_vision.max_center_error_px)
+        && center_jitter_p95_px.is_some_and(|jitter| jitter <= TOOLING_CENTER_JITTER_P95_LIMIT_PX);
     NozzleToolingReport {
         nozzle_id: nozzle.nozzle_id.clone(),
         expected_tip_id: nozzle.expected_tip_id.clone(),
@@ -339,6 +361,7 @@ pub fn summarize_nozzle_tooling(
         mean_bore_diameter_mm,
         bore_diameter_range_mm,
         center_error_p95_px,
+        center_jitter_p95_px,
         passed,
         detections,
     }
@@ -348,19 +371,149 @@ pub fn detect_nozzle_bore(
     frame: &GrayFrame,
     bottom_vision: &BottomVisionProfile,
 ) -> Option<FiducialDetection> {
-    let mut targets = detect_dark_fiducials(frame, 45, 5.0, 120.0)
+    detect_nozzle_bore_candidates(frame, bottom_vision)
         .into_iter()
+        .next()
+}
+
+fn detect_nozzle_bore_candidates(
+    frame: &GrayFrame,
+    bottom_vision: &BottomVisionProfile,
+) -> Vec<FiducialDetection> {
+    let raw_targets = TOOLING_DARK_THRESHOLDS
+        .into_iter()
+        .flat_map(|threshold| detect_dark_fiducials(frame, threshold, 5.0, 120.0))
         .filter(|target| {
             (target.x_px - bottom_vision.frame_center_x_px)
                 .hypot(target.y_px - bottom_vision.frame_center_y_px)
                 <= bottom_vision.max_center_error_px
         })
         .collect::<Vec<_>>();
-    // The bore is the innermost circular dark component. Larger concentric
-    // annuli are part of the nozzle body and would otherwise make an N045 look
-    // deceptively similar to the much larger N24 opening.
-    targets.sort_by(|left, right| left.diameter_px.total_cmp(&right.diameter_px));
-    targets.into_iter().next()
+    let mut targets = raw_targets
+        .iter()
+        .copied()
+        .filter(|target| {
+            let units_per_pixel =
+                (bottom_vision.units_per_pixel_x_mm + bottom_vision.units_per_pixel_y_mm) / 2.0;
+            let diameter_mm = target.diameter_px * units_per_pixel;
+            bottom_vision.nozzles.iter().any(|candidate| {
+                (diameter_mm - candidate.expected_bore_diameter_mm).abs()
+                    <= candidate.bore_diameter_tolerance_mm
+            })
+        })
+        .collect::<Vec<_>>();
+    if targets
+        .iter()
+        .any(|target| has_concentric_companion(*target, &raw_targets))
+    {
+        targets.retain(|target| has_concentric_companion(*target, &raw_targets));
+    }
+    // A low threshold isolates the N045 bore. The reflective N24 bore becomes
+    // a complete circular component only at the second threshold. Real nozzle
+    // features have another concentric edge; prefer that evidence over isolated
+    // dark components. If both known sizes are concentric, prefer the smaller
+    // feature so the N045's outer annulus does not make it look like an N24.
+    targets.sort_by(|left, right| {
+        let left_concentric = has_concentric_companion(*left, &raw_targets);
+        let right_concentric = has_concentric_companion(*right, &raw_targets);
+        right_concentric
+            .cmp(&left_concentric)
+            .then_with(|| left.diameter_px.total_cmp(&right.diameter_px))
+            .then_with(|| right.confidence.total_cmp(&left.confidence))
+    });
+    targets
+}
+
+fn has_concentric_companion(target: FiducialDetection, candidates: &[FiducialDetection]) -> bool {
+    candidates.iter().any(|candidate| {
+        (candidate.x_px - target.x_px).hypot(candidate.y_px - target.y_px)
+            <= TOOLING_CONCENTRIC_CENTER_LIMIT_PX
+            && (candidate.diameter_px - target.diameter_px).abs()
+                >= TOOLING_CONCENTRIC_DIAMETER_GAP_PX
+    })
+}
+
+fn select_stable_nozzle_cluster(
+    candidates: &[Vec<FiducialDetection>],
+) -> Vec<Option<FiducialDetection>> {
+    struct Cluster {
+        support: usize,
+        diameter_range: f64,
+        center_jitter: f64,
+        mean_diameter: f64,
+        mean_confidence: f64,
+        detections: Vec<Option<FiducialDetection>>,
+    }
+
+    let mut best: Option<Cluster> = None;
+    for seed in candidates.iter().flatten() {
+        let selected = candidates
+            .iter()
+            .map(|frame| {
+                frame
+                    .iter()
+                    .filter(|candidate| {
+                        (candidate.x_px - seed.x_px).hypot(candidate.y_px - seed.y_px)
+                            <= TOOLING_CENTER_JITTER_P95_LIMIT_PX
+                            && (candidate.diameter_px - seed.diameter_px).abs()
+                                <= TOOLING_CLUSTER_DIAMETER_LIMIT_PX
+                    })
+                    .min_by(|left, right| {
+                        let left_distance = (left.x_px - seed.x_px).hypot(left.y_px - seed.y_px)
+                            + (left.diameter_px - seed.diameter_px).abs();
+                        let right_distance = (right.x_px - seed.x_px).hypot(right.y_px - seed.y_px)
+                            + (right.diameter_px - seed.diameter_px).abs();
+                        left_distance.total_cmp(&right_distance)
+                    })
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        let detected = selected.iter().flatten().copied().collect::<Vec<_>>();
+        let support = detected.len();
+        let diameter_range = detected
+            .iter()
+            .map(|detection| detection.diameter_px)
+            .fold(f64::NEG_INFINITY, f64::max)
+            - detected
+                .iter()
+                .map(|detection| detection.diameter_px)
+                .fold(f64::INFINITY, f64::min);
+        let mean_x = mean(detected.iter().map(|detection| detection.x_px));
+        let mean_y = mean(detected.iter().map(|detection| detection.y_px));
+        let center_jitter = detected
+            .iter()
+            .map(|detection| (detection.x_px - mean_x).hypot(detection.y_px - mean_y))
+            .fold(0.0, f64::max);
+        let mean_diameter = mean(detected.iter().map(|detection| detection.diameter_px));
+        let mean_confidence = mean(detected.iter().map(|detection| detection.confidence));
+        let cluster = Cluster {
+            support,
+            diameter_range,
+            center_jitter,
+            mean_diameter,
+            mean_confidence,
+            detections: selected,
+        };
+        let replace = best.as_ref().is_none_or(|current| {
+            cluster.support > current.support
+                || (cluster.support == current.support
+                    && (cluster.mean_diameter < current.mean_diameter
+                        || (cluster.mean_diameter == current.mean_diameter
+                            && (cluster.diameter_range < current.diameter_range
+                                || (cluster.diameter_range == current.diameter_range
+                                    && (cluster.center_jitter < current.center_jitter
+                                        || (cluster.center_jitter == current.center_jitter
+                                            && cluster.mean_confidence
+                                                > current.mean_confidence)))))))
+        });
+        if replace {
+            best = Some(cluster);
+        }
+    }
+    best.map_or_else(
+        || vec![None; candidates.len()],
+        |cluster| cluster.detections,
+    )
 }
 
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
@@ -679,6 +832,213 @@ mod tests {
         let reader = decoder.read_info().unwrap();
         assert_eq!((reader.info().width, reader.info().height), (2, 2));
         assert_eq!(reader.info().color_type, png::ColorType::Grayscale);
+    }
+
+    fn frame_with_dark_disks(width: u32, height: u32, disks: &[(i32, i32, i32)]) -> GrayFrame {
+        let mut frame = GrayFrame {
+            width,
+            height,
+            pixels: vec![180; width as usize * height as usize],
+        };
+        for &(center_x, center_y, radius) in disks {
+            for y in 0..height as i32 {
+                for x in 0..width as i32 {
+                    if (x - center_x).pow(2) + (y - center_y).pow(2) <= radius.pow(2) {
+                        frame.pixels[(y as u32 * width + x as u32) as usize] = 10;
+                    }
+                }
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn tooling_ignores_smaller_components_outside_known_tip_ranges() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 64.0;
+        bottom_vision.frame_center_y_px = 64.0;
+        bottom_vision.max_center_error_px = 55.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n1 = bottom_vision.nozzles[0].clone();
+        let noise_centers = [(30, 30), (95, 30), (32, 96), (98, 95), (64, 28)];
+        let frames = noise_centers
+            .iter()
+            .map(|&(noise_x, noise_y)| {
+                frame_with_dark_disks(128, 128, &[(60, 59, 6), (noise_x, noise_y, 2)])
+            })
+            .collect::<Vec<_>>();
+
+        let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n1);
+
+        assert!(report.passed);
+        assert_eq!(report.detected_tip_id.as_deref(), Some("N045"));
+        assert_eq!(report.detected_samples, 5);
+        assert!(report
+            .detections
+            .iter()
+            .all(|detection| detection.is_some_and(|target| target.diameter_px == 13.0)));
+        assert_eq!(report.center_jitter_p95_px, Some(0.0));
+    }
+
+    #[test]
+    fn tooling_detects_a_reflective_n24_bore_at_the_second_threshold() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 64.0;
+        bottom_vision.frame_center_y_px = 64.0;
+        bottom_vision.max_center_error_px = 55.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n2 = bottom_vision.nozzles[1].clone();
+        let frames = (0..5)
+            .map(|_| {
+                let mut frame = frame_with_dark_disks(128, 128, &[]);
+                for y in 0..128_i32 {
+                    for x in 0..128_i32 {
+                        let radius_squared = (x - 64).pow(2) + (y - 64).pow(2);
+                        if radius_squared <= 37_i32.pow(2) {
+                            frame.pixels[(y as u32 * 128 + x as u32) as usize] = 75;
+                        }
+                        if radius_squared <= 21_i32.pow(2) {
+                            frame.pixels[(y as u32 * 128 + x as u32) as usize] = 10;
+                        }
+                    }
+                }
+                frame
+            })
+            .collect::<Vec<_>>();
+
+        assert!(frames.iter().all(|frame| {
+            detect_nozzle_bore(frame, &bottom_vision)
+                .is_some_and(|target| target.diameter_px == 75.0)
+        }));
+        let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n2);
+
+        assert!(report.passed);
+        assert_eq!(report.detected_tip_id.as_deref(), Some("N24"));
+        assert!(report
+            .detections
+            .iter()
+            .all(|detection| detection.is_some_and(|target| target.diameter_px == 75.0)));
+        assert_eq!(report.center_jitter_p95_px, Some(0.0));
+    }
+
+    #[test]
+    fn tooling_prefers_the_n045_bore_over_a_more_stable_outer_annulus() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 64.0;
+        bottom_vision.frame_center_y_px = 64.0;
+        bottom_vision.max_center_error_px = 55.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n1 = bottom_vision.nozzles[0].clone();
+        let frames = [6_i32, 7, 6, 7, 6]
+            .into_iter()
+            .map(|inner_radius| {
+                let mut frame = frame_with_dark_disks(128, 128, &[]);
+                for y in 0..128_i32 {
+                    for x in 0..128_i32 {
+                        let radius_squared = (x - 64).pow(2) + (y - 64).pow(2);
+                        if radius_squared <= 36_i32.pow(2) {
+                            frame.pixels[(y as u32 * 128 + x as u32) as usize] = 75;
+                        }
+                        if radius_squared <= inner_radius.pow(2) {
+                            frame.pixels[(y as u32 * 128 + x as u32) as usize] = 10;
+                        }
+                    }
+                }
+                frame
+            })
+            .collect::<Vec<_>>();
+
+        let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n1);
+
+        assert!(report.passed);
+        assert_eq!(report.detected_tip_id.as_deref(), Some("N045"));
+        assert!(report
+            .detections
+            .iter()
+            .all(|detection| detection.is_some_and(|target| target.diameter_px < 20.0)));
+    }
+
+    #[test]
+    fn tooling_prefers_a_repeated_n24_over_intermittent_n045_sized_noise() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 64.0;
+        bottom_vision.frame_center_y_px = 64.0;
+        bottom_vision.max_center_error_px = 55.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n2 = bottom_vision.nozzles[1].clone();
+        let frames = (0..5)
+            .map(|sample| {
+                let mut frame = frame_with_dark_disks(128, 128, &[]);
+                for y in 0..128_i32 {
+                    for x in 0..128_i32 {
+                        let radius_squared = (x - 64).pow(2) + (y - 64).pow(2);
+                        if radius_squared <= 37_i32.pow(2) {
+                            frame.pixels[(y as u32 * 128 + x as u32) as usize] = 75;
+                        }
+                        if radius_squared <= 21_i32.pow(2) {
+                            frame.pixels[(y as u32 * 128 + x as u32) as usize] = 10;
+                        }
+                    }
+                }
+                if sample == 0 || sample == 2 {
+                    for y in 0..128_i32 {
+                        for x in 0..128_i32 {
+                            if (x - 96).pow(2) + (y - 29).pow(2) <= 4_i32.pow(2) {
+                                frame.pixels[(y as u32 * 128 + x as u32) as usize] = 10;
+                            }
+                        }
+                    }
+                }
+                frame
+            })
+            .collect::<Vec<_>>();
+
+        assert!(frames.iter().all(|frame| {
+            detect_nozzle_bore(frame, &bottom_vision)
+                .is_some_and(|target| target.diameter_px == 75.0)
+        }));
+        let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n2);
+
+        assert!(report.passed);
+        assert_eq!(report.detected_tip_id.as_deref(), Some("N24"));
+        assert!(report
+            .detections
+            .iter()
+            .all(|detection| detection.is_some_and(|target| target.diameter_px == 75.0)));
+    }
+
+    #[test]
+    fn tooling_reports_a_consistent_wrong_tip_instead_of_accepting_it() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 90.0;
+        bottom_vision.frame_center_y_px = 90.0;
+        bottom_vision.max_center_error_px = 60.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n1 = bottom_vision.nozzles[0].clone();
+        let frames = (0..5)
+            .map(|_| frame_with_dark_disks(180, 180, &[(90, 90, 38)]))
+            .collect::<Vec<_>>();
+
+        let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n1);
+
+        assert!(!report.passed);
+        assert_eq!(report.detected_tip_id.as_deref(), Some("N24"));
+        assert_eq!(report.detected_samples, 5);
     }
 
     #[test]

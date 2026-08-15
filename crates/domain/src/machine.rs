@@ -202,7 +202,7 @@ pub struct VisualHomingProfile {
     pub pixel_error_to_machine_mm: [[f64; 2]; 2],
     pub max_capture_error_px: f64,
     pub max_correction_mm: f64,
-    pub acceptance_radius_px: f64,
+    pub max_verification_error_mm: f64,
     pub feed_mm_per_min: f64,
     pub axis_mapping_validated: bool,
 }
@@ -223,7 +223,7 @@ impl VisualHomingProfile {
             self.pixel_error_to_machine_mm[1][1],
             self.max_capture_error_px,
             self.max_correction_mm,
-            self.acceptance_radius_px,
+            self.max_verification_error_mm,
             self.feed_mm_per_min,
         ];
         let matrix_determinant = self.pixel_error_to_machine_mm[0][0]
@@ -234,7 +234,7 @@ impl VisualHomingProfile {
             || matrix_determinant.abs() < 1e-12
             || self.max_capture_error_px <= 0.0
             || self.max_correction_mm <= 0.0
-            || self.acceptance_radius_px < 0.0
+            || self.max_verification_error_mm <= 0.0
             || self.feed_mm_per_min <= 0.0
         {
             return Err("visual homing profile is invalid");

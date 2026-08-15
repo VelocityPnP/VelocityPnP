@@ -503,7 +503,11 @@ impl MachineActor {
         {
             bail!("actuator {actuator_id} is not present in the active profile");
         }
-        self.driver.actuate(&actuator_id, false).await?;
+        if let Err(error) = self.driver.actuate(&actuator_id, false).await {
+            let message = format!("failed to disable actuator {actuator_id}: {error}");
+            self.set_fault("actuator_disable_failed", message.clone(), true);
+            bail!(message);
+        }
         self.emit(
             "machine.actuator",
             json!({
@@ -634,6 +638,7 @@ mod tests {
     use super::*;
     use crate::SimulatorDriver;
     use async_trait::async_trait;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     fn profile() -> MachineProfile {
@@ -845,6 +850,84 @@ mod tests {
         assert_eq!(pose.x_mm, expected.fiducial_x_mm);
         assert_eq!(pose.y_mm, expected.fiducial_y_mm);
         assert_eq!(pose.z_mm, 31.5);
+    }
+
+    struct FailingDisableDriver {
+        emergency_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MachineDriver for FailingDisableDriver {
+        fn simulated(&self) -> bool {
+            false
+        }
+
+        async fn connect(&mut self) -> Result<String> {
+            Ok("actuator failure test driver".into())
+        }
+
+        async fn disconnect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn home(&mut self) -> Result<Pose> {
+            Ok(Pose::ORIGIN)
+        }
+
+        async fn move_to(&mut self, target: Pose, _feed_mm_per_min: f64) -> Result<Pose> {
+            Ok(target)
+        }
+
+        async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose> {
+            Ok(Pose {
+                x_mm,
+                y_mm,
+                ..Pose::ORIGIN
+            })
+        }
+
+        async fn actuate(&mut self, _actuator_id: &str, enabled: bool) -> Result<()> {
+            if enabled {
+                Ok(())
+            } else {
+                bail!("controller did not acknowledge the off command")
+            }
+        }
+
+        async fn read_sensor(&mut self, _sensor_id: &str) -> Result<i64> {
+            Ok(0)
+        }
+
+        async fn emergency_stop(&mut self) -> Result<()> {
+            self.emergency_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn actuator_cleanup_failure_faults_without_an_emergency_stop() {
+        let emergency_calls = Arc::new(AtomicUsize::new(0));
+        let handle = MachineHandle::spawn(
+            Box::new(FailingDisableDriver {
+                emergency_calls: emergency_calls.clone(),
+            }),
+            profile(),
+        );
+        handle.connect().await.unwrap();
+
+        let error = handle
+            .disable_actuator("lights".into())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("failed to disable actuator lights"));
+        assert_eq!(handle.status().state, MachineState::Fault);
+        assert_eq!(
+            handle.status().fault.unwrap().code,
+            "actuator_disable_failed"
+        );
+        assert_eq!(emergency_calls.load(Ordering::Acquire), 0);
     }
 
     struct InterruptibleDriver {

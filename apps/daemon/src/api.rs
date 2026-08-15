@@ -404,9 +404,6 @@ async fn camera_reproducibility(
         Ok(())
     };
     if let Err(error) = lights_off {
-        if let Err(stop_error) = state.machine.emergency_stop().await {
-            tracing::error!(%stop_error, "emergency stop after camera light cleanup failure also failed");
-        }
         return Err(ApiError::internal(error));
     }
     let (controls, report) = capture?;
@@ -726,6 +723,12 @@ struct VisualHomingExecution {
     final_pose: Option<Pose>,
 }
 
+struct VisualHomingRunOptions {
+    apply_offset: bool,
+    seed_pose: Pose,
+    verification_limit_mm: Option<f64>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -740,6 +743,14 @@ async fn visual_home(
 async fn execute_visual_home(
     state: &AppState,
     body: VisualHomingRequest,
+) -> ApiResult<VisualHomingExecution> {
+    execute_visual_home_with_limit(state, body, None).await
+}
+
+async fn execute_visual_home_with_limit(
+    state: &AppState,
+    body: VisualHomingRequest,
+    verification_limit_mm: Option<f64>,
 ) -> ApiResult<VisualHomingExecution> {
     let status = state.machine.status();
     status
@@ -793,11 +804,14 @@ async fn execute_visual_home(
     let result = run_visual_homing(
         state,
         body.lease_id,
-        body.apply_offset,
         &visual,
         &camera_profile,
         &device_path,
-        seed_pose,
+        VisualHomingRunOptions {
+            apply_offset: body.apply_offset,
+            seed_pose,
+            verification_limit_mm,
+        },
     )
     .await;
     let lights_off = if camera_profile.lighting_enabled {
@@ -806,9 +820,6 @@ async fn execute_visual_home(
         Ok(())
     };
     if let Err(error) = lights_off {
-        if let Err(stop_error) = state.machine.emergency_stop().await {
-            tracing::error!(%stop_error, "emergency stop after visual-homing light cleanup failure also failed");
-        }
         return Err(ApiError::internal(error));
     }
     result
@@ -817,19 +828,18 @@ async fn execute_visual_home(
 async fn run_visual_homing(
     state: &AppState,
     lease_id: Uuid,
-    apply_offset: bool,
     visual: &VisualHomingProfile,
     camera_profile: &CameraProfile,
     device_path: &str,
-    seed_pose: Pose,
+    options: VisualHomingRunOptions,
 ) -> ApiResult<VisualHomingExecution> {
     let initial_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
     let initial = plan_visual_homing(&initial_frame, visual)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    if !apply_offset {
+    if !options.apply_offset {
         return Ok(VisualHomingExecution {
             applied: false,
-            seed_pose,
+            seed_pose: options.seed_pose,
             initial,
             corrected_pose: None,
             corrections: Vec::new(),
@@ -842,12 +852,12 @@ async fn run_visual_homing(
             "visual homing observation exceeds the configured correction bounds",
         ));
     }
-    let mut corrected_pose = seed_pose;
+    let mut corrected_pose = options.seed_pose;
     let mut verification = initial.clone();
     let mut corrections = Vec::with_capacity(MAX_VISUAL_HOME_CORRECTIONS);
     for attempt in 1..=MAX_VISUAL_HOME_CORRECTIONS {
         let target =
-            next_visual_correction_target(seed_pose, corrected_pose, &verification, visual)
+            next_visual_correction_target(options.seed_pose, corrected_pose, &verification, visual)
                 .map_err(ApiError::bad_request)?;
         corrected_pose = state
             .machine
@@ -862,15 +872,28 @@ async fn run_visual_homing(
         let verification_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
         verification = plan_visual_homing(&verification_frame, visual)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
-        if verification.accepted {
+        if visual_verification_accepted(&verification, options.verification_limit_mm) {
             break;
         }
     }
-    if !verification.accepted {
-        return Err(ApiError::bad_request(format!(
-            "visual homing verification error {:.3}px exceeds {:.3}px after {} corrections",
-            verification.error_radius_px, visual.acceptance_radius_px, MAX_VISUAL_HOME_CORRECTIONS,
-        )));
+    if !visual_verification_accepted(&verification, options.verification_limit_mm) {
+        let message = options.verification_limit_mm.map_or_else(
+            || {
+                format!(
+                    "visual homing verification error {:.4}mm exceeds {:.4}mm after {} corrections",
+                    verification.correction_distance_mm,
+                    visual.max_verification_error_mm,
+                    MAX_VISUAL_HOME_CORRECTIONS,
+                )
+            },
+            |limit_mm| {
+                format!(
+                    "visual homing verification error {:.4}mm exceeds {:.4}mm after {} corrections",
+                    verification.correction_distance_mm, limit_mm, MAX_VISUAL_HOME_CORRECTIONS,
+                )
+            },
+        );
+        return Err(ApiError::bad_request(message));
     }
     let final_pose = state
         .machine
@@ -879,12 +902,21 @@ async fn run_visual_homing(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     Ok(VisualHomingExecution {
         applied: true,
-        seed_pose,
+        seed_pose: options.seed_pose,
         initial,
         corrected_pose: Some(corrected_pose),
         corrections,
         verification: Some(verification),
         final_pose: Some(final_pose),
+    })
+}
+
+fn visual_verification_accepted(
+    verification: &VisualHomingPlan,
+    verification_limit_mm: Option<f64>,
+) -> bool {
+    verification_limit_mm.map_or(verification.accepted, |limit_mm| {
+        verification.correction_distance_mm <= limit_mm
     })
 }
 
@@ -1467,18 +1499,12 @@ async fn execute_calibration_run(
     if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
         if let Err(cleanup_error) = state.machine.disable_actuator("lights".into()).await {
             tracing::error!(%cleanup_error, "camera-check light cleanup also failed");
-            if let Err(stop_error) = state.machine.emergency_stop().await {
-                tracing::error!(%stop_error, "emergency stop after light cleanup failure also failed");
-            }
         }
         return fail_calibration_run(&state, &mut run, error.to_string());
     }
     let camera_result = execute_camera_calibration(&state, &mut run, lease_id).await;
     let lights_off = state.machine.disable_actuator("lights".into()).await;
     if let Err(error) = lights_off {
-        if let Err(stop_error) = state.machine.emergency_stop().await {
-            tracing::error!(%stop_error, "emergency stop after light cleanup failure also failed");
-        }
         return fail_calibration_run(&state, &mut run, error.to_string());
     }
     match camera_result {
@@ -1514,13 +1540,14 @@ async fn execute_calibration_run(
         if let Err(error) = state.machine.home(lease_id, true).await {
             return fail_calibration_run(&state, &mut run, error.to_string());
         }
-        let applied = match execute_visual_home(
+        let applied = match execute_visual_home_with_limit(
             &state,
             VisualHomingRequest {
                 lease_id,
                 apply_offset: true,
                 move_to_seed: true,
             },
+            Some(run.config.visual_homing_p95_limit_mm),
         )
         .await
         {
@@ -1713,9 +1740,6 @@ async fn execute_initial_actuator_checks(
         {
             if let Err(cleanup_error) = state.machine.disable_actuator(actuator_id.clone()).await {
                 tracing::error!(%cleanup_error, %actuator_id, "actuator check cleanup also failed");
-                if let Err(stop_error) = state.machine.emergency_stop().await {
-                    tracing::error!(%stop_error, "emergency stop after actuator cleanup failure also failed");
-                }
             }
             return Err(error.to_string());
         }
@@ -1723,9 +1747,6 @@ async fn execute_initial_actuator_checks(
         let active = state.machine.read_sensor(lease_id, sensor.id.clone()).await;
         let disabled = state.machine.disable_actuator(actuator_id.clone()).await;
         if let Err(error) = disabled {
-            if let Err(stop_error) = state.machine.emergency_stop().await {
-                tracing::error!(%stop_error, "emergency stop after actuator cleanup failure also failed");
-            }
             return Err(format!("failed to disable {actuator_id}: {error}"));
         }
         let active = active.map_err(|error| error.to_string())?;
@@ -2865,6 +2886,33 @@ mod tests {
             ..seed
         };
         assert!(next_visual_correction_target(seed, current, &observation, &visual).is_err());
+    }
+
+    #[test]
+    fn calibration_verification_uses_its_declared_millimeter_limit() {
+        let mut verification = VisualHomingPlan {
+            target: velocitypnp_vision::FiducialDetection {
+                x_px: 640.0,
+                y_px: 360.0,
+                diameter_px: 75.0,
+                confidence: 1.0,
+            },
+            error_x_px: 1.047,
+            error_y_px: 0.0,
+            error_radius_px: 1.047,
+            correction_x_mm: 0.0141,
+            correction_y_mm: 0.0,
+            correction_distance_mm: 0.0141,
+            within_capture_bound: true,
+            within_correction_bound: true,
+            accepted: true,
+        };
+
+        assert!(visual_verification_accepted(&verification, None));
+        assert!(!visual_verification_accepted(&verification, Some(0.01)));
+        assert!(visual_verification_accepted(&verification, Some(0.05)));
+        verification.correction_distance_mm = 0.0501;
+        assert!(!visual_verification_accepted(&verification, Some(0.05)));
     }
 
     #[tokio::test]

@@ -163,10 +163,12 @@ focus/orientation and lock repeatable capture settings.
 ## Remaining prohibitions
 
 Every fresh connection still requires the operator leveling heuristic because
-the V3 has no absolute nozzle-height feedback. Jogging remains prohibited until
-that session's Z-first and XY stages pass. Rotation motion, higher feed limits,
-controlled-stop behavior, and the 30-cycle visual-refined homing acceptance
-claim remain unvalidated.
+the V3 has no absolute nozzle-height feedback. At this stage, jogging remained
+prohibited until that session's Z-first and XY stages passed. Rotation motion,
+higher feed limits, cooperative cancellation, and the 30-cycle visual-refined
+homing acceptance claim were unvalidated. `M112` is reserved for the explicit
+emergency-stop operation. An ordinary actuator cleanup failure now faults the
+machine, revokes its lease, and invalidates homing without sending `M112`.
 Production job execution remains unavailable by design.
 
 The driver has the current Opulo REV04 initialization and VAC1/VAC2 read
@@ -182,9 +184,10 @@ The primary-datum fixture produces a bounded visual-home observation. A prior
 target error converts to machine correction with a negative X coefficient and
 a positive Y coefficient. The probe exposed and corrected the provisional Y
 sign copied from the tagged profile. The attached V3.0.4 profile now marks the
-mapping validated, but apply mode still requires physical verification of its
-bounded correction and a post-move residual no larger than one pixel before an
-XY-only `G92` reset.
+mapping validated. At this stage, apply mode still required physical
+verification of its bounded correction and a post-move residual no larger than
+one pixel before an XY-only `G92` reset. Later attached-machine evidence below
+showed that this provisional pixel gate was not a valid machine-scale limit.
 
 The first apply-mode run with the corrected signs completed successfully. Its
 initial 2.238 px error requested a 0.0303 mm correction to X=220.1598 and
@@ -230,8 +233,8 @@ diameters with the profile's N045 and N24 assignments; and executes the agreed
 coarse-home, visual-refine, fixed-excursion, return, and independent-observation
 sequence. Progress, per-cycle samples, rejection reasons, and the final report
 are stored in SQLite and exposed through the API, CLI, Python client, and web
-UI. The operator UI no longer accepts calibration metrics. The 30-cycle
-hardware gate will be rerun through this first-class operation.
+UI. The operator UI no longer accepts calibration metrics. The next 30-cycle
+hardware gate used this first-class operation.
 
 The first persisted physical run on 2026-08-15 exposed two useful gates before
 the 30-cycle phase. Its top-camera check passed all 30 captures with 0.0391 px
@@ -239,6 +242,27 @@ p95 center jitter, zero capture failures, and stable focus and luma. N1 tooling
 classification then rejected: all five frames produced small, spatially
 inconsistent candidates averaging 0.163 mm rather than the expected N045 bore.
 The run preserved those detections and stopped before presenting N2.
+
+A revised detector rejected small components outside every known tip range and
+required the selected feature to stay spatially stable. The next persisted run
+passed the top camera at 0.0483 px p95 jitter and identified N1 as N045 in all
+five frames. Its mean measured bore was 0.3922 mm, its diameter range was
+0.0314 mm, and its p95 center jitter was 0.1183 px. N2 then produced no valid
+feature because the low grayscale threshold isolated only a 43-to-44 px dark
+core, not the reflective edge of its nominal 2.40 mm bore.
+
+The first two-threshold hardware rerun again passed combined XYZ homing, both
+vacuum command/read paths, the top camera, and N1. The top camera detected all
+30 targets with 0.0404 px p95 jitter. N1 was classified as N045 in all five
+frames with a 0.4047 mm mean diameter, 0.0157 mm diameter range, and 0.0962 px
+p95 center jitter. N2 still rejected because its bore edge shifted above the
+initial second threshold. Diagnostic captures at the rejected pose showed the
+same 75-to-75.5 px edge at grayscale thresholds from 90 through 120. The
+detector's locked thresholds are now 45 and 90: the first isolates N045 and the
+second resolves the reflective N24 edge. The attached N24 frame measures
+2.3687 mm at the current camera scale, inside the profile's nominal 2.40 plus
+or minus 0.60 mm interval. A further persisted runner validation is required
+before this is a passed N2 claim.
 
 During that run the operator observed that the axis-scoped `G28 Z` command
 moved the gantry toward X/Y zero before homing Z. Because the required operator
@@ -271,9 +295,10 @@ recovery can succeed after this REV4 build stops servicing its USB endpoint.
 
 The V3.0.4 bottom-vision seed uses the attached machine's observed camera
 center and the tagged Opulo N1/N2 head offsets. The retained N045 fixture
-measures a 0.422 mm bore and is automatically classified as N045. Live N2/N24
-classification remains part of the next runner validation; it is not claimed
-as attached-hardware evidence yet.
+measures a 0.422 mm bore and is automatically classified as N045. N24 uses a
+higher threshold for its reflective bore edge while keeping the physical
+2.40 mm model. At this stage, live N2/N24 classification remained part of the
+next runner validation and was not yet passed attached-hardware evidence.
 
 One conservative X/Y traverse exposed a completion-timeout defect. The
 324 mm move from home to the N1 bottom-camera target needs about 65 seconds at
@@ -285,6 +310,56 @@ move and derives a bounded 60-to-900-second completion timeout from the
 reported start pose, target, and feed. That correction has unit coverage but
 was also validated by repeating the same physical traverse in 65.0 seconds,
 past the old fixed limit, followed by a successful 32.6-second return move.
+
+The first run with both grayscale thresholds found the real N24 bore in three
+of five frames but selected small, unrelated features in two frames. The mixed
+set had a 2.0706 mm diameter range and 50.7 px p95 center jitter, so the runner
+rejected it. The detector now groups candidates across all frames and requires
+a stable center and diameter. It also prefers features with a concentric edge.
+A following run selected N24 in four of five frames at a stable 2.3530 mm and
+passed both tooling checks and the bottom-camera check. This removed the
+single-frame noise path without hiding missing detections.
+
+That run completed five visual-home cycles, then the provisional one-pixel
+verification rule rejected a 1.047 px residual. At the calibrated image scale,
+the same residual was about 0.014 mm and was well inside the declared 0.05 mm
+repeatability goal. Repository history showed that the pixel rule came from
+the provisional visual-home implementation, not from an Opulo requirement or
+attached-machine evidence. Visual-home acceptance now uses correction distance
+in millimetres. Pixel residuals remain stored as vision diagnostics.
+
+One further run showed that a stable N045 outer annulus can also resemble N24.
+The multi-frame selector now ranks equal-support stable groups by the smaller
+diameter before range and jitter. Synthetic tests cover this case, reflective
+N24 detection, intermittent small noise, out-of-range components, and a stable
+wrong tip. Live saved N1 and N2 frames also select their expected 12-to-12.5 px
+and 75-to-75.5 px bore groups.
+
+The complete physical runner validation then succeeded on 2026-08-15. Run
+`e31a11fa-3ec7-4e81-b0b5-e7db5c7c2c80` belongs to calibration
+`44f3476c-430a-4887-a247-7b008e1a9797`. Combined XYZ homing, both vacuum
+command/read/off paths, both cameras, both tooling checks, and all 30 visual
+homing cycles passed. The top camera detected 30 of 30 targets with 0.0481 px
+p95 center jitter. The bottom camera detected 30 of 30 targets with 0.2766 px
+p95 center jitter and zero capture failures.
+
+N1 was identified as N045 in five of five frames. Its mean bore was 0.3828 mm,
+its diameter range was 0.0157 mm, and its p95 center jitter was 0.0651 px. N2
+was identified as N24 in five of five frames. Its mean bore was 2.3593 mm, its
+diameter range was 0.0157 mm, and its p95 center jitter was 0.4018 px. The N1
+and N2 p95 errors from the configured camera center were 29.14 px and 82.18 px.
+Both are inside the current 100 px acquisition bound, but automatic head-offset
+centering remains useful future geometry-calibration work.
+
+All 30 visual-home cycles converged with one correction. Visual verification
+had 0.0198 mm p95, 0.0226 mm maximum, and 0.0145 mm RMS residual. Independent
+return observation had 0.0148 mm p95, 0.0156 mm maximum, and 0.0105 mm RMS
+residual. Initial coarse-home corrections ranged from 0.0457 to 0.8296 mm,
+which confirms that sensorless homing is a capture-range operation, not the
+precision datum. The attached machine ended homed, ready, and fault-free. This
+completes the persisted initial-machine runner and its visual-homing workflow
+step. It does not make the calibration production-ready: motion geometry,
+nozzle runout, and final placement validation still require their own evidence.
 
 ## Procedure sources
 

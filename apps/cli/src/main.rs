@@ -66,6 +66,7 @@ enum Command {
         #[arg(long, env = "VELOCITYPNP_LEASE")]
         lease: Uuid,
         actuator_id: String,
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     ReadSensor {
@@ -423,5 +424,34 @@ async fn run_operation(client: &Client, base: &str, initial: Value) -> Result<Va
         operation = serde_json::from_value(
             get(client, &format!("{base}/operations/{}", operation.id)).await?,
         )?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actuate_accepts_an_explicit_positional_boolean() {
+        let lease = Uuid::nil();
+        for enabled in [false, true] {
+            let args = Args::try_parse_from([
+                "velocitypnp",
+                "actuate",
+                "--lease",
+                &lease.to_string(),
+                "lights",
+                if enabled { "true" } else { "false" },
+            ])
+            .unwrap();
+            assert!(matches!(
+                args.command,
+                Command::Actuate {
+                    actuator_id,
+                    enabled: parsed,
+                    ..
+                } if actuator_id == "lights" && parsed == enabled
+            ));
+        }
     }
 }
