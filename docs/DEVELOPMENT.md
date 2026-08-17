@@ -235,7 +235,10 @@ waste the full repeatability run. The evidence remains provisional until all
    Nozzle offsets use the top-camera reference and nozzle poses observed by the
    same fixed bottom camera.
 5. Rotates N1/A and N2/B through 12 alternating offsets from ±15 to
-   ±165 degrees.
+   ±165 degrees. The initial tooling check supplies identity. During rotation,
+   a bounded multi-threshold tracker follows the same verified feature and
+   records the last frame from each attempt. This avoids treating a reflective
+   edge change as an installed-tool change.
 6. Restores each starting angle and fits the rotation-axis position, head
    offset, and first-harmonic nozzle-tip runout coefficients.
 

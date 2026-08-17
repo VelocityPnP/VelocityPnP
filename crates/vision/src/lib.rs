@@ -2126,6 +2126,46 @@ mod tests {
     }
 
     #[test]
+    fn geometric_tracker_keeps_a_verified_reflective_outer_tip() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 128.0;
+        bottom_vision.frame_center_y_px = 128.0;
+        bottom_vision.max_center_error_px = 100.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n2 = bottom_vision.nozzles[1].clone();
+        let frames = (0..5)
+            .map(|_| {
+                let mut frame = frame_with_dark_annulus(256, 256, 130, 126, 80, 60);
+                for pixel in &mut frame.pixels {
+                    if *pixel == 75 {
+                        *pixel = 110;
+                    }
+                }
+                frame
+            })
+            .collect::<Vec<_>>();
+
+        let identity = summarize_nozzle_tooling(&frames, &bottom_vision, &n2);
+        assert!(!identity.passed);
+
+        let target = summarize_nozzle_height_feature(
+            &frames,
+            128.0,
+            128.0,
+            160.0,
+            30.0,
+            NozzleCalibrationFeatureKind::OuterTip,
+        )
+        .unwrap();
+        assert!((target.x_px - 130.0).abs() < 0.2);
+        assert!((target.y_px - 126.0).abs() < 0.2);
+        assert!((target.diameter_px - 161.0).abs() < 0.1);
+    }
+
+    #[test]
     fn tooling_accepts_three_stable_detections_but_not_two() {
         let machine: velocitypnp_domain::MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();

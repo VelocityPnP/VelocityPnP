@@ -4305,6 +4305,8 @@ async fn measure_nozzle_runout(
         .calibration_rotation_reference(lease_id, nozzle.nozzle_id.clone())
         .await
         .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let mut expected =
+        capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
     let measurement = async {
         let mut samples = Vec::new();
         for angle_offset in &bottom.head_geometry.rotation_angle_offsets_deg {
@@ -4316,8 +4318,17 @@ async fn measure_nozzle_runout(
                 .calibration_rotate_nozzle(lease_id, nozzle.nozzle_id.clone(), *angle_offset)
                 .await
                 .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
-            let target =
-                capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
+            let target = capture_nozzle_runout_feature(
+                state,
+                run,
+                bottom,
+                nozzle,
+                camera_profile,
+                device_path,
+                expected,
+                *angle_offset,
+            )
+            .await?;
             let correction =
                 plan_bottom_camera_correction(target, bottom, pixel_error_to_machine_mm)
                     .ok_or_else(|| CalibrationStop::Failed("invalid nozzle correction".into()))?;
@@ -4335,6 +4346,7 @@ async fn measure_nozzle_runout(
                 correction_x_mm: correction.x_mm,
                 correction_y_mm: correction.y_mm,
             });
+            expected = target;
             update_run_check(
                 run,
                 &format!("runout_{}", nozzle.nozzle_id),
@@ -4398,6 +4410,87 @@ async fn measure_nozzle_runout(
         )));
     }
     Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_nozzle_runout_feature(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    expected: FiducialDetection,
+    angle_offset_deg: f64,
+) -> Result<FiducialDetection, CalibrationStop> {
+    for attempt in 1..=MAX_TOOLING_CAPTURE_ATTEMPTS {
+        let frames = capture_profiled_frames(
+            state,
+            camera_profile,
+            device_path,
+            bottom.head_geometry.centering_sample_count,
+        )
+        .await
+        .map_err(api_calibration_stop)?;
+        let frame = frames
+            .last()
+            .ok_or_else(|| CalibrationStop::Failed("runout capture returned no frames".into()))?;
+        record_nozzle_runout_frame(
+            state,
+            run,
+            &nozzle.nozzle_id,
+            angle_offset_deg,
+            attempt,
+            frame,
+        )?;
+        if let Some(target) = summarize_nozzle_height_feature(
+            &frames,
+            expected.x_px,
+            expected.y_px,
+            expected.diameter_px,
+            bottom.head_geometry.height_tracking_radius_px,
+            nozzle.calibration_feature_kind,
+        ) {
+            return Ok(target);
+        }
+    }
+    Err(CalibrationStop::Rejected(format!(
+        "{} runout feature was not stable near ({:.1}, {:.1})px at {angle_offset_deg:+.1}deg",
+        nozzle.nozzle_id, expected.x_px, expected.y_px
+    )))
+}
+
+fn record_nozzle_runout_frame(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    nozzle_id: &str,
+    angle_offset_deg: f64,
+    attempt: u32,
+    frame: &GrayFrame,
+) -> Result<(), CalibrationStop> {
+    let angle_millidegrees = (angle_offset_deg * 1_000.0).round() as i64;
+    let name = format!("runout-{nozzle_id}-{angle_millidegrees}-{attempt}.png");
+    let data =
+        encode_gray_png(frame).map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    state
+        .store
+        .put_calibration_artifact(run.id, &name, "image/png", &data)
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let artifacts = run
+        .camera_reports
+        .entry("nozzle_runout_artifacts".into())
+        .or_insert_with(|| json!([]));
+    let artifacts = artifacts.as_array_mut().ok_or_else(|| {
+        CalibrationStop::Failed("nozzle-runout artifact report is not an array".into())
+    })?;
+    artifacts.push(json!({
+        "nozzle_id": nozzle_id,
+        "angle_offset_deg": angle_offset_deg,
+        "attempt": attempt,
+        "name": name,
+        "url": format!("/api/v1/calibration-runs/{}/artifacts/{name}", run.id),
+    }));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
