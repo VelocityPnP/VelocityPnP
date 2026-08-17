@@ -710,6 +710,54 @@ and fault-free. The runner now refreshes its existing lease at every long-run
 measurement checkpoint. This is an operation keepalive, not a replacement
 lease or an expansion of machine authority.
 
+Three following attempts exposed reliability defects without producing an
+accepted calibration. Run `3edebe56-4fac-440b-b0bf-f8976168494a` reached N2
+rotation but let the full tooling classifier select a reflective feature at
+-75 degrees. Run `7ffd7558-68bd-4b44-bb58-a7b1a00ceda3` stopped when the top
+camera capture node re-enumerated during visual homing. Run
+`cff2967e-4cb8-48e7-8b3b-557e8349f8c6` showed that the live N24 outer edge
+needed grayscale threshold 60. The runner now tracks the already-verified tip
+through rotation with bounded thresholds, retries transient capture failures,
+and retains every initial tooling frame. Three live N24 frames are regression
+fixtures; threshold 60 finds a stable 170-to-171 px outer edge in all three.
+
+The terminal revised run
+`d100539f-1901-4724-80af-6b7b9efc0ea9` succeeded on 2026-08-17. It belongs to
+calibration `b6716644-422b-4cda-b48c-0ca9816c250e`. All 18 checks passed,
+including combined XYZ home, both actuator/sensor paths, both camera checks,
+tool identity, 30 visual-home cycles, reciprocal camera geometry, both runout
+fits, and both seven-height fits. N24 was identified from its outer tip in all
+five initial frames. The detections were 169.5-to-171.0 px with 0.0863 px p95
+centre jitter. Both cameras captured 30 of 30 samples with no failures. The
+top and bottom p95 centre jitter values were 0.0395 px and 0.1169 px.
+
+All 30 visual-home cycles passed. Independent return had 0.01614 mm p95,
+0.04793 mm maximum, and 0.01057 mm RMS residual. Closed-loop verification had
+0.01058 mm p95, 0.01350 mm maximum, and 0.00745 mm RMS residual. This result
+stays within the machine-scale 0.05 mm gate without a provisional pixel rule.
+
+The reciprocal camera observations had 0.03989 mm and 0.04413 mm residuals.
+The camera-ray fit measured a working-plane scale ratio of 0.84047 and produced
+a common transfer of X=+1.16442 mm and Y=-1.99436 mm. N1 and N2 head offsets
+were X=-23.38259/Y=-68.36371 mm and X=+24.16884/Y=-68.69924 mm. Thus, the
+measured N1-to-N2 axis offset was X=+47.55143 mm and Y=-0.33553 mm.
+
+N1 runout radius was 0.08095 mm with a 0.00639 mm p95 fit residual. N2 runout
+radius was 0.13457 mm with a 0.00720 mm p95 fit residual. All 12 angles passed
+for each nozzle, and the run stored exactly 24 angle artifacts. N1's height
+slopes were X=+0.009911 and Y=-0.006522 mm/mm with a 0.01116 mm p95 residual.
+N2's slopes were X=+0.011013 and Y=-0.002927 mm/mm with a 0.01342 mm p95
+residual. Both seven-height models retain the camera-derived X=+1.16442 mm and
+Y=-1.99436 mm transfer. They contain no vacuum or operator-entered XY term.
+
+The same control lease remained active for the complete 112-minute run. No
+external lease renewal was sent; checkpoint refreshes advanced its expiry
+through both height sweeps. The runner stored 10 tooling, 6 reciprocal-camera,
+24 runout, and 14 height artifacts. It ended at the level Z=31.5 pose, homed,
+ready, and fault-free after explicit actuator cleanup. The snapshot contains
+every current machine-geometry step. It is correctly not production-ready
+because the remaining motion, vacuum, feeder, and job gates are not complete.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

@@ -61,7 +61,7 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Apply height and working-plane transfer corrections to vacuum targeting
 - [x] Replace the bootstrap working-plane observation with reciprocal camera geometry
 - [x] Pass the earlier attached-hardware head geometry and runout validation
-- [ ] Pass the revised N24 outer-tip and camera-ray calibration on attached hardware
+- [x] Pass the revised N24 outer-tip and camera-ray calibration on attached hardware
 - [x] Add camera-centered, vacuum-transition datum-board probing with a bounded Z interval
 - [ ] Pass the revised vacuum probe on both nozzles without visible tip compression
 - [ ] Fit vacuum classification per nozzle/tip
