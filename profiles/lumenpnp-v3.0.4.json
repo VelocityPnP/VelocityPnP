@@ -127,7 +127,7 @@
         "expected_tip_id": "N24",
         "calibration_feature_kind": "outer_tip",
         "expected_feature_diameter_mm": 4.86,
-        "feature_diameter_tolerance_mm": 0.48
+        "feature_diameter_tolerance_mm": 0.55
       }
     ]
   },

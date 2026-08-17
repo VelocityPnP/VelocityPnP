@@ -2100,13 +2100,15 @@ mod tests {
         bottom_vision.units_per_pixel_x_mm = 0.03125;
         bottom_vision.units_per_pixel_y_mm = 0.03125;
         let n2 = bottom_vision.nozzles[1].clone();
+        // The connected-component box includes both boundary pixel centers,
+        // so the official 170 px Hough bound can report as 171 px here.
         let frames = (0..5)
-            .map(|_| frame_with_dark_annulus(256, 256, 126, 132, 77, 60))
+            .map(|_| frame_with_dark_annulus(256, 256, 126, 132, 85, 65))
             .collect::<Vec<_>>();
 
         assert!(frames.iter().all(|frame| {
             detect_nozzle_calibration_feature(frame, &bottom_vision, &n2)
-                .is_some_and(|target| target.diameter_px == 155.0)
+                .is_some_and(|target| target.diameter_px == 171.0)
         }));
         let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n2);
 
@@ -2116,7 +2118,7 @@ mod tests {
             .detections
             .iter()
             .all(|detection| detection.is_some_and(|target| {
-                target.diameter_px == 155.0
+                target.diameter_px == 171.0
                     && (target.x_px - 126.0).abs() < 1e-9
                     && (target.y_px - 132.0).abs() < 1e-9
             })));

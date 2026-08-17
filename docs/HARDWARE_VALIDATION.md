@@ -681,6 +681,17 @@ bottom-camera reference at about 899 px. The revised transfer has not yet run
 on the attached machine. Lens distortion and a full intrinsic calibration
 remain separate work.
 
+The first revised attached run, `fb5d4cd2-ae5d-4c26-ad61-050a4a67cec0`,
+passed coarse home, actuator checks, top-camera reproducibility, and N045 bore
+identification. N045 measured 0.433 mm across five stable captures. N24 then
+rejected with zero in-range detections. A diagnostic frame at the unchanged
+safe pose showed that threshold 45 isolated the correct outer ring at 171 px
+with a stable circle-fit centre. The original physical interval ended at about
+170.2 px. The connected-component box includes both boundary pixel centres,
+which can make the official 170 px Hough bound report as 171 px. The N24
+physical tolerance is now 0.55 mm instead of 0.48 mm; no centre or identity
+measurement was entered manually. A rerun is required.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
