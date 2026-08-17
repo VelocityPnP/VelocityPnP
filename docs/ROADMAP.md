@@ -51,11 +51,19 @@ The project is organized by measurable gates rather than calendar estimates.
 
 - [ ] Fabricate and publish the known-dimension multi-fiducial calibration PCB
 - [ ] Bind OpenCV camera intrinsics/distortion calibration to recorded workflow steps
-- [ ] Add machine runners for XY scale, skew, backlash, and camera scale
+- [ ] Add machine runners for full-bed XY scale, skew, backlash, and distortion
+- [x] Measure the top-camera working-plane map from bounded homing-fiducial moves
 - [x] Add automatic bottom-camera local mapping, reciprocal camera centering,
   and N1/N2 head-offset measurement
 - [x] Fit and persist nozzle runout coefficients per detected nozzle/tip
-- [x] Pass attached-hardware head geometry and nozzle runout validation
+- [x] Fit per-nozzle XY axis shift from safe, height-specific bottom-camera
+  image-to-motion maps
+- [x] Apply height and working-plane transfer corrections to vacuum targeting
+- [x] Replace the bootstrap working-plane observation with reciprocal camera geometry
+- [x] Pass the earlier attached-hardware head geometry and runout validation
+- [ ] Pass the revised N24 outer-tip and camera-ray calibration on attached hardware
+- [x] Add camera-centered, vacuum-transition datum-board probing with a bounded Z interval
+- [ ] Pass the revised vacuum probe on both nozzles without visible tip compression
 - [ ] Fit vacuum classification per nozzle/tip
 - [ ] Pass full-bed and nozzle p95 residual of 0.05 mm or better
 

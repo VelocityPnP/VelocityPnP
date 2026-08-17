@@ -363,6 +363,11 @@ validation still required their own evidence.
 
 ## Head geometry and runout validation
 
+The results in this section are valid historical evidence for the earlier
+detector and runner. The current camera-only transfer revision changes the N24
+calibration feature and adds a live top-camera working-plane map. It requires a
+new attached-hardware pass before these results apply to the revised path.
+
 The complete head-geometry run passed on the attached machine on 2026-08-15.
 Run `aead8ce5-2bbe-4491-8461-4797b12449a0` belongs to calibration
 `f6acd39d-b509-4e42-b265-132c0efcf8d2` for machine serial `3286336D3331`.
@@ -407,6 +412,275 @@ offsets, and nozzle runout. It remains not production-ready because camera
 intrinsics, motion geometry, Z planes, vacuum thresholds, and known-board
 validation are still incomplete.
 
+## Datum-board vacuum probe validation
+
+The first N1 vacuum probe ran on 2026-08-16. It safely returned to the visual
+home pose with no fault, but it did not lower N1. The initial profile had
+incorrectly treated controller Z=31.5 as the datum surface. The operator saw
+that the nozzle stayed level. The recorded open-nozzle median was 239 counts.
+All samples from controller Z=32.9 through Z=31.5 settled at 234 or 235 counts.
+This flat 5-count change was below the 10-count limit and was not contact
+evidence.
+
+An N2 probe started, but the operator reported the Z error before it lowered.
+A normal disconnect stopped the run and commanded both vacuum outputs off. A
+late cleanup request then changed the disconnected state to a recoverable
+actuator fault. The cleanup path now treats output disable after disconnect as
+an idempotent operation. No emergency stop was used.
+
+Inspection of the tagged Opulo V3.0.4 files confirmed that controller Z=31.5
+is the level home coordinate. Working Z=0 maps to controller Z=0 for N1 and
+Z=63 for N2. The datum PCB puts the visual fiducial at (40, -25) and a 5 mm
+front-mask opening at (17.5, -17.5). After the machine Y-axis inversion, the
+nominal sealing target is X=-22.5 mm and Y=-7.5 mm from the visual fiducial.
+
+The next N1 run used those mappings and did lower the nozzle. It ended homed,
+ready, and fault-free with both vacuum outputs off. The open-nozzle median was
+226 counts. Every five-sample median from nozzle Z=0.9 through Z=0.0 was also
+226, so no vacuum transition occurred. The operator observed that the tip was
+not centered on the pad, was already pressing into it before the pump started
+at the nominal Z=1.0 approach, and compressed it further during the descent.
+The pump also remained on during retract and return. This run disproved the
+assumption that nozzle working Z=0 is the installed-tip surface coordinate.
+The machine profile mapping alone cannot provide contact Z.
+
+With both nozzles level, the top camera then observed the 5 mm target at the
+nominal PCB coordinate. The new detector measured its center at X=653.223 px
+and Y=359.084 px with a 377 px diameter. That is a machine correction of about
+X=-0.179 mm and Y=-0.012 mm from the nominal target.
+
+The revised operation re-identifies and centers the installed tip over the
+bottom camera at its current angle. It visually centers the 5 mm target, moves
+the measured tip over that center, and approaches only to nozzle Z=5.0 with
+the pump off. It then starts the pump, descends slowly, and uses the vacuum
+transition as contact. The pump stops before retract. The current conservative
+search ends at nozzle Z=3.0, above the position that visibly compressed N1.
+This lower bound must not be extended without new physical clearance evidence.
+
+An attempted validation at 16:47 on 2026-08-16 accidentally launched the
+previously linked daemon executable. `cargo test` had compiled the new test
+harnesses but had not relinked `target/debug/velocitypnpd`. The stale daemon
+repeated the old Z=1.0-to-0.0 descent and recorded the same flat 226-count
+signal. An explicit VAC1-off request was queued during retract and completed at
+16:50:19. The machine returned to visual home homed, ready, and fault-free;
+VAC1 then read 0. It disconnected normally. No emergency stop was used. The
+workspace was then explicitly built. The linked CLI and daemon timestamps are
+09:50:42 and 09:50:51 local time, and the daemon binary contains the revised
+safe-interval and camera-centering paths. A physical run of that linked
+sequence was still pending at that point.
+
+The explicitly built N1 sequence then passed its vacuum-transition gate at
+16:58 on 2026-08-16. Before motion, the running daemon inode and SHA-256 were
+verified against the linked file. Combined XYZ homing completed at X=0, Y=0,
+Z=31.5. Bottom-camera vision identified N045 and centered the current tip at
+head X=242.3331 and Y=215.4924.
+
+Top-camera vision corrected the nominal 5 mm target by X=-0.1453 and Y=-0.0622
+mm. Its verified residual was 0.0119 mm, and the final target observation was
+X=640.065 px, Y=359.123 px with a 376.5 px diameter. The corrected target was
+X=197.4857 and Y=182.7088 mm. The resulting head target was X=219.5365 and
+Y=253.5248 mm.
+
+VAC1 started at nozzle Z=5.0. Its open-nozzle median was 236 counts. Step
+medians remained 234 from Z=4.9 through Z=3.7, then changed monotonically to
+230 at Z=3.6, 228 at Z=3.5, and 226 at Z=3.4. The 10-count transition at Z=3.4
+stopped descent. VAC1 switched off before retract. The machine returned to
+visual home at Z=31.5 homed, ready, and fault-free. VAC1 then read 0 and VAC2
+read 255.
+
+Because the physical transition occurred at Z=3.4, the fallback search floor
+was raised from Z=1.5 to Z=3.0. This leaves 0.4 mm for detection variation and
+limits compression if the vacuum sensor does not respond. N2 had not yet been
+validated at this stage; the height-model validation below later completed it.
+
+The operator then reported that N1 was approximately X=-2 mm and Y=+2 mm from
+the pad center. Thus the run passed contact detection but failed XY placement.
+The two reciprocal camera poses explain the error. The pose where the top
+camera saw the bottom-camera lens was X=220.2824 and Y=144.6764. The pose where
+the bottom camera saw the top-camera lens was X=218.8359 and Y=146.8758. Their
+difference is X=-1.4464 and Y=+2.1993 mm, which agrees with the observed nozzle
+error.
+
+The head-offset code had used the first pose. That pose came from a soft,
+almost frame-filling image of the bottom-camera lens. A cross-camera bridge is
+not mathematically invalid if both observations identify the same optical
+axis. However, this image did not provide a reliable axis landmark. The new
+bridge uses the second pose. Thus, the sharper top-camera lens and the nozzle
+tip are measured in the same fixed bottom-camera image. With the observed N1
+centering pose, the new current tip offset is X=-23.4972 and Y=-68.6166 mm. For
+the prior corrected pad target, the predicted head command changes from
+X=219.5365 and Y=253.5248 to about X=220.9829 and Y=251.3254.
+
+The common-camera N1 verification ran from 17:09 through 17:14 UTC on
+2026-08-16. The running daemon was verified against the new linked binary
+before motion. Combined XYZ homing completed at X=0, Y=0, Z=31.5. The measured
+current N1 tip offset was X=-23.5988 and Y=-68.6359 mm. Top-camera vision
+corrected the nominal pad target by X=-0.1489 and Y=-0.0718 mm. Target
+verification had a 0.0033 mm residual. The final head target was X=221.0809 and
+Y=251.3351 mm. This is X=+1.5444 and Y=-2.1897 mm from the incorrect prior
+command, in agreement with the required correction.
+
+VAC1 started at nozzle Z=5.0. Its open-nozzle median was 236.5 counts. The
+signal delta was 6.5 counts at Z=3.6, 8.5 counts at Z=3.5, and 10.5 counts at
+Z=3.4. The transition stopped descent at Z=3.4, above the Z=3.0 safety floor.
+VAC1 switched off before retract. The machine returned to visual home at
+Z=31.5 homed, ready, and fault-free. VAC1 then read 0 and VAC2 read 255.
+The operator reported that N1 was close to the pad center but was slightly at
+X=positive and Y=negative. Thus, the common-camera change removed the large
+error and slightly passed the center in the correction direction. The residual
+magnitude was not measured. N2 remains prohibited until this small systematic
+error is understood.
+
+### N1 Z-axis tilt experiment
+
+A one-off experiment on 2026-08-16 held head X=242.4347 and Y=215.5116 mm
+over the bottom camera. It lowered N1 from controller Z=31.5 to Z=3.5 with the
+pump off. The operator confirmed that the camera was below the workspace plane
+before the full descent. The operation used vertical motion only while N1 was
+lowered. It then retracted to Z=31.5 before any lateral motion.
+
+The standard bore detector produced ten of ten stable measurements at Z=31.5,
+28.0, 24.5, 21.0, 17.5, and 14.0. A local multi-threshold bore detector gave
+five stable measurements at Z=10.5. At Z=7.0, four of five frames gave a
+low-confidence bore center. At Z=3.5, the raw frame showed the complete nozzle
+face, but the bore was too blurred for a valid numerical detection. The
+machine reached Z=3.5 without contact with the camera.
+
+The high-confidence fit from Z=31.5 through Z=10.5 predicts a Z=3.5 pixel
+change of X=-10.61 and Y=+5.95 from the level measurement. Including the
+low-confidence Z=7.0 point predicts X=-11.43 and Y=+6.52 px. The calibrated
+bottom-camera map converts this range to a physical tip shift of approximately
+X=-0.39 and Y=+0.23 mm. The direct Z=7.0 point already gives approximately the
+same physical shift. Thus, N1 or bottom-camera tilt is measurable, but its
+direction is opposite the operator-observed X=positive, Y=negative pad
+residual. It does not explain that residual and must not be applied as a pad
+centering correction without a separate contact-plane calibration.
+
+After the tilt experiment, N1 was parked at the prior pad command X=221.0809,
+Y=251.3351, and Z=3.5 with the pump off. The operator estimated that the nozzle
+OD was 2 mm from the pad's top and left edges and 1 mm from its bottom and right
+edges. This gives an approximate contact residual of X=+0.5 and Y=-0.5 mm.
+The measurement is coarse because the edge gaps could not be measured more
+precisely.
+
+The measured Z-dependent tip shift is X=-0.39 and Y=+0.23 mm. It acts opposite
+the contact residual. Removing that shift from the contact observation gives
+an approximate level-plane camera-bridge bias of X=+0.89 and Y=-0.73 mm. Thus,
+adding tilt compensation alone would make the observed pad error larger. The
+calibration needs a 3D camera-ray, feature-height, and nozzle-contact-plane
+model. A contact-specific manual correction can validate the next N1 run, but
+it must not replace that general model.
+
+### Height-model implementation status
+
+The calibration runner now measures each centered nozzle at Z=31.5, 28.0,
+24.5, 21.0, 17.5, 14.0, and 10.5. At each height, it makes four bounded 0.5 mm
+X/Y probes and measures a local image-to-motion map. It then returns to the
+fixed head position before it records the feature center. This directly
+measures the projective scale instead of estimating it from a focus-dependent
+feature diameter. An error path first retracts at the current X/Y position and
+only then returns laterally at the level Z pose. The model fits XY shift per
+millimetre of nozzle Z. It stores nozzle-axis shift separately from the
+constant top-camera working-plane transfer correction.
+
+The first attached-hardware N1 sweep completed all seven Z-only captures. Its
+centroid path was smooth, but the detected diameter changed from 14.0 px to
+7.6 px as focus changed. The diameter-scaled fit therefore produced a false
+0.153 mm p95 residual and was rejected. The slope magnitude remained within
+the physical bound. This result caused the change to measured local maps.
+
+The revised attached run `a9ddb819-f74f-40be-bf61-799b0d3496be` passed both
+seven-height local-map fits. N1 had a 0.00514 mm p95 fit residual with slopes
+X=+0.00948 and Y=-0.00655 mm/mm. N2 had a 0.02838 mm p95 fit residual with
+slopes X=+0.01056 and Y=-0.00383 mm/mm. N1's measured image scale increased
+from approximately 27.7 px/mm at Z=31.5 to 40.0 px/mm at Z=10.5. This smooth
+change confirms that the non-monotonic detected bore diameter was not a valid
+perspective scale.
+
+That run later rejected the separate 30-cycle independent-return gate at
+0.05685 mm p95 against 0.05000 mm. All 21 one-correction cycles returned
+between 0.00533 and 0.01482 mm. All nine two-correction cycles returned between
+0.05108 and 0.06307 mm, with approximately four pixels of positive Y error.
+This is direction/history behavior, not height-fit noise. The runner now makes
+up to two bounded visual refinements from the standardized excursion-return
+direction when a return exceeds the limit. It repeats the excursion and still
+rejects persistent error.
+
+Run `5aa1951b-4e06-42d4-89b9-12867e8671de` then completed the full attached
+workflow. Eleven of 30 visual cycles used one direction-conditioned return
+refinement; none used the second allowed refinement. Visual verification had
+0.04936 mm p95 and independent return had 0.01243 mm p95. The final N1 height
+model had slopes X=+0.009795 and Y=-0.005003 mm/mm with a 0.01213 mm p95 fit
+residual. N2 had slopes X=+0.009461 and Y=-0.003357 mm/mm with a 0.02291 mm p95
+fit residual. Snapshot `f6acd39d-b509-4e42-b265-132c0efcf8d2` persists the
+accepted visual, reciprocal-camera, nozzle offset, runout, and height models.
+
+A bounded data-only observation can solve the transfer correction from an
+observed nozzle-to-target error and its Z. For the current coarse N1 evidence,
+the input is X=+0.5, Y=-0.5 at Z=3.5 with approximately 0.3 mm uncertainty.
+With the final accepted N1 slope, this produces a common top-camera
+working-plane transfer correction of X=+0.77427 and Y=-0.64007 mm. The N1
+axis term at Z=3.5 is X=-0.27427 and Y=+0.14007 mm, so vacuum targeting applies
+the observed combined correction X=+0.5 and Y=-0.5 mm.
+
+The corrected N1 probe applied X=+0.49902 and Y=-0.49950 mm at its prior
+Z=3.4 alignment estimate. Top-camera pad centering had a 0.00426 mm residual,
+and the live bottom-camera tip measurement differed from the fitted model by
+0.0773 mm. The sensor change reached 9 counts from Z=3.2 through Z=3.0, one
+count below the configured transition, so the operation retracted without
+claiming contact. N1 was then parked at the same corrected X/Y pose and Z=3.5
+with the pump off. The operator reported that the tip appeared centered. This
+validates the XY correction but leaves N1 vacuum-threshold fitting open.
+
+The working-plane transfer belongs to the fixed camera pair and board plane,
+not to one nozzle. The observation API now records its source and propagates
+the transfer to every independently fitted nozzle-axis model. N2 therefore
+combined the N1-sourced transfer with its own axis slope. Its attached probe
+applied X=+0.51409 and Y=-0.54775 mm at the Z=4.0 alignment estimate. The live
+N2 tip differed from its runout model by 0.01983 mm, and top-camera pad
+centering had a 0.04211 mm residual. VAC2 detected an 11-count transition at
+nozzle Z=3.8, controller Z=59.2, then switched off and retracted before the
+lateral return. The operation ended homed, ready, and fault-free. This passes
+N2 contact detection.
+
+N2 was then parked at the detected contact pose with VAC2 off. The operator
+reported that X appeared centered but Y remained approximately -0.25 to
+-0.5 mm from the pad center. Thus, X supports the shared-camera,
+per-nozzle-axis decomposition, but a purely shared Y transfer is insufficient.
+The model now retains the shared camera term and adds a per-nozzle constant for
+post-correction residuals. The N2 observation is represented by the midpoint
+Y=-0.375 mm with 0.125 mm uncertainty. A corrected N2 rerun remains required.
+
+### Camera-only transfer revision
+
+The prior N2 detector centered a roughly 75 px inner feature. The tagged Opulo
+V3.0.4 machine profile instead uses a 140-to-170 px N24 outer-tip feature. The
+revised profile therefore identifies N045 from its 0.45 mm bore and N24 from
+its 4.86 mm outer tip. The detector carries this configured feature identity
+through tooling checks, runout, and height tracking.
+
+The revised runner measures the top-camera working-plane map with bounded
+motions around the homing fiducial. It also measures the bottom-camera map,
+centers the top-camera reference in the bottom camera, and centers the
+bottom-camera reference in the top camera. The camera CAD supplies a 15 mm
+outer reference diameter. Its observed size, the live working-plane scale, and
+the reciprocal controller poses produce the camera-ray transfer term. Each
+nozzle still gets an independent runout fit and height-dependent axis model.
+
+Vacuum magnitude does not influence XY calibration. The pressure signal is
+used only for bounded contact-Z detection and later pickup/seal validation.
+The earlier N1 shared-transfer and N2 residual observations remain historical
+diagnostic data. A new automated run creates fresh camera-derived models and
+does not require those operator measurements.
+
+This implementation uses a pinhole distance-ratio model and the configured
+outer camera silhouette. Offline replay finds the top-camera outer reference
+at 523.3 px in the saved bottom-camera frame and the N24 outer tip at 169.5 px
+in the saved level-height frame. The retained top-camera fixture finds the
+bottom-camera reference at about 899 px. The revised transfer has not yet run
+on the attached machine. Lens distortion and a full intrinsic calibration
+remain separate work.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
@@ -414,3 +688,4 @@ validation are still incomplete.
 - [Opulo V2/V3 G-code macro update guide](https://docs.opulo.io/guides/update-gcode-macros/)
 - [Opulo actuator check](https://docs.opulo.io/byop/testing/actuator-check/)
 - [Opulo LumenPnP V3.0.4 OpenPnP machine profile](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml)
+- [Opulo LumenPnP V3.0.4 datum PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/datum/datum.kicad_pcb)

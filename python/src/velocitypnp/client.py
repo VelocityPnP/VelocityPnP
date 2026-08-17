@@ -249,6 +249,9 @@ class Client:
     def create_calibration(self, machine_serial: str) -> dict[str, Any]:
         return self._request("POST", "/calibrations", {"machine_serial": machine_serial})
 
+    def calibration(self, calibration_id: str | uuid.UUID) -> dict[str, Any]:
+        return self._request("GET", f"/calibrations/{calibration_id}")
+
     def calibration_runs(
         self, calibration_id: str | uuid.UUID,
     ) -> list[dict[str, Any]]:
@@ -300,6 +303,65 @@ class Client:
         )
         self.wait(started["operation"])
         return self.calibration_run(started["run"]["id"])
+
+    def vacuum_probe(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        nozzle_id: str,
+        *,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if nozzle_id not in {"N1", "N2"}:
+            raise ValueError("nozzle_id must be N1 or N2")
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "vacuum probing requires explicit confirmation that the datum board "
+                "and sealing target are clean and fixed, both nozzles are level, "
+                "the envelope is clear, and power isolation is reachable"
+            )
+        operation = self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/vacuum-probe",
+            {
+                "lease_id": str(lease_id),
+                "nozzle_id": nozzle_id,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        self.wait(operation)
+        return self.calibration(calibration_id)["values"]["vacuum_probe"][nozzle_id]
+
+    def observe_nozzle_height(
+        self,
+        calibration_id: str | uuid.UUID,
+        nozzle_id: str,
+        observed_error_x_mm: float,
+        observed_error_y_mm: float,
+        measurement_uncertainty_mm: float,
+        *,
+        nozzle_z_mm: float | None = None,
+        post_correction_residual: bool = False,
+    ) -> dict[str, Any]:
+        """Record nozzle-center minus target-center XY error at a known Z.
+
+        Set post_correction_residual after inspecting a pose that already used
+        the stored correction. That residual updates only the selected nozzle.
+        """
+        if nozzle_id not in {"N1", "N2"}:
+            raise ValueError("nozzle_id must be N1 or N2")
+        return self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/nozzle-height-observation",
+            {
+                "nozzle_id": nozzle_id,
+                "nozzle_z_mm": nozzle_z_mm,
+                "observed_error_x_mm": observed_error_x_mm,
+                "observed_error_y_mm": observed_error_y_mm,
+                "measurement_uncertainty_mm": measurement_uncertainty_mm,
+                "post_correction_residual": post_correction_residual,
+            },
+        )
 
     def feeders(self) -> list[dict[str, Any]]:
         return self._request("GET", "/feeders")["feeders"]

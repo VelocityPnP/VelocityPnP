@@ -89,6 +89,8 @@ export const api = {
     (await request<{ calibrations: CalibrationSnapshot[] }>("/calibrations")).calibrations,
   createCalibration: (machineSerial: string) =>
     jsonPost<CalibrationSnapshot>("/calibrations", { machine_serial: machineSerial }),
+  calibration: (snapshotId: string) =>
+    request<CalibrationSnapshot>(`/calibrations/${snapshotId}`),
   calibrationRuns: async (snapshotId: string) =>
     (await request<{ runs: AutomatedCalibrationRun[] }>(`/calibrations/${snapshotId}/runs`)).runs,
   calibrationRun: (runId: string) =>
@@ -101,6 +103,27 @@ export const api = {
       lease_id: leaseId,
       confirmed_external_safety_checks: true,
       visual_homing_sample_count: visualHomingSampleCount,
+    },
+  ),
+  vacuumProbe: (snapshotId: string, leaseId: string, nozzleId: "N1" | "N2") =>
+    jsonPost<Operation>(`/calibrations/${snapshotId}/vacuum-probe`, {
+      lease_id: leaseId,
+      nozzle_id: nozzleId,
+      confirmed_external_safety_checks: true,
+    }),
+  observeNozzleHeight: (
+    snapshotId: string, nozzleId: "N1" | "N2", nozzleZMm: number,
+    errorXMm: number, errorYMm: number, uncertaintyMm: number,
+    postCorrectionResidual = false,
+  ) => jsonPost<CalibrationSnapshot>(
+    `/calibrations/${snapshotId}/nozzle-height-observation`,
+    {
+      nozzle_id: nozzleId,
+      nozzle_z_mm: nozzleZMm,
+      observed_error_x_mm: errorXMm,
+      observed_error_y_mm: errorYMm,
+      measurement_uncertainty_mm: uncertaintyMm,
+      post_correction_residual: postCorrectionResidual,
     },
   ),
   invalidateCalibration: (snapshotId: string, stepId: string) =>

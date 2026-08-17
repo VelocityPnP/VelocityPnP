@@ -332,6 +332,14 @@ paths:
               properties: { machine_serial: { type: string } }
       responses:
         "201": { description: New snapshot, content: { application/json: { schema: { type: object } } } }
+  /calibrations/{id}:
+    get:
+      operationId: getCalibration
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Calibration snapshot, content: { application/json: { schema: { type: object } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /calibrations/{id}/runs:
     get:
       operationId: listCalibrationRuns
@@ -354,7 +362,9 @@ paths:
       description: >-
         Starts the profile-scoped initial calibration runner. The machine homes,
         verifies both cameras and installed nozzle tips, applies visual homing,
-        and measures repeated excursion/return residuals. No measured value is
+        measures the top-camera work-plane map from the homing fiducial,
+        derives camera-ray transfer from reciprocal camera geometry, and
+        measures repeated excursion/return residuals. No measured value is
         accepted from the caller.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -386,6 +396,81 @@ paths:
                 properties:
                   run: { $ref: "#/components/schemas/AutomatedCalibrationRun" }
                   operation: { $ref: "#/components/schemas/Operation" }
+  /calibrations/{id}/vacuum-probe:
+    post:
+      operationId: startVacuumProbe
+      description: >-
+        Visually registers the fixed homing fiducial, re-identifies and centers
+        the installed tip over the bottom camera, visually centers a separate
+        sealing target on the datum board, applies a validated height-dependent
+        tip-offset correction at the expected contact Z, and samples the raw
+        vacuum signal during a bounded descent. The pump starts at the clear search height
+        and stops before retract. Contact comes from the vacuum transition, not
+        a nominal surface Z. A report is stored in the calibration snapshot,
+        but this feasibility probe does not complete Z-plane or
+        vacuum-threshold steps.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, nozzle_id, confirmed_external_safety_checks]
+              properties:
+                lease_id: { type: string, format: uuid }
+                nozzle_id: { type: string, enum: [N1, N2] }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+  /calibrations/{id}/nozzle-height-observation:
+    post:
+      operationId: recordNozzleHeightObservation
+      description: >-
+        Records an observed nozzle-to-target XY error at a known nozzle Z.
+        An absolute observation solves the common-camera to top-camera
+        working-plane transfer term after removing fitted nozzle-axis shift.
+        A post-correction residual updates only the selected nozzle's constant
+        working-plane term.
+        This operation does not move the machine. It is a diagnostic override;
+        the supported calibration path derives the transfer automatically from
+        reciprocal camera geometry.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nozzle_id, observed_error_x_mm, observed_error_y_mm, measurement_uncertainty_mm]
+              properties:
+                nozzle_id: { type: string, enum: [N1, N2] }
+                nozzle_z_mm:
+                  description: Uses the last vacuum-contact Z when omitted.
+                  type: number
+                observed_error_x_mm:
+                  description: Nozzle center minus target center in machine X.
+                  type: number
+                  minimum: -2
+                  maximum: 2
+                observed_error_y_mm:
+                  description: Nozzle center minus target center in machine Y.
+                  type: number
+                  minimum: -2
+                  maximum: 2
+                measurement_uncertainty_mm: { type: number, minimum: 0.01, maximum: 1 }
+                post_correction_residual:
+                  description: Error remained after applying the stored correction.
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: Updated calibration snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CalibrationSnapshot" }
   /calibration-runs/{id}:
     get:
       operationId: getCalibrationRun
@@ -748,6 +833,11 @@ components:
         observed_at: { type: string, format: date-time }
         initial_correction_mm: { type: number, minimum: 0 }
         correction_count: { type: integer, minimum: 0 }
+        return_refinement_count:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Bounded visual refinements after a direction-dependent return error.
         verification_residual_mm: { type: number, minimum: 0 }
         verification_residual_px: { type: number, minimum: 0 }
         return_residual_mm: { type: number, minimum: 0 }

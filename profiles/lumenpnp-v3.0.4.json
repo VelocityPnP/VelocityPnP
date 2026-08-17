@@ -9,7 +9,7 @@
     "y_min_mm": 0.0,
     "y_max_mm": 487.0,
     "z_min_mm": 0.0,
-    "z_max_mm": 40.0
+    "z_max_mm": 63.0
   },
   "home_pose": {"x_mm": 0.0, "y_mm": 0.0, "z_mm": 31.5, "rotation_deg": 0.0},
   "safe_z_mm": 31.5,
@@ -90,14 +90,23 @@
       "max_centering_corrections": 3,
       "max_centering_correction_mm": 4.0,
       "verification_limit_mm": 0.05,
-      "top_camera_feature_min_diameter_px": 40.0,
-      "top_camera_feature_max_diameter_px": 400.0,
+      "top_camera_reference_min_diameter_px": 400.0,
+      "top_camera_reference_max_diameter_px": 650.0,
+      "bottom_camera_reference_min_diameter_px": 700.0,
+      "bottom_camera_reference_max_diameter_px": 1100.0,
+      "camera_reference_diameter_mm": 15.0,
+      "camera_ray_transfer_max_mm": 3.0,
       "rotation_angle_offsets_deg": [
         -15.0, 15.0, -45.0, 45.0, -75.0, 75.0,
         -105.0, 105.0, -135.0, 135.0, -165.0, 165.0
       ],
       "rotation_feed_deg_per_min": 600.0,
-      "runout_fit_p95_limit_mm": 0.05
+      "runout_fit_p95_limit_mm": 0.05,
+      "height_sample_nozzle_z_mm": [31.5, 28.0, 24.5, 21.0, 17.5, 14.0, 10.5],
+      "height_tracking_radius_px": 30.0,
+      "height_fit_p95_limit_mm": 0.05,
+      "height_max_axis_slope_mm_per_mm": 0.05,
+      "height_max_extrapolation_mm": 8.0
     },
     "nozzles": [
       {
@@ -106,8 +115,9 @@
         "head_offset_x_mm": -23.761,
         "head_offset_y_mm": -66.619,
         "expected_tip_id": "N045",
-        "expected_bore_diameter_mm": 0.45,
-        "bore_diameter_tolerance_mm": 0.18
+        "calibration_feature_kind": "bore",
+        "expected_feature_diameter_mm": 0.45,
+        "feature_diameter_tolerance_mm": 0.18
       },
       {
         "nozzle_id": "N2",
@@ -115,10 +125,50 @@
         "head_offset_x_mm": 25.692,
         "head_offset_y_mm": -66.46,
         "expected_tip_id": "N24",
-        "expected_bore_diameter_mm": 2.4,
-        "bore_diameter_tolerance_mm": 0.6
+        "calibration_feature_kind": "outer_tip",
+        "expected_feature_diameter_mm": 4.86,
+        "feature_diameter_tolerance_mm": 0.48
       }
     ]
+  },
+  "z_kinematics": {
+    "level_controller_z_mm": 31.5,
+    "controller_min_mm": 0.0,
+    "controller_max_mm": 63.0,
+    "nozzles": [
+      {
+        "nozzle_id": "N1",
+        "controller_offset_mm": 0.0,
+        "controller_scale": 1.0
+      },
+      {
+        "nozzle_id": "N2",
+        "controller_offset_mm": 63.0,
+        "controller_scale": -1.0
+      }
+    ]
+  },
+  "vacuum_calibration": {
+    "reference_surface": "datum_board_5mm_front_mask_opening",
+    "target_offset_x_mm": -22.5,
+    "target_offset_y_mm": -7.5,
+    "target_diameter_mm": 5.0,
+    "target_diameter_tolerance_mm": 0.75,
+    "target_max_center_error_mm": 1.0,
+    "target_verification_limit_mm": 0.1,
+    "target_max_centering_corrections": 3,
+    "fiducial_protected_radius_mm": 5.5,
+    "search_start_nozzle_z_mm": 5.0,
+    "search_end_nozzle_z_mm": 3.0,
+    "step_mm": 0.1,
+    "xy_feed_mm_per_min": 300.0,
+    "z_approach_feed_mm_per_min": 300.0,
+    "z_feed_mm_per_min": 60.0,
+    "vacuum_settle_ms": 500,
+    "baseline_sample_count": 10,
+    "step_sample_count": 5,
+    "minimum_signal_delta_counts": 10,
+    "required_consecutive_steps": 1
   },
   "capabilities": {
     "dual_nozzle": true,
@@ -126,6 +176,7 @@
     "rev04_integrated_vacuum_sensors": true,
     "visual_homing": true,
     "rotation_calibration": true,
+    "vacuum_probe_calibration": true,
     "photon_bus": false,
     "physical_endstops": false,
     "contact_probe": false

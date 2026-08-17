@@ -20,12 +20,13 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
     lumen_calibration_workflow, summarize_visual_homing_validation, AutomatedCalibrationConfig,
-    AutomatedCalibrationRun, BoardDesign, CalibrationCheck, CalibrationCheckSource,
-    CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
-    CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRole, Feeder,
-    HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus, Job,
-    JogTarget, MachineProfile, MachineState, NozzleRunoutReport, NozzleRunoutSample, Operation,
-    OperationStatus, Pose, Residuals, SensorReading, VisualHomingProfile,
+    AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport, CalibrationCheck,
+    CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
+    CalibrationSnapshot, CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRole,
+    Feeder, HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus, Job,
+    JogTarget, MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
+    NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus, Pose, Residuals,
+    SensorReading, VacuumProbeReport, VacuumProbeSample, VisualHomingProfile,
     VisualHomingValidationSample,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
@@ -34,17 +35,19 @@ use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::plan_job;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    apply_camera_controls, calibrate_bottom_camera_mapping, camera_sample_metrics,
-    capture_gray_frame, capture_gray_frames, encode_gray_png, fit_nozzle_runout,
+    apply_camera_controls, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
+    camera_sample_metrics, capture_gray_frame, capture_gray_frames, detect_bright_reference_pad,
+    detect_camera_target, encode_gray_png, fit_nozzle_height_model, fit_nozzle_runout,
     mean_nozzle_detection, plan_bottom_camera_correction, plan_pixel_correction,
     plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
-    summarize_head_camera_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
-    summarize_residuals, BottomCameraCorrection, CameraControlUpdate, CameraControlValue,
-    CameraReproducibilityReport, FiducialDetection, GrayFrame, NozzleToolingReport,
-    V4l2CaptureConfig, VisualHomingPlan,
+    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
+    summarize_opposed_camera_feature, summarize_residuals, BottomCameraCorrection,
+    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
+    GrayFrame, NozzleToolingReport, V4l2CaptureConfig, VisualHomingPlan,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
+const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 
 #[derive(Clone)]
@@ -169,9 +172,18 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/calibrations",
             get(list_calibrations).post(create_calibration),
         )
+        .route("/api/v1/calibrations/{id}", get(get_calibration))
         .route(
             "/api/v1/calibrations/{id}/runs",
             get(list_calibration_runs).post(start_calibration_run),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/vacuum-probe",
+            post(start_vacuum_probe),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/nozzle-height-observation",
+            post(record_nozzle_height_observation),
         )
         .route("/api/v1/calibration-runs/{id}", get(get_calibration_run))
         .route(
@@ -930,6 +942,17 @@ fn visual_verification_accepted(
     })
 }
 
+fn visual_return_needs_refinement(
+    return_error_mm: f64,
+    refinement_count: u32,
+    limit_mm: f64,
+) -> bool {
+    return_error_mm.is_finite()
+        && limit_mm.is_finite()
+        && return_error_mm > limit_mm
+        && refinement_count < MAX_VISUAL_HOME_RETURN_REFINEMENTS
+}
+
 fn next_visual_correction_target(
     seed_pose: Pose,
     current_pose: Pose,
@@ -1127,6 +1150,1249 @@ async fn list_calibrations(State(state): State<AppState>) -> ApiResult<Json<Valu
     Ok(Json(
         json!({"calibrations": state.store.list_calibrations().map_err(ApiError::internal)?}),
     ))
+}
+
+async fn get_calibration(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<CalibrationSnapshot>> {
+    state
+        .store
+        .get_calibration(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))
+}
+
+#[derive(Deserialize)]
+struct StartVacuumProbeRequest {
+    lease_id: Uuid,
+    nozzle_id: String,
+    confirmed_external_safety_checks: bool,
+}
+
+#[derive(Deserialize)]
+struct NozzleHeightObservationRequest {
+    nozzle_id: String,
+    nozzle_z_mm: Option<f64>,
+    observed_error_x_mm: f64,
+    observed_error_y_mm: f64,
+    measurement_uncertainty_mm: f64,
+    #[serde(default)]
+    post_correction_residual: bool,
+}
+
+async fn record_nozzle_height_observation(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<NozzleHeightObservationRequest>,
+) -> ApiResult<Json<CalibrationSnapshot>> {
+    if !state.profile.bottom_vision.as_ref().is_some_and(|bottom| {
+        bottom
+            .nozzles
+            .iter()
+            .any(|nozzle| nozzle.nozzle_id == body.nozzle_id)
+    }) {
+        return Err(ApiError::bad_request(
+            "unknown nozzle for active machine profile",
+        ));
+    }
+    if [body.observed_error_x_mm, body.observed_error_y_mm]
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > 2.0)
+        || !body.measurement_uncertainty_mm.is_finite()
+        || !(0.01..=1.0).contains(&body.measurement_uncertainty_mm)
+    {
+        return Err(ApiError::bad_request(
+            "nozzle height observation is outside its physical bounds",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let nozzle_z_mm = body
+        .nozzle_z_mm
+        .filter(|value| value.is_finite())
+        .or_else(|| {
+            snapshot
+                .values
+                .get("vacuum_probe")
+                .and_then(|value| value.get(&body.nozzle_id))
+                .and_then(|value| value.get("contact_nozzle_z_mm"))
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "nozzle Z is required when no vacuum contact observation is stored",
+            )
+        })?;
+    let models = snapshot
+        .values
+        .get_mut("nozzle_height_model")
+        .and_then(|value| value.get_mut("models"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ApiError::bad_request("calibrated nozzle height models are missing"))?;
+    let mut decoded_models = models
+        .iter()
+        .cloned()
+        .map(serde_json::from_value::<NozzleHeightModel>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ApiError::bad_request("calibrated nozzle height model is invalid"))?;
+    let source_index = decoded_models
+        .iter()
+        .position(|model| model.nozzle_id == body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("calibrated nozzle height model is missing"))?;
+    if body.post_correction_residual {
+        decoded_models[source_index]
+            .observe_post_correction_residual(
+                nozzle_z_mm,
+                body.observed_error_x_mm,
+                body.observed_error_y_mm,
+                body.measurement_uncertainty_mm,
+            )
+            .ok_or_else(|| {
+                ApiError::bad_request("nozzle residual observation is outside the calibrated model")
+            })?;
+    } else {
+        decoded_models[source_index]
+            .observe_working_plane_error(
+                nozzle_z_mm,
+                body.observed_error_x_mm,
+                body.observed_error_y_mm,
+                body.measurement_uncertainty_mm,
+            )
+            .ok_or_else(|| {
+                ApiError::bad_request("nozzle height observation is outside the calibrated model")
+            })?;
+        let source = decoded_models[source_index].clone();
+        for model in &mut decoded_models {
+            model
+                .use_shared_reference_transfer_from(&source)
+                .ok_or_else(|| {
+                    ApiError::bad_request("working-plane transfer observation is invalid")
+                })?;
+        }
+    }
+    *models = decoded_models
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(ApiError::internal)?;
+    Ok(Json(snapshot))
+}
+
+struct PreparedVacuumProbe {
+    calibration_id: Uuid,
+    lease_id: Uuid,
+    nozzle_id: String,
+    sensor_id: String,
+    geometry: CalibratedNozzleGeometry,
+    head_reference: CalibratedHeadReference,
+    height_model: Option<NozzleHeightModel>,
+    height_model_has_working_plane_transfer: bool,
+    alignment_nozzle_z_mm: f64,
+}
+
+struct CalibratedHeadReference {
+    top_camera_controller_x_mm: f64,
+    top_camera_controller_y_mm: f64,
+    top_camera_working_plane_mapping: [[f64; 2]; 2],
+    bottom_camera_mapping: [[f64; 2]; 2],
+}
+
+struct CalibratedNozzleGeometry {
+    tip_id: String,
+    head_offset_x_mm: f64,
+    head_offset_y_mm: f64,
+    reference_controller_angle_deg: f64,
+    correction_cos_x_mm: f64,
+    correction_sin_x_mm: f64,
+    correction_cos_y_mm: f64,
+    correction_sin_y_mm: f64,
+}
+
+impl CalibratedNozzleGeometry {
+    fn runout_correction_at(&self, controller_angle_deg: f64) -> Option<[f64; 2]> {
+        let angle = (controller_angle_deg - self.reference_controller_angle_deg).to_radians();
+        let correction = [
+            self.correction_cos_x_mm * angle.cos() + self.correction_sin_x_mm * angle.sin(),
+            self.correction_cos_y_mm * angle.cos() + self.correction_sin_y_mm * angle.sin(),
+        ];
+        correction
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(correction)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VacuumProbeMotion {
+    probe_head_x_mm: f64,
+    probe_head_y_mm: f64,
+    return_head_x_mm: f64,
+    return_head_y_mm: f64,
+    approach_controller_z_mm: f64,
+    level_controller_z_mm: f64,
+    xy_feed_mm_per_min: f64,
+    z_approach_feed_mm_per_min: f64,
+}
+
+#[derive(Clone, Copy)]
+struct VacuumTargetCenter {
+    nominal_x_mm: f64,
+    nominal_y_mm: f64,
+    x_mm: f64,
+    y_mm: f64,
+    observation: FiducialDetection,
+    residual_mm: f64,
+}
+
+#[derive(Clone, Copy)]
+struct CurrentTipOffset {
+    x_mm: f64,
+    y_mm: f64,
+}
+
+impl CalibratedHeadReference {
+    fn current_tip_offset(&self, centered_nozzle_pose: Pose) -> Option<CurrentTipOffset> {
+        let offset = CurrentTipOffset {
+            x_mm: self.top_camera_controller_x_mm - centered_nozzle_pose.x_mm,
+            y_mm: self.top_camera_controller_y_mm - centered_nozzle_pose.y_mm,
+        };
+        (offset.x_mm.is_finite() && offset.y_mm.is_finite()).then_some(offset)
+    }
+}
+
+impl VacuumProbeMotion {
+    fn level_return_target(self) -> JogTarget {
+        JogTarget {
+            x_mm: self.return_head_x_mm,
+            y_mm: self.return_head_y_mm,
+            z_mm: self.level_controller_z_mm,
+            rotation_deg: None,
+        }
+    }
+
+    fn level_probe_target(self) -> JogTarget {
+        JogTarget {
+            x_mm: self.probe_head_x_mm,
+            y_mm: self.probe_head_y_mm,
+            z_mm: self.level_controller_z_mm,
+            rotation_deg: None,
+        }
+    }
+
+    fn approach_probe_target(self) -> JogTarget {
+        JogTarget {
+            z_mm: self.approach_controller_z_mm,
+            ..self.level_probe_target()
+        }
+    }
+
+    fn restore_targets(self) -> [(JogTarget, f64); 2] {
+        [
+            (self.level_probe_target(), self.z_approach_feed_mm_per_min),
+            (self.level_return_target(), self.xy_feed_mm_per_min),
+        ]
+    }
+}
+
+async fn start_vacuum_probe(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartVacuumProbeRequest>,
+) -> ApiResult<(StatusCode, Json<Operation>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "vacuum probing requires confirmation that the datum board is fixed, the configured sealing target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    let snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    if !snapshot
+        .completed_steps
+        .contains(&CalibrationStepId::NozzleOffsets)
+        || !snapshot
+            .completed_steps
+            .contains(&CalibrationStepId::NozzleRunout)
+    {
+        return Err(ApiError::bad_request(
+            "vacuum probing requires calibrated nozzle offsets and runout",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed {
+        return Err(ApiError::bad_request(
+            "vacuum probing requires a homed ready machine",
+        ));
+    }
+    if !state
+        .profile
+        .capabilities
+        .get("vacuum_probe_calibration")
+        .copied()
+        .unwrap_or(false)
+    {
+        return Err(ApiError::bad_request(
+            "active profile does not permit vacuum probe calibration",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let z_kinematics = state
+        .profile
+        .z_kinematics
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define Z kinematics"))?;
+    z_kinematics.validate().map_err(ApiError::bad_request)?;
+    let probe = state.profile.vacuum_calibration.as_ref().ok_or_else(|| {
+        ApiError::bad_request("active profile does not define vacuum calibration")
+    })?;
+    probe.validate().map_err(ApiError::bad_request)?;
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?;
+    let nozzle = bottom
+        .nozzles
+        .iter()
+        .find(|nozzle| nozzle.nozzle_id == body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("unknown nozzle for active machine profile"))?;
+    let sensor_id = match nozzle.nozzle_id.as_str() {
+        "N1" => "vacuum_1",
+        "N2" => "vacuum_2",
+        _ => {
+            return Err(ApiError::bad_request(
+                "active profile does not map this nozzle to a vacuum sensor",
+            ))
+        }
+    };
+    if !state
+        .profile
+        .sensors
+        .iter()
+        .any(|sensor| sensor.id == sensor_id && sensor.actuator_id.as_deref() == Some(sensor_id))
+    {
+        return Err(ApiError::bad_request(
+            "active profile has no matching vacuum actuator and sensor",
+        ));
+    }
+    let geometry = calibrated_nozzle_geometry(&snapshot, &body.nozzle_id)?;
+    let head_reference = calibrated_head_reference(&snapshot, visual.pixel_error_to_machine_mm)?;
+    let height_model = calibrated_nozzle_height_model(&snapshot, &body.nozzle_id)?;
+    let height_model_has_working_plane_transfer = height_model
+        .as_ref()
+        .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
+    let alignment_nozzle_z_mm = snapshot
+        .values
+        .get("vacuum_probe")
+        .and_then(|value| value.get(&body.nozzle_id))
+        .and_then(|value| value.get("contact_nozzle_z_mm"))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or((probe.search_start_nozzle_z_mm + probe.search_end_nozzle_z_mm) / 2.0);
+    let surface_x_mm = visual.fiducial_x_mm + probe.target_offset_x_mm;
+    let surface_y_mm = visual.fiducial_y_mm + probe.target_offset_y_mm;
+    let preflight_height_correction = match height_model
+        .as_ref()
+        .filter(|_| height_model_has_working_plane_transfer)
+    {
+        Some(model) => model
+            .tip_offset_correction_at(alignment_nozzle_z_mm)
+            .ok_or_else(|| {
+                ApiError::bad_request("vacuum contact Z is outside the nozzle height model")
+            })?,
+        None => [0.0, 0.0],
+    };
+    let head_x_mm = surface_x_mm - geometry.head_offset_x_mm - preflight_height_correction[0];
+    let head_y_mm = surface_y_mm - geometry.head_offset_y_mm - preflight_height_correction[1];
+    for nozzle_z_mm in [probe.search_start_nozzle_z_mm, probe.search_end_nozzle_z_mm] {
+        let controller_z_mm = z_kinematics
+            .controller_z(&body.nozzle_id, nozzle_z_mm)
+            .ok_or_else(|| ApiError::bad_request("vacuum probe Z target is outside bounds"))?;
+        let correction_bound = probe.target_max_center_error_mm;
+        if [-correction_bound, correction_bound]
+            .into_iter()
+            .any(|x_offset| {
+                [-correction_bound, correction_bound]
+                    .into_iter()
+                    .any(|y_offset| {
+                        !state.profile.bounds.contains(Pose {
+                            x_mm: head_x_mm + x_offset,
+                            y_mm: head_y_mm + y_offset,
+                            z_mm: controller_z_mm,
+                            rotation_deg: status.pose.map_or(0.0, |pose| pose.rotation_deg),
+                        })
+                    })
+            })
+        {
+            return Err(ApiError::bad_request(
+                "vacuum probe target is outside machine bounds",
+            ));
+        }
+    }
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let task_state = state.clone();
+    let prepared = PreparedVacuumProbe {
+        calibration_id,
+        lease_id: body.lease_id,
+        nozzle_id: body.nozzle_id,
+        sensor_id: sensor_id.to_string(),
+        geometry,
+        head_reference,
+        height_model,
+        height_model_has_working_plane_transfer,
+        alignment_nozzle_z_mm,
+    };
+    spawn_operation(state, "calibration.vacuum_probe", async move {
+        execute_vacuum_probe(task_state, prepared).await
+    })
+}
+
+fn calibrated_head_reference(
+    snapshot: &CalibrationSnapshot,
+    fallback_top_camera_mapping: [[f64; 2]; 2],
+) -> ApiResult<CalibratedHeadReference> {
+    let bottom_camera_mapping: BottomCameraMappingReport = serde_json::from_value(
+        snapshot
+            .values
+            .get("bottom_camera_geometry")
+            .and_then(|value| value.get("mapping"))
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request("calibrated bottom-camera mapping is missing"))?,
+    )
+    .map_err(|_| ApiError::bad_request("calibrated bottom-camera mapping is invalid"))?;
+    let top_camera_working_plane_mapping = snapshot
+        .values
+        .get("bottom_camera_geometry")
+        .and_then(|value| value.get("top_camera_working_plane_mapping"))
+        .cloned()
+        .map(serde_json::from_value::<BottomCameraMappingReport>)
+        .transpose()
+        .map_err(|_| ApiError::bad_request("calibrated top-camera mapping is invalid"))?
+        .map_or(fallback_top_camera_mapping, |mapping| {
+            mapping.pixel_error_to_machine_mm
+        });
+    let top_camera = snapshot
+        .values
+        .get("nozzle_offsets")
+        .and_then(|value| value.get("top_camera_reference"))
+        .or_else(|| {
+            snapshot
+                .values
+                .get("bottom_camera_geometry")
+                .and_then(|value| value.get("reciprocal_observation"))
+        })
+        .ok_or_else(|| ApiError::bad_request("calibrated top-camera reference is missing"))?;
+    let coordinate = |field: &'static str| {
+        top_camera
+            .get(field)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "calibrated top-camera reference {field} is invalid"
+                ))
+            })
+    };
+    Ok(CalibratedHeadReference {
+        top_camera_controller_x_mm: coordinate("controller_x_mm")?,
+        top_camera_controller_y_mm: coordinate("controller_y_mm")?,
+        top_camera_working_plane_mapping,
+        bottom_camera_mapping: bottom_camera_mapping.pixel_error_to_machine_mm,
+    })
+}
+
+fn calibrated_nozzle_geometry(
+    snapshot: &CalibrationSnapshot,
+    nozzle_id: &str,
+) -> ApiResult<CalibratedNozzleGeometry> {
+    let report = snapshot
+        .values
+        .get("nozzle_runout")
+        .and_then(|value| value.get("reports"))
+        .and_then(Value::as_array)
+        .and_then(|reports| {
+            reports
+                .iter()
+                .find(|report| report.get("nozzle_id").and_then(Value::as_str) == Some(nozzle_id))
+        })
+        .ok_or_else(|| ApiError::bad_request("calibrated nozzle runout is missing"))?;
+    let tip_id = report
+        .get("tip_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("calibrated nozzle tip identity is missing"))?;
+    let number = |field: &'static str| {
+        report
+            .get(field)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| ApiError::bad_request(format!("calibrated nozzle {field} is missing")))
+    };
+    Ok(CalibratedNozzleGeometry {
+        tip_id: tip_id.into(),
+        head_offset_x_mm: number("head_offset_x_mm")?,
+        head_offset_y_mm: number("head_offset_y_mm")?,
+        reference_controller_angle_deg: number("reference_controller_angle_deg")?,
+        correction_cos_x_mm: number("correction_cos_x_mm")?,
+        correction_sin_x_mm: number("correction_sin_x_mm")?,
+        correction_cos_y_mm: number("correction_cos_y_mm")?,
+        correction_sin_y_mm: number("correction_sin_y_mm")?,
+    })
+}
+
+fn calibrated_nozzle_height_model(
+    snapshot: &CalibrationSnapshot,
+    nozzle_id: &str,
+) -> ApiResult<Option<NozzleHeightModel>> {
+    let Some(models) = snapshot
+        .values
+        .get("nozzle_height_model")
+        .and_then(|value| value.get("models"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(None);
+    };
+    let Some(model) = models
+        .iter()
+        .find(|model| model.get("nozzle_id").and_then(Value::as_str) == Some(nozzle_id))
+    else {
+        return Ok(None);
+    };
+    let model: NozzleHeightModel = serde_json::from_value(model.clone())
+        .map_err(|_| ApiError::bad_request("calibrated nozzle height model is invalid"))?;
+    if !model.passed {
+        return Err(ApiError::bad_request(
+            "calibrated nozzle height model did not pass",
+        ));
+    }
+    Ok(Some(model))
+}
+
+fn has_calibrated_working_plane_transfer(
+    snapshot: &CalibrationSnapshot,
+    model: &NozzleHeightModel,
+) -> bool {
+    let camera_geometry_passed = snapshot
+        .values
+        .get("nozzle_height_model")
+        .and_then(|value| value.get("camera_ray_transfer"))
+        .and_then(|value| value.get("passed"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    camera_geometry_passed || model.transfer_observation_nozzle_z_mm.is_some()
+}
+
+async fn execute_vacuum_probe(
+    state: AppState,
+    prepared: PreparedVacuumProbe,
+) -> Result<Option<String>, String> {
+    let PreparedVacuumProbe {
+        calibration_id,
+        lease_id,
+        nozzle_id,
+        sensor_id,
+        geometry,
+        head_reference,
+        height_model,
+        height_model_has_working_plane_transfer,
+        alignment_nozzle_z_mm,
+    } = prepared;
+    state
+        .machine
+        .disable_actuator(sensor_id.clone())
+        .await
+        .map_err(|error| format!("vacuum probe could not establish the off state: {error}"))?;
+    execute_visual_home(
+        &state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let visual = state.profile.visual_homing.as_ref().unwrap();
+    let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+    let probe = state.profile.vacuum_calibration.as_ref().unwrap();
+    let controller_angle_deg = state
+        .machine
+        .calibration_rotation_reference(lease_id, nozzle_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let [runout_correction_x_mm, runout_correction_y_mm] = geometry
+        .runout_correction_at(controller_angle_deg)
+        .ok_or_else(|| "calibrated nozzle runout correction is invalid".to_string())?;
+    let current_tip_offset =
+        match measure_current_tip_offset(&state, lease_id, &nozzle_id, &head_reference).await {
+            Ok(offset) => offset,
+            Err(error) => {
+                let restore_result = restore_level_visual_home(&state, lease_id).await;
+                let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+                return Err(append_vacuum_probe_cleanup_errors(
+                    error,
+                    restore_result,
+                    vacuum_off_result,
+                ));
+            }
+        };
+    let model_tip_offset_x_mm = geometry.head_offset_x_mm - runout_correction_x_mm;
+    let model_tip_offset_y_mm = geometry.head_offset_y_mm - runout_correction_y_mm;
+    let tip_offset_model_error_mm = (current_tip_offset.x_mm - model_tip_offset_x_mm)
+        .hypot(current_tip_offset.y_mm - model_tip_offset_y_mm);
+    let height_correction = height_model
+        .as_ref()
+        .filter(|_| height_model_has_working_plane_transfer)
+        .and_then(|model| model.tip_offset_correction_at(alignment_nozzle_z_mm));
+    let [height_correction_x_mm, height_correction_y_mm] = height_correction.unwrap_or([0.0, 0.0]);
+    let nominal_surface_x_mm = visual.fiducial_x_mm + probe.target_offset_x_mm;
+    let nominal_surface_y_mm = visual.fiducial_y_mm + probe.target_offset_y_mm;
+    let target = match center_vacuum_target(
+        &state,
+        lease_id,
+        nominal_surface_x_mm,
+        nominal_surface_y_mm,
+        head_reference.top_camera_working_plane_mapping,
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(error) => {
+            let restore_result = state
+                .machine
+                .jog(
+                    lease_id,
+                    JogTarget {
+                        x_mm: visual.fiducial_x_mm,
+                        y_mm: visual.fiducial_y_mm,
+                        z_mm: z_kinematics.level_controller_z_mm,
+                        rotation_deg: None,
+                    },
+                    probe.xy_feed_mm_per_min,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|restore_error| restore_error.to_string());
+            let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+            return Err(append_vacuum_probe_cleanup_errors(
+                error,
+                restore_result,
+                vacuum_off_result,
+            ));
+        }
+    };
+    let head_x_mm = target.x_mm - current_tip_offset.x_mm - height_correction_x_mm;
+    let head_y_mm = target.y_mm - current_tip_offset.y_mm - height_correction_y_mm;
+    let approach_controller_z_mm = z_kinematics
+        .controller_z(&nozzle_id, probe.search_start_nozzle_z_mm)
+        .ok_or_else(|| "vacuum probe approach Z is outside bounds".to_string())?;
+    let motion = VacuumProbeMotion {
+        probe_head_x_mm: head_x_mm,
+        probe_head_y_mm: head_y_mm,
+        return_head_x_mm: visual.fiducial_x_mm,
+        return_head_y_mm: visual.fiducial_y_mm,
+        approach_controller_z_mm,
+        level_controller_z_mm: z_kinematics.level_controller_z_mm,
+        xy_feed_mm_per_min: probe.xy_feed_mm_per_min,
+        z_approach_feed_mm_per_min: probe.z_approach_feed_mm_per_min,
+    };
+    // Keep both nozzles level for lateral motion. Lower only the selected
+    // nozzle after its calibrated tip is over the clear datum-board cell.
+    if let Err(error) = state
+        .machine
+        .jog(
+            lease_id,
+            motion.level_probe_target(),
+            motion.xy_feed_mm_per_min,
+        )
+        .await
+    {
+        // A failed move faults the driver and makes the position uncertain.
+        // Do not add another motion. Both nozzles are still level.
+        let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+        return Err(append_vacuum_probe_cleanup_errors(
+            error.to_string(),
+            Ok(()),
+            vacuum_off_result,
+        ));
+    }
+    if let Err(error) = state
+        .machine
+        .jog(
+            lease_id,
+            motion.approach_probe_target(),
+            motion.z_approach_feed_mm_per_min,
+        )
+        .await
+    {
+        // The head did not move laterally while a nozzle was below level. A
+        // driver fault makes the partial Z position uncertain, so do not add
+        // another motion here.
+        let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+        return Err(append_vacuum_probe_cleanup_errors(
+            error.to_string(),
+            Ok(()),
+            vacuum_off_result,
+        ));
+    }
+    let setup_result: Result<Vec<i64>, String> = async {
+        let off_baseline =
+            collect_sensor_values(&state, lease_id, &sensor_id, probe.baseline_sample_count)
+                .await?;
+        state
+            .machine
+            .actuate(lease_id, sensor_id.clone(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(probe.vacuum_settle_ms)).await;
+        Ok(off_baseline)
+    }
+    .await;
+    let off_baseline_raw_values = match setup_result {
+        Ok(values) => values,
+        Err(error) => {
+            let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+            let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+            return Err(append_vacuum_probe_cleanup_errors(
+                error,
+                restore_result,
+                vacuum_off_result,
+            ));
+        }
+    };
+    let probe_result = execute_vacuum_probe_descent(
+        &state, lease_id, &nozzle_id, &sensor_id, head_x_mm, head_y_mm,
+    )
+    .await;
+    // Stop vacuum before any retract or lateral return. This bounds pump-on
+    // time and prevents a sealed reference board from being lifted.
+    let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+    let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+    let (open_nozzle_raw_values, samples, contact) = match probe_result {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(append_vacuum_probe_cleanup_errors(
+                error,
+                restore_result,
+                vacuum_off_result,
+            ));
+        }
+    };
+    restore_result.map_err(|error| format!("vacuum probe restore failed: {error}"))?;
+    vacuum_off_result.map_err(|error| format!("vacuum probe cleanup failed: {error}"))?;
+    let open_nozzle_median_raw_value = median_raw(&open_nozzle_raw_values)
+        .ok_or_else(|| "vacuum probe has no open-nozzle samples".to_string())?;
+    let report = VacuumProbeReport {
+        nozzle_id: nozzle_id.clone(),
+        tip_id: geometry.tip_id,
+        sensor_id,
+        reference_surface: probe.reference_surface.clone(),
+        nominal_target_surface_x_mm: target.nominal_x_mm,
+        nominal_target_surface_y_mm: target.nominal_y_mm,
+        target_surface_x_mm: target.x_mm,
+        target_surface_y_mm: target.y_mm,
+        target_centering_correction_x_mm: target.x_mm - target.nominal_x_mm,
+        target_centering_correction_y_mm: target.y_mm - target.nominal_y_mm,
+        target_centering_residual_mm: target.residual_mm,
+        target_observed_x_px: target.observation.x_px,
+        target_observed_y_px: target.observation.y_px,
+        target_observed_diameter_px: target.observation.diameter_px,
+        head_controller_x_mm: head_x_mm,
+        head_controller_y_mm: head_y_mm,
+        controller_angle_deg,
+        runout_correction_x_mm,
+        runout_correction_y_mm,
+        measured_tip_offset_x_mm: current_tip_offset.x_mm,
+        measured_tip_offset_y_mm: current_tip_offset.y_mm,
+        tip_offset_model_error_mm,
+        alignment_nozzle_z_mm,
+        height_correction_x_mm,
+        height_correction_y_mm,
+        height_model_applied: height_correction.is_some(),
+        off_baseline_raw_values,
+        open_nozzle_raw_values,
+        open_nozzle_median_raw_value,
+        minimum_signal_delta_counts: probe.minimum_signal_delta_counts,
+        contact_nozzle_z_mm: contact.as_ref().map(|sample| sample.nozzle_z_mm),
+        contact_controller_z_mm: contact.as_ref().map(|sample| sample.controller_z_mm),
+        samples,
+        passed: contact.is_some(),
+        observed_at: Utc::now(),
+    };
+    persist_vacuum_probe_report(&state, calibration_id, &report)?;
+    Ok(Some(match contact {
+        Some(sample) => format!(
+            "{} {} detected a {:.1}-count vacuum change at nozzle Z{:.3}",
+            report.nozzle_id, report.tip_id, sample.signal_delta_counts, sample.nozzle_z_mm
+        ),
+        None => format!(
+            "{} {} found no vacuum seal in the configured safe Z search interval",
+            report.nozzle_id, report.tip_id,
+        ),
+    }))
+}
+
+async fn measure_current_tip_offset(
+    state: &AppState,
+    lease_id: Uuid,
+    nozzle_id: &str,
+    reference: &CalibratedHeadReference,
+) -> Result<CurrentTipOffset, String> {
+    let bottom = state.profile.bottom_vision.as_ref().unwrap();
+    let nozzle = bottom
+        .nozzles
+        .iter()
+        .find(|nozzle| nozzle.nozzle_id == nozzle_id)
+        .ok_or_else(|| "vacuum probe nozzle is not in the bottom-vision profile".to_string())?;
+    let camera_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let camera_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let seed_pose = state
+        .machine
+        .jog(
+            lease_id,
+            bottom.nozzle_target(nozzle),
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let result = center_nozzle_for_runout(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        &camera_profile,
+        &camera_path,
+        reference.bottom_camera_mapping,
+        seed_pose,
+    )
+    .await
+    .map_err(calibration_stop_message);
+    let lights_off = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    let centered_pose = match (result, lights_off) {
+        (Ok(pose), Ok(())) => pose,
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(error)) => return Err(format!("current-tip light cleanup failed: {error}")),
+        (Err(error), Err(cleanup_error)) => {
+            return Err(format!(
+                "{error}; current-tip light cleanup also failed: {cleanup_error}"
+            ))
+        }
+    };
+    reference
+        .current_tip_offset(centered_pose)
+        .ok_or_else(|| "current tip offset is invalid".into())
+}
+
+fn calibration_stop_message(error: CalibrationStop) -> String {
+    match error {
+        CalibrationStop::Rejected(message) | CalibrationStop::Failed(message) => message,
+    }
+}
+
+async fn restore_level_visual_home(state: &AppState, lease_id: Uuid) -> Result<(), String> {
+    let visual = state.profile.visual_homing.as_ref().unwrap();
+    let level_controller_z_mm = state
+        .profile
+        .z_kinematics
+        .as_ref()
+        .unwrap()
+        .level_controller_z_mm;
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: visual.fiducial_x_mm,
+                y_mm: visual.fiducial_y_mm,
+                z_mm: level_controller_z_mm,
+                rotation_deg: None,
+            },
+            visual.feed_mm_per_min,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+async fn center_vacuum_target(
+    state: &AppState,
+    lease_id: Uuid,
+    nominal_x_mm: f64,
+    nominal_y_mm: f64,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+) -> Result<VacuumTargetCenter, String> {
+    let visual = state.profile.visual_homing.as_ref().unwrap();
+    if visual.camera_role != CameraRole::TopCamera {
+        return Err("vacuum target centering requires the top camera".into());
+    }
+    let probe = state.profile.vacuum_calibration.as_ref().unwrap();
+    let camera_profile =
+        stored_camera_profile(state, visual.camera_role).map_err(|error| error.message)?;
+    let camera_path = camera_path_for_role(visual.camera_role).map_err(|error| error.message)?;
+    let seed_pose = state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: nominal_x_mm,
+                y_mm: nominal_y_mm,
+                z_mm: state
+                    .profile
+                    .z_kinematics
+                    .as_ref()
+                    .unwrap()
+                    .level_controller_z_mm,
+                rotation_deg: None,
+            },
+            probe.xy_feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let result = run_vacuum_target_centering(
+        state,
+        lease_id,
+        seed_pose,
+        &camera_profile,
+        &camera_path,
+        pixel_error_to_machine_mm,
+    )
+    .await;
+    let lights_off = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    match (result, lights_off) {
+        (Ok(target), Ok(())) => Ok(target),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(format!("vacuum target light cleanup failed: {error}")),
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{error}; vacuum target light cleanup also failed: {cleanup_error}"
+        )),
+    }
+}
+
+async fn run_vacuum_target_centering(
+    state: &AppState,
+    lease_id: Uuid,
+    seed_pose: Pose,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+) -> Result<VacuumTargetCenter, String> {
+    let visual = state.profile.visual_homing.as_ref().unwrap();
+    let probe = state.profile.vacuum_calibration.as_ref().unwrap();
+    let scale_mm_per_px = mean_transform_scale(pixel_error_to_machine_mm)
+        .ok_or_else(|| "top-camera pixel mapping is singular".to_string())?;
+    let expected_diameter_px = probe.target_diameter_mm / scale_mm_per_px;
+    let diameter_tolerance_px = probe.target_diameter_tolerance_mm / scale_mm_per_px;
+    let max_center_error_px = probe.target_max_center_error_mm / scale_mm_per_px;
+    let mut pose = seed_pose;
+    for correction_count in 0..=probe.target_max_centering_corrections {
+        let frames = capture_profiled_frames(state, camera_profile, camera_path, 3)
+            .await
+            .map_err(|error| error.message)?;
+        let detections = frames
+            .iter()
+            .filter_map(|frame| {
+                detect_bright_reference_pad(
+                    frame,
+                    visual.frame_center_x_px,
+                    visual.frame_center_y_px,
+                    expected_diameter_px,
+                    diameter_tolerance_px,
+                    max_center_error_px,
+                )
+            })
+            .collect::<Vec<_>>();
+        if detections.len() != frames.len() {
+            return Err(format!(
+                "top camera detected the vacuum reference pad in {} of {} frames",
+                detections.len(),
+                frames.len(),
+            ));
+        }
+        let observation = mean_fiducial_detection(&detections)
+            .ok_or_else(|| "top camera returned no vacuum target observations".to_string())?;
+        let correction = plan_pixel_correction(
+            observation,
+            visual.frame_center_x_px,
+            visual.frame_center_y_px,
+            pixel_error_to_machine_mm,
+        )
+        .ok_or_else(|| "vacuum target camera correction is invalid".to_string())?;
+        if correction.distance_mm <= probe.target_verification_limit_mm {
+            return Ok(VacuumTargetCenter {
+                nominal_x_mm: seed_pose.x_mm,
+                nominal_y_mm: seed_pose.y_mm,
+                x_mm: pose.x_mm,
+                y_mm: pose.y_mm,
+                observation,
+                residual_mm: correction.distance_mm,
+            });
+        }
+        if correction_count == probe.target_max_centering_corrections {
+            return Err(format!(
+                "vacuum target centering residual {:.3}mm exceeds {:.3}mm",
+                correction.distance_mm, probe.target_verification_limit_mm,
+            ));
+        }
+        let target = JogTarget {
+            x_mm: pose.x_mm + correction.x_mm,
+            y_mm: pose.y_mm + correction.y_mm,
+            z_mm: pose.z_mm,
+            rotation_deg: None,
+        };
+        let cumulative_correction =
+            (target.x_mm - seed_pose.x_mm).hypot(target.y_mm - seed_pose.y_mm);
+        if cumulative_correction > probe.target_max_center_error_mm {
+            return Err(format!(
+                "vacuum target correction {:.3}mm exceeds {:.3}mm",
+                cumulative_correction, probe.target_max_center_error_mm,
+            ));
+        }
+        pose = state
+            .machine
+            .jog(lease_id, target, probe.xy_feed_mm_per_min)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Err("vacuum target centering ended without a result".into())
+}
+
+fn mean_fiducial_detection(detections: &[FiducialDetection]) -> Option<FiducialDetection> {
+    let count = detections.len() as f64;
+    (!detections.is_empty()).then(|| FiducialDetection {
+        x_px: detections.iter().map(|target| target.x_px).sum::<f64>() / count,
+        y_px: detections.iter().map(|target| target.y_px).sum::<f64>() / count,
+        diameter_px: detections
+            .iter()
+            .map(|target| target.diameter_px)
+            .sum::<f64>()
+            / count,
+        confidence: detections
+            .iter()
+            .map(|target| target.confidence)
+            .sum::<f64>()
+            / count,
+    })
+}
+
+fn mean_transform_scale(transform: [[f64; 2]; 2]) -> Option<f64> {
+    let x_scale = transform[0][0].hypot(transform[1][0]);
+    let y_scale = transform[0][1].hypot(transform[1][1]);
+    let mean = (x_scale + y_scale) / 2.0;
+    (mean.is_finite() && mean > f64::EPSILON).then_some(mean)
+}
+
+async fn restore_after_vacuum_probe(
+    state: &AppState,
+    lease_id: Uuid,
+    motion: VacuumProbeMotion,
+) -> Result<(), String> {
+    // Lift vertically, leave the datum area while lifted, and only then level
+    // the coupled nozzles. This prevents a nozzle from scraping the board.
+    for (target, feed_mm_per_min) in motion.restore_targets() {
+        state
+            .machine
+            .jog(lease_id, target, feed_mm_per_min)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn append_vacuum_probe_cleanup_errors(
+    mut error: String,
+    restore_result: Result<(), String>,
+    vacuum_off_result: Result<(), anyhow::Error>,
+) -> String {
+    if let Err(cleanup_error) = restore_result {
+        error.push_str(&format!("; nozzle restore also failed: {cleanup_error}"));
+    }
+    if let Err(cleanup_error) = vacuum_off_result {
+        error.push_str(&format!("; vacuum cleanup also failed: {cleanup_error}"));
+    }
+    error
+}
+
+async fn execute_vacuum_probe_descent(
+    state: &AppState,
+    lease_id: Uuid,
+    nozzle_id: &str,
+    sensor_id: &str,
+    head_x_mm: f64,
+    head_y_mm: f64,
+) -> Result<(Vec<i64>, Vec<VacuumProbeSample>, Option<VacuumProbeSample>), String> {
+    let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+    let probe = state.profile.vacuum_calibration.as_ref().unwrap();
+    let open_nozzle_raw_values =
+        collect_sensor_values(state, lease_id, sensor_id, probe.baseline_sample_count).await?;
+    let open_median = median_raw(&open_nozzle_raw_values)
+        .ok_or_else(|| "vacuum probe has no open-nozzle samples".to_string())?;
+    let minimum_nozzle_z_mm = probe.search_end_nozzle_z_mm;
+    let mut nozzle_z_mm = probe.search_start_nozzle_z_mm;
+    let mut samples = Vec::new();
+    let mut consecutive = 0;
+    loop {
+        if nozzle_z_mm <= minimum_nozzle_z_mm + 1e-9 {
+            break;
+        }
+        nozzle_z_mm = (nozzle_z_mm - probe.step_mm).max(minimum_nozzle_z_mm);
+        let controller_z_mm = z_kinematics
+            .controller_z(nozzle_id, nozzle_z_mm)
+            .ok_or_else(|| "vacuum probe descent Z is outside bounds".to_string())?;
+        state
+            .machine
+            .jog(
+                lease_id,
+                JogTarget {
+                    x_mm: head_x_mm,
+                    y_mm: head_y_mm,
+                    z_mm: controller_z_mm,
+                    rotation_deg: None,
+                },
+                probe.z_feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let raw_values =
+            collect_sensor_values(state, lease_id, sensor_id, probe.step_sample_count).await?;
+        let median_raw_value = median_raw(&raw_values)
+            .ok_or_else(|| "vacuum probe step has no sensor samples".to_string())?;
+        let signal_delta_counts = (median_raw_value - open_median).abs();
+        let sample = VacuumProbeSample {
+            nozzle_z_mm,
+            controller_z_mm,
+            raw_values,
+            median_raw_value,
+            signal_delta_counts,
+        };
+        if signal_delta_counts >= probe.minimum_signal_delta_counts as f64 {
+            consecutive += 1;
+        } else {
+            consecutive = 0;
+        }
+        samples.push(sample.clone());
+        if consecutive >= probe.required_consecutive_steps {
+            return Ok((open_nozzle_raw_values, samples, Some(sample)));
+        }
+    }
+    Ok((open_nozzle_raw_values, samples, None))
+}
+
+async fn collect_sensor_values(
+    state: &AppState,
+    lease_id: Uuid,
+    sensor_id: &str,
+    sample_count: u32,
+) -> Result<Vec<i64>, String> {
+    let mut values = Vec::with_capacity(sample_count as usize);
+    for _ in 0..sample_count {
+        values.push(
+            state
+                .machine
+                .read_sensor(lease_id, sensor_id.into())
+                .await
+                .map_err(|error| error.to_string())?
+                .raw_value,
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(values)
+}
+
+fn median_raw(values: &[i64]) -> Option<f64> {
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.is_empty() {
+        None
+    } else if values.len() % 2 == 0 {
+        Some((values[middle - 1] as f64 + values[middle] as f64) / 2.0)
+    } else {
+        Some(values[middle] as f64)
+    }
+}
+
+fn persist_vacuum_probe_report(
+    state: &AppState,
+    calibration_id: Uuid,
+    report: &VacuumProbeReport,
+) -> Result<(), String> {
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    let values = snapshot.values.as_object_mut().unwrap();
+    let probes = values.entry("vacuum_probe").or_insert_with(|| json!({}));
+    if !probes.is_object() {
+        *probes = json!({});
+    }
+    probes.as_object_mut().unwrap().insert(
+        report.nozzle_id.clone(),
+        serde_json::to_value(report).map_err(|error| error.to_string())?,
+    );
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Deserialize)]
@@ -1519,11 +2785,25 @@ fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
             "Waiting for automatic bounded X/Y probe moves",
         ),
         calibration_check(
+            "top_camera_working_plane_mapping",
+            "Top-camera working-plane mapping",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for bounded fiducial probe moves",
+        ),
+        calibration_check(
             "reciprocal_camera_center",
             "Reciprocal camera centering",
             CalibrationCheckSource::Vision,
             CalibrationCheckStatus::Pending,
             "Waiting for both cameras to locate the opposing lens",
+        ),
+        calibration_check(
+            "camera_ray_transfer",
+            "Camera working-plane ray transfer",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for reciprocal camera geometry",
         ),
         calibration_check(
             "nozzle_offsets",
@@ -1545,6 +2825,20 @@ fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
             CalibrationCheckSource::Vision,
             CalibrationCheckStatus::Pending,
             "Waiting for bounded multi-angle measurement",
+        ),
+        calibration_check(
+            "height_N1",
+            "N1 height-dependent axis model",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for safe height-specific bottom-camera mapping probes",
+        ),
+        calibration_check(
+            "height_N2",
+            "N2 height-dependent axis model",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for safe height-specific bottom-camera mapping probes",
         ),
     ]
 }
@@ -1650,7 +2944,6 @@ async fn execute_calibration_run(
         CalibrationRunPhase::VisualHomingValidation,
     )?;
     let visual = state.profile.visual_homing.as_ref().unwrap().clone();
-    let mut head_geometry_report = None;
     for cycle in 1..=run.config.visual_homing_sample_count {
         if let Err(error) = state.machine.home(lease_id, true).await {
             return fail_calibration_run(&state, &mut run, error.to_string());
@@ -1690,62 +2983,87 @@ async fn execute_calibration_run(
                 )
             }
         };
-        let away = JogTarget {
-            x_mm: visual.fiducial_x_mm + run.config.excursion_x_mm,
-            y_mm: visual.fiducial_y_mm + run.config.excursion_y_mm,
-            z_mm: visual.seed_pose.z_mm,
-            rotation_deg: None,
-        };
-        if let Err(error) = state
-            .machine
-            .jog(lease_id, away, run.config.excursion_feed_mm_per_min)
+        let mut observation =
+            match measure_independent_visual_return(&state, lease_id, &visual, &run.config).await {
+                Ok(observation) => observation,
+                Err(error) if error.status == StatusCode::BAD_REQUEST => {
+                    let completed_cycles = run.visual_homing_samples.len();
+                    update_run_check(
+                        &mut run,
+                        "visual_homing",
+                        CalibrationCheckStatus::Failed,
+                        &error.message,
+                        json!({"completed_cycles": completed_cycles}),
+                    );
+                    return reject_calibration_run(&state, &mut run, error.message);
+                }
+                Err(error) => return fail_calibration_run(&state, &mut run, error.message),
+            };
+        let mut return_refinement_count = 0;
+        while visual_return_needs_refinement(
+            observation.correction_distance_mm,
+            return_refinement_count,
+            run.config.visual_homing_p95_limit_mm,
+        ) {
+            let refinement = match execute_visual_home_with_limit(
+                &state,
+                VisualHomingRequest {
+                    lease_id,
+                    apply_offset: true,
+                    move_to_seed: true,
+                },
+                Some(run.config.visual_homing_p95_limit_mm),
+            )
             .await
-        {
-            return fail_calibration_run(&state, &mut run, error.to_string());
-        }
-        let returned = JogTarget {
-            x_mm: visual.fiducial_x_mm,
-            y_mm: visual.fiducial_y_mm,
-            z_mm: visual.seed_pose.z_mm,
-            rotation_deg: None,
-        };
-        if let Err(error) = state
-            .machine
-            .jog(lease_id, returned, run.config.excursion_feed_mm_per_min)
-            .await
-        {
-            return fail_calibration_run(&state, &mut run, error.to_string());
-        }
-        let observation = match execute_visual_home(
-            &state,
-            VisualHomingRequest {
-                lease_id,
-                apply_offset: false,
-                move_to_seed: false,
-            },
-        )
-        .await
-        {
-            Ok(result) => result.initial,
-            Err(error) if error.status == StatusCode::BAD_REQUEST => {
-                let completed_cycles = run.visual_homing_samples.len();
-                update_run_check(
+            {
+                Ok(result) => result,
+                Err(error) if error.status == StatusCode::BAD_REQUEST => {
+                    let completed_cycles = run.visual_homing_samples.len();
+                    update_run_check(
+                        &mut run,
+                        "visual_homing",
+                        CalibrationCheckStatus::Failed,
+                        &error.message,
+                        json!({"completed_cycles": completed_cycles}),
+                    );
+                    return reject_calibration_run(&state, &mut run, error.message);
+                }
+                Err(error) => return fail_calibration_run(&state, &mut run, error.message),
+            };
+            if refinement.verification.is_none() {
+                return fail_calibration_run(
+                    &state,
                     &mut run,
-                    "visual_homing",
-                    CalibrationCheckStatus::Failed,
-                    &error.message,
-                    json!({"completed_cycles": completed_cycles}),
+                    "return refinement produced no verification".into(),
                 );
-                return reject_calibration_run(&state, &mut run, error.message);
             }
-            Err(error) => return fail_calibration_run(&state, &mut run, error.message),
-        };
+            return_refinement_count += 1;
+            observation =
+                match measure_independent_visual_return(&state, lease_id, &visual, &run.config)
+                    .await
+                {
+                    Ok(observation) => observation,
+                    Err(error) if error.status == StatusCode::BAD_REQUEST => {
+                        let completed_cycles = run.visual_homing_samples.len();
+                        update_run_check(
+                            &mut run,
+                            "visual_homing",
+                            CalibrationCheckStatus::Failed,
+                            &error.message,
+                            json!({"completed_cycles": completed_cycles}),
+                        );
+                        return reject_calibration_run(&state, &mut run, error.message);
+                    }
+                    Err(error) => return fail_calibration_run(&state, &mut run, error.message),
+                };
+        }
         run.visual_homing_samples
             .push(VisualHomingValidationSample {
                 cycle,
                 observed_at: Utc::now(),
                 initial_correction_mm: applied.initial.correction_distance_mm,
                 correction_count: applied.corrections.len() as u32,
+                return_refinement_count,
                 verification_residual_mm: verification.correction_distance_mm,
                 verification_residual_px: verification.error_radius_px,
                 return_residual_mm: observation.correction_distance_mm,
@@ -1755,51 +3073,23 @@ async fn execute_calibration_run(
             });
         let sample_count = run.config.visual_homing_sample_count;
         let progress_message = format!("Completed {cycle} of {sample_count} visual-homing cycles");
+        let return_refinements = run
+            .visual_homing_samples
+            .iter()
+            .map(|sample| sample.return_refinement_count)
+            .sum::<u32>();
         update_run_check(
             &mut run,
             "visual_homing",
             CalibrationCheckStatus::Pending,
             &progress_message,
-            json!({"completed_cycles": cycle}),
+            json!({
+                "completed_cycles": cycle,
+                "return_refinements": return_refinements,
+            }),
         );
         if let Err(error) = persist_calibration_run(&state, &mut run) {
             return fail_calibration_run(&state, &mut run, error);
-        }
-        if cycle == 1 {
-            if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
-                if let Err(cleanup_error) = state.machine.disable_actuator("lights".into()).await {
-                    tracing::error!(%cleanup_error, "head-geometry light cleanup also failed");
-                }
-                return fail_calibration_run(&state, &mut run, error.to_string());
-            }
-            let geometry_result =
-                execute_head_geometry_calibration(&state, &mut run, lease_id).await;
-            if let Err(error) = state.machine.disable_actuator("lights".into()).await {
-                return fail_calibration_run(&state, &mut run, error.to_string());
-            }
-            let geometry_report = match geometry_result {
-                Ok(report) => report,
-                Err(CalibrationStop::Rejected(message)) => {
-                    return reject_calibration_run(&state, &mut run, message)
-                }
-                Err(CalibrationStop::Failed(message)) => {
-                    return fail_calibration_run(&state, &mut run, message)
-                }
-            };
-            run.head_geometry_report = Some(geometry_report.clone());
-            if let Err(error) = persist_calibration_run(&state, &mut run) {
-                return fail_calibration_run(&state, &mut run, error);
-            }
-            head_geometry_report = Some(geometry_report);
-            if run.config.visual_homing_sample_count > 1 {
-                if let Err(error) = set_run_phase(
-                    &state,
-                    &mut run,
-                    CalibrationRunPhase::VisualHomingValidation,
-                ) {
-                    return fail_calibration_run(&state, &mut run, error);
-                }
-            }
         }
     }
     let report = match summarize_visual_homing_validation(
@@ -1851,16 +3141,29 @@ async fn execute_calibration_run(
         return fail_calibration_run(&state, &mut run, error);
     }
 
-    let geometry_report = match head_geometry_report {
-        Some(report) => report,
-        None => {
-            return fail_calibration_run(
-                &state,
-                &mut run,
-                "head-geometry report is missing after visual homing".into(),
-            )
+    if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
+        if let Err(cleanup_error) = state.machine.disable_actuator("lights".into()).await {
+            tracing::error!(%cleanup_error, "head-geometry light cleanup also failed");
+        }
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let geometry_result = execute_head_geometry_calibration(&state, &mut run, lease_id).await;
+    if let Err(error) = state.machine.disable_actuator("lights".into()).await {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let geometry_report = match geometry_result {
+        Ok(report) => report,
+        Err(CalibrationStop::Rejected(message)) => {
+            return reject_calibration_run(&state, &mut run, message)
+        }
+        Err(CalibrationStop::Failed(message)) => {
+            return fail_calibration_run(&state, &mut run, message)
         }
     };
+    run.head_geometry_report = Some(geometry_report.clone());
+    if let Err(error) = persist_calibration_run(&state, &mut run) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
     if let Err(error) = record_head_geometry_steps(&state, &run, &geometry_report) {
         return fail_calibration_run(&state, &mut run, error);
     }
@@ -1869,10 +3172,57 @@ async fn execute_calibration_run(
     run.failure = None;
     persist_calibration_run(&state, &mut run)?;
     Ok(Some(format!(
-        "Initial machine calibration passed {} visual-homing cycles and {} nozzle runout fits",
+        "Initial machine calibration passed {} visual-homing cycles, {} nozzle runout fits, and {} height models",
         run.config.visual_homing_sample_count,
         geometry_report.nozzles.len(),
+        geometry_report.nozzle_height_models.len(),
     )))
+}
+
+async fn measure_independent_visual_return(
+    state: &AppState,
+    lease_id: Uuid,
+    visual: &VisualHomingProfile,
+    config: &AutomatedCalibrationConfig,
+) -> ApiResult<VisualHomingPlan> {
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: visual.fiducial_x_mm + config.excursion_x_mm,
+                y_mm: visual.fiducial_y_mm + config.excursion_y_mm,
+                z_mm: visual.seed_pose.z_mm,
+                rotation_deg: None,
+            },
+            config.excursion_feed_mm_per_min,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: visual.fiducial_x_mm,
+                y_mm: visual.fiducial_y_mm,
+                z_mm: visual.seed_pose.z_mm,
+                rotation_deg: None,
+            },
+            config.excursion_feed_mm_per_min,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: false,
+            move_to_seed: false,
+        },
+    )
+    .await
+    .map(|result| result.initial)
 }
 
 async fn execute_head_geometry_calibration(
@@ -1895,6 +3245,28 @@ async fn execute_head_geometry_calibration(
         .nozzles
         .first()
         .ok_or_else(|| CalibrationStop::Failed("bottom-vision profile has no nozzles".into()))?;
+
+    let top_camera_working_plane_mapping = measure_top_camera_working_plane_mapping(
+        state,
+        lease_id,
+        &visual,
+        &bottom,
+        &top_camera_profile,
+        &top_path,
+    )
+    .await?;
+    update_run_check(
+        run,
+        "top_camera_working_plane_mapping",
+        CalibrationCheckStatus::Passed,
+        "Bounded fiducial probes measured the top-camera working-plane map",
+        serde_json::to_value(&top_camera_working_plane_mapping).unwrap_or(Value::Null),
+    );
+    run.camera_reports.insert(
+        "top_camera_working_plane_mapping".into(),
+        serde_json::to_value(&top_camera_working_plane_mapping).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
 
     let mapping = measure_bottom_camera_mapping(
         state,
@@ -1940,7 +3312,39 @@ async fn execute_head_geometry_calibration(
     );
     persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
 
+    let camera_ray_transfer = calibrate_camera_ray_transfer(
+        &bottom_camera_observation,
+        &top_camera_center,
+        top_camera_working_plane_mapping.pixel_error_to_machine_mm,
+        bottom.head_geometry.camera_reference_diameter_mm,
+        bottom.head_geometry.camera_ray_transfer_max_mm,
+    )
+    .ok_or_else(|| CalibrationStop::Rejected("camera-ray transfer fit is invalid".into()))?;
+    update_run_check(
+        run,
+        "camera_ray_transfer",
+        if camera_ray_transfer.passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        if camera_ray_transfer.passed {
+            "Reciprocal camera circles produced a bounded working-plane transfer"
+        } else {
+            "Reciprocal camera circles did not produce a bounded working-plane transfer"
+        },
+        serde_json::to_value(&camera_ray_transfer).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+    if !camera_ray_transfer.passed {
+        return Err(CalibrationStop::Rejected(format!(
+            "camera-ray transfer {:.3}mm exceeds the configured geometry bounds",
+            camera_ray_transfer.transfer_correction_mm,
+        )));
+    }
+
     let mut nozzle_reports = Vec::new();
+    let mut nozzle_height_models = Vec::new();
     for nozzle in &bottom.nozzles {
         let report = measure_nozzle_runout(
             state,
@@ -1951,11 +3355,27 @@ async fn execute_head_geometry_calibration(
             &bottom_camera_profile,
             &bottom_path,
             mapping.pixel_error_to_machine_mm,
-            top_camera_center.controller_x_mm,
-            top_camera_center.controller_y_mm,
+            bottom_camera_observation.controller_x_mm,
+            bottom_camera_observation.controller_y_mm,
         )
         .await?;
+        let mut height_model = measure_nozzle_height_model(
+            state,
+            run,
+            lease_id,
+            &bottom,
+            nozzle,
+            &bottom_camera_profile,
+            &bottom_path,
+            &mapping,
+        )
+        .await?;
+        height_model.reference_transfer_correction_x_mm =
+            camera_ray_transfer.transfer_correction_x_mm;
+        height_model.reference_transfer_correction_y_mm =
+            camera_ray_transfer.transfer_correction_y_mm;
         nozzle_reports.push(report);
+        nozzle_height_models.push(height_model);
     }
     if nozzle_reports.len() != 2 {
         return Err(CalibrationStop::Rejected(
@@ -1975,7 +3395,7 @@ async fn execute_head_geometry_calibration(
         run,
         "nozzle_offsets",
         CalibrationCheckStatus::Passed,
-        "Both nozzle rotation axes were measured relative to the top camera",
+        "Both nozzle rotation axes were measured relative to the top camera as observed by the bottom camera",
         json!({
             "N1": {"x_mm": n1.head_offset_x_mm, "y_mm": n1.head_offset_y_mm},
             "N2": {"x_mm": n2.head_offset_x_mm, "y_mm": n2.head_offset_y_mm},
@@ -1985,19 +3405,161 @@ async fn execute_head_geometry_calibration(
             },
         }),
     );
+    let passed = camera_ray_transfer.passed
+        && nozzle_reports.iter().all(|report| report.passed)
+        && nozzle_height_models.iter().all(|model| model.passed);
     let report = HeadGeometryReport {
         bottom_camera_mapping: mapping,
+        top_camera_working_plane_mapping: Some(top_camera_working_plane_mapping),
         top_camera_reciprocal_mapping,
         top_camera_center,
         bottom_camera_reciprocal_observation: bottom_camera_observation,
+        camera_ray_transfer: Some(camera_ray_transfer),
+        nozzle_height_models,
         n1_to_n2_x_mm: n1.axis_controller_x_mm - n2.axis_controller_x_mm,
         n1_to_n2_y_mm: n1.axis_controller_y_mm - n2.axis_controller_y_mm,
         combined_runout_fit_residuals,
-        passed: nozzle_reports.iter().all(|report| report.passed),
+        passed,
         nozzles: nozzle_reports,
     };
     persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
     Ok(report)
+}
+
+async fn measure_top_camera_working_plane_mapping(
+    state: &AppState,
+    lease_id: Uuid,
+    visual: &VisualHomingProfile,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> Result<BottomCameraMappingReport, CalibrationStop> {
+    let base_pose = state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: visual.fiducial_x_mm,
+                y_mm: visual.fiducial_y_mm,
+                z_mm: visual.seed_pose.z_mm,
+                rotation_deg: None,
+            },
+            visual.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let base = capture_top_working_plane_fiducial(state, camera_profile, device_path).await?;
+    let probe = bottom.head_geometry.probe_distance_mm;
+    let x_minus = capture_top_working_plane_fiducial_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm - probe,
+        base_pose.y_mm,
+        visual,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    let x_plus = capture_top_working_plane_fiducial_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm + probe,
+        base_pose.y_mm,
+        visual,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    let y_minus = capture_top_working_plane_fiducial_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm,
+        base_pose.y_mm - probe,
+        visual,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    let y_plus = capture_top_working_plane_fiducial_at_xy(
+        state,
+        lease_id,
+        base_pose,
+        base_pose.x_mm,
+        base_pose.y_mm + probe,
+        visual,
+        camera_profile,
+        device_path,
+    )
+    .await?;
+    state
+        .machine
+        .jog(lease_id, base_pose.into(), visual.feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let returned = capture_top_working_plane_fiducial(state, camera_profile, device_path).await?;
+    calibrate_bottom_camera_mapping(base, x_minus, x_plus, y_minus, y_plus, returned, probe)
+        .ok_or_else(|| {
+            CalibrationStop::Rejected(
+                "top-camera fiducial probes did not produce a plausible invertible map".into(),
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_top_working_plane_fiducial_at_xy(
+    state: &AppState,
+    lease_id: Uuid,
+    base_pose: Pose,
+    x_mm: f64,
+    y_mm: f64,
+    visual: &VisualHomingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> Result<FiducialDetection, CalibrationStop> {
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm,
+                y_mm,
+                z_mm: base_pose.z_mm,
+                rotation_deg: None,
+            },
+            visual.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    capture_top_working_plane_fiducial(state, camera_profile, device_path).await
+}
+
+async fn capture_top_working_plane_fiducial(
+    state: &AppState,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> Result<FiducialDetection, CalibrationStop> {
+    let frames = capture_profiled_frames(state, camera_profile, device_path, 3)
+        .await
+        .map_err(api_calibration_stop)?;
+    let detections = frames
+        .iter()
+        .filter_map(|frame| detect_camera_target(frame, CameraRole::TopCamera))
+        .collect::<Vec<_>>();
+    if detections.len() != frames.len() {
+        return Err(CalibrationStop::Rejected(format!(
+            "top camera detected the homing fiducial in {} of {} mapping frames",
+            detections.len(),
+            frames.len(),
+        )));
+    }
+    mean_fiducial_detection(&detections).ok_or_else(|| {
+        CalibrationStop::Rejected(
+            "top camera returned no homing-fiducial mapping observations".into(),
+        )
+    })
 }
 
 async fn measure_bottom_camera_mapping(
@@ -2135,7 +3697,7 @@ async fn capture_geometry_nozzle(
     }
     mean_nozzle_detection(&report).ok_or_else(|| {
         CalibrationStop::Rejected(format!(
-            "{} produced no mean bore detection",
+            "{} produced no mean calibration-feature detection",
             nozzle.nozzle_id
         ))
     })
@@ -2327,8 +3889,8 @@ async fn center_opposed_cameras(
             visual.frame_center_x_px,
             visual.frame_center_y_px,
             top_camera_search_radius_px,
-            geometry.top_camera_feature_min_diameter_px,
-            geometry.top_camera_feature_max_diameter_px,
+            geometry.bottom_camera_reference_min_diameter_px,
+            geometry.bottom_camera_reference_max_diameter_px,
         )
         .ok_or_else(|| {
             CalibrationStop::Rejected("top camera could not locate the bottom-camera lens".into())
@@ -2542,8 +4104,8 @@ async fn capture_top_camera_reciprocal_feature(
         visual.frame_center_x_px,
         visual.frame_center_y_px,
         search_radius_px,
-        bottom.head_geometry.top_camera_feature_min_diameter_px,
-        bottom.head_geometry.top_camera_feature_max_diameter_px,
+        bottom.head_geometry.bottom_camera_reference_min_diameter_px,
+        bottom.head_geometry.bottom_camera_reference_max_diameter_px,
     )
     .ok_or_else(|| {
         CalibrationStop::Rejected(
@@ -2799,6 +4361,454 @@ async fn measure_nozzle_runout(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn measure_nozzle_height_model(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    reference_mapping: &BottomCameraMappingReport,
+) -> Result<NozzleHeightModel, CalibrationStop> {
+    let z_kinematics = state.profile.z_kinematics.as_ref().ok_or_else(|| {
+        CalibrationStop::Failed("height calibration requires Z kinematics".into())
+    })?;
+    let seed_pose = state
+        .machine
+        .jog(
+            lease_id,
+            bottom.nozzle_target(nozzle),
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let centered_pose = center_nozzle_for_runout(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+        reference_mapping.pixel_error_to_machine_mm,
+        seed_pose,
+    )
+    .await?;
+    let reference =
+        capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
+    let fixed_x_mm = centered_pose.x_mm;
+    let fixed_y_mm = centered_pose.y_mm;
+    let measurement = async {
+        let mut samples = Vec::new();
+        let mut expected = reference;
+        let mut expected_image_motion = reference_mapping.observed_pixel_per_machine_mm;
+        let mut reference_centering_correction = None;
+        for nozzle_z_mm in &bottom.head_geometry.height_sample_nozzle_z_mm {
+            let controller_z_mm = z_kinematics
+                .controller_z(&nozzle.nozzle_id, *nozzle_z_mm)
+                .ok_or_else(|| {
+                    CalibrationStop::Rejected(format!(
+                        "{} height sample Z{nozzle_z_mm:.3} is outside controller bounds",
+                        nozzle.nozzle_id
+                    ))
+                })?;
+            state
+                .machine
+                .jog(
+                    lease_id,
+                    JogTarget {
+                        x_mm: fixed_x_mm,
+                        y_mm: fixed_y_mm,
+                        z_mm: controller_z_mm,
+                        rotation_deg: None,
+                    },
+                    bottom.feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+            let (target, local_mapping, frame) = measure_nozzle_height_mapping(
+                state,
+                lease_id,
+                bottom,
+                nozzle,
+                camera_profile,
+                device_path,
+                Pose {
+                    x_mm: fixed_x_mm,
+                    y_mm: fixed_y_mm,
+                    z_mm: controller_z_mm,
+                    rotation_deg: centered_pose.rotation_deg,
+                },
+                expected,
+                expected_image_motion,
+            )
+            .await?;
+            record_nozzle_height_frame(state, run, &nozzle.nozzle_id, *nozzle_z_mm, &frame)?;
+            let centering = plan_bottom_camera_correction(
+                target,
+                bottom,
+                local_mapping.pixel_error_to_machine_mm,
+            )
+            .ok_or_else(|| CalibrationStop::Failed("invalid local height correction".into()))?;
+            let reference_centering_correction =
+                reference_centering_correction.get_or_insert([centering.x_mm, centering.y_mm]);
+            samples.push(NozzleHeightSample {
+                nozzle_z_mm: *nozzle_z_mm,
+                controller_z_mm,
+                target_x_px: target.x_px,
+                target_y_px: target.y_px,
+                target_diameter_px: target.diameter_px,
+                local_mapping: Some(local_mapping.clone()),
+                lateral_shift_x_mm: -(centering.x_mm - reference_centering_correction[0]),
+                lateral_shift_y_mm: -(centering.y_mm - reference_centering_correction[1]),
+            });
+            expected = target;
+            expected_image_motion = local_mapping.observed_pixel_per_machine_mm;
+            update_run_check(
+                run,
+                &format!("height_{}", nozzle.nozzle_id),
+                CalibrationCheckStatus::Pending,
+                &format!(
+                    "Measured {} of {} height-specific image maps",
+                    samples.len(),
+                    bottom.head_geometry.height_sample_nozzle_z_mm.len()
+                ),
+                serde_json::to_value(&samples).unwrap_or(Value::Null),
+            );
+            persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+        }
+        Ok::<_, CalibrationStop>(samples)
+    }
+    .await;
+    let retract = retract_after_height_measurement(
+        state,
+        lease_id,
+        bottom.feed_mm_per_min,
+        fixed_x_mm,
+        fixed_y_mm,
+        z_kinematics.level_controller_z_mm,
+    )
+    .await;
+    let samples = match (measurement, retract) {
+        (Ok(samples), Ok(_)) => samples,
+        (Err(error), Ok(_)) => return Err(error),
+        (Ok(_), Err(error)) => {
+            return Err(CalibrationStop::Failed(format!(
+                "failed to retract {} after height calibration: {error}",
+                nozzle.nozzle_id
+            )))
+        }
+        (Err(error), Err(retract_error)) => {
+            return Err(CalibrationStop::Failed(format!(
+                "{}; failed to retract {} after height calibration: {retract_error}",
+                calibration_stop_message(error),
+                nozzle.nozzle_id
+            )))
+        }
+    };
+    let reference_nozzle_z_mm = *bottom
+        .head_geometry
+        .height_sample_nozzle_z_mm
+        .first()
+        .ok_or_else(|| CalibrationStop::Failed("height sample list is empty".into()))?;
+    let model = fit_nozzle_height_model(
+        &nozzle.nozzle_id,
+        reference_nozzle_z_mm,
+        samples,
+        bottom.head_geometry.height_fit_p95_limit_mm,
+        bottom.head_geometry.height_max_axis_slope_mm_per_mm,
+        bottom.head_geometry.height_max_extrapolation_mm,
+    )
+    .ok_or_else(|| {
+        CalibrationStop::Rejected(format!(
+            "{} height-dependent axis fit is singular",
+            nozzle.nozzle_id
+        ))
+    })?;
+    update_run_check(
+        run,
+        &format!("height_{}", nozzle.nozzle_id),
+        if model.passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        if model.passed {
+            "Height-dependent axis fit met the configured physical residual limit"
+        } else {
+            "Height-dependent axis fit exceeded the configured physical residual limit"
+        },
+        serde_json::to_value(&model).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+    if !model.passed {
+        return Err(CalibrationStop::Rejected(format!(
+            "{} height fit rejected: p95 {:.4}mm (limit {:.4}mm), slope {:.5}mm/mm (limit {:.5}mm/mm)",
+            nozzle.nozzle_id,
+            model.fit_residuals.p95_mm,
+            bottom.head_geometry.height_fit_p95_limit_mm,
+            model
+                .axis_slope_x_mm_per_mm
+                .hypot(model.axis_slope_y_mm_per_mm),
+            bottom.head_geometry.height_max_axis_slope_mm_per_mm,
+        )));
+    }
+    Ok(model)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_nozzle_height_mapping(
+    state: &AppState,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    fixed_pose: Pose,
+    expected: FiducialDetection,
+    expected_image_motion: [[f64; 2]; 2],
+) -> Result<(FiducialDetection, BottomCameraMappingReport, GrayFrame), CalibrationStop> {
+    let (base, _) =
+        capture_nozzle_height_feature(state, bottom, nozzle, camera_profile, device_path, expected)
+            .await?;
+    let probe = bottom.head_geometry.probe_distance_mm;
+    let x_minus = capture_nozzle_height_at_xy(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+        fixed_pose,
+        fixed_pose.x_mm - probe,
+        fixed_pose.y_mm,
+        projected_height_target(base, expected_image_motion, -probe, 0.0),
+    )
+    .await?;
+    let x_plus = capture_nozzle_height_at_xy(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+        fixed_pose,
+        fixed_pose.x_mm + probe,
+        fixed_pose.y_mm,
+        projected_height_target(base, expected_image_motion, probe, 0.0),
+    )
+    .await?;
+    let y_minus = capture_nozzle_height_at_xy(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+        fixed_pose,
+        fixed_pose.x_mm,
+        fixed_pose.y_mm - probe,
+        projected_height_target(base, expected_image_motion, 0.0, -probe),
+    )
+    .await?;
+    let y_plus = capture_nozzle_height_at_xy(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+        fixed_pose,
+        fixed_pose.x_mm,
+        fixed_pose.y_mm + probe,
+        projected_height_target(base, expected_image_motion, 0.0, probe),
+    )
+    .await?;
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: fixed_pose.x_mm,
+                y_mm: fixed_pose.y_mm,
+                z_mm: fixed_pose.z_mm,
+                rotation_deg: None,
+            },
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let (returned, frame) =
+        capture_nozzle_height_feature(state, bottom, nozzle, camera_profile, device_path, base)
+            .await?;
+    let mapping =
+        calibrate_bottom_camera_mapping(base, x_minus, x_plus, y_minus, y_plus, returned, probe)
+            .ok_or_else(|| {
+                CalibrationStop::Rejected(format!(
+                    "{} local image mapping was not plausible at controller Z{:.3}",
+                    nozzle.nozzle_id, fixed_pose.z_mm
+                ))
+            })?;
+    Ok((returned, mapping, frame))
+}
+
+fn projected_height_target(
+    base: FiducialDetection,
+    image_motion: [[f64; 2]; 2],
+    delta_x_mm: f64,
+    delta_y_mm: f64,
+) -> FiducialDetection {
+    FiducialDetection {
+        x_px: base.x_px + image_motion[0][0] * delta_x_mm + image_motion[0][1] * delta_y_mm,
+        y_px: base.y_px + image_motion[1][0] * delta_x_mm + image_motion[1][1] * delta_y_mm,
+        ..base
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_nozzle_height_at_xy(
+    state: &AppState,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    fixed_pose: Pose,
+    x_mm: f64,
+    y_mm: f64,
+    expected: FiducialDetection,
+) -> Result<FiducialDetection, CalibrationStop> {
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm,
+                y_mm,
+                z_mm: fixed_pose.z_mm,
+                rotation_deg: None,
+            },
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    capture_nozzle_height_feature(state, bottom, nozzle, camera_profile, device_path, expected)
+        .await
+        .map(|(target, _)| target)
+}
+
+async fn capture_nozzle_height_feature(
+    state: &AppState,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    expected: FiducialDetection,
+) -> Result<(FiducialDetection, GrayFrame), CalibrationStop> {
+    let frames = capture_profiled_frames(
+        state,
+        camera_profile,
+        device_path,
+        bottom.head_geometry.centering_sample_count,
+    )
+    .await
+    .map_err(api_calibration_stop)?;
+    let target = summarize_nozzle_height_feature(
+        &frames,
+        expected.x_px,
+        expected.y_px,
+        expected.diameter_px,
+        bottom.head_geometry.height_tracking_radius_px,
+        nozzle.calibration_feature_kind,
+    )
+    .ok_or_else(|| {
+        CalibrationStop::Rejected(format!(
+            "{} height feature was not stable near ({:.1}, {:.1})px",
+            nozzle.nozzle_id, expected.x_px, expected.y_px
+        ))
+    })?;
+    let frame = frames
+        .into_iter()
+        .last()
+        .ok_or_else(|| CalibrationStop::Failed("height capture returned no frames".into()))?;
+    Ok((target, frame))
+}
+
+async fn retract_after_height_measurement(
+    state: &AppState,
+    lease_id: Uuid,
+    feed_mm_per_min: f64,
+    fixed_x_mm: f64,
+    fixed_y_mm: f64,
+    level_z_mm: f64,
+) -> anyhow::Result<Pose> {
+    let current =
+        state.machine.status().pose.ok_or_else(|| {
+            anyhow::anyhow!("machine pose is unavailable during height retraction")
+        })?;
+    let raised = state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: current.x_mm,
+                y_mm: current.y_mm,
+                z_mm: level_z_mm,
+                rotation_deg: None,
+            },
+            feed_mm_per_min,
+        )
+        .await?;
+    if (raised.x_mm - fixed_x_mm).hypot(raised.y_mm - fixed_y_mm) <= f64::EPSILON {
+        return Ok(raised);
+    }
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: fixed_x_mm,
+                y_mm: fixed_y_mm,
+                z_mm: level_z_mm,
+                rotation_deg: None,
+            },
+            feed_mm_per_min,
+        )
+        .await
+}
+
+fn record_nozzle_height_frame(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    nozzle_id: &str,
+    nozzle_z_mm: f64,
+    frame: &GrayFrame,
+) -> Result<(), CalibrationStop> {
+    let z_micrometers = (nozzle_z_mm * 1_000.0).round() as i64;
+    let name = format!("height-{nozzle_id}-{z_micrometers}.png");
+    let data =
+        encode_gray_png(frame).map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    state
+        .store
+        .put_calibration_artifact(run.id, &name, "image/png", &data)
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let artifacts = run
+        .camera_reports
+        .entry("nozzle_height_artifacts".into())
+        .or_insert_with(|| json!([]));
+    let artifacts = artifacts.as_array_mut().ok_or_else(|| {
+        CalibrationStop::Failed("nozzle-height artifact report is not an array".into())
+    })?;
+    artifacts.push(json!({
+        "nozzle_id": nozzle_id,
+        "nozzle_z_mm": nozzle_z_mm,
+        "name": name,
+        "url": format!("/api/v1/calibration-runs/{}/artifacts/{name}", run.id),
+    }));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn center_nozzle_for_runout(
     state: &AppState,
     lease_id: Uuid,
@@ -2880,6 +4890,20 @@ fn combine_runout_residuals(reports: &[NozzleRunoutReport]) -> Residuals {
     }
 }
 
+fn combine_height_residuals(models: &[NozzleHeightModel]) -> Option<Residuals> {
+    let residuals = models
+        .iter()
+        .flat_map(|model| {
+            model.samples.iter().map(|sample| {
+                let delta_z_mm = sample.nozzle_z_mm - model.reference_nozzle_z_mm;
+                (sample.lateral_shift_x_mm - model.axis_slope_x_mm_per_mm * delta_z_mm)
+                    .hypot(sample.lateral_shift_y_mm - model.axis_slope_y_mm_per_mm * delta_z_mm)
+            })
+        })
+        .collect::<Vec<_>>();
+    summarize_residuals(residuals.into_iter())
+}
+
 fn record_head_geometry_steps(
     state: &AppState,
     run: &AutomatedCalibrationRun,
@@ -2903,6 +4927,7 @@ fn record_head_geometry_steps(
             "run_id": run.id,
             "camera_x_mm": report.top_camera_center.controller_x_mm,
             "camera_y_mm": report.top_camera_center.controller_y_mm,
+            "top_camera_working_plane_mapping": report.top_camera_working_plane_mapping,
             "mapping": report.bottom_camera_mapping,
             "reciprocal_observation": report.bottom_camera_reciprocal_observation,
         }),
@@ -2915,6 +4940,7 @@ fn record_head_geometry_steps(
         json!({
             "run_id": run.id,
             "top_camera_center": report.top_camera_center,
+            "top_camera_reference": report.bottom_camera_reciprocal_observation,
             "nozzles": report.nozzles.iter().map(|nozzle| json!({
                 "nozzle_id": nozzle.nozzle_id,
                 "head_offset_x_mm": nozzle.head_offset_x_mm,
@@ -2934,6 +4960,17 @@ fn record_head_geometry_steps(
         json!({
             "run_id": run.id,
             "reports": report.nozzles,
+        }),
+    )?;
+    record_automated_calibration_step(
+        state,
+        run.calibration_id,
+        CalibrationStepId::NozzleHeightModel,
+        combine_height_residuals(&report.nozzle_height_models),
+        json!({
+            "run_id": run.id,
+            "camera_ray_transfer": report.camera_ray_transfer,
+            "models": report.nozzle_height_models,
         }),
     )
 }
@@ -3182,9 +5219,9 @@ fn update_tooling_check(run: &mut AutomatedCalibrationRun, report: &NozzleToolin
             CalibrationCheckStatus::Failed
         },
         if report.passed {
-            "Bottom-camera bore measurement matches the configured nozzle tip"
+            "Bottom-camera feature geometry matches the configured nozzle tip"
         } else {
-            "Bottom-camera bore measurement does not match the configured nozzle tip"
+            "Bottom-camera feature geometry does not match the configured nozzle tip"
         },
         serde_json::to_value(report).unwrap_or(Value::Null),
     );
@@ -3794,6 +5831,67 @@ mod tests {
         }
     }
 
+    fn test_nozzle_height_model() -> NozzleHeightModel {
+        NozzleHeightModel {
+            nozzle_id: "N1".into(),
+            reference_nozzle_z_mm: 31.5,
+            measured_min_nozzle_z_mm: 10.5,
+            measured_max_nozzle_z_mm: 31.5,
+            max_extrapolation_mm: 8.0,
+            axis_slope_x_mm_per_mm: 0.39 / 28.0,
+            axis_slope_y_mm_per_mm: -0.23 / 28.0,
+            reference_transfer_correction_x_mm: 0.0,
+            reference_transfer_correction_y_mm: 0.0,
+            nozzle_working_plane_correction_x_mm: 0.0,
+            nozzle_working_plane_correction_y_mm: 0.0,
+            transfer_observation_source_nozzle_id: None,
+            transfer_observation_nozzle_z_mm: None,
+            transfer_observation_error_x_mm: None,
+            transfer_observation_error_y_mm: None,
+            transfer_observation_uncertainty_mm: None,
+            nozzle_residual_observation_nozzle_z_mm: None,
+            nozzle_residual_observation_error_x_mm: None,
+            nozzle_residual_observation_error_y_mm: None,
+            nozzle_residual_observation_uncertainty_mm: None,
+            fit_residuals: Residuals {
+                sample_count: 7,
+                rms_mm: 0.01,
+                p95_mm: 0.02,
+                max_mm: 0.02,
+            },
+            samples: Vec::new(),
+            passed: true,
+        }
+    }
+
+    #[test]
+    fn camera_geometry_authorizes_the_height_transfer_model() {
+        let mut model = test_nozzle_height_model();
+        model.reference_transfer_correction_x_mm = 0.5;
+        model.reference_transfer_correction_y_mm = -0.4;
+        let mut snapshot = CalibrationSnapshot {
+            id: Uuid::new_v4(),
+            machine_serial: "test".into(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: Utc::now(),
+            completed_steps: BTreeSet::new(),
+            residuals: BTreeMap::new(),
+            values: json!({
+                "nozzle_height_model": {
+                    "camera_ray_transfer": {"passed": true}
+                }
+            }),
+            parent_id: None,
+            production_ready: false,
+        };
+
+        assert!(has_calibrated_working_plane_transfer(&snapshot, &model));
+        snapshot.values["nozzle_height_model"]["camera_ray_transfer"]["passed"] = json!(false);
+        assert!(!has_calibrated_working_plane_transfer(&snapshot, &model));
+        model.transfer_observation_nozzle_z_mm = Some(3.5);
+        assert!(has_calibrated_working_plane_transfer(&snapshot, &model));
+    }
+
     #[tokio::test]
     async fn health_reports_simulator() {
         let response = router(test_state())
@@ -4081,6 +6179,298 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vacuum_probe_requires_datum_board_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/vacuum-probe",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sealing target"));
+    }
+
+    #[tokio::test]
+    async fn height_observation_solves_the_camera_transfer_term_without_motion() {
+        let state = test_state();
+        let calibration_id = Uuid::new_v4();
+        let n1_model = test_nozzle_height_model();
+        let mut n2_model = n1_model.clone();
+        n2_model.nozzle_id = "N2".into();
+        n2_model.axis_slope_x_mm_per_mm = 0.28 / 28.0;
+        n2_model.axis_slope_y_mm_per_mm = -0.14 / 28.0;
+        let snapshot = CalibrationSnapshot {
+            id: calibration_id,
+            machine_serial: "test".into(),
+            profile_id: state.profile.id.clone(),
+            created_at: Utc::now(),
+            completed_steps: BTreeSet::from([CalibrationStepId::NozzleHeightModel]),
+            residuals: BTreeMap::new(),
+            values: json!({
+                "nozzle_height_model": {"models": [n1_model, n2_model]}
+            }),
+            parent_id: None,
+            production_ready: false,
+        };
+        state.store.put_calibration(&snapshot).unwrap();
+
+        let app = router(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{calibration_id}/nozzle-height-observation"
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "nozzle_id": "N1",
+                            "nozzle_z_mm": 3.5,
+                            "observed_error_x_mm": 0.5,
+                            "observed_error_y_mm": -0.5,
+                            "measurement_uncertainty_mm": 0.3,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let snapshot: CalibrationSnapshot = serde_json::from_slice(&body).unwrap();
+        let model = calibrated_nozzle_height_model(&snapshot, "N1")
+            .unwrap()
+            .unwrap();
+        assert!((model.reference_transfer_correction_x_mm - 0.89).abs() < 1e-12);
+        assert!((model.reference_transfer_correction_y_mm + 0.73).abs() < 1e-12);
+        let correction = model.tip_offset_correction_at(3.5).unwrap();
+        assert!((correction[0] - 0.5).abs() < 1e-12);
+        assert!((correction[1] + 0.5).abs() < 1e-12);
+        assert_eq!(
+            model.transfer_observation_source_nozzle_id.as_deref(),
+            Some("N1")
+        );
+
+        let n2_model = calibrated_nozzle_height_model(&snapshot, "N2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            n2_model.transfer_observation_source_nozzle_id.as_deref(),
+            Some("N1")
+        );
+        assert!((n2_model.reference_transfer_correction_x_mm - 0.89).abs() < 1e-12);
+        assert!((n2_model.reference_transfer_correction_y_mm + 0.73).abs() < 1e-12);
+        let n2_correction = n2_model.tip_offset_correction_at(3.5).unwrap();
+        assert!((n2_correction[0] - 0.61).abs() < 1e-12);
+        assert!((n2_correction[1] + 0.59).abs() < 1e-12);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{calibration_id}/nozzle-height-observation"
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "nozzle_id": "N2",
+                            "nozzle_z_mm": 3.5,
+                            "observed_error_x_mm": 0.0,
+                            "observed_error_y_mm": -0.375,
+                            "measurement_uncertainty_mm": 0.125,
+                            "post_correction_residual": true,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let snapshot: CalibrationSnapshot = serde_json::from_slice(&body).unwrap();
+        let n1_model = calibrated_nozzle_height_model(&snapshot, "N1")
+            .unwrap()
+            .unwrap();
+        let n2_model = calibrated_nozzle_height_model(&snapshot, "N2")
+            .unwrap()
+            .unwrap();
+        let n1_correction = n1_model.tip_offset_correction_at(3.5).unwrap();
+        let n2_correction = n2_model.tip_offset_correction_at(3.5).unwrap();
+        assert!((n1_correction[0] - 0.5).abs() < 1e-12);
+        assert!((n1_correction[1] + 0.5).abs() < 1e-12);
+        assert!((n2_correction[0] - 0.61).abs() < 1e-12);
+        assert!((n2_correction[1] + 0.965).abs() < 1e-12);
+        assert_eq!(
+            n2_model.nozzle_residual_observation_error_y_mm,
+            Some(-0.375)
+        );
+    }
+
+    #[test]
+    fn vacuum_probe_uses_persisted_nozzle_geometry_and_stable_medians() {
+        let snapshot = CalibrationSnapshot {
+            id: Uuid::new_v4(),
+            machine_serial: "test".into(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: Utc::now(),
+            completed_steps: BTreeSet::from([
+                CalibrationStepId::NozzleOffsets,
+                CalibrationStepId::NozzleRunout,
+            ]),
+            residuals: BTreeMap::new(),
+            values: json!({
+                "bottom_camera_geometry": {
+                    "mapping": {
+                        "pixel_error_to_machine_mm": [[-0.036, 0.0], [0.0, -0.036]],
+                        "observed_pixel_per_machine_mm": [[-27.778, 0.0], [0.0, -27.778]],
+                        "probe_distance_mm": 0.5,
+                        "returned_center_error_px": 0.2,
+                        "returned_center_error_mm": 0.0072,
+                    },
+                    "reciprocal_observation": {
+                        "controller_x_mm": 218.836,
+                        "controller_y_mm": 146.876,
+                    },
+                },
+                "nozzle_runout": {"reports": [{
+                    "nozzle_id": "N1",
+                    "tip_id": "N045",
+                    "head_offset_x_mm": -22.125,
+                    "head_offset_y_mm": -70.725,
+                    "reference_controller_angle_deg": 720.0,
+                    "correction_cos_x_mm": 0.008,
+                    "correction_sin_x_mm": -0.087,
+                    "correction_cos_y_mm": 0.089,
+                    "correction_sin_y_mm": 0.004,
+                }]},
+            }),
+            parent_id: None,
+            production_ready: false,
+        };
+        let geometry = calibrated_nozzle_geometry(&snapshot, "N1").unwrap();
+        assert_eq!(geometry.head_offset_x_mm, -22.125);
+        assert_eq!(geometry.head_offset_y_mm, -70.725);
+        assert_eq!(geometry.tip_id, "N045");
+        assert_eq!(geometry.runout_correction_at(720.0), Some([0.008, 0.089]));
+        let fallback_top_mapping = [[-0.0135, 0.0], [0.0, 0.0135]];
+        let reference = calibrated_head_reference(&snapshot, fallback_top_mapping).unwrap();
+        assert_eq!(reference.top_camera_controller_x_mm, 218.836);
+        assert_eq!(reference.top_camera_controller_y_mm, 146.876);
+        assert_eq!(
+            reference.top_camera_working_plane_mapping,
+            fallback_top_mapping
+        );
+        assert_eq!(reference.bottom_camera_mapping[0][0], -0.036);
+        assert_eq!(median_raw(&[255, 254, 255, 200, 255]), Some(255.0));
+        assert_eq!(median_raw(&[226, 225, 227, 226]), Some(226.0));
+        assert_eq!(median_raw(&[]), None);
+    }
+
+    #[test]
+    fn vacuum_probe_moves_laterally_at_level_and_retracts_before_return() {
+        let motion = VacuumProbeMotion {
+            probe_head_x_mm: 242.0,
+            probe_head_y_mm: 261.0,
+            return_head_x_mm: 220.0,
+            return_head_y_mm: 190.0,
+            approach_controller_z_mm: 5.0,
+            level_controller_z_mm: 31.5,
+            xy_feed_mm_per_min: 300.0,
+            z_approach_feed_mm_per_min: 300.0,
+        };
+
+        assert_eq!(
+            motion.level_probe_target(),
+            JogTarget {
+                x_mm: 242.0,
+                y_mm: 261.0,
+                z_mm: 31.5,
+                rotation_deg: None,
+            }
+        );
+        assert_eq!(motion.approach_probe_target().z_mm, 5.0);
+        let restore = motion.restore_targets();
+        assert_eq!(restore[0].0, motion.level_probe_target());
+        assert_eq!(restore[0].1, 300.0);
+        assert_eq!(restore[1].0, motion.level_return_target());
+    }
+
+    #[test]
+    fn vacuum_tip_offset_uses_the_common_bottom_camera_reference() {
+        let reference = CalibratedHeadReference {
+            top_camera_controller_x_mm: 218.83592009024375,
+            top_camera_controller_y_mm: 146.87577636371486,
+            top_camera_working_plane_mapping: [[-0.0135, 0.0], [0.0, 0.0135]],
+            bottom_camera_mapping: [[-0.036, 0.0], [0.0, -0.036]],
+        };
+        let offset = reference
+            .current_tip_offset(Pose {
+                x_mm: 242.33309363338415,
+                y_mm: 215.49237867055368,
+                z_mm: 31.5,
+                rotation_deg: 720.0,
+            })
+            .unwrap();
+        assert!((offset.x_mm + 23.4971735431404).abs() < 1e-12);
+        assert!((offset.y_mm + 68.61660230683882).abs() < 1e-12);
+
+        let wrong_reciprocal_x_mm = 220.28236097458588 - 242.33309363338415;
+        let wrong_reciprocal_y_mm = 144.6764269848319 - 215.49237867055368;
+        assert!((offset.x_mm - wrong_reciprocal_x_mm + 1.44644088434213).abs() < 1e-12);
+        assert!((offset.y_mm - wrong_reciprocal_y_mm - 2.19934937888296).abs() < 1e-12);
+    }
+
+    #[test]
+    fn vacuum_target_averages_camera_observations() {
+        let target = mean_fiducial_detection(&[
+            FiducialDetection {
+                x_px: 650.0,
+                y_px: 358.0,
+                diameter_px: 376.0,
+                confidence: 0.8,
+            },
+            FiducialDetection {
+                x_px: 652.0,
+                y_px: 360.0,
+                diameter_px: 378.0,
+                confidence: 0.9,
+            },
+        ])
+        .unwrap();
+        assert_eq!(target.x_px, 651.0);
+        assert_eq!(target.y_px, 359.0);
+        assert_eq!(target.diameter_px, 377.0);
+        assert!((target.confidence - 0.85).abs() < 1e-12);
+        assert!(mean_fiducial_detection(&[]).is_none());
+    }
+
+    #[tokio::test]
     async fn manual_calibration_measurement_endpoint_is_not_exposed() {
         let response = router(test_state())
             .oneshot(
@@ -4173,6 +6563,15 @@ mod tests {
         assert!(visual_verification_accepted(&verification, Some(0.05)));
         verification.correction_distance_mm = 0.0501;
         assert!(!visual_verification_accepted(&verification, Some(0.05)));
+    }
+
+    #[test]
+    fn direction_conditioned_return_refinement_is_bounded() {
+        assert!(!visual_return_needs_refinement(0.05, 0, 0.05));
+        assert!(visual_return_needs_refinement(0.056, 0, 0.05));
+        assert!(visual_return_needs_refinement(0.056, 1, 0.05));
+        assert!(!visual_return_needs_refinement(0.056, 2, 0.05));
+        assert!(!visual_return_needs_refinement(f64::NAN, 0, 0.05));
     }
 
     #[tokio::test]

@@ -42,6 +42,30 @@ returns the nozzle to its starting angle. The mapping from N1/N2 to A/B comes
 from the active machine profile. A driver error faults the machine and revokes
 control. This capability does not enable normal jog or job rotation.
 
+The V3.0.4 Z mechanism also has profile-scoped nozzle mappings. Controller Z
+equals nozzle working Z for N1 and `63 - nozzle working Z` for N2. Both nozzles
+are level and retracted at controller Z 31.5. Vacuum probing keeps them level
+for X/Y motion. It identifies and centers the current tip over the bottom
+camera. The nozzle offset uses the top-camera lens pose measured by that same
+bottom camera. It then centers the separate sealing pad with the top camera.
+Initial head calibration also measures each nozzle at a bounded list of Z
+heights over the recessed bottom camera. X/Y stays fixed while the selected
+nozzle is below the level pose. The machine retracts to controller Z 31.5
+before it moves to another nozzle or camera target.
+It lowers at fixed X/Y to a clear search start. The pump starts before the
+bounded slow descent. A stable vacuum transition defines contact; nominal
+working Z does not. The pump stops before retract, and the nozzle retracts to
+level before the return X/Y move. Every normal or failed path commands the
+vacuum output off.
+The target is the 5 mm front-mask opening near X=-22.5 mm and Y=-7.5 mm from
+the visual fiducial. The profile protects a 5.5 mm radius around that
+fiducial. The operator must confirm that the datum board is fixed and that the
+sealing target and nozzle tip are clean.
+
+The working-plane height observation is data-only. It records a bounded XY
+residual and uncertainty after the operator or a future inspection runner has
+observed the result. It cannot command motion.
+
 Visual homing is observation-only until both raw-camera axis signs have
 physical evidence. Apply mode bounds the initial target and XY correction,
 verifies the target again after moving, and changes only the controller's X/Y

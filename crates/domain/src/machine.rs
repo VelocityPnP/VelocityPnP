@@ -131,6 +131,10 @@ pub struct MachineProfile {
     pub visual_homing: Option<VisualHomingProfile>,
     #[serde(default)]
     pub bottom_vision: Option<BottomVisionProfile>,
+    #[serde(default)]
+    pub z_kinematics: Option<ZKinematicsProfile>,
+    #[serde(default)]
+    pub vacuum_calibration: Option<VacuumCalibrationProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -266,11 +270,35 @@ pub struct HeadGeometryProfile {
     pub max_centering_corrections: u32,
     pub max_centering_correction_mm: f64,
     pub verification_limit_mm: f64,
-    pub top_camera_feature_min_diameter_px: f64,
-    pub top_camera_feature_max_diameter_px: f64,
+    #[serde(alias = "top_camera_feature_min_diameter_px")]
+    pub top_camera_reference_min_diameter_px: f64,
+    #[serde(alias = "top_camera_feature_max_diameter_px")]
+    pub top_camera_reference_max_diameter_px: f64,
+    pub bottom_camera_reference_min_diameter_px: f64,
+    pub bottom_camera_reference_max_diameter_px: f64,
+    pub camera_reference_diameter_mm: f64,
+    pub camera_ray_transfer_max_mm: f64,
     pub rotation_angle_offsets_deg: Vec<f64>,
     pub rotation_feed_deg_per_min: f64,
     pub runout_fit_p95_limit_mm: f64,
+    pub height_sample_nozzle_z_mm: Vec<f64>,
+    pub height_tracking_radius_px: f64,
+    pub height_fit_p95_limit_mm: f64,
+    pub height_max_axis_slope_mm_per_mm: f64,
+    pub height_max_extrapolation_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NozzleCalibrationFeatureKind {
+    Bore,
+    OuterTip,
+}
+
+impl Default for NozzleCalibrationFeatureKind {
+    fn default() -> Self {
+        Self::Bore
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -280,8 +308,136 @@ pub struct NozzleToolingProfile {
     pub head_offset_x_mm: f64,
     pub head_offset_y_mm: f64,
     pub expected_tip_id: String,
-    pub expected_bore_diameter_mm: f64,
-    pub bore_diameter_tolerance_mm: f64,
+    #[serde(default)]
+    pub calibration_feature_kind: NozzleCalibrationFeatureKind,
+    #[serde(alias = "expected_bore_diameter_mm")]
+    pub expected_feature_diameter_mm: f64,
+    #[serde(alias = "bore_diameter_tolerance_mm")]
+    pub feature_diameter_tolerance_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZKinematicsProfile {
+    pub level_controller_z_mm: f64,
+    pub controller_min_mm: f64,
+    pub controller_max_mm: f64,
+    pub nozzles: Vec<NozzleZMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NozzleZMapping {
+    pub nozzle_id: String,
+    /// Controller Z = offset + scale * nozzle working-plane Z.
+    pub controller_offset_mm: f64,
+    pub controller_scale: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VacuumCalibrationProfile {
+    pub reference_surface: String,
+    pub target_offset_x_mm: f64,
+    pub target_offset_y_mm: f64,
+    pub target_diameter_mm: f64,
+    pub target_diameter_tolerance_mm: f64,
+    pub target_max_center_error_mm: f64,
+    pub target_verification_limit_mm: f64,
+    pub target_max_centering_corrections: u32,
+    pub fiducial_protected_radius_mm: f64,
+    pub search_start_nozzle_z_mm: f64,
+    pub search_end_nozzle_z_mm: f64,
+    pub step_mm: f64,
+    pub xy_feed_mm_per_min: f64,
+    pub z_approach_feed_mm_per_min: f64,
+    pub z_feed_mm_per_min: f64,
+    pub vacuum_settle_ms: u64,
+    pub baseline_sample_count: u32,
+    pub step_sample_count: u32,
+    pub minimum_signal_delta_counts: i64,
+    pub required_consecutive_steps: u32,
+}
+
+impl ZKinematicsProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.level_controller_z_mm.is_finite()
+            || !self.controller_min_mm.is_finite()
+            || !self.controller_max_mm.is_finite()
+            || self.controller_min_mm >= self.controller_max_mm
+            || !(self.controller_min_mm..=self.controller_max_mm)
+                .contains(&self.level_controller_z_mm)
+            || self.nozzles.is_empty()
+            || self.nozzles.iter().any(|mapping| {
+                mapping.nozzle_id.trim().is_empty()
+                    || !mapping.controller_offset_mm.is_finite()
+                    || !mapping.controller_scale.is_finite()
+                    || mapping.controller_scale.abs() < 1e-12
+            })
+        {
+            return Err("Z kinematics profile is invalid");
+        }
+        Ok(())
+    }
+
+    pub fn controller_z(&self, nozzle_id: &str, nozzle_z_mm: f64) -> Option<f64> {
+        if !nozzle_z_mm.is_finite() {
+            return None;
+        }
+        let mapping = self
+            .nozzles
+            .iter()
+            .find(|mapping| mapping.nozzle_id == nozzle_id)?;
+        let controller_z_mm = mapping.controller_offset_mm + mapping.controller_scale * nozzle_z_mm;
+        (controller_z_mm.is_finite()
+            && (self.controller_min_mm..=self.controller_max_mm).contains(&controller_z_mm))
+        .then_some(controller_z_mm)
+    }
+}
+
+impl VacuumCalibrationProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let values = [
+            self.target_offset_x_mm,
+            self.target_offset_y_mm,
+            self.target_diameter_mm,
+            self.target_diameter_tolerance_mm,
+            self.target_max_center_error_mm,
+            self.target_verification_limit_mm,
+            self.fiducial_protected_radius_mm,
+            self.search_start_nozzle_z_mm,
+            self.search_end_nozzle_z_mm,
+            self.step_mm,
+            self.xy_feed_mm_per_min,
+            self.z_approach_feed_mm_per_min,
+            self.z_feed_mm_per_min,
+        ];
+        if self.reference_surface.trim().is_empty()
+            || values.iter().any(|value| !value.is_finite())
+            || self.fiducial_protected_radius_mm <= 0.0
+            || self.target_offset_x_mm.hypot(self.target_offset_y_mm)
+                < self.fiducial_protected_radius_mm
+            || self.target_diameter_mm <= 0.0
+            || self.target_diameter_tolerance_mm <= 0.0
+            || self.target_diameter_tolerance_mm >= self.target_diameter_mm
+            || self.target_max_center_error_mm <= 0.0
+            || self.target_verification_limit_mm <= 0.0
+            || self.target_verification_limit_mm > self.target_max_center_error_mm
+            || !(1..=5).contains(&self.target_max_centering_corrections)
+            || self.search_start_nozzle_z_mm <= self.search_end_nozzle_z_mm
+            || self.search_end_nozzle_z_mm < 0.0
+            || self.search_start_nozzle_z_mm - self.search_end_nozzle_z_mm > 10.0
+            || !(0.01..=0.25).contains(&self.step_mm)
+            || self.xy_feed_mm_per_min <= 0.0
+            || self.z_approach_feed_mm_per_min <= 0.0
+            || self.z_feed_mm_per_min <= 0.0
+            || !(250..=5_000).contains(&self.vacuum_settle_ms)
+            || !(3..=30).contains(&self.baseline_sample_count)
+            || !(3..=10).contains(&self.step_sample_count)
+            || self.minimum_signal_delta_counts <= 0
+            || !(1..=3).contains(&self.required_consecutive_steps)
+        {
+            return Err("vacuum calibration profile is invalid");
+        }
+        Ok(())
+    }
 }
 
 impl BottomVisionProfile {
@@ -304,6 +460,11 @@ impl BottomVisionProfile {
             || self.max_center_error_px <= 0.0
             || self.feed_mm_per_min <= 0.0
             || self.head_geometry.validate().is_err()
+            || self
+                .head_geometry
+                .height_sample_nozzle_z_mm
+                .first()
+                .is_none_or(|height| (*height - self.working_z_mm).abs() > 1e-9)
             || self.nozzles.is_empty()
             || self.nozzles.iter().any(|nozzle| {
                 nozzle.nozzle_id.trim().is_empty()
@@ -311,10 +472,10 @@ impl BottomVisionProfile {
                     || nozzle.expected_tip_id.trim().is_empty()
                     || !nozzle.head_offset_x_mm.is_finite()
                     || !nozzle.head_offset_y_mm.is_finite()
-                    || !nozzle.expected_bore_diameter_mm.is_finite()
-                    || !nozzle.bore_diameter_tolerance_mm.is_finite()
-                    || nozzle.expected_bore_diameter_mm <= 0.0
-                    || nozzle.bore_diameter_tolerance_mm <= 0.0
+                    || !nozzle.expected_feature_diameter_mm.is_finite()
+                    || !nozzle.feature_diameter_tolerance_mm.is_finite()
+                    || nozzle.expected_feature_diameter_mm <= 0.0
+                    || nozzle.feature_diameter_tolerance_mm <= 0.0
             })
         {
             return Err("bottom-vision profile is invalid");
@@ -338,10 +499,18 @@ impl HeadGeometryProfile {
             self.probe_distance_mm,
             self.max_centering_correction_mm,
             self.verification_limit_mm,
-            self.top_camera_feature_min_diameter_px,
-            self.top_camera_feature_max_diameter_px,
+            self.top_camera_reference_min_diameter_px,
+            self.top_camera_reference_max_diameter_px,
+            self.bottom_camera_reference_min_diameter_px,
+            self.bottom_camera_reference_max_diameter_px,
+            self.camera_reference_diameter_mm,
+            self.camera_ray_transfer_max_mm,
             self.rotation_feed_deg_per_min,
             self.runout_fit_p95_limit_mm,
+            self.height_tracking_radius_px,
+            self.height_fit_p95_limit_mm,
+            self.height_max_axis_slope_mm_per_mm,
+            self.height_max_extrapolation_mm,
         ];
         if values.iter().any(|value| !value.is_finite())
             || !(0.1..=2.0).contains(&self.probe_distance_mm)
@@ -350,8 +519,14 @@ impl HeadGeometryProfile {
             || self.max_centering_correction_mm <= 0.0
             || self.max_centering_correction_mm > 10.0
             || self.verification_limit_mm <= 0.0
-            || self.top_camera_feature_min_diameter_px <= 0.0
-            || self.top_camera_feature_max_diameter_px <= self.top_camera_feature_min_diameter_px
+            || self.top_camera_reference_min_diameter_px <= 0.0
+            || self.top_camera_reference_max_diameter_px
+                <= self.top_camera_reference_min_diameter_px
+            || self.bottom_camera_reference_min_diameter_px <= 0.0
+            || self.bottom_camera_reference_max_diameter_px
+                <= self.bottom_camera_reference_min_diameter_px
+            || self.camera_reference_diameter_mm <= 0.0
+            || self.camera_ray_transfer_max_mm <= 0.0
             || self.rotation_angle_offsets_deg.len() < 12
             || self.rotation_angle_offsets_deg.len() > 36
             || self
@@ -360,6 +535,20 @@ impl HeadGeometryProfile {
                 .any(|angle| !angle.is_finite() || angle.abs() > 165.0)
             || self.rotation_feed_deg_per_min <= 0.0
             || self.runout_fit_p95_limit_mm <= 0.0
+            || !(4..=12).contains(&self.height_sample_nozzle_z_mm.len())
+            || self
+                .height_sample_nozzle_z_mm
+                .iter()
+                .any(|height| !height.is_finite() || *height < 0.0)
+            || self
+                .height_sample_nozzle_z_mm
+                .windows(2)
+                .any(|pair| pair[0] <= pair[1])
+            || !(5.0..=100.0).contains(&self.height_tracking_radius_px)
+            || self.height_fit_p95_limit_mm <= 0.0
+            || self.height_fit_p95_limit_mm > 0.25
+            || !(0.001..=0.1).contains(&self.height_max_axis_slope_mm_per_mm)
+            || !(0.0..=20.0).contains(&self.height_max_extrapolation_mm)
         {
             return Err("head-geometry profile is invalid");
         }
@@ -487,6 +676,20 @@ mod tests {
         assert_eq!(bottom.nozzles[0].expected_tip_id, "N045");
         assert_eq!(bottom.nozzles[1].expected_tip_id, "N24");
         assert_eq!(
+            bottom.nozzles[0].calibration_feature_kind,
+            NozzleCalibrationFeatureKind::Bore
+        );
+        assert_eq!(bottom.nozzles[0].expected_feature_diameter_mm, 0.45);
+        assert_eq!(
+            bottom.nozzles[1].calibration_feature_kind,
+            NozzleCalibrationFeatureKind::OuterTip
+        );
+        assert_eq!(bottom.nozzles[1].expected_feature_diameter_mm, 4.86);
+        assert_eq!(
+            bottom.head_geometry.height_sample_nozzle_z_mm,
+            [31.5, 28.0, 24.5, 21.0, 17.5, 14.0, 10.5]
+        );
+        assert_eq!(
             bottom.head_geometry.rotation_angle_offsets_deg,
             [-15.0, 15.0, -45.0, 45.0, -75.0, 75.0, -105.0, 105.0, -135.0, 135.0, -165.0, 165.0,]
         );
@@ -497,5 +700,45 @@ mod tests {
                 .unwrap();
             assert!(profile.bounds.contains(target));
         }
+    }
+
+    #[test]
+    fn attached_v3_maps_each_nozzle_working_z_to_the_shared_controller_axis() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let z = profile.z_kinematics.as_ref().unwrap();
+        let vacuum = profile.vacuum_calibration.as_ref().unwrap();
+        assert!(z.validate().is_ok());
+        assert!(vacuum.validate().is_ok());
+        assert_eq!(z.controller_z("N1", 30.0), Some(30.0));
+        assert_eq!(z.controller_z("N2", 30.0), Some(33.0));
+        assert_eq!(z.controller_z("N1", 33.0), Some(33.0));
+        assert_eq!(z.controller_z("N2", 33.0), Some(30.0));
+        assert_eq!(z.controller_z("N1", 31.5), Some(31.5));
+        assert_eq!(z.controller_z("N2", 31.5), Some(31.5));
+        assert_eq!(z.controller_z("N1", 0.0), Some(0.0));
+        assert_eq!(z.controller_z("N2", 0.0), Some(63.0));
+        let heights = &profile
+            .bottom_vision
+            .as_ref()
+            .unwrap()
+            .head_geometry
+            .height_sample_nozzle_z_mm;
+        assert!(heights
+            .iter()
+            .all(|height| z.controller_z("N1", *height).is_some()));
+        assert!(heights
+            .iter()
+            .all(|height| z.controller_z("N2", *height).is_some()));
+        assert_eq!(vacuum.target_offset_x_mm, -22.5);
+        assert_eq!(vacuum.target_offset_y_mm, -7.5);
+        assert_eq!(vacuum.target_diameter_mm, 5.0);
+        assert_eq!(vacuum.search_start_nozzle_z_mm, 5.0);
+        assert_eq!(vacuum.search_end_nozzle_z_mm, 3.0);
+        assert!(
+            vacuum.target_offset_x_mm.hypot(vacuum.target_offset_y_mm)
+                >= vacuum.fiducial_protected_radius_mm
+        );
+        assert!(profile.bounds.z_max_mm >= z.controller_max_mm);
     }
 }

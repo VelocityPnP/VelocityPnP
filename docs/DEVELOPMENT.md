@@ -114,6 +114,12 @@ bounded asynchronous read. This normalizes either a running or previously
 stopped Marlin parser and clears stale queued commands. Connect still enters
 preflight with no trusted pose or homing.
 
+Before a physical daemon restart after source changes, run `cargo build
+--workspace`. `cargo check`, `cargo clippy`, and `cargo test` validate source
+and test harnesses, but they do not guarantee that the standalone
+`target/debug/velocitypnpd` executable was relinked. Check the executable
+timestamp and the expected hardware-path strings before connection.
+
 The V3.0.4 profile exposes `vacuum_1` and `vacuum_2` as both actuators and raw
 pressure sensors. Reads require a lease and are allowed during preflight,
 unhomed, or ready states:
@@ -128,6 +134,50 @@ Sensor readings are signed controller counts, not pressure units. Establish
 the ambient and sealed-nozzle distributions on the attached machine before
 using them for part detection. An actuator-on validation must always include
 an explicit off command and a fail-safe disconnect.
+
+The bounded datum-board feasibility probe uses the homing fiducial only for
+visual registration. It seals on the separate 5 mm front-mask opening at
+X=-22.5 mm and Y=-7.5 mm from the fiducial. These coordinates come from the
+tagged Opulo V3.0.4 datum PCB. Before descent, the probe uses the bottom camera
+to identify and center the current tip. It then uses the top camera to center
+the 5 mm target instead of trusting the PCB offset alone. It moves X/Y while
+both nozzles are level at controller Z=31.5, lowers the selected nozzle to the
+clear search start, starts the pump, and descends at fixed X/Y. A stable vacuum
+transition defines contact. The pump stops before the nozzle retracts.
+
+The attached V3 profile currently bounds the search from nozzle Z=5.0 to
+Z=3.0. N1 produced a stable vacuum transition at Z=3.4. The lower limit leaves
+four 0.1 mm steps for detection variation but prevents deep travel if the
+sensor does not respond. It is a safety bound, not a surface coordinate:
+
+```bash
+velocitypnp vacuum-probe f6acd39d-b509-4e42-b265-132c0efcf8d2 \
+  --lease "$VELOCITYPNP_LEASE" --nozzle N1 --confirm-safety-checks
+```
+
+The command stores camera target correction, the directly measured current-tip
+offset, applied height-model correction, raw off and open-nozzle values, and
+descent samples in `values.vacuum_probe.<nozzle>` on the calibration snapshot. A
+successful signal is feasibility evidence only. It does not complete the
+Z-plane or vacuum-threshold workflow steps.
+
+The automated head-geometry pass also holds each centered nozzle at fixed X/Y
+and captures it at the profile Z heights. Bounded X/Y probes measure the local
+image map at each height, and the runner fits XY shift per millimetre of nozzle
+Z. It always retracts to the level controller Z before the next lateral move.
+Reciprocal observations of the two 15 mm camera references supply the shared
+working-plane transfer term automatically.
+
+The observation command is retained as a diagnostic override:
+
+```bash
+velocitypnp observe-nozzle-height f6acd39d-b509-4e42-b265-132c0efcf8d2 \
+  --nozzle N1 --nozzle-z-mm 3.5 \
+  --error-x-mm 0.5 --error-y-mm -0.5 --uncertainty-mm 0.3
+```
+
+This command does not move the machine or complete an automated step. Normal
+calibration and vacuum targeting do not require an operator measurement.
 
 Primary-datum visual homing defaults to observation mode. It moves to the
 profile seed, applies the top-camera profile and lights, detects the datum, and
@@ -148,9 +198,11 @@ included in that reset.
 
 ## Automated calibration runs
 
-The supported calibration path does not accept operator-entered measurements.
-Create a snapshot, then start its initial machine runner from the web UI or the
-CLI. The only confirmation covers conditions the V3 cannot observe before its
+The supported calibration path completes automated steps only from machine
+measurements. Create a snapshot, then start its initial machine runner from the
+web UI or the CLI. A bounded working-plane residual can refine a completed
+height model, but it does not complete a workflow step. Safety confirmation
+covers conditions the V3 cannot observe before its
 first motion: level nozzles, a clear travel envelope, and reachable physical
 power isolation. The nozzle tubes must also be seated, routed normally, and
 free of snags.
@@ -165,20 +217,26 @@ velocitypnp calibrate CALIBRATION_UUID \
 The runner performs profile-scoped combined XYZ coarse homing, pulses and reads
 back each configured vacuum actuator/sensor pair with explicit off cleanup,
 moves to both camera working views, applies stored camera controls, measures
-reproducibility, and presents N1 and N2 to the bottom camera. Bore diameter
-distinguishes the configured N045 and N24 assignments; the operator does not
-declare the loaded tips. It then repeats coarse home, bounded visual refinement,
-a deterministic -10/-10 mm excursion, return, and observation for 30 cycles by
-default. After the first successful cycle, the runner performs head geometry
-early so a camera or rotation problem does not waste the full repeatability
-run. The evidence remains provisional until all 30 cycles pass. The runner:
+reproducibility, and presents N1 and N2 to the bottom camera. The N045 bore and
+the N24 outer-tip circle distinguish the configured tools. The operator does
+not declare the loaded tips. It then repeats coarse home, bounded
+visual refinement, a deterministic -10/-10 mm excursion, return, and
+observation for 30 cycles by default. After the first successful cycle, the
+runner performs head geometry early so a camera or rotation problem does not
+waste the full repeatability run. The evidence remains provisional until all
+30 cycles pass. The runner:
 
-1. Uses bounded local X/Y probes to learn the bottom-camera pixel-to-motion map.
-2. Uses each camera to locate the opposing lens and centers the pair.
-3. Locates each detected nozzle tip from the prior profile offset seed.
-4. Rotates N1/A and N2/B through 12 alternating offsets from ±15 to
+1. Uses bounded X/Y probes around the homing fiducial to measure the top-camera
+   working-plane map.
+2. Uses bounded local X/Y probes to measure the bottom-camera map.
+3. Uses each camera to locate the opposing 15 mm camera reference. Their
+   reciprocal poses and apparent scale solve the working-plane ray transfer.
+4. Locates each configured nozzle feature from the prior profile offset seed.
+   Nozzle offsets use the top-camera reference and nozzle poses observed by the
+   same fixed bottom camera.
+5. Rotates N1/A and N2/B through 12 alternating offsets from ±15 to
    ±165 degrees.
-5. Restores each starting angle and fits the rotation-axis position, head
+6. Restores each starting angle and fits the rotation-axis position, head
    offset, and first-harmonic nozzle-tip runout coefficients.
 
 Only the calibration runner can request these profile-bounded rotations.

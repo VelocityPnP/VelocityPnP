@@ -29,8 +29,21 @@ with Client("http://127.0.0.1:4080/api/v1") as pnp:
         lease["id"],
         safety_checks_confirmed=True,
     )
+    vacuum = pnp.vacuum_probe(
+        snapshot["id"],
+        lease["id"],
+        "N1",
+        safety_checks_confirmed=True,
+    )
+    snapshot = pnp.observe_nozzle_height(
+        snapshot["id"], "N1", 0.5, -0.5, 0.3, nozzle_z_mm=3.5,
+    )
 ```
 
 `calibrate` waits for the persisted machine runner; it never sends residuals
 or marks workflow steps complete. Use `start_calibration_run` plus
 `calibration_run` when an application wants to display progress asynchronously.
+`observe_nozzle_height` records a bounded working-plane residual. It does not
+move the machine or complete a workflow step. Pass
+`post_correction_residual=True` when the inspected pose already used the stored
+correction; the service then updates only that nozzle's remaining constant.

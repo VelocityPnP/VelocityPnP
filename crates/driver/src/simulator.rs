@@ -133,8 +133,20 @@ impl MachineDriver for SimulatorDriver {
     async fn read_sensor(&mut self, sensor_id: &str) -> Result<i64> {
         self.require_connected()?;
         match sensor_id {
-            "vacuum_1" => Ok(if self.vacuum_1_enabled { -80 } else { 0 }),
-            "vacuum_2" => Ok(if self.vacuum_2_enabled { -80 } else { 0 }),
+            "vacuum_1" => Ok(if !self.vacuum_1_enabled {
+                0
+            } else if self.pose.z_mm <= 2.0 {
+                -80
+            } else {
+                -5
+            }),
+            "vacuum_2" => Ok(if !self.vacuum_2_enabled {
+                0
+            } else if self.pose.z_mm >= 61.0 {
+                -80
+            } else {
+                -5
+            }),
             _ => bail!("unknown simulated sensor {sensor_id}"),
         }
     }

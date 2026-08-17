@@ -103,6 +103,9 @@ enum Command {
         #[arg(long, default_value = "unassigned")]
         machine_serial: String,
     },
+    Calibration {
+        calibration: Uuid,
+    },
     CalibrationRuns {
         calibration: Uuid,
     },
@@ -119,6 +122,37 @@ enum Command {
         confirm_safety_checks: bool,
         #[arg(long, default_value_t = 30)]
         visual_homing_samples: u32,
+    },
+    VacuumProbe {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long)]
+        nozzle: String,
+        /// Confirm the datum board and sealing target are clean and fixed,
+        /// both nozzles are level, the envelope is clear, and power isolation
+        /// is reachable.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    ObserveNozzleHeight {
+        calibration: Uuid,
+        #[arg(long)]
+        nozzle: String,
+        #[arg(long)]
+        nozzle_z_mm: Option<f64>,
+        #[arg(long, allow_hyphen_values = true)]
+        /// Observed nozzle center minus target center in machine X.
+        error_x_mm: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        /// Observed nozzle center minus target center in machine Y.
+        error_y_mm: f64,
+        #[arg(long)]
+        uncertainty_mm: f64,
+        /// Treat the reported error as residual remaining after the last
+        /// applied correction; update only this nozzle's working-plane term.
+        #[arg(long)]
+        post_correction_residual: bool,
     },
 }
 
@@ -337,6 +371,9 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::Calibration { calibration } => {
+            get(&client, &format!("{base}/calibrations/{calibration}")).await?
+        }
         Command::CalibrationRuns { calibration } => {
             get(&client, &format!("{base}/calibrations/{calibration}/runs")).await?
         }
@@ -369,6 +406,60 @@ async fn main() -> Result<()> {
                 .context("calibration response did not contain a run ID")?;
             run_operation(&client, base, started["operation"].clone()).await?;
             get(&client, &format!("{base}/calibration-runs/{run_id}")).await?
+        }
+        Command::VacuumProbe {
+            calibration,
+            lease,
+            nozzle,
+            confirm_safety_checks,
+        } => {
+            if !matches!(nozzle.as_str(), "N1" | "N2") {
+                bail!("--nozzle must be N1 or N2");
+            }
+            if !confirm_safety_checks {
+                bail!(
+                    "vacuum probing requires --confirm-safety-checks after inspecting the datum board, sealing target, nozzles, envelope, and power isolation"
+                );
+            }
+            let operation = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/vacuum-probe"),
+                Some(json!({
+                    "lease_id": lease,
+                    "nozzle_id": nozzle,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            run_operation(&client, base, operation).await?;
+            let snapshot = get(&client, &format!("{base}/calibrations/{calibration}")).await?;
+            snapshot["values"]["vacuum_probe"][&nozzle].clone()
+        }
+        Command::ObserveNozzleHeight {
+            calibration,
+            nozzle,
+            nozzle_z_mm,
+            error_x_mm,
+            error_y_mm,
+            uncertainty_mm,
+            post_correction_residual,
+        } => {
+            if !matches!(nozzle.as_str(), "N1" | "N2") {
+                bail!("--nozzle must be N1 or N2");
+            }
+            post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/nozzle-height-observation"),
+                Some(json!({
+                    "nozzle_id": nozzle,
+                    "nozzle_z_mm": nozzle_z_mm,
+                    "observed_error_x_mm": error_x_mm,
+                    "observed_error_y_mm": error_y_mm,
+                    "measurement_uncertainty_mm": uncertainty_mm,
+                    "post_correction_residual": post_correction_residual,
+                })),
+            )
+            .await?
         }
     };
     println!("{}", serde_json::to_string_pretty(&output)?);

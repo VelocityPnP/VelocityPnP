@@ -249,9 +249,27 @@ function CalibrationPanel({ status, devices, setError }: {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const vacuumProbe = async (nozzleId: "N1" | "N2") => {
+    if (!active) return;
+    if (!window.confirm(
+      `Probe ${nozzleId} on the datum-board sealing target? Confirm the board is fixed, the target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is within reach. X/Y motion occurs only while both nozzles are level; the selected nozzle then lowers at fixed X/Y and does not move below working Z0.`,
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 900)
+        : await api.lease("VelocityPnP vacuum probe", 900);
+      await waitForOperation(await api.vacuumProbe(active.id, lease.id, nozzleId));
+      const snapshot = await api.calibration(active.id);
+      setActive(snapshot);
+      setSnapshots((current) => current.map((value) => value.id === snapshot.id ? snapshot : value));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
 
   const runActive = Boolean(activeRun && ["pending", "running"].includes(activeRun.status));
   const machineReady = ["unhomed", "ready"].includes(status.state);
+  const canVacuumProbe = Boolean(active && completed.has("nozzle_height_model") && status.state === "ready" && status.homed);
 
   return <div className="calibration-layout">
     <section className="card calibration-summary">
@@ -261,22 +279,32 @@ function CalibrationPanel({ status, devices, setError }: {
       {!active ? <button onClick={() => void createSnapshot()}>Create calibration</button> : <>
         <button disabled={starting || runActive || !machineReady} onClick={() => void start()}>{runActive ? "Calibration running" : activeRun ? "Run calibration again" : "Run initial calibration"}</button>
         <button className="secondary" disabled={starting || runActive} onClick={() => void createSnapshot()}>New revision</button>
+        <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N1")}>Probe N1 vacuum</button>
+        <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N2")}>Probe N2 vacuum</button>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
       </>}
+      {active?.values.vacuum_probe && <div className="run-result">
+        {(["N1", "N2"] as const).map((nozzleId) => {
+          const report = active.values.vacuum_probe?.[nozzleId];
+          return report && <p key={nozzleId}>{nozzleId} {report.tip_id}: <strong>{report.passed ? `signal at Z${report.contact_nozzle_z_mm?.toFixed(3)}` : "no seal in safe interval"}</strong>{report.target_centering_residual_mm !== undefined && `; target residual ${report.target_centering_residual_mm.toFixed(3)} mm`}{report.height_model_applied && `; Z correction ${report.height_correction_x_mm?.toFixed(3)}, ${report.height_correction_y_mm?.toFixed(3)} mm`}</p>;
+        })}
+      </div>}
       {activeRun && <div className="calibration-run">
         <div className="run-heading"><strong>{pretty(activeRun.status)}</strong><span>{pretty(activeRun.phase)}</span></div>
         {activeRun.phase === "visual_homing_validation" && <p>{activeRun.visual_homing_samples.length} / {activeRun.config.visual_homing_sample_count} homing cycles measured</p>}
-        {activeRun.phase === "head_geometry_calibration" && <p>Mapping cameras and measuring both nozzle rotation axes</p>}
+        {activeRun.phase === "head_geometry_calibration" && <p>Mapping cameras and measuring nozzle runout and Z-dependent axis shift</p>}
         <div className="calibration-checks">{activeRun.checks.map((check) => <div key={check.id} className={`check-${check.status}`}><span>{check.status === "passed" ? "✓" : check.status === "failed" ? "!" : "·"}</span><div><strong>{check.title}</strong><small>{check.message}</small></div></div>)}</div>
         {activeRun.visual_homing_report && <p className="run-result">Independent return p95 <strong>{activeRun.visual_homing_report.independent_return.p95_mm.toFixed(4)} mm</strong></p>}
         {activeRun.head_geometry_report && <div className="run-result">
           <p>Bottom camera <strong>{activeRun.head_geometry_report.top_camera_center.controller_x_mm.toFixed(3)}, {activeRun.head_geometry_report.top_camera_center.controller_y_mm.toFixed(3)} mm</strong></p>
+          {activeRun.head_geometry_report.camera_ray_transfer && <p>Camera-ray transfer <strong>{activeRun.head_geometry_report.camera_ray_transfer.transfer_correction_x_mm.toFixed(3)}, {activeRun.head_geometry_report.camera_ray_transfer.transfer_correction_y_mm.toFixed(3)} mm</strong></p>}
           <p>N1 to N2 <strong>{activeRun.head_geometry_report.n1_to_n2_x_mm.toFixed(3)}, {activeRun.head_geometry_report.n1_to_n2_y_mm.toFixed(3)} mm</strong></p>
           {activeRun.head_geometry_report.nozzles.map((nozzle) => <p key={nozzle.nozzle_id}>{nozzle.nozzle_id} {nozzle.tip_id} runout <strong>{nozzle.runout_radius_mm.toFixed(4)} mm</strong>; fit p95 <strong>{nozzle.fit_residuals.p95_mm.toFixed(4)} mm</strong></p>)}
+          {(activeRun.head_geometry_report.nozzle_height_models ?? []).map((model) => <p key={model.nozzle_id}>{model.nozzle_id} axis slope <strong>{model.axis_slope_x_mm_per_mm.toFixed(5)}, {model.axis_slope_y_mm_per_mm.toFixed(5)} mm/mm</strong>; fit p95 <strong>{model.fit_residuals.p95_mm.toFixed(4)} mm</strong></p>)}
         </div>}
         {activeRun.failure && <div className="notice">{activeRun.failure}</div>}
       </div>}
-      <small>No calibration metric can be entered manually. A step completes only from a successful machine runner.</small>
+      <small>Machine measurements complete each automated step. Reciprocal camera geometry supplies the working-plane transfer. Manual target observations are diagnostic overrides only.</small>
     </section>
     <section className="workflow">{steps.map((step, index) => {
       const done = completed.has(step.id); const automated = step.automation === "automated";

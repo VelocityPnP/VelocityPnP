@@ -146,8 +146,55 @@ export interface CalibrationSnapshot {
   created_at: string;
   completed_steps: string[];
   residuals: Record<string, Residuals>;
-  values: Record<string, unknown>;
+  values: Record<string, unknown> & {
+    vacuum_probe?: Partial<Record<"N1" | "N2", VacuumProbeReport>>;
+    nozzle_height_model?: {
+      camera_ray_transfer?: CameraRayTransferReport | null;
+      models: NozzleHeightModel[];
+    };
+  };
   production_ready: boolean;
+}
+
+export interface VacuumProbeReport {
+  nozzle_id: "N1" | "N2";
+  tip_id: string;
+  sensor_id: string;
+  reference_surface: string;
+  nominal_target_surface_x_mm?: number;
+  nominal_target_surface_y_mm?: number;
+  target_surface_x_mm: number;
+  target_surface_y_mm: number;
+  target_centering_correction_x_mm?: number;
+  target_centering_correction_y_mm?: number;
+  target_centering_residual_mm?: number;
+  target_observed_x_px?: number;
+  target_observed_y_px?: number;
+  target_observed_diameter_px?: number;
+  head_controller_x_mm: number;
+  head_controller_y_mm: number;
+  controller_angle_deg: number;
+  runout_correction_x_mm: number;
+  runout_correction_y_mm: number;
+  measured_tip_offset_x_mm?: number;
+  measured_tip_offset_y_mm?: number;
+  tip_offset_model_error_mm?: number;
+  alignment_nozzle_z_mm?: number;
+  height_correction_x_mm?: number;
+  height_correction_y_mm?: number;
+  height_model_applied?: boolean;
+  open_nozzle_median_raw_value: number;
+  minimum_signal_delta_counts: number;
+  contact_nozzle_z_mm: number | null;
+  contact_controller_z_mm: number | null;
+  samples: Array<{
+    nozzle_z_mm: number;
+    controller_z_mm: number;
+    median_raw_value: number;
+    signal_delta_counts: number;
+  }>;
+  passed: boolean;
+  observed_at: string;
 }
 
 export interface Residuals {
@@ -171,6 +218,7 @@ export interface VisualHomingValidationSample {
   observed_at: string;
   initial_correction_mm: number;
   correction_count: number;
+  return_refinement_count?: number;
   verification_residual_mm: number;
   verification_residual_px: number;
   return_residual_mm: number;
@@ -226,15 +274,73 @@ export interface NozzleRunoutReport {
   passed: boolean;
 }
 
+export interface NozzleHeightSample {
+  nozzle_z_mm: number;
+  controller_z_mm: number;
+  target_x_px: number;
+  target_y_px: number;
+  target_diameter_px: number;
+  local_mapping?: BottomCameraMappingReport;
+  lateral_shift_x_mm: number;
+  lateral_shift_y_mm: number;
+}
+
+export interface NozzleHeightModel {
+  nozzle_id: string;
+  reference_nozzle_z_mm: number;
+  measured_min_nozzle_z_mm: number;
+  measured_max_nozzle_z_mm: number;
+  max_extrapolation_mm: number;
+  axis_slope_x_mm_per_mm: number;
+  axis_slope_y_mm_per_mm: number;
+  reference_transfer_correction_x_mm: number;
+  reference_transfer_correction_y_mm: number;
+  nozzle_working_plane_correction_x_mm: number;
+  nozzle_working_plane_correction_y_mm: number;
+  transfer_observation_source_nozzle_id: string | null;
+  transfer_observation_nozzle_z_mm: number | null;
+  transfer_observation_error_x_mm: number | null;
+  transfer_observation_error_y_mm: number | null;
+  transfer_observation_uncertainty_mm: number | null;
+  nozzle_residual_observation_nozzle_z_mm: number | null;
+  nozzle_residual_observation_error_x_mm: number | null;
+  nozzle_residual_observation_error_y_mm: number | null;
+  nozzle_residual_observation_uncertainty_mm: number | null;
+  fit_residuals: Residuals;
+  samples: NozzleHeightSample[];
+  passed: boolean;
+}
+
 export interface HeadGeometryReport {
   bottom_camera_mapping: BottomCameraMappingReport;
+  top_camera_working_plane_mapping: BottomCameraMappingReport | null;
   top_camera_reciprocal_mapping: BottomCameraMappingReport;
   top_camera_center: HeadFeatureCenterReport;
   bottom_camera_reciprocal_observation: HeadFeatureCenterReport;
+  camera_ray_transfer: CameraRayTransferReport | null;
   nozzles: NozzleRunoutReport[];
+  nozzle_height_models: NozzleHeightModel[];
   n1_to_n2_x_mm: number;
   n1_to_n2_y_mm: number;
   combined_runout_fit_residuals: Residuals;
+  passed: boolean;
+}
+
+export interface CameraRayTransferReport {
+  top_camera_lens_controller_x_mm: number;
+  top_camera_lens_controller_y_mm: number;
+  bottom_camera_lens_controller_x_mm: number;
+  bottom_camera_lens_controller_y_mm: number;
+  top_working_plane_pixel_per_mm: number;
+  camera_reference_diameter_mm: number;
+  bottom_camera_reference_diameter_px: number;
+  bottom_camera_reference_pixel_per_mm: number;
+  working_plane_distance_ratio: number;
+  relative_camera_displacement_x_mm: number;
+  relative_camera_displacement_y_mm: number;
+  transfer_correction_x_mm: number;
+  transfer_correction_y_mm: number;
+  transfer_correction_mm: number;
   passed: boolean;
 }
 

@@ -713,6 +713,12 @@ impl MachineActor {
         {
             bail!("actuator {actuator_id} is not present in the active profile");
         }
+        // Disconnect already commands every validated output off before it
+        // releases the driver. A concurrent operation can still request its
+        // own cleanup after that point; treat this as an idempotent no-op.
+        if self.status().state == MachineState::Disconnected {
+            return Ok(());
+        }
         if let Err(error) = self.driver.actuate(&actuator_id, false).await {
             let message = format!("failed to disable actuator {actuator_id}: {error}");
             self.set_fault("actuator_disable_failed", message.clone(), true);
@@ -1050,7 +1056,9 @@ mod tests {
             profile,
         );
         handle.connect().await.unwrap();
+        handle.complete_preflight(true).await.unwrap();
         let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.home(lease.id, true).await.unwrap();
         assert_eq!(
             handle
                 .read_sensor(lease.id, "vacuum_1".into())
@@ -1069,8 +1077,23 @@ mod tests {
                 .await
                 .unwrap()
                 .raw_value,
-            -80
+            -5
         );
+    }
+
+    #[tokio::test]
+    async fn fail_safe_disable_is_idempotent_after_disconnect() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile,
+        );
+        handle.connect().await.unwrap();
+        handle.disconnect().await.unwrap();
+
+        handle.disable_actuator("vacuum_1".into()).await.unwrap();
+        assert_eq!(handle.status().state, MachineState::Disconnected);
+        assert!(handle.status().fault.is_none());
     }
 
     #[tokio::test]
