@@ -222,7 +222,9 @@ the N24 outer-tip circle distinguish the configured tools. The operator does
 not declare the loaded tips. Camera open and capture failures get five bounded
 attempts with 500 ms between attempts so a short USB re-enumeration does not
 discard a long calibration run. A persistent camera fault still stops the
-runner. It then repeats coarse home, bounded
+runner. Tooling identity uses dark thresholds 45, 60, and 90. It stores every
+identity frame and does not treat an unsupported wrong-feature sample as a
+confirmed different tool. It then repeats coarse home, bounded
 visual refinement, a deterministic -10/-10 mm excursion, return, and
 observation for 30 cycles by default. After the first successful cycle, the
 runner performs head geometry early so a camera or rotation problem does not

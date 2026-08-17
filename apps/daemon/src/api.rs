@@ -3753,6 +3753,7 @@ async fn capture_geometry_nozzle(
 ) -> Result<FiducialDetection, CalibrationStop> {
     let (report, _) = capture_nozzle_tooling_with_retries(
         state,
+        None,
         camera_profile,
         device_path,
         bottom.head_geometry.centering_sample_count,
@@ -3776,6 +3777,7 @@ async fn capture_geometry_nozzle(
 
 async fn capture_nozzle_tooling_with_retries(
     state: &AppState,
+    mut artifact_run: Option<&mut AutomatedCalibrationRun>,
     camera_profile: &CameraProfile,
     device_path: &str,
     sample_count: u32,
@@ -3783,16 +3785,15 @@ async fn capture_nozzle_tooling_with_retries(
     nozzle: &velocitypnp_domain::NozzleToolingProfile,
 ) -> Result<(NozzleToolingReport, Vec<NozzleToolingReport>), CalibrationStop> {
     let mut attempts = Vec::new();
-    for _ in 0..MAX_TOOLING_CAPTURE_ATTEMPTS {
+    for attempt in 1..=MAX_TOOLING_CAPTURE_ATTEMPTS {
         let frames = capture_profiled_frames(state, camera_profile, device_path, sample_count)
             .await
             .map_err(api_calibration_stop)?;
+        if let Some(run) = artifact_run.as_deref_mut() {
+            record_nozzle_tooling_frames(state, run, &nozzle.nozzle_id, attempt, &frames)?;
+        }
         let report = summarize_nozzle_tooling(&frames, bottom, nozzle);
-        let stop = report.passed
-            || report
-                .detected_tip_id
-                .as_deref()
-                .is_some_and(|tip_id| tip_id != nozzle.expected_tip_id);
+        let stop = report.passed;
         attempts.push(report);
         if stop {
             break;
@@ -3803,6 +3804,40 @@ async fn capture_nozzle_tooling_with_retries(
         .cloned()
         .ok_or_else(|| CalibrationStop::Failed("tooling capture made no attempts".into()))?;
     Ok((report, attempts))
+}
+
+fn record_nozzle_tooling_frames(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    nozzle_id: &str,
+    attempt: u32,
+    frames: &[GrayFrame],
+) -> Result<(), CalibrationStop> {
+    for (sample_index, frame) in frames.iter().enumerate() {
+        let sample = sample_index + 1;
+        let name = format!("tooling-{nozzle_id}-{attempt}-{sample}.png");
+        let data =
+            encode_gray_png(frame).map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+        state
+            .store
+            .put_calibration_artifact(run.id, &name, "image/png", &data)
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+        let artifacts = run
+            .camera_reports
+            .entry("tooling_artifacts".into())
+            .or_insert_with(|| json!([]));
+        let artifacts = artifacts.as_array_mut().ok_or_else(|| {
+            CalibrationStop::Failed("tooling artifact report is not an array".into())
+        })?;
+        artifacts.push(json!({
+            "nozzle_id": nozzle_id,
+            "attempt": attempt,
+            "sample": sample,
+            "name": name,
+            "url": format!("/api/v1/calibration-runs/{}/artifacts/{name}", run.id),
+        }));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5247,6 +5282,7 @@ async fn execute_camera_calibration(
         stored_camera_profile(state, CameraRole::BottomCamera).map_err(api_calibration_stop)?;
     let device_path =
         camera_path_for_role(CameraRole::BottomCamera).map_err(api_calibration_stop)?;
+    let tooling_sample_count = run.config.tooling_sample_count;
     for nozzle in &bottom.nozzles {
         state
             .machine
@@ -5259,9 +5295,10 @@ async fn execute_camera_calibration(
             .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
         let (report, attempts) = capture_nozzle_tooling_with_retries(
             state,
+            Some(run),
             &camera_profile,
             &device_path,
-            run.config.tooling_sample_count,
+            tooling_sample_count,
             &bottom,
             nozzle,
         )

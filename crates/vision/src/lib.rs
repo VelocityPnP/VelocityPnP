@@ -22,7 +22,7 @@ const TOOLING_CLUSTER_DIAMETER_LIMIT_PX: f64 = 2.0;
 const TOOLING_CONCENTRIC_CENTER_LIMIT_PX: f64 = 8.0;
 const TOOLING_CONCENTRIC_DIAMETER_GAP_PX: f64 = 8.0;
 const TOOLING_MIN_DETECTION_RATE: f64 = 0.6;
-const TOOLING_DARK_THRESHOLDS: [u8; 2] = [45, 90];
+const TOOLING_DARK_THRESHOLDS: [u8; 3] = [45, 60, 90];
 const HEIGHT_TRACKING_DARK_THRESHOLDS: [u8; 7] = [30, 45, 60, 90, 120, 150, 180];
 const HEAD_CAMERA_THRESHOLDS: [u8; 6] = [30, 45, 60, 90, 120, 150];
 const CAMERA_OUTER_CIRCLE_THRESHOLDS: [u8; 9] = [60, 90, 120, 150, 165, 180, 195, 210, 225];
@@ -2360,6 +2360,40 @@ mod tests {
         let tooling = summarize_nozzle_tooling(&[bottom], bottom_vision, n1);
         assert_eq!(tooling.detected_tip_id.as_deref(), Some("N045"));
         assert!(tooling.passed);
+    }
+
+    #[test]
+    fn detects_n24_across_attached_reflective_frames() {
+        let frames = [
+            decode_gray_png(include_bytes!(
+                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-1.png"
+            ))
+            .unwrap(),
+            decode_gray_png(include_bytes!(
+                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-2.png"
+            ))
+            .unwrap(),
+            decode_gray_png(include_bytes!(
+                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-3.png"
+            ))
+            .unwrap(),
+        ];
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let bottom = machine.bottom_vision.unwrap();
+        let n2 = &bottom.nozzles[1];
+
+        let report = summarize_nozzle_tooling(&frames, &bottom, n2);
+
+        assert!(report.passed);
+        assert_eq!(report.detected_tip_id.as_deref(), Some("N24"));
+        assert_eq!(report.detected_samples, 3);
+        assert!(report.detections.iter().all(|detection| {
+            detection.is_some_and(|target| (170.0..=171.0).contains(&target.diameter_px))
+        }));
+        assert!(report
+            .center_jitter_p95_px
+            .is_some_and(|jitter| jitter < 0.1));
     }
 
     #[test]
