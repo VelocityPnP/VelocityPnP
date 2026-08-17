@@ -49,6 +49,8 @@ use velocitypnp_vision::{
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
 const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
+const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
+const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -1000,17 +1002,49 @@ async fn capture_profiled_frames(
     let config = camera_capture_config(profile, device_path.to_owned());
     let _capture_guard = state.camera_capture_lock.lock().await;
     tokio::task::spawn_blocking(move || {
-        apply_camera_controls(&config.device, &updates)?;
-        anyhow::Ok(
-            capture_gray_frames(&config, sample_count)?
-                .into_iter()
-                .map(|capture| capture.frame)
-                .collect(),
+        retry_camera_capture(
+            MAX_CAMERA_CAPTURE_ATTEMPTS,
+            CAMERA_CAPTURE_RETRY_DELAY,
+            || {
+                apply_camera_controls(&config.device, &updates)?;
+                anyhow::Ok(
+                    capture_gray_frames(&config, sample_count)?
+                        .into_iter()
+                        .map(|capture| capture.frame)
+                        .collect(),
+                )
+            },
         )
     })
     .await
     .map_err(ApiError::internal)?
     .map_err(ApiError::internal)
+}
+
+fn retry_camera_capture<T>(
+    max_attempts: u32,
+    retry_delay: Duration,
+    mut capture: impl FnMut() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if max_attempts == 0 {
+        return Err(anyhow::anyhow!(
+            "camera capture retry count must be non-zero"
+        ));
+    }
+    let mut last_error = None;
+    for attempt in 1..=max_attempts {
+        match capture() {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt < max_attempts {
+            std::thread::sleep(retry_delay);
+        }
+    }
+    let error = last_error.expect("a non-zero capture loop must retain an error");
+    Err(anyhow::anyhow!(
+        "camera capture failed after {max_attempts} attempts: {error:#}"
+    ))
 }
 
 async fn emergency_stop(State(state): State<AppState>) -> ApiResult<(StatusCode, Json<Operation>)> {
@@ -5926,6 +5960,35 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
     use velocitypnp_driver::SimulatorDriver;
+
+    #[test]
+    fn camera_capture_retry_recovers_a_transient_open_failure() {
+        let mut attempts = 0;
+        let value = retry_camera_capture(3, Duration::ZERO, || {
+            attempts += 1;
+            if attempts < 3 {
+                return Err(anyhow::anyhow!("camera is re-enumerating"));
+            }
+            Ok(42)
+        })
+        .unwrap();
+
+        assert_eq!(value, 42);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn camera_capture_retry_reports_the_last_persistent_failure() {
+        let error = retry_camera_capture::<()>(2, Duration::ZERO, || {
+            Err(anyhow::anyhow!("camera node is absent"))
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "camera capture failed after 2 attempts: camera node is absent"
+        );
+    }
 
     fn test_state() -> AppState {
         let profile: MachineProfile =

@@ -219,7 +219,10 @@ back each configured vacuum actuator/sensor pair with explicit off cleanup,
 moves to both camera working views, applies stored camera controls, measures
 reproducibility, and presents N1 and N2 to the bottom camera. The N045 bore and
 the N24 outer-tip circle distinguish the configured tools. The operator does
-not declare the loaded tips. It then repeats coarse home, bounded
+not declare the loaded tips. Camera open and capture failures get five bounded
+attempts with 500 ms between attempts so a short USB re-enumeration does not
+discard a long calibration run. A persistent camera fault still stops the
+runner. It then repeats coarse home, bounded
 visual refinement, a deterministic -10/-10 mm excursion, return, and
 observation for 30 cycles by default. After the first successful cycle, the
 runner performs head geometry early so a camera or rotation problem does not
