@@ -677,9 +677,9 @@ This implementation uses a pinhole distance-ratio model and the configured
 outer camera silhouette. Offline replay finds the top-camera outer reference
 at 523.3 px in the saved bottom-camera frame and the N24 outer tip at 169.5 px
 in the saved level-height frame. The retained top-camera fixture finds the
-bottom-camera reference at about 899 px. The revised transfer has not yet run
-on the attached machine. Lens distortion and a full intrinsic calibration
-remain separate work.
+bottom-camera reference at about 899 px. These offline detections provided
+pre-motion checks. The attached results below now validate the live path.
+Lens distortion and a full intrinsic calibration remain separate work.
 
 The first revised attached run, `fb5d4cd2-ae5d-4c26-ad61-050a4a67cec0`,
 passed coarse home, actuator checks, top-camera reproducibility, and N045 bore
@@ -691,6 +691,24 @@ with a stable circle-fit centre. The original physical interval ended at about
 which can make the official 170 px Hough bound report as 171 px. The N24
 physical tolerance is now 0.55 mm instead of 0.48 mm; no centre or identity
 measurement was entered manually. A rerun is required.
+
+Run `adc50a38-741a-40f4-940f-a18d9add9ac2` then accepted N045 and N24 and
+passed all 30 visual-home cycles. Independent return had 0.01867 mm p95 and
+0.01869 mm maximum residual. The top working-plane and bottom-camera maps
+passed. Reciprocal 15 mm camera references produced a +1.158 mm X and
+-1.965 mm Y working-plane transfer, 2.281 mm total. N1 runout was 0.0849 mm
+with a 0.0052 mm maximum fit residual. Its seven-height model had slopes
+X=+0.00992 and Y=-0.00537 mm/mm with a 0.00986 mm p95 fit residual. N2
+runout was 0.1358 mm with a 0.0075 mm maximum fit residual.
+
+The run reached the sixth N2 height map after 105 minutes. Its one-hour lease
+had been renewed once during observation, but it expired before the next
+machine command. The runner failed without a controller fault and could not
+make its normal retract with the expired lease. A fresh lease then moved only
+Z from controller 49.0 to the level 31.5 pose. The machine ended homed, ready,
+and fault-free. The runner now refreshes its existing lease at every long-run
+measurement checkpoint. This is an operation keepalive, not a replacement
+lease or an expansion of machine authority.
 
 ## Procedure sources
 

@@ -82,6 +82,11 @@ The v1 trusted-LAN model has no user authentication. Keep the daemon bound to
 loopback unless the network is isolated and trusted. The control lease prevents
 competing writers but is not an authentication mechanism.
 
+Starting an automated calibration authorizes that operation to refresh the
+same control lease to the actor's one-hour maximum at measurement checkpoints.
+It does not acquire a replacement lease, and it stops refreshing when the
+operation ends. A revoked, replaced, or invalid lease stops the run.
+
 ## Hardware-command provenance
 
 The V3.0.4 home position, travel bounds, axis letters, light commands, and

@@ -252,5 +252,6 @@ image with `GET /api/v1/calibration-runs/{id}/artifacts/{name}`.
 Successful evidence advances the snapshot automatically. Calibration stages
 whose runners are not implemented are reported as planned and cannot be
 completed manually. Starting a run renews the caller's matching control lease
-to the machine actor's one-hour maximum so the default 30-cycle measurement
-does not expire mid-run.
+to the machine actor's one-hour maximum. The runner refreshes that same lease
+before each long-running measurement checkpoint, so the default 30-cycle run
+keeps control without asking the operator to renew it manually.

@@ -2435,6 +2435,8 @@ fn default_visual_homing_p95_limit() -> f64 {
     0.05
 }
 
+const CALIBRATION_LEASE_SECONDS: u32 = 3600;
+
 #[derive(Serialize)]
 struct StartCalibrationRunResponse {
     run: AutomatedCalibrationRun,
@@ -2519,7 +2521,7 @@ async fn start_calibration_run(
     validate_calibration_targets(&state.profile, &config)?;
     state
         .machine
-        .renew_lease(body.lease_id, 3600)
+        .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
@@ -2865,6 +2867,15 @@ enum CalibrationStop {
     Failed(String),
 }
 
+async fn refresh_calibration_lease(state: &AppState, lease_id: Uuid) -> Result<(), String> {
+    state
+        .machine
+        .renew_lease(lease_id, CALIBRATION_LEASE_SECONDS)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("failed to refresh calibration control lease: {error}"))
+}
+
 async fn execute_calibration_run(
     state: AppState,
     run_id: Uuid,
@@ -2877,6 +2888,10 @@ async fn execute_calibration_run(
         .ok_or_else(|| "calibration run disappeared from storage".to_string())?;
     run.status = CalibrationRunStatus::Running;
     set_run_phase(&state, &mut run, CalibrationRunPhase::CoarseHoming)?;
+
+    if let Err(error) = refresh_calibration_lease(&state, lease_id).await {
+        return fail_calibration_run(&state, &mut run, error);
+    }
 
     let pose = match state.machine.home(lease_id, true).await {
         Ok(pose) => pose,
@@ -2945,6 +2960,9 @@ async fn execute_calibration_run(
     )?;
     let visual = state.profile.visual_homing.as_ref().unwrap().clone();
     for cycle in 1..=run.config.visual_homing_sample_count {
+        if let Err(error) = refresh_calibration_lease(&state, lease_id).await {
+            return fail_calibration_run(&state, &mut run, error);
+        }
         if let Err(error) = state.machine.home(lease_id, true).await {
             return fail_calibration_run(&state, &mut run, error.to_string());
         }
@@ -3141,6 +3159,10 @@ async fn execute_calibration_run(
         return fail_calibration_run(&state, &mut run, error);
     }
 
+    if let Err(error) = refresh_calibration_lease(&state, lease_id).await {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+
     if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
         if let Err(cleanup_error) = state.machine.disable_actuator("lights".into()).await {
             tracing::error!(%cleanup_error, "head-geometry light cleanup also failed");
@@ -3230,6 +3252,9 @@ async fn execute_head_geometry_calibration(
     run: &mut AutomatedCalibrationRun,
     lease_id: Uuid,
 ) -> Result<HeadGeometryReport, CalibrationStop> {
+    refresh_calibration_lease(state, lease_id)
+        .await
+        .map_err(CalibrationStop::Failed)?;
     set_run_phase(state, run, CalibrationRunPhase::HeadGeometryCalibration)
         .map_err(CalibrationStop::Failed)?;
     let bottom = state.profile.bottom_vision.as_ref().unwrap().clone();
@@ -3268,6 +3293,9 @@ async fn execute_head_geometry_calibration(
     );
     persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
 
+    refresh_calibration_lease(state, lease_id)
+        .await
+        .map_err(CalibrationStop::Failed)?;
     let mapping = measure_bottom_camera_mapping(
         state,
         lease_id,
@@ -3286,6 +3314,9 @@ async fn execute_head_geometry_calibration(
     );
     persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
 
+    refresh_calibration_lease(state, lease_id)
+        .await
+        .map_err(CalibrationStop::Failed)?;
     let (top_camera_center, bottom_camera_observation, top_camera_reciprocal_mapping) =
         center_opposed_cameras(
             state,
@@ -3346,6 +3377,9 @@ async fn execute_head_geometry_calibration(
     let mut nozzle_reports = Vec::new();
     let mut nozzle_height_models = Vec::new();
     for nozzle in &bottom.nozzles {
+        refresh_calibration_lease(state, lease_id)
+            .await
+            .map_err(CalibrationStop::Failed)?;
         let report = measure_nozzle_runout(
             state,
             run,
@@ -3359,6 +3393,9 @@ async fn execute_head_geometry_calibration(
             bottom_camera_observation.controller_y_mm,
         )
         .await?;
+        refresh_calibration_lease(state, lease_id)
+            .await
+            .map_err(CalibrationStop::Failed)?;
         let mut height_model = measure_nozzle_height_model(
             state,
             run,
@@ -4271,6 +4308,9 @@ async fn measure_nozzle_runout(
     let measurement = async {
         let mut samples = Vec::new();
         for angle_offset in &bottom.head_geometry.rotation_angle_offsets_deg {
+            refresh_calibration_lease(state, lease_id)
+                .await
+                .map_err(CalibrationStop::Failed)?;
             let controller_angle = state
                 .machine
                 .calibration_rotate_nozzle(lease_id, nozzle.nozzle_id.clone(), *angle_offset)
@@ -4404,6 +4444,9 @@ async fn measure_nozzle_height_model(
         let mut expected_image_motion = reference_mapping.observed_pixel_per_machine_mm;
         let mut reference_centering_correction = None;
         for nozzle_z_mm in &bottom.head_geometry.height_sample_nozzle_z_mm {
+            refresh_calibration_lease(state, lease_id)
+                .await
+                .map_err(CalibrationStop::Failed)?;
             let controller_z_mm = z_kinematics
                 .controller_z(&nozzle.nozzle_id, *nozzle_z_mm)
                 .ok_or_else(|| {
@@ -5947,6 +5990,24 @@ mod tests {
                 .raw_value,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn calibration_lease_refresh_extends_control_for_long_runs() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        state.machine.complete_preflight(true).await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("long calibration test".into(), 60)
+            .await
+            .unwrap();
+
+        refresh_calibration_lease(&state, lease.id).await.unwrap();
+
+        let refreshed = state.machine.status().control_lease.unwrap();
+        assert_eq!(refreshed.id, lease.id);
+        assert!(refreshed.expires_at > lease.expires_at + chrono::Duration::minutes(50));
     }
 
     #[tokio::test]
