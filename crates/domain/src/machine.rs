@@ -276,7 +276,8 @@ pub struct HeadGeometryProfile {
     pub top_camera_reference_max_diameter_px: f64,
     pub bottom_camera_reference_min_diameter_px: f64,
     pub bottom_camera_reference_max_diameter_px: f64,
-    pub camera_reference_diameter_mm: f64,
+    #[serde(alias = "camera_reference_diameter_mm")]
+    pub bottom_camera_reference_diameter_mm: f64,
     pub camera_ray_transfer_max_mm: f64,
     pub rotation_angle_offsets_deg: Vec<f64>,
     pub rotation_feed_deg_per_min: f64,
@@ -503,7 +504,7 @@ impl HeadGeometryProfile {
             self.top_camera_reference_max_diameter_px,
             self.bottom_camera_reference_min_diameter_px,
             self.bottom_camera_reference_max_diameter_px,
-            self.camera_reference_diameter_mm,
+            self.bottom_camera_reference_diameter_mm,
             self.camera_ray_transfer_max_mm,
             self.rotation_feed_deg_per_min,
             self.runout_fit_p95_limit_mm,
@@ -525,7 +526,7 @@ impl HeadGeometryProfile {
             || self.bottom_camera_reference_min_diameter_px <= 0.0
             || self.bottom_camera_reference_max_diameter_px
                 <= self.bottom_camera_reference_min_diameter_px
-            || self.camera_reference_diameter_mm <= 0.0
+            || self.bottom_camera_reference_diameter_mm <= 0.0
             || self.camera_ray_transfer_max_mm <= 0.0
             || self.rotation_angle_offsets_deg.len() < 12
             || self.rotation_angle_offsets_deg.len() > 36
@@ -685,6 +686,10 @@ mod tests {
             NozzleCalibrationFeatureKind::OuterTip
         );
         assert_eq!(bottom.nozzles[1].expected_feature_diameter_mm, 4.86);
+        assert_eq!(
+            bottom.head_geometry.bottom_camera_reference_diameter_mm,
+            33.0
+        );
         assert_eq!(
             bottom.head_geometry.height_sample_nozzle_z_mm,
             [31.5, 28.0, 24.5, 21.0, 17.5, 14.0, 10.5]

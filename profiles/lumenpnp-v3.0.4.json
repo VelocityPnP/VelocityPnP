@@ -94,7 +94,7 @@
       "top_camera_reference_max_diameter_px": 650.0,
       "bottom_camera_reference_min_diameter_px": 700.0,
       "bottom_camera_reference_max_diameter_px": 1100.0,
-      "camera_reference_diameter_mm": 15.0,
+      "bottom_camera_reference_diameter_mm": 33.0,
       "camera_ray_transfer_max_mm": 3.0,
       "rotation_angle_offsets_deg": [
         -15.0, 15.0, -45.0, 45.0, -75.0, 75.0,

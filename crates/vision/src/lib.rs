@@ -792,11 +792,11 @@ pub fn calibrate_camera_ray_transfer(
     top_camera_lens: &HeadFeatureCenterReport,
     bottom_camera_lens: &HeadFeatureCenterReport,
     top_working_plane_pixel_error_to_machine_mm: [[f64; 2]; 2],
-    camera_reference_diameter_mm: f64,
+    bottom_camera_reference_diameter_mm: f64,
     transfer_max_mm: f64,
 ) -> Option<CameraRayTransferReport> {
-    if !camera_reference_diameter_mm.is_finite()
-        || camera_reference_diameter_mm <= 0.0
+    if !bottom_camera_reference_diameter_mm.is_finite()
+        || bottom_camera_reference_diameter_mm <= 0.0
         || !transfer_max_mm.is_finite()
         || transfer_max_mm <= 0.0
     {
@@ -812,7 +812,7 @@ pub fn calibrate_camera_ray_transfer(
     }
     let top_working_plane_pixel_per_mm = 1.0 / mean_mm_per_px;
     let bottom_camera_reference_pixel_per_mm =
-        bottom_camera_lens.target_diameter_px / camera_reference_diameter_mm;
+        bottom_camera_lens.target_diameter_px / bottom_camera_reference_diameter_mm;
     let working_plane_distance_ratio =
         bottom_camera_reference_pixel_per_mm / top_working_plane_pixel_per_mm;
     let relative_camera_displacement_x_mm =
@@ -842,7 +842,7 @@ pub fn calibrate_camera_ray_transfer(
         bottom_camera_lens_controller_x_mm: bottom_camera_lens.controller_x_mm,
         bottom_camera_lens_controller_y_mm: bottom_camera_lens.controller_y_mm,
         top_working_plane_pixel_per_mm,
-        camera_reference_diameter_mm,
+        bottom_camera_reference_diameter_mm,
         bottom_camera_reference_diameter_px: bottom_camera_lens.target_diameter_px,
         bottom_camera_reference_pixel_per_mm,
         working_plane_distance_ratio,
@@ -1919,6 +1919,45 @@ mod tests {
         assert!((report.working_plane_distance_ratio - 0.5).abs() < 1e-12);
         assert!((report.transfer_correction_x_mm + 0.5).abs() < 1e-12);
         assert!((report.transfer_correction_y_mm + 1.0).abs() < 1e-12);
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn v304_camera_cutout_recovers_observed_working_plane_transfer() {
+        let observation = |feature_id: &str, x_mm, y_mm, diameter_px| HeadFeatureCenterReport {
+            feature_id: feature_id.into(),
+            controller_x_mm: x_mm,
+            controller_y_mm: y_mm,
+            target_x_px: 640.0,
+            target_y_px: 360.0,
+            target_diameter_px: diameter_px,
+            correction_count: 1,
+            verification_residual_mm: 0.01,
+        };
+        let top_camera_lens =
+            observation("top_camera_lens", 218.935430, 147.0576394945362, 524.720);
+        let bottom_camera_cutout = observation(
+            "bottom_camera_cutout",
+            220.320862,
+            144.684740,
+            883.4730075764661,
+        );
+
+        let report = calibrate_camera_ray_transfer(
+            &top_camera_lens,
+            &bottom_camera_cutout,
+            [
+                [1.0 / 70.07752202688118, 0.0],
+                [0.0, 1.0 / 70.07752202688118],
+            ],
+            33.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert!((report.working_plane_distance_ratio - 0.382_033).abs() < 1e-6);
+        assert!((report.transfer_correction_x_mm - 0.529_280).abs() < 1e-6);
+        assert!((report.transfer_correction_y_mm + 0.906_525).abs() < 1e-6);
         assert!(report.passed);
     }
 

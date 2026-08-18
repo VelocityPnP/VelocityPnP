@@ -332,7 +332,7 @@ export interface CameraRayTransferReport {
   bottom_camera_lens_controller_x_mm: number;
   bottom_camera_lens_controller_y_mm: number;
   top_working_plane_pixel_per_mm: number;
-  camera_reference_diameter_mm: number;
+  bottom_camera_reference_diameter_mm: number;
   bottom_camera_reference_diameter_px: number;
   bottom_camera_reference_pixel_per_mm: number;
   working_plane_distance_ratio: number;

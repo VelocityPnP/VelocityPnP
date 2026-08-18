@@ -473,7 +473,8 @@ pub struct CameraRayTransferReport {
     pub bottom_camera_lens_controller_x_mm: f64,
     pub bottom_camera_lens_controller_y_mm: f64,
     pub top_working_plane_pixel_per_mm: f64,
-    pub camera_reference_diameter_mm: f64,
+    #[serde(alias = "camera_reference_diameter_mm")]
+    pub bottom_camera_reference_diameter_mm: f64,
     pub bottom_camera_reference_diameter_px: f64,
     pub bottom_camera_reference_pixel_per_mm: f64,
     pub working_plane_distance_ratio: f64,

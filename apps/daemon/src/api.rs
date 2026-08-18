@@ -3381,7 +3381,7 @@ async fn execute_head_geometry_calibration(
         &bottom_camera_observation,
         &top_camera_center,
         top_camera_working_plane_mapping.pixel_error_to_machine_mm,
-        bottom.head_geometry.camera_reference_diameter_mm,
+        bottom.head_geometry.bottom_camera_reference_diameter_mm,
         bottom.head_geometry.camera_ray_transfer_max_mm,
     )
     .ok_or_else(|| CalibrationStop::Rejected("camera-ray transfer fit is invalid".into()))?;
