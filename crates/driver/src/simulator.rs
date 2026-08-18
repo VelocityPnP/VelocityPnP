@@ -135,14 +135,14 @@ impl MachineDriver for SimulatorDriver {
         match sensor_id {
             "vacuum_1" => Ok(if !self.vacuum_1_enabled {
                 0
-            } else if self.pose.z_mm <= 2.0 {
+            } else if self.pose.z_mm <= 3.21 {
                 -80
             } else {
                 -5
             }),
             "vacuum_2" => Ok(if !self.vacuum_2_enabled {
                 0
-            } else if self.pose.z_mm >= 61.0 {
+            } else if self.pose.z_mm >= 59.19 {
                 -80
             } else {
                 -5

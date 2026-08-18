@@ -225,6 +225,38 @@ class ClientTests(unittest.TestCase):
             ("GET", "/calibrations/calibration"),
         )
 
+    def test_vacuum_characterization_returns_persisted_report(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.characterize_vacuum("calibration", "lease", "N1")
+            with self.assertRaisesRegex(ValueError, "N1 or N2"):
+                client.characterize_vacuum(
+                    "calibration", "lease", "N3", safety_checks_confirmed=True,
+                )
+        send.assert_not_called()
+
+        operation = {"id": "op", "status": "succeeded", "message": "characterized"}
+        snapshot = {
+            "values": {
+                "vacuum_sensor_characterization": {"N1": {"passed": True}},
+            },
+        }
+        with patch.object(client, "_request", side_effect=[operation, snapshot]) as send:
+            report = client.characterize_vacuum(
+                "calibration", "lease", "N1", safety_checks_confirmed=True,
+            )
+        self.assertEqual(report, {"passed": True})
+        self.assertEqual(send.call_args_list[0].args, (
+            "POST",
+            "/calibrations/calibration/vacuum-characterization",
+            {
+                "lease_id": "lease",
+                "nozzle_id": "N1",
+                "confirmed_external_safety_checks": True,
+            },
+        ))
+
     def test_nozzle_height_observation_records_bounded_working_plane_error(self):
         client = Client(timeout=1)
         snapshot = {"values": {"nozzle_height_model": {"models": []}}}

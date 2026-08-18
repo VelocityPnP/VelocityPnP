@@ -790,9 +790,45 @@ normalize through their storage representation before SHA-256 calculation.
 A regression test covers the contact value, and the stored N1 report migrated
 to algorithm `vacuum_contact_probe.v3` without another physical probe.
 
-The final planner reports no non-reusable artifacts, no required motion, and a
-zero-second estimate. N1 and N2 contact artifact fingerprints start with
-`df707f490307` and `6aca004909b6`, respectively.
+The initial post-probe contact plan reported no non-reusable artifacts, no
+required motion, and a zero-second estimate. Those initial N1 and N2 contact
+artifact fingerprints started with `df707f490307` and `6aca004909b6`.
+
+## Reference-seal vacuum characterization
+
+Automatic reference-seal characterization passed for both installed tips on
+2026-08-17. The runner reused the current contact artifacts, performed a live
+visual home, re-centered each tip with the bottom camera, and re-centered the
+5 mm sealing target with the top camera.
+
+The first N1 attempt sampled the supposed open state at nozzle Z=3.5. The
+signal fell from 232 to 228 counts before descent because this height was
+already in the seal transition. The runner did not meet its 10-count relative
+contact criterion, stopped the pump, retracted, and returned to the visual-home
+pose without moving below the stored Z=3.2 contact bound.
+
+The corrected sequence samples the pump-on open state at the known-clear
+nozzle Z=5.0. It then approaches at 300 mm/min to 0.3 mm above the stored
+contact and samples only that final interval at 60 mm/min. The search never
+moves below the previously validated contact Z.
+
+N1/N045 measured an open median of 236.5 and a sealed median of 226.0 counts.
+Its robust distribution gap was 9.45 counts. The reference-seal acquire and
+release thresholds are 229.675 and 232.825 counts. N2/N24 measured an open
+median of 252.0 and a sealed median of 240.0 counts. Its robust gap was 12.0
+counts, with acquire and release thresholds of 244.0 and 248.0 counts. Both
+sensors report lower values for more vacuum.
+
+The pump was disabled while each nozzle remained stationary on the target.
+Ten release samples recorded the pressure decay before vertical retract. N1
+and N2 characterization artifact fingerprints start with `81dd78fc51d7` and
+`e0c326ecd9f6`, respectively. The final planner reports both branches reusable,
+zero required motion, and a zero-second estimate. The controller ended homed,
+ready, and fault-free at X=220.131, Y=190.271, Z=31.5. Both pump-off sensor
+values matched their established baselines: N1=0 and N2=255.
+
+These thresholds validate only the fixed reference seal. They do not validate
+that a production part is held; known-part distributions remain pending.
 
 ## Procedure sources
 

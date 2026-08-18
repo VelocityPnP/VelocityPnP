@@ -35,6 +35,9 @@ with Client("http://127.0.0.1:4080/api/v1") as pnp:
         "N1",
         safety_checks_confirmed=True,
     )
+    reference_seal = pnp.characterize_vacuum(
+        snapshot["id"], lease["id"], "N1", safety_checks_confirmed=True,
+    )
     snapshot = pnp.observe_nozzle_height(
         snapshot["id"], "N1", 0.5, -0.5, 0.3, nozzle_z_mm=3.5,
     )

@@ -57,6 +57,11 @@ bounded slow descent. A stable vacuum transition defines contact; nominal
 working Z does not. The pump stops before retract, and the nozzle retracts to
 level before the return X/Y move. Every normal or failed path commands the
 vacuum output off.
+Reference-seal characterization starts from a current successful contact
+artifact. It searches only from 0.3 mm above the stored contact Z through that
+contact Z. After sealed sampling, it switches the pump off while the nozzle is
+stationary, measures the release signal, and then retracts. It never searches
+below the previously validated contact Z.
 The target is the 5 mm front-mask opening near X=-22.5 mm and Y=-7.5 mm from
 the visual fiducial. The profile protects a 5.5 mm radius around that
 fiducial. The operator must confirm that the datum board is fixed and that the

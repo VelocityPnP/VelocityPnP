@@ -170,6 +170,12 @@
     "minimum_signal_delta_counts": 10,
     "required_consecutive_steps": 1
   },
+  "vacuum_characterization": {
+    "characterization_clearance_mm": 0.3,
+    "characterization_sample_count": 20,
+    "release_sample_count": 10,
+    "minimum_distribution_gap_counts": 3
+  },
   "capabilities": {
     "dual_nozzle": true,
     "rotation_motion": false,
@@ -177,6 +183,7 @@
     "visual_homing": true,
     "rotation_calibration": true,
     "vacuum_probe_calibration": true,
+    "vacuum_sensor_characterization": true,
     "photon_bus": false,
     "physical_endstops": false,
     "contact_probe": false

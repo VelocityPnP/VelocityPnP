@@ -163,6 +163,26 @@ Z-plane or vacuum-threshold workflow steps. It also records an independent
 `vacuum_contact_n1` or `vacuum_contact_n2` artifact with the exact runtime-tip,
 tooling, sensor, and vacuum-profile fingerprints that authorized the probe.
 
+Reference-seal characterization is a separate step. It requires a current,
+successful contact artifact and repeats camera registration and tip centering.
+The stored contact Z narrows the new search to 0.3 mm above contact through the
+same contact Z. The machine does not search below the validated value:
+
+```bash
+velocitypnp vacuum-characterize CALIBRATION_UUID \
+  --lease "$VELOCITYPNP_LEASE" --nozzle N1 --confirm-safety-checks
+```
+
+The pump-off, pump-on open-nozzle, sealed-reference, and pump-off release
+samples are stored in `values.vacuum_sensor_characterization.<nozzle>`. The
+runner calculates robust distribution separation, signal polarity, and
+separate acquire and release thresholds. Both nozzle/tool branches must pass
+before the `vacuum_sensor_characterization` workflow step is complete.
+
+These thresholds classify the fixed reference seal only. They do not claim
+that a production part is held. Known-part distributions remain a later,
+part-aware calibration after feeder pickup Z is available.
+
 The automated head-geometry pass also holds each centered nozzle at fixed X/Y
 and captures it at the profile Z heights. Bounded X/Y probes measure the local
 image map at each height, and the runner fits XY shift per millimetre of nozzle
@@ -278,7 +298,9 @@ top map + reciprocal cameras -> camera-ray transfer (calculated)
 bottom map + N1 tooling -> N1 runout -> N1 height model
 bottom map + N2 tooling -> N2 runout -> N2 height model
 camera-ray transfer + N1 branch -> N1 runtime tip -> N1 vacuum contact
+  -> N1 reference-seal characterization
 camera-ray transfer + N2 branch -> N2 runtime tip -> N2 vacuum contact
+  -> N2 reference-seal characterization
 ```
 
 Coarse homing and one live visual alignment are session motion preconditions.

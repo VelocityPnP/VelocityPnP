@@ -290,6 +290,23 @@ function CalibrationPanel({ status, devices, setError }: {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const characterizeVacuum = async (nozzleId: "N1" | "N2") => {
+    if (!active) return;
+    if (!window.confirm(
+      `Characterize ${nozzleId} on the datum-board sealing target? Confirm the board is fixed, the target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is within reach. The pump will be on only during the narrowed contact search and sealed sampling.`,
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 900)
+        : await api.lease("VelocityPnP vacuum characterization", 900);
+      await waitForOperation(await api.characterizeVacuum(active.id, lease.id, nozzleId));
+      const snapshot = await api.calibration(active.id);
+      setActive(snapshot);
+      setSnapshots((current) => current.map((value) => value.id === snapshot.id ? snapshot : value));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
   const recomputeDerived = async () => {
     if (!active) return;
     setStarting(true); setError(null);
@@ -331,6 +348,9 @@ function CalibrationPanel({ status, devices, setError }: {
     active?.parent_id && status.state === "ready" && status.homed,
   );
   const canVacuumProbe = Boolean(active && completed.has("nozzle_height_model") && status.state === "ready" && status.homed);
+  const canCharacterizeVacuum = (nozzleId: "N1" | "N2") => Boolean(
+    canVacuumProbe && active?.values.vacuum_probe?.[nozzleId]?.passed,
+  );
 
   return <div className="calibration-layout">
     <section className="card calibration-summary">
@@ -343,6 +363,8 @@ function CalibrationPanel({ status, devices, setError }: {
         <button className="secondary" disabled={starting || runActive} onClick={() => void createSnapshot()}>New revision</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N1")}>Probe N1 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N2")}>Probe N2 vacuum</button>
+        <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N1")} onClick={() => void characterizeVacuum("N1")}>Characterize N1 vacuum</button>
+        <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N2")} onClick={() => void characterizeVacuum("N2")}>Characterize N2 vacuum</button>
         <button className="secondary" disabled={starting || runActive} onClick={() => void recomputeDerived()}>Recompute derived transforms</button>
         <button className="secondary" disabled={starting || runActive || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
@@ -357,6 +379,12 @@ function CalibrationPanel({ status, devices, setError }: {
         {(["N1", "N2"] as const).map((nozzleId) => {
           const report = active.values.vacuum_probe?.[nozzleId];
           return report && <p key={nozzleId}>{nozzleId} {report.tip_id}: <strong>{report.passed ? `signal at Z${report.contact_nozzle_z_mm?.toFixed(3)}` : "no seal in safe interval"}</strong>{report.target_centering_residual_mm !== undefined && `; target residual ${report.target_centering_residual_mm.toFixed(3)} mm`}{report.height_model_applied && `; Z correction ${report.height_correction_x_mm?.toFixed(3)}, ${report.height_correction_y_mm?.toFixed(3)} mm`}</p>;
+        })}
+      </div>}
+      {active?.values.vacuum_sensor_characterization && <div className="run-result">
+        {(["N1", "N2"] as const).map((nozzleId) => {
+          const report = active.values.vacuum_sensor_characterization?.[nozzleId];
+          return report && <p key={nozzleId}>{nozzleId} {report.tip_id}: <strong>{report.passed ? "reference seal characterized" : "distributions overlap"}</strong>; signal {report.median_signal_delta_counts.toFixed(1)} counts; robust gap {report.robust_distribution_gap_counts.toFixed(1)} counts; acquire/release {report.acquire_threshold_raw_value.toFixed(1)} / {report.release_threshold_raw_value.toFixed(1)}</p>;
         })}
       </div>}
       {activeRun && <div className="calibration-run">

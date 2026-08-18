@@ -137,6 +137,13 @@ export const api = {
       nozzle_id: nozzleId,
       confirmed_external_safety_checks: true,
     }),
+  characterizeVacuum: (
+    snapshotId: string, leaseId: string, nozzleId: "N1" | "N2",
+  ) => jsonPost<Operation>(`/calibrations/${snapshotId}/vacuum-characterization`, {
+    lease_id: leaseId,
+    nozzle_id: nozzleId,
+    confirmed_external_safety_checks: true,
+  }),
   observeNozzleHeight: (
     snapshotId: string, nozzleId: "N1" | "N2", nozzleZMm: number,
     errorXMm: number, errorYMm: number, uncertaintyMm: number,

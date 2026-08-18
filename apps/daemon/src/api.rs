@@ -19,16 +19,18 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    lumen_calibration_artifacts, lumen_calibration_workflow, summarize_visual_homing_validation,
-    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport,
-    CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource,
-    CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
-    CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
-    CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, InspectionReport,
-    InspectionStatus, Job, JogTarget, MachineProfile, MachineState, NozzleHeightModel,
-    NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus, Pose,
-    Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample, VisualHomingProfile,
-    VisualHomingValidationReport, VisualHomingValidationSample,
+    calculate_vacuum_classification_thresholds, lumen_calibration_artifacts,
+    lumen_calibration_workflow, summarize_visual_homing_validation, AutomatedCalibrationConfig,
+    AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport, CalibrationArtifactId,
+    CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus,
+    CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId,
+    CameraProfile, CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
+    HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus, Job,
+    JogTarget, MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
+    NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus, Pose, Residuals,
+    SensorReading, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
+    VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    VisualHomingValidationSample,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -203,6 +205,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/vacuum-probe",
             post(start_vacuum_probe),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/vacuum-characterization",
+            post(start_vacuum_characterization),
         )
         .route(
             "/api/v1/calibrations/{id}/nozzle-height-observation",
@@ -1459,6 +1465,8 @@ struct PreparedVacuumProbe {
     height_model: Option<NozzleHeightModel>,
     height_model_has_working_plane_transfer: bool,
     alignment_nozzle_z_mm: f64,
+    search: VacuumProbeSearch,
+    characterize: bool,
 }
 
 struct CalibratedHeadReference {
@@ -1503,6 +1511,29 @@ struct VacuumProbeMotion {
     level_controller_z_mm: f64,
     xy_feed_mm_per_min: f64,
     z_approach_feed_mm_per_min: f64,
+}
+
+#[derive(Clone, Copy)]
+struct VacuumProbeSearch {
+    start_nozzle_z_mm: f64,
+    end_nozzle_z_mm: f64,
+}
+
+impl VacuumProbeSearch {
+    fn descent_targets(self, profile_start_nozzle_z_mm: f64, step_mm: f64) -> Vec<f64> {
+        let narrowed = self.start_nozzle_z_mm < profile_start_nozzle_z_mm - 1e-9;
+        let mut nozzle_z_mm = if narrowed {
+            (self.start_nozzle_z_mm + step_mm).min(profile_start_nozzle_z_mm)
+        } else {
+            self.start_nozzle_z_mm
+        };
+        let mut targets = Vec::new();
+        while nozzle_z_mm > self.end_nozzle_z_mm + 1e-9 {
+            nozzle_z_mm = (nozzle_z_mm - step_mm).max(self.end_nozzle_z_mm);
+            targets.push(nozzle_z_mm);
+        }
+        targets
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1570,9 +1601,26 @@ async fn start_vacuum_probe(
     Path(calibration_id): Path<Uuid>,
     Json(body): Json<StartVacuumProbeRequest>,
 ) -> ApiResult<(StatusCode, Json<Operation>)> {
+    start_vacuum_operation(state, calibration_id, body, false).await
+}
+
+async fn start_vacuum_characterization(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartVacuumProbeRequest>,
+) -> ApiResult<(StatusCode, Json<Operation>)> {
+    start_vacuum_operation(state, calibration_id, body, true).await
+}
+
+async fn start_vacuum_operation(
+    state: AppState,
+    calibration_id: Uuid,
+    body: StartVacuumProbeRequest,
+    characterize: bool,
+) -> ApiResult<(StatusCode, Json<Operation>)> {
     if !body.confirmed_external_safety_checks {
         return Err(ApiError::bad_request(
-            "vacuum probing requires confirmation that the datum board is fixed, the configured sealing target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+            "vacuum measurement requires confirmation that the datum board is fixed, the configured sealing target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
         ));
     }
     let mut snapshot = state
@@ -1608,15 +1656,20 @@ async fn start_vacuum_probe(
             "vacuum probing requires a homed ready machine",
         ));
     }
+    let required_capability = if characterize {
+        "vacuum_sensor_characterization"
+    } else {
+        "vacuum_probe_calibration"
+    };
     if !state
         .profile
         .capabilities
-        .get("vacuum_probe_calibration")
+        .get(required_capability)
         .copied()
         .unwrap_or(false)
     {
         return Err(ApiError::bad_request(
-            "active profile does not permit vacuum probe calibration",
+            "active profile does not permit this vacuum calibration operation",
         ));
     }
     let visual = state
@@ -1634,6 +1687,21 @@ async fn start_vacuum_probe(
         ApiError::bad_request("active profile does not define vacuum calibration")
     })?;
     probe.validate().map_err(ApiError::bad_request)?;
+    let characterization_profile = if characterize {
+        let profile = state
+            .profile
+            .vacuum_characterization
+            .as_ref()
+            .ok_or_else(|| {
+                ApiError::bad_request("active profile does not define vacuum characterization")
+            })?;
+        profile
+            .validate(probe.minimum_signal_delta_counts)
+            .map_err(ApiError::bad_request)?;
+        Some(profile)
+    } else {
+        None
+    };
     let bottom = state
         .profile
         .bottom_vision
@@ -1652,6 +1720,32 @@ async fn start_vacuum_probe(
             "vacuum probing requires a current per-nozzle runtime tip transform",
         ));
     }
+    let prior_contact = if characterize {
+        let contact_artifact = CalibrationArtifactId::vacuum_contact(&body.nozzle_id)
+            .ok_or_else(|| ApiError::bad_request("unknown nozzle for active machine profile"))?;
+        if !crate::calibration_artifacts::artifact_tree_is_current(
+            &state,
+            &snapshot,
+            contact_artifact,
+        ) {
+            return Err(ApiError::bad_request(
+                "vacuum characterization requires a current successful contact probe",
+            ));
+        }
+        let report: VacuumProbeReport = serde_json::from_value(
+            crate::calibration_artifacts::artifact_result_value(&snapshot, contact_artifact)
+                .map_err(ApiError::bad_request)?,
+        )
+        .map_err(|_| ApiError::bad_request("stored vacuum contact report is invalid"))?;
+        if !report.passed || report.contact_nozzle_z_mm.is_none() {
+            return Err(ApiError::bad_request(
+                "vacuum characterization requires a successful contact probe",
+            ));
+        }
+        Some(report)
+    } else {
+        None
+    };
     let sensor_id = match nozzle.nozzle_id.as_str() {
         "N1" => "vacuum_1",
         "N2" => "vacuum_2",
@@ -1677,14 +1771,37 @@ async fn start_vacuum_probe(
     let height_model_has_working_plane_transfer = height_model
         .as_ref()
         .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
-    let alignment_nozzle_z_mm = snapshot
-        .values
-        .get("vacuum_probe")
-        .and_then(|value| value.get(&body.nozzle_id))
-        .and_then(|value| value.get("contact_nozzle_z_mm"))
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite())
+    let alignment_nozzle_z_mm = prior_contact
+        .as_ref()
+        .and_then(|report| report.contact_nozzle_z_mm)
+        .or_else(|| {
+            snapshot
+                .values
+                .get("vacuum_probe")
+                .and_then(|value| value.get(&body.nozzle_id))
+                .and_then(|value| value.get("contact_nozzle_z_mm"))
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+        })
         .unwrap_or((probe.search_start_nozzle_z_mm + probe.search_end_nozzle_z_mm) / 2.0);
+    let (search_start_nozzle_z_mm, search_end_nozzle_z_mm) = match prior_contact
+        .as_ref()
+        .and_then(|report| report.contact_nozzle_z_mm)
+    {
+        Some(contact_z_mm) => (
+            (contact_z_mm
+                + characterization_profile
+                    .unwrap()
+                    .characterization_clearance_mm)
+                .min(probe.search_start_nozzle_z_mm),
+            contact_z_mm,
+        ),
+        None => (probe.search_start_nozzle_z_mm, probe.search_end_nozzle_z_mm),
+    };
+    let search = VacuumProbeSearch {
+        start_nozzle_z_mm: search_start_nozzle_z_mm,
+        end_nozzle_z_mm: search_end_nozzle_z_mm,
+    };
     let surface_x_mm = visual.fiducial_x_mm + probe.target_offset_x_mm;
     let surface_y_mm = visual.fiducial_y_mm + probe.target_offset_y_mm;
     let preflight_height_correction = match height_model
@@ -1700,7 +1817,11 @@ async fn start_vacuum_probe(
     };
     let head_x_mm = surface_x_mm - geometry.head_offset_x_mm - preflight_height_correction[0];
     let head_y_mm = surface_y_mm - geometry.head_offset_y_mm - preflight_height_correction[1];
-    for nozzle_z_mm in [probe.search_start_nozzle_z_mm, probe.search_end_nozzle_z_mm] {
+    for nozzle_z_mm in [
+        probe.search_start_nozzle_z_mm,
+        search.start_nozzle_z_mm,
+        search.end_nozzle_z_mm,
+    ] {
         let controller_z_mm = z_kinematics
             .controller_z(&body.nozzle_id, nozzle_z_mm)
             .ok_or_else(|| ApiError::bad_request("vacuum probe Z target is outside bounds"))?;
@@ -1747,8 +1868,15 @@ async fn start_vacuum_probe(
         height_model,
         height_model_has_working_plane_transfer,
         alignment_nozzle_z_mm,
+        search,
+        characterize,
     };
-    spawn_operation(state, "calibration.vacuum_probe", async move {
+    let operation_kind = if characterize {
+        "calibration.vacuum_characterization"
+    } else {
+        "calibration.vacuum_probe"
+    };
+    spawn_operation(state, operation_kind, async move {
         execute_vacuum_probe(task_state, prepared).await
     })
 }
@@ -1900,6 +2028,8 @@ async fn execute_vacuum_probe(
         height_model,
         height_model_has_working_plane_transfer,
         alignment_nozzle_z_mm,
+        search,
+        characterize,
     } = prepared;
     state
         .machine
@@ -1919,6 +2049,7 @@ async fn execute_vacuum_probe(
     let visual = state.profile.visual_homing.as_ref().unwrap();
     let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
     let probe = state.profile.vacuum_calibration.as_ref().unwrap();
+    let characterization_profile = state.profile.vacuum_characterization.as_ref();
     let controller_angle_deg = state
         .machine
         .calibration_rotation_reference(lease_id, nozzle_id.clone())
@@ -2065,16 +2196,14 @@ async fn execute_vacuum_probe(
         }
     };
     let probe_result = execute_vacuum_probe_descent(
-        &state, lease_id, &nozzle_id, &sensor_id, head_x_mm, head_y_mm,
+        &state, lease_id, &nozzle_id, &sensor_id, head_x_mm, head_y_mm, search,
     )
     .await;
-    // Stop vacuum before any retract or lateral return. This bounds pump-on
-    // time and prevents a sealed reference board from being lifted.
-    let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
-    let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
     let (open_nozzle_raw_values, samples, contact) = match probe_result {
         Ok(result) => result,
         Err(error) => {
+            let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+            let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
             return Err(append_vacuum_probe_cleanup_errors(
                 error,
                 restore_result,
@@ -2082,8 +2211,68 @@ async fn execute_vacuum_probe(
             ));
         }
     };
+    let characterization_values = if characterize {
+        let contact = contact.as_ref().ok_or_else(|| {
+            "vacuum characterization did not reproduce contact at the stored safe Z".to_string()
+        });
+        match contact {
+            Ok(_) => {
+                match collect_sensor_values(
+                    &state,
+                    lease_id,
+                    &sensor_id,
+                    characterization_profile
+                        .unwrap()
+                        .characterization_sample_count,
+                )
+                .await
+                {
+                    Ok(sealed) => Some(sealed),
+                    Err(error) => {
+                        let vacuum_off_result =
+                            state.machine.disable_actuator(sensor_id.clone()).await;
+                        let restore_result =
+                            restore_after_vacuum_probe(&state, lease_id, motion).await;
+                        return Err(append_vacuum_probe_cleanup_errors(
+                            error,
+                            restore_result,
+                            vacuum_off_result,
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+                let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+                return Err(append_vacuum_probe_cleanup_errors(
+                    error,
+                    restore_result,
+                    vacuum_off_result,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    // Stop vacuum before any retract or lateral return. This bounds pump-on
+    // time and prevents a sealed reference board from being lifted.
+    let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+    let release_raw_values = if characterize && vacuum_off_result.is_ok() {
+        collect_sensor_values(
+            &state,
+            lease_id,
+            &sensor_id,
+            characterization_profile.unwrap().release_sample_count,
+        )
+        .await
+    } else {
+        Ok(Vec::new())
+    };
+    let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
     restore_result.map_err(|error| format!("vacuum probe restore failed: {error}"))?;
     vacuum_off_result.map_err(|error| format!("vacuum probe cleanup failed: {error}"))?;
+    let release_raw_values =
+        release_raw_values.map_err(|error| format!("vacuum release sampling failed: {error}"))?;
     let open_nozzle_median_raw_value = median_raw(&open_nozzle_raw_values)
         .ok_or_else(|| "vacuum probe has no open-nozzle samples".to_string())?;
     let report = VacuumProbeReport {
@@ -2124,6 +2313,24 @@ async fn execute_vacuum_probe(
         observed_at: Utc::now(),
     };
     persist_vacuum_probe_report(&state, calibration_id, &report)?;
+    if let Some(sealed_raw_values) = characterization_values {
+        let characterization = build_vacuum_characterization_report(
+            &report,
+            sealed_raw_values,
+            release_raw_values,
+            characterization_profile
+                .unwrap()
+                .minimum_distribution_gap_counts,
+        )?;
+        persist_vacuum_characterization_report(&state, calibration_id, &characterization)?;
+        return Ok(Some(format!(
+            "{} {} characterized a {:.1}-count reference seal with a {:.1}-count robust gap",
+            characterization.nozzle_id,
+            characterization.tip_id,
+            characterization.median_signal_delta_counts,
+            characterization.robust_distribution_gap_counts,
+        )));
+    }
     Ok(Some(match contact {
         Some(sample) => format!(
             "{} {} detected a {:.1}-count vacuum change at nozzle Z{:.3}",
@@ -2447,6 +2654,7 @@ async fn execute_vacuum_probe_descent(
     sensor_id: &str,
     head_x_mm: f64,
     head_y_mm: f64,
+    search: VacuumProbeSearch,
 ) -> Result<(Vec<i64>, Vec<VacuumProbeSample>, Option<VacuumProbeSample>), String> {
     let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
     let probe = state.profile.vacuum_calibration.as_ref().unwrap();
@@ -2454,18 +2662,18 @@ async fn execute_vacuum_probe_descent(
         collect_sensor_values(state, lease_id, sensor_id, probe.baseline_sample_count).await?;
     let open_median = median_raw(&open_nozzle_raw_values)
         .ok_or_else(|| "vacuum probe has no open-nozzle samples".to_string())?;
-    let minimum_nozzle_z_mm = probe.search_end_nozzle_z_mm;
-    let mut nozzle_z_mm = probe.search_start_nozzle_z_mm;
+    let narrowed_search = search.start_nozzle_z_mm < probe.search_start_nozzle_z_mm - 1e-9;
     let mut samples = Vec::new();
     let mut consecutive = 0;
-    loop {
-        if nozzle_z_mm <= minimum_nozzle_z_mm + 1e-9 {
-            break;
-        }
-        nozzle_z_mm = (nozzle_z_mm - probe.step_mm).max(minimum_nozzle_z_mm);
+    for nozzle_z_mm in search.descent_targets(probe.search_start_nozzle_z_mm, probe.step_mm) {
         let controller_z_mm = z_kinematics
             .controller_z(nozzle_id, nozzle_z_mm)
             .ok_or_else(|| "vacuum probe descent Z is outside bounds".to_string())?;
+        let feed_mm_per_min = if narrowed_search && samples.is_empty() {
+            probe.z_approach_feed_mm_per_min
+        } else {
+            probe.z_feed_mm_per_min
+        };
         state
             .machine
             .jog(
@@ -2476,7 +2684,7 @@ async fn execute_vacuum_probe_descent(
                     z_mm: controller_z_mm,
                     rotation_deg: None,
                 },
-                probe.z_feed_mm_per_min,
+                feed_mm_per_min,
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -2540,6 +2748,56 @@ fn median_raw(values: &[i64]) -> Option<f64> {
     }
 }
 
+fn build_vacuum_characterization_report(
+    probe: &VacuumProbeReport,
+    sealed_raw_values: Vec<i64>,
+    release_raw_values: Vec<i64>,
+    minimum_distribution_gap_counts: i64,
+) -> Result<VacuumSensorCharacterizationReport, String> {
+    let pump_off = VacuumStateStatistics::from_raw(probe.off_baseline_raw_values.clone())
+        .ok_or_else(|| "vacuum characterization has no pump-off samples".to_string())?;
+    let pump_on_open = VacuumStateStatistics::from_raw(probe.open_nozzle_raw_values.clone())
+        .ok_or_else(|| "vacuum characterization has no open-nozzle samples".to_string())?;
+    let sealed_reference = VacuumStateStatistics::from_raw(sealed_raw_values)
+        .ok_or_else(|| "vacuum characterization has no sealed samples".to_string())?;
+    let pump_off_release = VacuumStateStatistics::from_raw(release_raw_values)
+        .ok_or_else(|| "vacuum characterization has no release samples".to_string())?;
+    let thresholds = calculate_vacuum_classification_thresholds(
+        &pump_on_open,
+        &sealed_reference,
+        probe.minimum_signal_delta_counts,
+        minimum_distribution_gap_counts,
+    )
+    .ok_or_else(|| "vacuum characterization could not calculate thresholds".to_string())?;
+    Ok(VacuumSensorCharacterizationReport {
+        nozzle_id: probe.nozzle_id.clone(),
+        tip_id: probe.tip_id.clone(),
+        sensor_id: probe.sensor_id.clone(),
+        reference_surface: probe.reference_surface.clone(),
+        contact_nozzle_z_mm: probe
+            .contact_nozzle_z_mm
+            .ok_or_else(|| "vacuum characterization has no contact nozzle Z".to_string())?,
+        contact_controller_z_mm: probe
+            .contact_controller_z_mm
+            .ok_or_else(|| "vacuum characterization has no contact controller Z".to_string())?,
+        pump_off,
+        pump_on_open,
+        sealed_reference,
+        pump_off_release,
+        signal_polarity: thresholds.signal_polarity,
+        median_signal_delta_counts: thresholds.median_signal_delta_counts,
+        robust_distribution_gap_counts: thresholds.robust_distribution_gap_counts,
+        acquire_threshold_raw_value: thresholds.acquire_threshold_raw_value,
+        release_threshold_raw_value: thresholds.release_threshold_raw_value,
+        minimum_signal_delta_counts: probe.minimum_signal_delta_counts,
+        minimum_distribution_gap_counts,
+        reference_seal_validated: thresholds.passed,
+        known_part_validated: false,
+        passed: thresholds.passed,
+        observed_at: Utc::now(),
+    })
+}
+
 fn persist_vacuum_probe_report(
     state: &AppState,
     calibration_id: Uuid,
@@ -2563,6 +2821,64 @@ fn persist_vacuum_probe_report(
         serde_json::to_value(report).map_err(|error| error.to_string())?,
     );
     crate::calibration_artifacts::record_vacuum_contact_artifact(state, &mut snapshot, report)?;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(|error| error.to_string())
+}
+
+fn persist_vacuum_characterization_report(
+    state: &AppState,
+    calibration_id: Uuid,
+    report: &VacuumSensorCharacterizationReport,
+) -> Result<(), String> {
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    let values = snapshot.values.as_object_mut().unwrap();
+    let reports = values
+        .entry(CalibrationStepId::VacuumSensorCharacterization.as_str())
+        .or_insert_with(|| json!({}));
+    if !reports.is_object() {
+        *reports = json!({});
+    }
+    reports.as_object_mut().unwrap().insert(
+        report.nozzle_id.clone(),
+        serde_json::to_value(report).map_err(|error| error.to_string())?,
+    );
+    let artifact_id = CalibrationArtifactId::vacuum_characterization(&report.nozzle_id)
+        .ok_or_else(|| "vacuum characterization names an unknown nozzle".to_string())?;
+    if report.passed {
+        crate::calibration_artifacts::record_vacuum_characterization_artifact(
+            state,
+            &mut snapshot,
+            report,
+        )?;
+    } else {
+        snapshot.invalidate_artifacts_from(&[artifact_id]);
+    }
+    let characterization_complete = [
+        CalibrationArtifactId::VacuumCharacterizationN1,
+        CalibrationArtifactId::VacuumCharacterizationN2,
+    ]
+    .into_iter()
+    .all(|id| crate::calibration_artifacts::artifact_tree_is_current(state, &snapshot, id));
+    if characterization_complete {
+        snapshot
+            .completed_steps
+            .insert(CalibrationStepId::VacuumSensorCharacterization);
+    } else {
+        snapshot
+            .completed_steps
+            .remove(&CalibrationStepId::VacuumSensorCharacterization);
+    }
+    snapshot.production_ready =
+        calibration_is_production_ready(&snapshot, state.machine.status().simulated);
     state
         .store
         .put_calibration(&snapshot)
@@ -3426,6 +3742,7 @@ fn inherit_head_geometry_prerequisites(
     }
     let values = target.values.as_object_mut().unwrap();
     values.remove("vacuum_probe");
+    values.remove(CalibrationStepId::VacuumSensorCharacterization.as_str());
     for step in HEAD_GEOMETRY_PREREQUISITES {
         target.completed_steps.remove(&step);
         target.residuals.remove(&step);
@@ -7631,6 +7948,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vacuum_characterization_requires_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/vacuum-characterization",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sealing target"));
+    }
+
+    #[tokio::test]
     async fn height_observation_solves_the_camera_transfer_term_without_motion() {
         let state = test_state();
         let calibration_id = Uuid::new_v4();
@@ -7841,6 +8190,19 @@ mod tests {
         assert_eq!(restore[0].0, motion.level_probe_target());
         assert_eq!(restore[0].1, 300.0);
         assert_eq!(restore[1].0, motion.level_return_target());
+    }
+
+    #[test]
+    fn narrowed_vacuum_search_keeps_clear_open_sampling_and_contact_bound() {
+        let search = VacuumProbeSearch {
+            start_nozzle_z_mm: 3.5,
+            end_nozzle_z_mm: 3.2,
+        };
+        let targets = search.descent_targets(5.0, 0.1);
+        assert_eq!(targets.len(), 4);
+        assert!((targets[0] - 3.5).abs() < 1e-9);
+        assert!((targets[3] - 3.2).abs() < 1e-9);
+        assert!(targets.iter().all(|value| *value >= 3.2));
     }
 
     #[test]

@@ -135,6 +135,8 @@ pub struct MachineProfile {
     pub z_kinematics: Option<ZKinematicsProfile>,
     #[serde(default)]
     pub vacuum_calibration: Option<VacuumCalibrationProfile>,
+    #[serde(default)]
+    pub vacuum_characterization: Option<VacuumCharacterizationProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -357,6 +359,14 @@ pub struct VacuumCalibrationProfile {
     pub required_consecutive_steps: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VacuumCharacterizationProfile {
+    pub characterization_clearance_mm: f64,
+    pub characterization_sample_count: u32,
+    pub release_sample_count: u32,
+    pub minimum_distribution_gap_counts: i64,
+}
+
 impl ZKinematicsProfile {
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self.level_controller_z_mm.is_finite()
@@ -436,6 +446,20 @@ impl VacuumCalibrationProfile {
             || !(1..=3).contains(&self.required_consecutive_steps)
         {
             return Err("vacuum calibration profile is invalid");
+        }
+        Ok(())
+    }
+}
+
+impl VacuumCharacterizationProfile {
+    pub fn validate(&self, minimum_signal_delta_counts: i64) -> Result<(), &'static str> {
+        if !(0.1..=1.0).contains(&self.characterization_clearance_mm)
+            || !(10..=100).contains(&self.characterization_sample_count)
+            || !(3..=30).contains(&self.release_sample_count)
+            || self.minimum_distribution_gap_counts <= 0
+            || self.minimum_distribution_gap_counts >= minimum_signal_delta_counts
+        {
+            return Err("vacuum characterization profile is invalid");
         }
         Ok(())
     }
@@ -713,8 +737,12 @@ mod tests {
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
         let z = profile.z_kinematics.as_ref().unwrap();
         let vacuum = profile.vacuum_calibration.as_ref().unwrap();
+        let characterization = profile.vacuum_characterization.as_ref().unwrap();
         assert!(z.validate().is_ok());
         assert!(vacuum.validate().is_ok());
+        assert!(characterization
+            .validate(vacuum.minimum_signal_delta_counts)
+            .is_ok());
         assert_eq!(z.controller_z("N1", 30.0), Some(30.0));
         assert_eq!(z.controller_z("N2", 30.0), Some(33.0));
         assert_eq!(z.controller_z("N1", 33.0), Some(33.0));
@@ -740,6 +768,8 @@ mod tests {
         assert_eq!(vacuum.target_diameter_mm, 5.0);
         assert_eq!(vacuum.search_start_nozzle_z_mm, 5.0);
         assert_eq!(vacuum.search_end_nozzle_z_mm, 3.0);
+        assert_eq!(characterization.characterization_clearance_mm, 0.3);
+        assert_eq!(characterization.characterization_sample_count, 20);
         assert!(
             vacuum.target_offset_x_mm.hypot(vacuum.target_offset_y_mm)
                 >= vacuum.fiducial_protected_radius_mm

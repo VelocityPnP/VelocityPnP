@@ -388,6 +388,36 @@ class Client:
         self.wait(operation)
         return self.calibration(calibration_id)["values"]["vacuum_probe"][nozzle_id]
 
+    def characterize_vacuum(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        nozzle_id: str,
+        *,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if nozzle_id not in {"N1", "N2"}:
+            raise ValueError("nozzle_id must be N1 or N2")
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "vacuum characterization requires explicit confirmation that the "
+                "datum board and sealing target are clean and fixed, both nozzles "
+                "are level, the envelope is clear, and power isolation is reachable"
+            )
+        operation = self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/vacuum-characterization",
+            {
+                "lease_id": str(lease_id),
+                "nozzle_id": nozzle_id,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        self.wait(operation)
+        return self.calibration(calibration_id)["values"][
+            "vacuum_sensor_characterization"
+        ][nozzle_id]
+
     def observe_nozzle_height(
         self,
         calibration_id: str | uuid.UUID,

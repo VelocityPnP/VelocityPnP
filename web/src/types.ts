@@ -157,7 +157,9 @@ export type CalibrationArtifactId =
   | "runtime_tip_transform_n1"
   | "runtime_tip_transform_n2"
   | "vacuum_contact_n1"
-  | "vacuum_contact_n2";
+  | "vacuum_contact_n2"
+  | "vacuum_characterization_n1"
+  | "vacuum_characterization_n2";
 
 export interface CalibrationArtifact {
   kind: "captured" | "qualification" | "derived";
@@ -192,6 +194,9 @@ export interface CalibrationSnapshot {
   residuals: Record<string, Residuals>;
   values: Record<string, unknown> & {
     vacuum_probe?: Partial<Record<"N1" | "N2", VacuumProbeReport>>;
+    vacuum_sensor_characterization?: Partial<
+      Record<"N1" | "N2", VacuumSensorCharacterizationReport>
+    >;
     nozzle_height_model?: {
       camera_ray_transfer?: CameraRayTransferReport | null;
       models: NozzleHeightModel[];
@@ -239,6 +244,37 @@ export interface VacuumProbeReport {
     median_raw_value: number;
     signal_delta_counts: number;
   }>;
+  passed: boolean;
+  observed_at: string;
+}
+
+export interface VacuumStateStatistics {
+  sample_count: number;
+  minimum_raw_value: number;
+  maximum_raw_value: number;
+  mean_raw_value: number;
+  median_raw_value: number;
+  standard_deviation_counts: number;
+  p05_raw_value: number;
+  p95_raw_value: number;
+}
+
+export interface VacuumSensorCharacterizationReport {
+  nozzle_id: "N1" | "N2";
+  tip_id: string;
+  sensor_id: string;
+  contact_nozzle_z_mm: number;
+  pump_off: VacuumStateStatistics;
+  pump_on_open: VacuumStateStatistics;
+  sealed_reference: VacuumStateStatistics;
+  pump_off_release: VacuumStateStatistics;
+  signal_polarity: "lower_is_more_vacuum" | "higher_is_more_vacuum";
+  median_signal_delta_counts: number;
+  robust_distribution_gap_counts: number;
+  acquire_threshold_raw_value: number;
+  release_threshold_raw_value: number;
+  reference_seal_validated: boolean;
+  known_part_validated: boolean;
   passed: boolean;
   observed_at: string;
 }

@@ -63,8 +63,9 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Pass the earlier attached-hardware head geometry and runout validation
 - [x] Pass the revised N24 outer-tip and camera-ray calibration on attached hardware
 - [x] Add camera-centered, vacuum-transition datum-board probing with a bounded Z interval
-- [ ] Pass the revised vacuum probe on both nozzles without visible tip compression
-- [ ] Fit vacuum classification per nozzle/tip
+- [x] Pass the revised vacuum probe on both nozzles without visible tip compression
+- [x] Add automatic reference-seal vacuum characterization per nozzle/tip
+- [ ] Validate known-part vacuum classification per nozzle/tip and part class
 - [ ] Pass full-bed and nozzle p95 residual of 0.05 mm or better
 
 ## Gate 4 — Feeder and job production validation

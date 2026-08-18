@@ -17,6 +17,7 @@ pub enum CalibrationStepId {
     BottomCameraGeometry,
     NozzleRunout,
     NozzleHeightModel,
+    VacuumSensorCharacterization,
     ZPlanes,
     VacuumThresholds,
     Validation,
@@ -35,6 +36,7 @@ impl CalibrationStepId {
             Self::BottomCameraGeometry => "bottom_camera_geometry",
             Self::NozzleRunout => "nozzle_runout",
             Self::NozzleHeightModel => "nozzle_height_model",
+            Self::VacuumSensorCharacterization => "vacuum_sensor_characterization",
             Self::ZPlanes => "z_planes",
             Self::VacuumThresholds => "vacuum_thresholds",
             Self::Validation => "validation",
@@ -71,11 +73,12 @@ pub fn lumen_calibration_workflow() -> Vec<CalibrationStepDefinition> {
         step(NozzleOffsets, "Head and nozzle offsets", "Use the bottom camera as a common comparator for the top camera and both nozzle rotation axes.", &[BottomCameraGeometry], true, false, Automated),
         step(NozzleRunout, "Nozzle runout", "Rotate each identified tip through the bounded profile angles and fit its correction curve.", &[NozzleOffsets], true, false, Automated),
         step(NozzleHeightModel, "Nozzle height model", "Track each nozzle over several safe Z heights and fit its lateral axis slope. Store a separate working-plane transfer correction when an observed target residual is available.", &[NozzleRunout], true, false, Automated),
+        step(VacuumSensorCharacterization, "Vacuum sensor characterization", "Measure pump-off, open-nozzle, sealed-reference, and release distributions per nozzle and installed tip.", &[NozzleHeightModel], true, false, Automated),
         step(TopCameraIntrinsics, "Top camera intrinsics", "Measure lens distortion and camera matrix from a known target after visual homing.", &[VisualHoming], true, true, Planned),
         step(MotionGeometry, "Motion geometry", "Measure scale, skew, backlash, and direction-dependent residuals over the work envelope.", &[VisualHoming, TopCameraIntrinsics], true, true, Planned),
         step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to corrected machine coordinates at calibrated Z planes.", &[MotionGeometry], true, true, Planned),
         step(ZPlanes, "Z planes", "Capture safe, board, feeder, discard, and camera-clearance planes.", &[NozzleHeightModel], true, false, Planned),
-        step(VacuumThresholds, "Vacuum thresholds", "Learn empty and known-part pressure distributions per nozzle and tip.", &[ZPlanes], true, false, Planned),
+        step(VacuumThresholds, "Known-part vacuum thresholds", "Learn known-part pressure distributions per nozzle, tip, and applicable part class.", &[ZPlanes, VacuumSensorCharacterization], true, false, Planned),
         step(Validation, "Known-board validation", "Measure homing, geometry, pick, alignment, and placement acceptance metrics.", &[NozzleHeightModel, VacuumThresholds], true, true, Planned),
     ]
 }
@@ -138,6 +141,8 @@ pub enum CalibrationArtifactId {
     RuntimeTipTransformN2,
     VacuumContactN1,
     VacuumContactN2,
+    VacuumCharacterizationN1,
+    VacuumCharacterizationN2,
 }
 
 impl CalibrationArtifactId {
@@ -169,6 +174,14 @@ impl CalibrationArtifactId {
         match nozzle_id.as_bytes() {
             b"N1" => Some(Self::VacuumContactN1),
             b"N2" => Some(Self::VacuumContactN2),
+            _ => None,
+        }
+    }
+
+    pub const fn vacuum_characterization(nozzle_id: &str) -> Option<Self> {
+        match nozzle_id.as_bytes() {
+            b"N1" => Some(Self::VacuumCharacterizationN1),
+            b"N2" => Some(Self::VacuumCharacterizationN2),
             _ => None,
         }
     }
@@ -385,6 +398,22 @@ pub fn lumen_calibration_artifacts() -> Vec<CalibrationArtifactDefinition> {
             Captured,
             true,
             120,
+        ),
+        artifact(
+            VacuumCharacterizationN1,
+            "N1 vacuum sensor characterization",
+            &[VacuumContactN1],
+            Captured,
+            true,
+            90,
+        ),
+        artifact(
+            VacuumCharacterizationN2,
+            "N2 vacuum sensor characterization",
+            &[VacuumContactN2],
+            Captured,
+            true,
+            90,
         ),
     ]
 }
@@ -833,6 +862,140 @@ pub struct VacuumProbeReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VacuumStateStatistics {
+    pub raw_values: Vec<i64>,
+    pub sample_count: u32,
+    pub minimum_raw_value: i64,
+    pub maximum_raw_value: i64,
+    pub mean_raw_value: f64,
+    pub median_raw_value: f64,
+    pub standard_deviation_counts: f64,
+    pub p05_raw_value: f64,
+    pub p95_raw_value: f64,
+}
+
+impl VacuumStateStatistics {
+    pub fn from_raw(raw_values: Vec<i64>) -> Option<Self> {
+        if raw_values.is_empty() {
+            return None;
+        }
+        let mut sorted = raw_values.clone();
+        sorted.sort_unstable();
+        let sample_count = sorted.len() as u32;
+        let mean_raw_value =
+            sorted.iter().map(|value| *value as f64).sum::<f64>() / sorted.len() as f64;
+        let standard_deviation_counts = (sorted
+            .iter()
+            .map(|value| (*value as f64 - mean_raw_value).powi(2))
+            .sum::<f64>()
+            / sorted.len() as f64)
+            .sqrt();
+        Some(Self {
+            sample_count,
+            minimum_raw_value: *sorted.first()?,
+            maximum_raw_value: *sorted.last()?,
+            mean_raw_value,
+            median_raw_value: percentile(&sorted, 0.5)?,
+            standard_deviation_counts,
+            p05_raw_value: percentile(&sorted, 0.05)?,
+            p95_raw_value: percentile(&sorted, 0.95)?,
+            raw_values,
+        })
+    }
+}
+
+fn percentile(sorted: &[i64], fraction: f64) -> Option<f64> {
+    if sorted.is_empty() || !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+        return None;
+    }
+    let position = fraction * (sorted.len() - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    let weight = position - lower as f64;
+    Some(sorted[lower] as f64 * (1.0 - weight) + sorted[upper] as f64 * weight)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VacuumSignalPolarity {
+    LowerIsMoreVacuum,
+    HigherIsMoreVacuum,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VacuumSensorCharacterizationReport {
+    pub nozzle_id: String,
+    pub tip_id: String,
+    pub sensor_id: String,
+    pub reference_surface: String,
+    pub contact_nozzle_z_mm: f64,
+    pub contact_controller_z_mm: f64,
+    pub pump_off: VacuumStateStatistics,
+    pub pump_on_open: VacuumStateStatistics,
+    pub sealed_reference: VacuumStateStatistics,
+    pub pump_off_release: VacuumStateStatistics,
+    pub signal_polarity: VacuumSignalPolarity,
+    pub median_signal_delta_counts: f64,
+    pub robust_distribution_gap_counts: f64,
+    pub acquire_threshold_raw_value: f64,
+    pub release_threshold_raw_value: f64,
+    pub minimum_signal_delta_counts: i64,
+    pub minimum_distribution_gap_counts: i64,
+    pub reference_seal_validated: bool,
+    pub known_part_validated: bool,
+    pub passed: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VacuumClassificationThresholds {
+    pub signal_polarity: VacuumSignalPolarity,
+    pub median_signal_delta_counts: f64,
+    pub robust_distribution_gap_counts: f64,
+    pub acquire_threshold_raw_value: f64,
+    pub release_threshold_raw_value: f64,
+    pub passed: bool,
+}
+
+pub fn calculate_vacuum_classification_thresholds(
+    open: &VacuumStateStatistics,
+    sealed: &VacuumStateStatistics,
+    minimum_signal_delta_counts: i64,
+    minimum_distribution_gap_counts: i64,
+) -> Option<VacuumClassificationThresholds> {
+    if minimum_signal_delta_counts <= 0 || minimum_distribution_gap_counts <= 0 {
+        return None;
+    }
+    let signed_delta = sealed.median_raw_value - open.median_raw_value;
+    if !signed_delta.is_finite() || signed_delta.abs() <= f64::EPSILON {
+        return None;
+    }
+    let (signal_polarity, robust_gap) = if signed_delta < 0.0 {
+        (
+            VacuumSignalPolarity::LowerIsMoreVacuum,
+            open.p05_raw_value - sealed.p95_raw_value,
+        )
+    } else {
+        (
+            VacuumSignalPolarity::HigherIsMoreVacuum,
+            sealed.p05_raw_value - open.p95_raw_value,
+        )
+    };
+    let midpoint = (open.median_raw_value + sealed.median_raw_value) / 2.0;
+    let direction = signed_delta.signum();
+    let hysteresis = robust_gap.max(0.0) / 6.0;
+    Some(VacuumClassificationThresholds {
+        signal_polarity,
+        median_signal_delta_counts: signed_delta.abs(),
+        robust_distribution_gap_counts: robust_gap,
+        acquire_threshold_raw_value: midpoint + direction * hysteresis,
+        release_threshold_raw_value: midpoint - direction * hysteresis,
+        passed: signed_delta.abs() >= minimum_signal_delta_counts as f64
+            && robust_gap >= minimum_distribution_gap_counts as f64,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomatedCalibrationRun {
     pub id: Uuid,
     pub calibration_id: Uuid,
@@ -991,9 +1154,9 @@ impl CalibrationSnapshot {
                 CalibrationArtifactId::NozzleHeightN1,
                 CalibrationArtifactId::NozzleHeightN2,
             ],
-            CalibrationStepId::VacuumThresholds => vec![
-                CalibrationArtifactId::VacuumContactN1,
-                CalibrationArtifactId::VacuumContactN2,
+            CalibrationStepId::VacuumSensorCharacterization => vec![
+                CalibrationArtifactId::VacuumCharacterizationN1,
+                CalibrationArtifactId::VacuumCharacterizationN2,
             ],
             _ => Vec::new(),
         };
@@ -1120,7 +1283,17 @@ mod tests {
                     CalibrationArtifactId::RuntimeTipTransformN1,
                     artifact.clone(),
                 ),
-                (CalibrationArtifactId::RuntimeTipTransformN2, artifact),
+                (
+                    CalibrationArtifactId::RuntimeTipTransformN2,
+                    artifact.clone(),
+                ),
+                (CalibrationArtifactId::VacuumContactN1, artifact.clone()),
+                (CalibrationArtifactId::VacuumContactN2, artifact.clone()),
+                (
+                    CalibrationArtifactId::VacuumCharacterizationN1,
+                    artifact.clone(),
+                ),
+                (CalibrationArtifactId::VacuumCharacterizationN2, artifact),
             ]),
             parent_id: None,
             production_ready: false,
@@ -1135,6 +1308,9 @@ mod tests {
         assert!(!snapshot
             .artifacts
             .contains_key(&CalibrationArtifactId::RuntimeTipTransformN1));
+        assert!(!snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::VacuumCharacterizationN1));
         assert!(snapshot
             .artifacts
             .contains_key(&CalibrationArtifactId::NozzleHeightN2));
@@ -1144,6 +1320,9 @@ mod tests {
         assert!(snapshot
             .artifacts
             .contains_key(&CalibrationArtifactId::RuntimeTipTransformN2));
+        assert!(snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::VacuumCharacterizationN2));
     }
 
     #[test]
@@ -1283,5 +1462,29 @@ mod tests {
 
         config.visual_homing_sample_count = 2;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn vacuum_thresholds_use_robust_separation_and_hysteresis() {
+        let open = VacuumStateStatistics::from_raw(vec![234, 235, 235, 236, 236]).unwrap();
+        let sealed = VacuumStateStatistics::from_raw(vec![224, 225, 225, 226, 226]).unwrap();
+        let thresholds = calculate_vacuum_classification_thresholds(&open, &sealed, 8, 3).unwrap();
+        assert_eq!(
+            thresholds.signal_polarity,
+            VacuumSignalPolarity::LowerIsMoreVacuum
+        );
+        assert!(thresholds.passed);
+        assert!(thresholds.acquire_threshold_raw_value < thresholds.release_threshold_raw_value);
+        assert!(thresholds.acquire_threshold_raw_value > sealed.p95_raw_value);
+        assert!(thresholds.release_threshold_raw_value < open.p05_raw_value);
+    }
+
+    #[test]
+    fn vacuum_thresholds_reject_overlapping_distributions() {
+        let open = VacuumStateStatistics::from_raw(vec![230, 232, 234, 236, 238]).unwrap();
+        let sealed = VacuumStateStatistics::from_raw(vec![226, 228, 230, 232, 234]).unwrap();
+        let thresholds = calculate_vacuum_classification_thresholds(&open, &sealed, 4, 3).unwrap();
+        assert!(thresholds.robust_distribution_gap_counts < 0.0);
+        assert!(!thresholds.passed);
     }
 }

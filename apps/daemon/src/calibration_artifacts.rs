@@ -10,7 +10,7 @@ use velocitypnp_domain::{
     CalibrationArtifactDefinition, CalibrationArtifactId, CalibrationArtifactKind,
     CalibrationArtifactPlan, CalibrationPlanAction, CalibrationPlanItem, CalibrationSnapshot,
     CalibrationStepId, CameraProfile, CameraRole, HeadFeatureCenterReport, NozzleHeightModel,
-    NozzleRunoutReport, VacuumProbeReport,
+    NozzleRunoutReport, VacuumProbeReport, VacuumSensorCharacterizationReport,
 };
 use velocitypnp_vision::calibrate_camera_ray_transfer;
 
@@ -75,10 +75,8 @@ pub fn plan_artifacts(
     let definitions = definitions_by_id();
     let targets = if targets.is_empty() {
         vec![
-            CalibrationArtifactId::RuntimeTipTransformN1,
-            CalibrationArtifactId::RuntimeTipTransformN2,
-            CalibrationArtifactId::VacuumContactN1,
-            CalibrationArtifactId::VacuumContactN2,
+            CalibrationArtifactId::VacuumCharacterizationN1,
+            CalibrationArtifactId::VacuumCharacterizationN2,
         ]
     } else {
         targets.to_vec()
@@ -123,6 +121,53 @@ pub fn record_vacuum_contact_artifact(
             report.nozzle_id
         ));
     }
+    snapshot.invalidate_artifacts_from(&[id]);
+    snapshot
+        .completed_steps
+        .remove(&CalibrationStepId::VacuumSensorCharacterization);
+    if let Some(values) = snapshot.values.as_object_mut() {
+        let key = CalibrationStepId::VacuumSensorCharacterization.as_str();
+        let remove_empty = values
+            .get_mut(key)
+            .and_then(Value::as_object_mut)
+            .is_some_and(|reports| {
+                reports.remove(&report.nozzle_id);
+                reports.is_empty()
+            });
+        if remove_empty {
+            values.remove(key);
+        }
+    }
+    insert_artifact(
+        state,
+        snapshot,
+        &definition,
+        None,
+        serde_json::to_value(report).map_err(|error| error.to_string())?,
+    )?;
+    Ok(())
+}
+
+pub fn record_vacuum_characterization_artifact(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    report: &VacuumSensorCharacterizationReport,
+) -> Result<(), String> {
+    reconcile_snapshot_artifacts(state, snapshot)?;
+    let id = CalibrationArtifactId::vacuum_characterization(&report.nozzle_id)
+        .ok_or_else(|| "vacuum characterization names an unknown nozzle".to_string())?;
+    let definition = definition(id)?;
+    if !definition
+        .dependencies
+        .iter()
+        .all(|dependency| artifact_tree_is_current(state, snapshot, *dependency))
+    {
+        return Err(format!(
+            "{} vacuum characterization depends on stale calibration artifacts",
+            report.nozzle_id
+        ));
+    }
+    snapshot.invalidate_artifacts_from(&[id]);
     insert_artifact(
         state,
         snapshot,
@@ -818,8 +863,12 @@ fn expected_inputs(
             );
         }
         HeadNozzleOffsets | RuntimeTipTransformN1 | RuntimeTipTransformN2 => {}
-        VacuumContactN1 | VacuumContactN2 => {
-            let nozzle_id = if id == VacuumContactN1 { "N1" } else { "N2" };
+        VacuumContactN1 | VacuumContactN2 | VacuumCharacterizationN1 | VacuumCharacterizationN2 => {
+            let nozzle_id = if matches!(id, VacuumContactN1 | VacuumCharacterizationN1) {
+                "N1"
+            } else {
+                "N2"
+            };
             add(
                 &mut inputs,
                 "vacuum_profile",
@@ -842,6 +891,19 @@ fn expected_inputs(
                 .find(|sensor| sensor.id == sensor_id)
                 .ok_or_else(|| format!("active profile has no {sensor_id} sensor"))?;
             add(&mut inputs, "sensor", &sensor);
+            if matches!(id, VacuumCharacterizationN1 | VacuumCharacterizationN2) {
+                add(
+                    &mut inputs,
+                    "characterization_profile",
+                    &state
+                        .profile
+                        .vacuum_characterization
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "active profile has no vacuum characterization".to_string()
+                        })?,
+                );
+            }
         }
     }
     if matches!(id, NozzleHeightN1 | NozzleHeightN2) {
@@ -961,6 +1023,7 @@ fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
         NozzleHeightN1 | NozzleHeightN2 => "nozzle_height_axis.v2",
         RuntimeTipTransformN1 | RuntimeTipTransformN2 => "runtime_tip_transform.v1",
         VacuumContactN1 | VacuumContactN2 => "vacuum_contact_probe.v3",
+        VacuumCharacterizationN1 | VacuumCharacterizationN2 => "vacuum_sensor_characterization.v1",
     }
 }
 
@@ -1020,6 +1083,16 @@ mod tests {
         assert!(!n2
             .dependencies
             .contains(&CalibrationArtifactId::NozzleAxisRunoutN1));
+        let vacuum_n1 = &definitions[&CalibrationArtifactId::VacuumCharacterizationN1];
+        let vacuum_n2 = &definitions[&CalibrationArtifactId::VacuumCharacterizationN2];
+        assert_eq!(
+            vacuum_n1.dependencies,
+            [CalibrationArtifactId::VacuumContactN1]
+        );
+        assert_eq!(
+            vacuum_n2.dependencies,
+            [CalibrationArtifactId::VacuumContactN2]
+        );
     }
 
     #[test]

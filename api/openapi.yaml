@@ -523,6 +523,31 @@ paths:
                 confirmed_external_safety_checks: { type: boolean }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /calibrations/{id}/vacuum-characterization:
+    post:
+      operationId: startVacuumCharacterization
+      description: >-
+        Re-registers the cameras and installed tip, visually centers the fixed
+        sealing target, and reproduces the prior vacuum contact without moving
+        below its stored contact Z. Measures pump-off, pump-on open-nozzle,
+        sealed-reference, and pump-off release distributions. Calculates
+        per-nozzle and per-tip reference-seal thresholds with hysteresis. This
+        does not validate thresholds for holding a production part.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, nozzle_id, confirmed_external_safety_checks]
+              properties:
+                lease_id: { type: string, format: uuid }
+                nozzle_id: { type: string, enum: [N1, N2] }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
   /calibrations/{id}/nozzle-height-observation:
     post:
       operationId: recordNozzleHeightObservation
