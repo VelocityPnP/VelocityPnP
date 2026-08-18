@@ -23,6 +23,7 @@ pub fn reconcile_snapshot_artifacts(
     let before = snapshot.artifacts.clone();
     migrate_legacy_captures(state, snapshot)?;
     recompute_stale_derived(state, snapshot, None)?;
+    migrate_legacy_vacuum_contacts(state, snapshot)?;
     Ok(snapshot.artifacts != before)
 }
 
@@ -61,7 +62,9 @@ pub fn recompute_artifacts(
             }
         }
     }
-    recompute_stale_derived(state, snapshot, requested)
+    let recomputed = recompute_stale_derived(state, snapshot, requested)?;
+    migrate_legacy_vacuum_contacts(state, snapshot)?;
+    Ok(recomputed)
 }
 
 pub fn plan_artifacts(
@@ -326,6 +329,41 @@ fn migrate_legacy_captures(
     Ok(())
 }
 
+fn migrate_legacy_vacuum_contacts(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+) -> Result<(), String> {
+    for nozzle_id in ["N1", "N2"] {
+        let Some(value) = snapshot
+            .values
+            .get("vacuum_probe")
+            .and_then(|probes| probes.get(nozzle_id))
+            .cloned()
+        else {
+            continue;
+        };
+        let id = CalibrationArtifactId::vacuum_contact(nozzle_id).unwrap();
+        let replace_older_artifact = snapshot.artifacts.get(&id).is_some_and(|artifact| {
+            artifact.algorithm_version != algorithm_version(id) && artifact.value == value
+        });
+        if replace_older_artifact {
+            snapshot.artifacts.remove(&id);
+        }
+        if snapshot.artifacts.contains_key(&id) {
+            continue;
+        }
+        let definition = definition(id)?;
+        if definition
+            .dependencies
+            .iter()
+            .all(|dependency| artifact_tree_is_current(state, snapshot, *dependency))
+        {
+            insert_artifact(state, snapshot, &definition, None, value)?;
+        }
+    }
+    Ok(())
+}
+
 fn migrate_value(
     state: &AppState,
     snapshot: &mut CalibrationSnapshot,
@@ -516,16 +554,19 @@ fn visit_plan(
             .get(dependency)
             .is_some_and(|item| item.action == CalibrationPlanAction::Reuse)
     });
-    let current = dependencies_reusable && artifact_is_current(state, snapshot, definition);
+    let stale_reason = artifact_stale_reason(state, snapshot, definition);
+    let current = dependencies_reusable && stale_reason.is_none();
     let (action, reason) = if current {
         (
             CalibrationPlanAction::Reuse,
-            "artifact and provenance are current",
+            "artifact and provenance are current".to_string(),
         )
     } else if definition.kind == CalibrationArtifactKind::Derived {
         (
             CalibrationPlanAction::Recompute,
-            "source data is available; recalculate without machine motion",
+            stale_reason.unwrap_or_else(|| {
+                "a source will change; recalculate without machine motion".into()
+            }),
         )
     } else if definition.dependencies.iter().any(|dependency| {
         actions
@@ -534,12 +575,12 @@ fn visit_plan(
     }) {
         (
             CalibrationPlanAction::Blocked,
-            "a required source artifact is unavailable",
+            "a required source artifact is unavailable".to_string(),
         )
     } else {
         (
             CalibrationPlanAction::Recapture,
-            "measurement is missing, stale, or depends on a changed input",
+            stale_reason.unwrap_or_else(|| "a dependency requires a new measurement".to_string()),
         )
     };
     actions.insert(
@@ -547,7 +588,7 @@ fn visit_plan(
         CalibrationPlanItem {
             artifact: id,
             action,
-            reason: reason.into(),
+            reason,
             requires_motion: definition.requires_motion,
             estimated_duration_seconds: if action == CalibrationPlanAction::Reuse {
                 0
@@ -586,7 +627,7 @@ fn insert_artifact(
         &dependency_fingerprints,
         &value,
     )?;
-    snapshot.artifacts.insert(
+    let artifact = normalize_artifact(
         definition.id,
         CalibrationArtifact {
             kind: definition.kind,
@@ -598,8 +639,26 @@ fn insert_artifact(
             fingerprint,
             value,
         },
-    );
+    )?;
+    snapshot.artifacts.insert(definition.id, artifact);
     Ok(())
+}
+
+fn normalize_artifact(
+    id: CalibrationArtifactId,
+    artifact: CalibrationArtifact,
+) -> Result<CalibrationArtifact, String> {
+    let bytes = serde_json::to_vec(&artifact).map_err(|error| error.to_string())?;
+    let mut normalized: CalibrationArtifact =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    normalized.fingerprint = artifact_fingerprint(
+        id,
+        &normalized.algorithm_version,
+        &normalized.input_fingerprints,
+        &normalized.dependency_fingerprints,
+        &normalized.value,
+    )?;
+    Ok(normalized)
 }
 
 fn artifact_is_current(
@@ -607,12 +666,43 @@ fn artifact_is_current(
     snapshot: &CalibrationSnapshot,
     definition: &CalibrationArtifactDefinition,
 ) -> bool {
+    artifact_stale_reason(state, snapshot, definition).is_none()
+}
+
+fn artifact_stale_reason(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    definition: &CalibrationArtifactDefinition,
+) -> Option<String> {
     let Some(artifact) = snapshot.artifacts.get(&definition.id) else {
-        return false;
+        return Some("artifact is not stored".into());
     };
+    if artifact.kind != definition.kind {
+        return Some("artifact kind changed".into());
+    }
+    let algorithm = algorithm_version(definition.id);
+    if artifact.algorithm_version != algorithm {
+        return Some(format!(
+            "algorithm changed from {} to {algorithm}",
+            artifact.algorithm_version
+        ));
+    }
     let Ok(inputs) = expected_inputs(state, definition.id) else {
-        return false;
+        return Some("current input fingerprints could not be calculated".into());
     };
+    if artifact.input_fingerprints != inputs {
+        let changed = artifact
+            .input_fingerprints
+            .keys()
+            .chain(inputs.keys())
+            .filter(|key| artifact.input_fingerprints.get(*key) != inputs.get(*key))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        return Some(format!(
+            "input fingerprint changed: {}",
+            changed.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
     let dependencies = definition
         .dependencies
         .iter()
@@ -623,7 +713,12 @@ fn artifact_is_current(
                 .map(|artifact| (*dependency, artifact.fingerprint.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let algorithm = algorithm_version(definition.id);
+    if dependencies.len() != definition.dependencies.len() {
+        return Some("a dependency artifact is missing".into());
+    }
+    if artifact.dependency_fingerprints != dependencies {
+        return Some("a dependency fingerprint changed".into());
+    }
     let Ok(fingerprint) = artifact_fingerprint(
         definition.id,
         algorithm,
@@ -631,14 +726,15 @@ fn artifact_is_current(
         &dependencies,
         &artifact.value,
     ) else {
-        return false;
+        return Some("artifact fingerprint could not be calculated".into());
     };
-    artifact.kind == definition.kind
-        && artifact.algorithm_version == algorithm
-        && artifact.input_fingerprints == inputs
-        && artifact.dependency_fingerprints == dependencies
-        && artifact.fingerprint == fingerprint
-        && dependencies.len() == definition.dependencies.len()
+    (artifact.fingerprint != fingerprint).then(|| {
+        format!(
+            "stored value fingerprint changed (stored {}, calculated {})",
+            &artifact.fingerprint[..artifact.fingerprint.len().min(12)],
+            &fingerprint[..fingerprint.len().min(12)]
+        )
+    })
 }
 
 fn expected_inputs(
@@ -864,7 +960,7 @@ fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
         HeadNozzleOffsets => "head_nozzle_offsets.v2",
         NozzleHeightN1 | NozzleHeightN2 => "nozzle_height_axis.v2",
         RuntimeTipTransformN1 | RuntimeTipTransformN2 => "runtime_tip_transform.v1",
-        VacuumContactN1 | VacuumContactN2 => "vacuum_contact_probe.v2",
+        VacuumContactN1 | VacuumContactN2 => "vacuum_contact_probe.v3",
     }
 }
 
@@ -932,6 +1028,43 @@ mod tests {
         assert_eq!(definition.kind, CalibrationArtifactKind::Derived);
         assert!(!definition.requires_motion);
         assert_eq!(definition.estimated_duration_seconds, 0);
+    }
+
+    #[test]
+    fn artifact_fingerprint_survives_json_round_trip() {
+        let id = CalibrationArtifactId::VacuumContactN1;
+        let artifact = normalize_artifact(
+            id,
+            CalibrationArtifact {
+                kind: CalibrationArtifactKind::Captured,
+                recorded_at: Utc::now(),
+                source_run_id: None,
+                algorithm_version: algorithm_version(id).into(),
+                input_fingerprints: BTreeMap::from([("sensor".into(), "abc".into())]),
+                dependency_fingerprints: BTreeMap::from([(
+                    CalibrationArtifactId::RuntimeTipTransformN1,
+                    "def".into(),
+                )]),
+                fingerprint: String::new(),
+                value: json!({
+                    "contact_nozzle_z_mm": 3.200000000000003,
+                    "signal_delta_counts": 10.0,
+                    "observed_at": Utc::now(),
+                }),
+            },
+        )
+        .unwrap();
+        let stored: CalibrationArtifact =
+            serde_json::from_str(&serde_json::to_string(&artifact).unwrap()).unwrap();
+        let calculated = artifact_fingerprint(
+            id,
+            &stored.algorithm_version,
+            &stored.input_fingerprints,
+            &stored.dependency_fingerprints,
+            &stored.value,
+        )
+        .unwrap();
+        assert_eq!(stored.fingerprint, calculated);
     }
 
     #[tokio::test]

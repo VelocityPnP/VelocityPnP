@@ -662,8 +662,8 @@ through tooling checks, runout, and height tracking.
 The revised runner measures the top-camera working-plane map with bounded
 motions around the homing fiducial. It also measures the bottom-camera map,
 centers the top-camera reference in the bottom camera, and centers the
-bottom-camera reference in the top camera. The camera CAD supplies a 15 mm
-outer reference diameter. Its observed size, the live working-plane scale, and
+bottom-camera reference in the top camera. The camera CAD supplies the 33 mm
+bottom-camera cutout diameter. Its observed size, the live working-plane scale, and
 the reciprocal controller poses produce the camera-ray transfer term. Each
 nozzle still gets an independent runout fit and height-dependent axis model.
 
@@ -757,6 +757,42 @@ through both height sweeps. The runner stored 10 tooling, 6 reciprocal-camera,
 ready, and fault-free after explicit actuator cleanup. The snapshot contains
 every current machine-geometry step. It is correctly not production-ready
 because the remaining motion, vacuum, feeder, and job gates are not complete.
+
+## Selective artifact migration and vacuum probes
+
+Scoped head-geometry run `7341de88-577b-423a-9b44-5d43d1215102` succeeded on
+2026-08-17 and produced snapshot `fce63a82-a847-4550-97bc-aa6d03dd3da9`.
+It reused the validated parent homing evidence, performed one live visual
+alignment, and captured the camera maps, reciprocal geometry, both runout
+fits, and both height-axis models. The corrected 33 mm camera cutout produced
+a camera-ray transfer of X=+0.530461 and Y=-0.908262 mm. N1 and N2 runout
+radii were 0.07852 mm and 0.12899 mm.
+
+The snapshot then migrated to 16 provenance-bearing artifacts. The migration
+retained physical source captures and recalculated the camera-ray transfer,
+head-offset summary, and both runtime tip transforms without motion. The
+planner classified all geometry as reusable and requested only independent N1
+and N2 vacuum-contact captures.
+
+Both physical vacuum probes passed on 2026-08-17. N1/N045 contacted at nozzle
+Z=3.2 with a 10-count signal delta and 0.02308 mm target-centering residual.
+N2/N24 contacted at nozzle Z=3.8 with a 10-count signal delta and 0.06725 mm
+target-centering residual. Their open-nozzle medians were 236 and 252 raw
+counts. Each probe started the pump at the clear search height, moved only Z
+during descent, stopped the pump before retract, and returned to X=220.131,
+Y=190.271, Z=31.5. The controller ended homed, ready, and fault-free.
+
+The first N1 persistence exposed a digest timing defect: one JSON
+floating-point representation changed during its first storage round trip.
+The semantic profile and dependency fingerprints were unchanged, but the
+planner correctly refused to reuse the mismatched digest. Artifacts now
+normalize through their storage representation before SHA-256 calculation.
+A regression test covers the contact value, and the stored N1 report migrated
+to algorithm `vacuum_contact_probe.v3` without another physical probe.
+
+The final planner reports no non-reusable artifacts, no required motion, and a
+zero-second estimate. N1 and N2 contact artifact fingerprints start with
+`df707f490307` and `6aca004909b6`, respectively.
 
 ## Procedure sources
 
