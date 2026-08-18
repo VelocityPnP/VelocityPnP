@@ -178,6 +178,15 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    CalibrateXyDirectionResponse {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Confirm level nozzles, a fixed datum board, a clear envelope, and
+        /// reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
     ObserveNozzleHeight {
         calibration: Uuid,
         #[arg(long)]
@@ -582,6 +591,29 @@ async fn main() -> Result<()> {
             run_operation(&client, base, operation).await?;
             let snapshot = get(&client, &format!("{base}/calibrations/{calibration}")).await?;
             snapshot["values"]["vacuum_sensor_characterization"][&nozzle].clone()
+        }
+        Command::CalibrateXyDirectionResponse {
+            calibration,
+            lease,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "local XY direction-response calibration requires --confirm-safety-checks after inspecting the level nozzles, fixed datum board, travel envelope, and power isolation"
+                );
+            }
+            let operation = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/xy-direction-response"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            run_operation(&client, base, operation).await?;
+            let snapshot = get(&client, &format!("{base}/calibrations/{calibration}")).await?;
+            snapshot["values"]["local_xy_direction_response"].clone()
         }
         Command::ObserveNozzleHeight {
             calibration,

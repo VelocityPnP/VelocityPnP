@@ -75,6 +75,7 @@ pub fn plan_artifacts(
     let definitions = definitions_by_id();
     let targets = if targets.is_empty() {
         vec![
+            CalibrationArtifactId::LocalXyDirectionResponse,
             CalibrationArtifactId::VacuumCharacterizationN1,
             CalibrationArtifactId::VacuumCharacterizationN2,
         ]
@@ -835,6 +836,21 @@ fn expected_inputs(
             add(&mut inputs, "top_camera_profile", &top_profile()?);
             add(&mut inputs, "visual_homing_profile", &visual()?);
         }
+        LocalXyDirectionResponse => {
+            add(&mut inputs, "top_camera_profile", &top_profile()?);
+            add(&mut inputs, "visual_homing_profile", &visual()?);
+            add(
+                &mut inputs,
+                "direction_response_profile",
+                &state
+                    .profile
+                    .local_xy_direction_response
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "active profile has no local XY direction response".to_string()
+                    })?,
+            );
+        }
         BottomCameraLocalMap => {
             add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
             add(
@@ -1016,6 +1032,7 @@ fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
         ToolingN1 | ToolingN2 => "nozzle_tooling.v1",
         VisualHomingQualification => "visual_homing_qualification.v2",
         TopCameraWorkingPlaneMap | BottomCameraLocalMap => "camera_motion_mapping.v1",
+        LocalXyDirectionResponse => "local_xy_direction_response.v2",
         ReciprocalCameraGeometry => "reciprocal_camera_geometry.v2",
         CameraRayTransfer => "camera_ray_transfer.v2",
         NozzleAxisRunoutN1 | NozzleAxisRunoutN2 => "nozzle_axis_runout.v1",
@@ -1069,6 +1086,11 @@ mod tests {
     #[test]
     fn dependency_graph_keeps_nozzle_branches_independent() {
         let definitions = definitions_by_id();
+        let local = &definitions[&CalibrationArtifactId::LocalXyDirectionResponse];
+        assert_eq!(
+            local.dependencies,
+            [CalibrationArtifactId::TopCameraWorkingPlaneMap]
+        );
         let n1 = &definitions[&CalibrationArtifactId::NozzleHeightN1];
         let n2 = &definitions[&CalibrationArtifactId::NozzleHeightN2];
         assert!(n1

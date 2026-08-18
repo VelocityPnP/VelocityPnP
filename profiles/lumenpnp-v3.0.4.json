@@ -176,6 +176,13 @@
     "release_sample_count": 10,
     "minimum_distribution_gap_counts": 3
   },
+  "local_xy_direction_response": {
+    "approach_distances_mm": [1.0, 5.0],
+    "approach_feeds_mm_per_min": [300.0, 900.0],
+    "minimum_sample_pairs": 3,
+    "maximum_sample_pairs": 7,
+    "resolved_relative_uncertainty": 0.5
+  },
   "capabilities": {
     "dual_nozzle": true,
     "rotation_motion": false,
@@ -184,6 +191,7 @@
     "rotation_calibration": true,
     "vacuum_probe_calibration": true,
     "vacuum_sensor_characterization": true,
+    "local_xy_direction_response": true,
     "photon_bus": false,
     "physical_endstops": false,
     "contact_probe": false

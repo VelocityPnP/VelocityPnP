@@ -78,6 +78,14 @@ working coordinates. A failed detection or verification never applies the
 coordinate reset. Any disconnect, fault, or emergency stop still invalidates
 the resulting homed state.
 
+Local X/Y direction-response calibration first performs visual homing. It
+keeps both nozzles level at controller Z 31.5 and uses only profile-bounded
+lateral moves around the fixed datum. The maximum path is checked against
+machine bounds before the operation starts. Measured correction vectors must
+also remain inside the visual-homing correction safety bound before a holdout
+move is allowed. A motion fault does not trigger an emergency stop or an
+uncertain return move; the normal fault state invalidates homing.
+
 Physical disconnect and graceful daemon shutdown command both vacuum channels
 and the shared lights off before releasing serial. SIGINT and SIGTERM use this
 path. A process crash, `SIGKILL`, USB failure, controller failure, or loss of

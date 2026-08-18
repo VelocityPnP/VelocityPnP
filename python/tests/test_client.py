@@ -257,6 +257,33 @@ class ClientTests(unittest.TestCase):
             },
         ))
 
+    def test_xy_direction_response_requires_confirmation_and_returns_report(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.calibrate_xy_direction_response(
+                    "calibration", "lease",
+                )
+        send.assert_not_called()
+
+        operation = {"id": "op", "status": "succeeded", "message": "measured"}
+        snapshot = {
+            "values": {"local_xy_direction_response": {"passed": True}},
+        }
+        with patch.object(client, "_request", side_effect=[operation, snapshot]) as send:
+            report = client.calibrate_xy_direction_response(
+                "calibration", "lease", safety_checks_confirmed=True,
+            )
+        self.assertEqual(report, {"passed": True})
+        self.assertEqual(send.call_args_list[0].args, (
+            "POST",
+            "/calibrations/calibration/xy-direction-response",
+            {
+                "lease_id": "lease",
+                "confirmed_external_safety_checks": True,
+            },
+        ))
+
     def test_nozzle_height_observation_records_bounded_working_plane_error(self):
         client = Client(timeout=1)
         snapshot = {"values": {"nozzle_height_model": {"models": []}}}

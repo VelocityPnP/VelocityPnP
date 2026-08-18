@@ -146,6 +146,7 @@ export type CalibrationArtifactId =
   | "tooling_n2"
   | "visual_homing_qualification"
   | "top_camera_working_plane_map"
+  | "local_xy_direction_response"
   | "bottom_camera_local_map"
   | "reciprocal_camera_geometry"
   | "camera_ray_transfer"
@@ -197,6 +198,7 @@ export interface CalibrationSnapshot {
     vacuum_sensor_characterization?: Partial<
       Record<"N1" | "N2", VacuumSensorCharacterizationReport>
     >;
+    local_xy_direction_response?: LocalXyDirectionResponseReport;
     nozzle_height_model?: {
       camera_ray_transfer?: CameraRayTransferReport | null;
       models: NozzleHeightModel[];
@@ -275,6 +277,68 @@ export interface VacuumSensorCharacterizationReport {
   release_threshold_raw_value: number;
   reference_seal_validated: boolean;
   known_part_validated: boolean;
+  passed: boolean;
+  observed_at: string;
+}
+
+export interface LocalXyAxisEstimate {
+  axis: "x" | "y";
+  sample_pairs: number;
+  negative_mean_correction_x_mm: number;
+  negative_mean_correction_y_mm: number;
+  positive_mean_correction_x_mm: number;
+  positive_mean_correction_y_mm: number;
+  direction_gap_x_mm: number;
+  direction_gap_y_mm: number;
+  primary_axis_gap_mm: number;
+  cross_axis_gap_mm: number;
+  primary_axis_confidence_interval_95_mm: number;
+  effect_resolved: boolean;
+}
+
+export interface LocalXyAxisDirectionReport {
+  estimate: LocalXyAxisEstimate;
+  stopping_reason: string;
+  holdout: {
+    negative_sample: LocalXyDirectionResponseSample;
+    positive_sample: LocalXyDirectionResponseSample;
+    negative_residual_x_mm: number;
+    negative_residual_y_mm: number;
+    positive_residual_x_mm: number;
+    positive_residual_y_mm: number;
+    direction_gap_mm: number;
+    improved: boolean;
+  };
+  compensation_enabled: boolean;
+  applied_negative_compensation_x_mm: number;
+  applied_negative_compensation_y_mm: number;
+  applied_positive_compensation_x_mm: number;
+  applied_positive_compensation_y_mm: number;
+}
+
+export interface LocalXyDirectionResponseSample {
+  axis: "x" | "y";
+  approach_side: "negative" | "positive";
+  pair: number;
+  approach_distance_mm: number;
+  feed_mm_per_min: number;
+  commanded_x_mm: number;
+  commanded_y_mm: number;
+  observed_x_px: number;
+  observed_y_px: number;
+  residual_correction_x_mm: number;
+  residual_correction_y_mm: number;
+  observed_at: string;
+}
+
+export interface LocalXyDirectionResponseReport {
+  reference_controller_x_mm: number;
+  reference_controller_y_mm: number;
+  reference_observed_x_px: number;
+  reference_observed_y_px: number;
+  pixel_error_to_machine_mm: [[number, number], [number, number]];
+  axes: LocalXyAxisDirectionReport[];
+  samples: LocalXyDirectionResponseSample[];
   passed: boolean;
   observed_at: string;
 }

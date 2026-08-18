@@ -144,6 +144,11 @@ export const api = {
     nozzle_id: nozzleId,
     confirmed_external_safety_checks: true,
   }),
+  calibrateXyDirectionResponse: (snapshotId: string, leaseId: string) =>
+    jsonPost<Operation>(`/calibrations/${snapshotId}/xy-direction-response`, {
+      lease_id: leaseId,
+      confirmed_external_safety_checks: true,
+    }),
   observeNozzleHeight: (
     snapshotId: string, nozzleId: "N1" | "N2", nozzleZMm: number,
     errorXMm: number, errorYMm: number, uncertaintyMm: number,

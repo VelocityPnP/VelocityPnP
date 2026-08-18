@@ -830,6 +830,42 @@ values matched their established baselines: N1=0 and N2=255.
 These thresholds validate only the fixed reference seal. They do not validate
 that a production part is held; known-part distributions remain pending.
 
+## Local X/Y direction response
+
+The adaptive local direction-response runner passed on the attached V3.0.4 on
+2026-08-17. It reused the current visual-home qualification and top-camera
+working-plane map. It performed one live visual home, then approached the same
+datum pose from both sides of X and Y at 1 mm and 5 mm distances and 300 and
+900 mm/min feeds. Both axes met the relative uncertainty rule after the minimum
+three pairs. No fixed millimetre acceptance rule was used.
+
+The first physical report exposed a model error before commit. Its holdouts
+improved, but each stored direction vector included a common image offset as
+well as the direction difference. Algorithm v2 removes the common term and
+uses opposite half-gap vectors whose mean is exactly zero. The artifact planner
+invalidated only the v1 local direction artifact; all camera, homing, nozzle,
+and vacuum artifacts remained reusable. A second physical run validated v2.
+
+X measured a 0.06486 mm primary direction gap with a 0.01320 mm 95% confidence
+interval. Its 0.01046 mm cross-axis gap is retained as diagnostic evidence. The
+zero-mean X holdout used `(+0.03243, -0.00523) mm` and
+`(-0.03243, +0.00523) mm`; the direction-vector gap fell from 0.06570 mm to
+0.01865 mm.
+
+Y measured a 0.04607 mm primary direction gap with a 0.01421 mm 95% confidence
+interval and a 0.00009 mm cross-axis gap. Its zero-mean holdout used
+`(+0.00004, +0.02304) mm` and `(-0.00004, -0.02304) mm`; the direction-vector
+gap fell from 0.04607 mm to 0.02647 mm. Both axis corrections are stored as
+holdout-enabled. The current artifact uses
+`local_xy_direction_response.v2` and fingerprint prefix `c1c6e2114541`.
+
+The final default artifact plan reports every target reusable, no required
+motion, and a zero-second estimate. Both vacuum outputs remained off at their
+known baselines, N1=0 and N2=255. The machine ended homed, ready, and fault-free
+at X=220.13, Y=190.27, Z=31.5. Manual jog and calibration moves do not yet use
+the stored correction; consumption belongs to the future physical motion
+planner.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

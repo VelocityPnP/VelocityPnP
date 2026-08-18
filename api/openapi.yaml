@@ -548,6 +548,31 @@ paths:
                 confirmed_external_safety_checks: { type: boolean }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /calibrations/{id}/xy-direction-response:
+    post:
+      operationId: startLocalXyDirectionResponse
+      description: >-
+        Visually aligns to the fixed homing fiducial, then approaches the same
+        commanded pose from positive and negative X and Y at several bounded
+        distances and speeds. Sampling stops adaptively when an effect is
+        resolved or cannot be distinguished from measured repeatability.
+        Direction-specific corrections are retained only when an independent
+        holdout pair reduces the observed direction gap. This is a local
+        measurement and does not claim full-bed scale, skew, or distortion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, confirmed_external_safety_checks]
+              properties:
+                lease_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
   /calibrations/{id}/nozzle-height-observation:
     post:
       operationId: recordNozzleHeightObservation

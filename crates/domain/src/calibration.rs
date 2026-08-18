@@ -11,6 +11,7 @@ pub enum CalibrationStepId {
     TopCameraIntrinsics,
     CoarseHoming,
     VisualHoming,
+    LocalXyDirectionResponse,
     MotionGeometry,
     TopCameraScale,
     NozzleOffsets,
@@ -30,6 +31,7 @@ impl CalibrationStepId {
             Self::TopCameraIntrinsics => "top_camera_intrinsics",
             Self::CoarseHoming => "coarse_homing",
             Self::VisualHoming => "visual_homing",
+            Self::LocalXyDirectionResponse => "local_xy_direction_response",
             Self::MotionGeometry => "motion_geometry",
             Self::TopCameraScale => "top_camera_scale",
             Self::NozzleOffsets => "nozzle_offsets",
@@ -69,13 +71,14 @@ pub fn lumen_calibration_workflow() -> Vec<CalibrationStepDefinition> {
         step(CoarseHoming, "Coarse hardware homing", "Establish controller coordinates using the profile-specific homing method.", &[], true, false, Automated),
         step(CameraReproducibility, "Camera and tooling verification", "Move the top camera over the 1 mm datum and each nozzle over the bottom camera; apply locked controls, identify the installed tips, and measure capture stability.", &[CoarseHoming], true, false, Automated),
         step(VisualHoming, "Visual-refined homing", "Refine coarse home against the fixed 1 mm datum, make a controlled excursion, and measure independent return error over repeated cycles.", &[CoarseHoming, CameraReproducibility], true, false, Automated),
+        step(LocalXyDirectionResponse, "Local XY direction response", "Approach the fixed datum from both X and Y directions at several distances and speeds. Measure backlash-like endpoint shifts, uncertainty, and compensation holdouts.", &[VisualHoming], true, false, Automated),
         step(BottomCameraGeometry, "Bottom camera geometry", "Measure the local two-axis image-to-motion map and locate the bottom camera in visual-home coordinates.", &[VisualHoming, CameraReproducibility], true, false, Automated),
         step(NozzleOffsets, "Head and nozzle offsets", "Use the bottom camera as a common comparator for the top camera and both nozzle rotation axes.", &[BottomCameraGeometry], true, false, Automated),
         step(NozzleRunout, "Nozzle runout", "Rotate each identified tip through the bounded profile angles and fit its correction curve.", &[NozzleOffsets], true, false, Automated),
         step(NozzleHeightModel, "Nozzle height model", "Track each nozzle over several safe Z heights and fit its lateral axis slope. Store a separate working-plane transfer correction when an observed target residual is available.", &[NozzleRunout], true, false, Automated),
         step(VacuumSensorCharacterization, "Vacuum sensor characterization", "Measure pump-off, open-nozzle, sealed-reference, and release distributions per nozzle and installed tip.", &[NozzleHeightModel], true, false, Automated),
         step(TopCameraIntrinsics, "Top camera intrinsics", "Measure lens distortion and camera matrix from a known target after visual homing.", &[VisualHoming], true, true, Planned),
-        step(MotionGeometry, "Motion geometry", "Measure scale, skew, backlash, and direction-dependent residuals over the work envelope.", &[VisualHoming, TopCameraIntrinsics], true, true, Planned),
+        step(MotionGeometry, "Full-bed motion geometry", "Measure scale, skew, and spatial residuals over the work envelope after local direction response and lens distortion are known.", &[LocalXyDirectionResponse, TopCameraIntrinsics], true, true, Planned),
         step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to corrected machine coordinates at calibrated Z planes.", &[MotionGeometry], true, true, Planned),
         step(ZPlanes, "Z planes", "Capture safe, board, feeder, discard, and camera-clearance planes.", &[NozzleHeightModel], true, false, Planned),
         step(VacuumThresholds, "Known-part vacuum thresholds", "Learn known-part pressure distributions per nozzle, tip, and applicable part class.", &[ZPlanes, VacuumSensorCharacterization], true, false, Planned),
@@ -129,6 +132,7 @@ pub enum CalibrationArtifactId {
     ToolingN2,
     VisualHomingQualification,
     TopCameraWorkingPlaneMap,
+    LocalXyDirectionResponse,
     BottomCameraLocalMap,
     ReciprocalCameraGeometry,
     CameraRayTransfer,
@@ -298,6 +302,14 @@ pub fn lumen_calibration_artifacts() -> Vec<CalibrationArtifactDefinition> {
             Captured,
             true,
             60,
+        ),
+        artifact(
+            LocalXyDirectionResponse,
+            "Local XY direction response",
+            &[TopCameraWorkingPlaneMap],
+            Captured,
+            true,
+            180,
         ),
         artifact(
             BottomCameraLocalMap,
@@ -534,6 +546,226 @@ pub struct BottomCameraMappingReport {
     pub probe_distance_mm: f64,
     pub returned_center_error_px: f64,
     pub returned_center_error_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinearAxis {
+    X,
+    Y,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApproachSide {
+    Negative,
+    Positive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalXyDirectionResponseSample {
+    pub axis: LinearAxis,
+    pub approach_side: ApproachSide,
+    pub pair: u32,
+    pub approach_distance_mm: f64,
+    pub feed_mm_per_min: f64,
+    pub commanded_x_mm: f64,
+    pub commanded_y_mm: f64,
+    pub observed_x_px: f64,
+    pub observed_y_px: f64,
+    /// Corrective move relative to the visually aligned reference capture.
+    pub residual_correction_x_mm: f64,
+    pub residual_correction_y_mm: f64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalXyAxisEstimate {
+    pub axis: LinearAxis,
+    pub sample_pairs: u32,
+    pub negative_mean_correction_x_mm: f64,
+    pub negative_mean_correction_y_mm: f64,
+    pub positive_mean_correction_x_mm: f64,
+    pub positive_mean_correction_y_mm: f64,
+    pub direction_gap_x_mm: f64,
+    pub direction_gap_y_mm: f64,
+    pub primary_axis_gap_mm: f64,
+    pub cross_axis_gap_mm: f64,
+    pub primary_axis_confidence_interval_95_mm: f64,
+    pub effect_resolved: bool,
+}
+
+impl LocalXyAxisEstimate {
+    pub fn from_samples(
+        axis: LinearAxis,
+        samples: &[LocalXyDirectionResponseSample],
+    ) -> Option<Self> {
+        let group = |side| {
+            samples
+                .iter()
+                .filter(|sample| sample.axis == axis && sample.approach_side == side)
+                .collect::<Vec<_>>()
+        };
+        let negative = group(ApproachSide::Negative);
+        let positive = group(ApproachSide::Positive);
+        if negative.len() < 2 || negative.len() != positive.len() {
+            return None;
+        }
+        let mean_component = |items: &[&LocalXyDirectionResponseSample], x: bool| {
+            items
+                .iter()
+                .map(|sample| {
+                    if x {
+                        sample.residual_correction_x_mm
+                    } else {
+                        sample.residual_correction_y_mm
+                    }
+                })
+                .sum::<f64>()
+                / items.len() as f64
+        };
+        let negative_x = mean_component(&negative, true);
+        let negative_y = mean_component(&negative, false);
+        let positive_x = mean_component(&positive, true);
+        let positive_y = mean_component(&positive, false);
+        let direction_gap_x_mm = positive_x - negative_x;
+        let direction_gap_y_mm = positive_y - negative_y;
+        let primary_x = axis == LinearAxis::X;
+        let primary = |sample: &&LocalXyDirectionResponseSample| {
+            if primary_x {
+                sample.residual_correction_x_mm
+            } else {
+                sample.residual_correction_y_mm
+            }
+        };
+        let variance = |items: &[&LocalXyDirectionResponseSample]| {
+            let mean = items.iter().map(primary).sum::<f64>() / items.len() as f64;
+            items
+                .iter()
+                .map(|sample| (primary(sample) - mean).powi(2))
+                .sum::<f64>()
+                / (items.len() - 1) as f64
+        };
+        let standard_error = (variance(&negative) / negative.len() as f64
+            + variance(&positive) / positive.len() as f64)
+            .sqrt();
+        let confidence_interval = 1.96 * standard_error;
+        let primary_axis_gap_mm = if primary_x {
+            direction_gap_x_mm.abs()
+        } else {
+            direction_gap_y_mm.abs()
+        };
+        let cross_axis_gap_mm = if primary_x {
+            direction_gap_y_mm.abs()
+        } else {
+            direction_gap_x_mm.abs()
+        };
+        let finite = [
+            negative_x,
+            negative_y,
+            positive_x,
+            positive_y,
+            direction_gap_x_mm,
+            direction_gap_y_mm,
+            primary_axis_gap_mm,
+            cross_axis_gap_mm,
+            confidence_interval,
+        ]
+        .iter()
+        .all(|value| value.is_finite());
+        finite.then_some(Self {
+            axis,
+            sample_pairs: negative.len() as u32,
+            negative_mean_correction_x_mm: negative_x,
+            negative_mean_correction_y_mm: negative_y,
+            positive_mean_correction_x_mm: positive_x,
+            positive_mean_correction_y_mm: positive_y,
+            direction_gap_x_mm,
+            direction_gap_y_mm,
+            primary_axis_gap_mm,
+            cross_axis_gap_mm,
+            primary_axis_confidence_interval_95_mm: confidence_interval,
+            effect_resolved: primary_axis_gap_mm > confidence_interval,
+        })
+    }
+
+    pub fn sampling_complete(
+        &self,
+        minimum_pairs: u32,
+        maximum_pairs: u32,
+        resolved_relative_uncertainty: f64,
+    ) -> bool {
+        if self.sample_pairs < minimum_pairs {
+            return false;
+        }
+        if self.sample_pairs >= maximum_pairs {
+            return true;
+        }
+        if self.effect_resolved {
+            return self.primary_axis_confidence_interval_95_mm
+                <= self.primary_axis_gap_mm * resolved_relative_uncertainty;
+        }
+        // Five pairs give the unresolved branch more evidence than the
+        // minimum resolved branch, without imposing a fixed millimetre gate.
+        self.sample_pairs >= minimum_pairs.max(5)
+    }
+
+    pub fn negative_compensation(&self) -> [f64; 2] {
+        // Remove the common capture offset. Backlash compensation is the
+        // zero-mean half-gap between approach directions, not an absolute
+        // correction to one datum image.
+        [
+            -self.direction_gap_x_mm / 2.0,
+            -self.direction_gap_y_mm / 2.0,
+        ]
+    }
+
+    pub fn positive_compensation(&self) -> [f64; 2] {
+        [self.direction_gap_x_mm / 2.0, self.direction_gap_y_mm / 2.0]
+    }
+
+    pub fn uncompensated_direction_gap_mm(&self) -> f64 {
+        self.direction_gap_x_mm.hypot(self.direction_gap_y_mm)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalXyCompensationHoldout {
+    pub negative_residual_x_mm: f64,
+    pub negative_residual_y_mm: f64,
+    pub positive_residual_x_mm: f64,
+    pub positive_residual_y_mm: f64,
+    pub direction_gap_mm: f64,
+    pub improved: bool,
+    pub negative_sample: LocalXyDirectionResponseSample,
+    pub positive_sample: LocalXyDirectionResponseSample,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalXyAxisDirectionReport {
+    pub estimate: LocalXyAxisEstimate,
+    pub stopping_reason: String,
+    pub holdout: LocalXyCompensationHoldout,
+    /// False means the measured effect was unresolved or the holdout did not
+    /// improve. In that case both applied vectors are stored as zero.
+    pub compensation_enabled: bool,
+    pub applied_negative_compensation_x_mm: f64,
+    pub applied_negative_compensation_y_mm: f64,
+    pub applied_positive_compensation_x_mm: f64,
+    pub applied_positive_compensation_y_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalXyDirectionResponseReport {
+    pub reference_controller_x_mm: f64,
+    pub reference_controller_y_mm: f64,
+    pub reference_observed_x_px: f64,
+    pub reference_observed_y_px: f64,
+    pub pixel_error_to_machine_mm: [[f64; 2]; 2],
+    pub axes: Vec<LocalXyAxisDirectionReport>,
+    pub samples: Vec<LocalXyDirectionResponseSample>,
+    pub passed: bool,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1138,6 +1370,9 @@ impl CalibrationSnapshot {
             CalibrationStepId::VisualHoming => {
                 vec![CalibrationArtifactId::VisualHomingQualification]
             }
+            CalibrationStepId::LocalXyDirectionResponse => {
+                vec![CalibrationArtifactId::LocalXyDirectionResponse]
+            }
             CalibrationStepId::BottomCameraGeometry => vec![
                 CalibrationArtifactId::TopCameraWorkingPlaneMap,
                 CalibrationArtifactId::BottomCameraLocalMap,
@@ -1244,6 +1479,7 @@ mod tests {
 
         assert!(visual < bottom && bottom < offsets && offsets < runout && runout < height);
         for id in [
+            CalibrationStepId::LocalXyDirectionResponse,
             CalibrationStepId::NozzleOffsets,
             CalibrationStepId::BottomCameraGeometry,
             CalibrationStepId::NozzleRunout,
@@ -1486,5 +1722,78 @@ mod tests {
         let thresholds = calculate_vacuum_classification_thresholds(&open, &sealed, 4, 3).unwrap();
         assert!(thresholds.robust_distribution_gap_counts < 0.0);
         assert!(!thresholds.passed);
+    }
+
+    fn direction_sample(
+        side: ApproachSide,
+        pair: u32,
+        x_mm: f64,
+        y_mm: f64,
+    ) -> LocalXyDirectionResponseSample {
+        LocalXyDirectionResponseSample {
+            axis: LinearAxis::X,
+            approach_side: side,
+            pair,
+            approach_distance_mm: if pair % 2 == 0 { 5.0 } else { 1.0 },
+            feed_mm_per_min: if pair > 2 { 900.0 } else { 300.0 },
+            commanded_x_mm: 220.131,
+            commanded_y_mm: 190.271,
+            observed_x_px: 640.0,
+            observed_y_px: 360.0,
+            residual_correction_x_mm: x_mm,
+            residual_correction_y_mm: y_mm,
+            observed_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn local_direction_estimate_resolves_an_effect_from_empirical_noise() {
+        let mut samples = Vec::new();
+        for (pair, negative, positive) in
+            [(1, 0.039, -0.039), (2, 0.040, -0.040), (3, 0.041, -0.041)]
+        {
+            samples.push(direction_sample(
+                ApproachSide::Negative,
+                pair,
+                negative,
+                0.002,
+            ));
+            samples.push(direction_sample(
+                ApproachSide::Positive,
+                pair,
+                positive,
+                -0.002,
+            ));
+        }
+
+        let estimate = LocalXyAxisEstimate::from_samples(LinearAxis::X, &samples).unwrap();
+
+        assert_eq!(estimate.sample_pairs, 3);
+        assert!((estimate.primary_axis_gap_mm - 0.08).abs() < 1e-12);
+        assert!((estimate.cross_axis_gap_mm - 0.004).abs() < 1e-12);
+        assert!(estimate.effect_resolved);
+        assert!(estimate.sampling_complete(3, 7, 0.5));
+        assert_eq!(estimate.negative_compensation(), [0.04, 0.002]);
+        assert_eq!(estimate.positive_compensation(), [-0.04, -0.002]);
+        let negative = estimate.negative_compensation();
+        let positive = estimate.positive_compensation();
+        assert_eq!(negative[0] + positive[0], 0.0);
+        assert_eq!(negative[1] + positive[1], 0.0);
+    }
+
+    #[test]
+    fn local_direction_estimate_stops_unresolved_sampling_without_a_mm_rule() {
+        let mut samples = Vec::new();
+        for pair in 1..=5 {
+            let noise = (f64::from(pair) - 3.0) * 0.002;
+            samples.push(direction_sample(ApproachSide::Negative, pair, noise, 0.0));
+            samples.push(direction_sample(ApproachSide::Positive, pair, noise, 0.0));
+        }
+
+        let estimate = LocalXyAxisEstimate::from_samples(LinearAxis::X, &samples).unwrap();
+
+        assert_eq!(estimate.primary_axis_gap_mm, 0.0);
+        assert!(!estimate.effect_resolved);
+        assert!(estimate.sampling_complete(3, 7, 0.5));
     }
 }

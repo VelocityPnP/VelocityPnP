@@ -137,6 +137,8 @@ pub struct MachineProfile {
     pub vacuum_calibration: Option<VacuumCalibrationProfile>,
     #[serde(default)]
     pub vacuum_characterization: Option<VacuumCharacterizationProfile>,
+    #[serde(default)]
+    pub local_xy_direction_response: Option<LocalXyDirectionResponseProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -367,6 +369,19 @@ pub struct VacuumCharacterizationProfile {
     pub minimum_distribution_gap_counts: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalXyDirectionResponseProfile {
+    /// Final-approach distances used to expose short- and long-move response.
+    pub approach_distances_mm: Vec<f64>,
+    /// Final-approach feeds used to expose speed-dependent response.
+    pub approach_feeds_mm_per_min: Vec<f64>,
+    pub minimum_sample_pairs: u32,
+    pub maximum_sample_pairs: u32,
+    /// A resolved effect can stop when its 95% confidence interval is no more
+    /// than this fraction of the measured direction gap.
+    pub resolved_relative_uncertainty: f64,
+}
+
 impl ZKinematicsProfile {
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self.level_controller_z_mm.is_finite()
@@ -460,6 +475,32 @@ impl VacuumCharacterizationProfile {
             || self.minimum_distribution_gap_counts >= minimum_signal_delta_counts
         {
             return Err("vacuum characterization profile is invalid");
+        }
+        Ok(())
+    }
+}
+
+impl LocalXyDirectionResponseProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.approach_distances_mm.len() < 2
+            || self.approach_distances_mm.len() > 6
+            || self
+                .approach_distances_mm
+                .iter()
+                .any(|value| !value.is_finite() || !(0.5..=25.0).contains(value))
+            || self.approach_feeds_mm_per_min.len() < 2
+            || self.approach_feeds_mm_per_min.len() > 6
+            || self
+                .approach_feeds_mm_per_min
+                .iter()
+                .any(|value| !value.is_finite() || !(30.0..=2_400.0).contains(value))
+            || !(3..=5).contains(&self.minimum_sample_pairs)
+            || self.maximum_sample_pairs < self.minimum_sample_pairs
+            || self.maximum_sample_pairs > 9
+            || !self.resolved_relative_uncertainty.is_finite()
+            || !(0.1..=1.0).contains(&self.resolved_relative_uncertainty)
+        {
+            return Err("local XY direction-response profile is invalid");
         }
         Ok(())
     }
@@ -738,11 +779,13 @@ mod tests {
         let z = profile.z_kinematics.as_ref().unwrap();
         let vacuum = profile.vacuum_calibration.as_ref().unwrap();
         let characterization = profile.vacuum_characterization.as_ref().unwrap();
+        let direction_response = profile.local_xy_direction_response.as_ref().unwrap();
         assert!(z.validate().is_ok());
         assert!(vacuum.validate().is_ok());
         assert!(characterization
             .validate(vacuum.minimum_signal_delta_counts)
             .is_ok());
+        assert!(direction_response.validate().is_ok());
         assert_eq!(z.controller_z("N1", 30.0), Some(30.0));
         assert_eq!(z.controller_z("N2", 30.0), Some(33.0));
         assert_eq!(z.controller_z("N1", 33.0), Some(33.0));
@@ -770,6 +813,10 @@ mod tests {
         assert_eq!(vacuum.search_end_nozzle_z_mm, 3.0);
         assert_eq!(characterization.characterization_clearance_mm, 0.3);
         assert_eq!(characterization.characterization_sample_count, 20);
+        assert_eq!(direction_response.approach_distances_mm, [1.0, 5.0]);
+        assert_eq!(direction_response.approach_feeds_mm_per_min, [300.0, 900.0]);
+        assert_eq!(direction_response.minimum_sample_pairs, 3);
+        assert_eq!(direction_response.maximum_sample_pairs, 7);
         assert!(
             vacuum.target_offset_x_mm.hypot(vacuum.target_offset_y_mm)
                 >= vacuum.fiducial_protected_radius_mm

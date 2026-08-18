@@ -418,6 +418,32 @@ class Client:
             "vacuum_sensor_characterization"
         ][nozzle_id]
 
+    def calibrate_xy_direction_response(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "local XY direction-response calibration requires explicit "
+                "confirmation that both nozzles are level, the datum board is "
+                "fixed, the envelope is clear, and power isolation is reachable"
+            )
+        operation = self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/xy-direction-response",
+            {
+                "lease_id": str(lease_id),
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        self.wait(operation)
+        return self.calibration(calibration_id)["values"][
+            "local_xy_direction_response"
+        ]
+
     def observe_nozzle_height(
         self,
         calibration_id: str | uuid.UUID,

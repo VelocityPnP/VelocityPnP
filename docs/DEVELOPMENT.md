@@ -218,6 +218,33 @@ in millimetres before the profile-defined XY-only coordinate reset is sent.
 Pixel error remains diagnostic evidence. Z and both nozzle angles are never
 included in that reset.
 
+Local X/Y direction response is a separate automatic capture. It reuses the
+current top-camera working-plane map, performs one live visual home, and ends
+every measurement at the same datum pose. Fixed datum location and local lens
+distortion therefore cancel. The runner approaches from both sides of X and Y
+with the profile distances and feeds:
+
+```bash
+velocitypnp calibrate-xy-direction-response CALIBRATION_UUID \
+  --lease "$VELOCITYPNP_LEASE" --confirm-safety-checks
+```
+
+Sampling is adaptive. It starts with three pairs that cover multiple distances
+and feeds. A resolved direction gap can stop when its 95% confidence interval
+is small relative to the observed effect. An unresolved result gets five pairs.
+An uncertain resolved result can continue to seven pairs. No fixed millimetre
+accuracy rule decides whether backlash exists. The runner tests each measured
+direction correction on an independent holdout pair. It stores zero applied
+compensation when the effect is unresolved or the holdout does not reduce the
+direction gap. The two direction corrections are the zero-mean half-gap. This
+removes camera drift and other common offset from the backlash term.
+
+This result is local to the homing datum. It does not establish full-bed scale,
+skew, or lens distortion. The physical job executor is not implemented, so
+stored corrections do not silently alter manual jog or existing calibration
+motion. A future executor must consume only holdout-enabled vectors and retain
+logical coordinate reporting.
+
 ## Automated calibration runs
 
 The supported calibration path completes automated steps only from machine
@@ -295,6 +322,7 @@ The graph separates physical captures from mathematical calculations:
 
 ```text
 top map + reciprocal cameras -> camera-ray transfer (calculated)
+top map -> local X/Y direction response (captured and holdout-validated)
 bottom map + N1 tooling -> N1 runout -> N1 height model
 bottom map + N2 tooling -> N2 runout -> N2 height model
 camera-ray transfer + N1 branch -> N1 runtime tip -> N1 vacuum contact

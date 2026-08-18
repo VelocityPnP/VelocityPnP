@@ -74,6 +74,14 @@ stationary rotation axis and head offset from periodic nozzle-tip runout. The
 raw samples, coefficients, and physical residuals are stored in the calibration
 snapshot.
 
+Local direction response uses the same top-camera datum and working-plane
+Jacobian. Each sample returns to one commanded pose from a known side, so fixed
+optical and datum offsets cancel. Adaptive paired statistics decide when enough
+evidence exists. Direction-specific corrections remain disabled unless a
+separate compensated holdout reduces the observed endpoint gap. This artifact
+stores the zero-mean half-gap, so common camera drift is not encoded as
+backlash. It is not a substitute for later multi-fiducial full-bed geometry.
+
 ## Crates and applications
 
 - `velocitypnp-domain`: geometry, machine state, manufacturing entities, and calibration graph

@@ -46,12 +46,14 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Remove operator-entered calibration metrics from the supported workflow
 - [x] Add bottom-camera detection of configured N045/N24 tooling assignments
 - [x] Pass 30-cycle visual-refined homing p95 residual of 0.05 mm or better
+- [x] Add adaptive local X/Y direction-response measurement with independent
+  compensation holdouts at the homing datum
 
 ## Gate 3 — Full calibration
 
 - [ ] Fabricate and publish the known-dimension multi-fiducial calibration PCB
 - [ ] Bind OpenCV camera intrinsics/distortion calibration to recorded workflow steps
-- [ ] Add machine runners for full-bed XY scale, skew, backlash, and distortion
+- [ ] Add machine runners for full-bed XY scale, skew, and spatial distortion
 - [x] Measure the top-camera working-plane map from bounded homing-fiducial moves
 - [x] Add automatic bottom-camera local mapping, reciprocal camera centering,
   and N1/N2 head-offset measurement
@@ -66,7 +68,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Pass the revised vacuum probe on both nozzles without visible tip compression
 - [x] Add automatic reference-seal vacuum characterization per nozzle/tip
 - [ ] Validate known-part vacuum classification per nozzle/tip and part class
-- [ ] Pass full-bed and nozzle p95 residual of 0.05 mm or better
+- [ ] Set and pass empirically justified full-bed and nozzle accuracy and
+  repeatability gates
 
 ## Gate 4 — Feeder and job production validation
 
@@ -74,6 +77,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
 - [ ] Add vacuum and bottom-vision feedback to the physical job executor
+- [ ] Consume holdout-enabled local direction compensation in the physical
+  motion planner without changing logical coordinates
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
 
 ## Gate 5 — Inspection and newer machines

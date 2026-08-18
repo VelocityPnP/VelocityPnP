@@ -20,15 +20,17 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
     calculate_vacuum_classification_thresholds, lumen_calibration_artifacts,
-    lumen_calibration_workflow, summarize_visual_homing_validation, AutomatedCalibrationConfig,
-    AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport, CalibrationArtifactId,
-    CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus,
-    CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId,
-    CameraProfile, CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
-    HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus, Job,
-    JogTarget, MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
-    NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus, Pose, Residuals,
-    SensorReading, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
+    lumen_calibration_workflow, summarize_visual_homing_validation, ApproachSide,
+    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport,
+    CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource,
+    CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
+    CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
+    CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, InspectionReport,
+    InspectionStatus, Job, JogTarget, LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate,
+    LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
+    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample, NozzleRunoutReport,
+    NozzleRunoutSample, Operation, OperationStatus, Pose, Residuals, SensorReading,
+    VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
     VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
     VisualHomingValidationSample,
 };
@@ -209,6 +211,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/vacuum-characterization",
             post(start_vacuum_characterization),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/xy-direction-response",
+            post(start_local_xy_direction_response),
         )
         .route(
             "/api/v1/calibrations/{id}/nozzle-height-observation",
@@ -2876,6 +2882,546 @@ fn persist_vacuum_characterization_report(
         snapshot
             .completed_steps
             .remove(&CalibrationStepId::VacuumSensorCharacterization);
+    }
+    snapshot.production_ready =
+        calibration_is_production_ready(&snapshot, state.machine.status().simulated);
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Deserialize)]
+struct StartLocalXyDirectionResponseRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+}
+
+struct PreparedLocalXyDirectionResponse {
+    calibration_id: Uuid,
+    lease_id: Uuid,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+}
+
+async fn start_local_xy_direction_response(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartLocalXyDirectionResponseRequest>,
+) -> ApiResult<(StatusCode, Json<Operation>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "local XY direction-response calibration requires confirmation that both nozzles are level, the datum board is fixed, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let artifacts_changed =
+        crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+            .map_err(ApiError::bad_request)?;
+    if !crate::calibration_artifacts::artifact_tree_is_current(
+        &state,
+        &snapshot,
+        CalibrationArtifactId::TopCameraWorkingPlaneMap,
+    ) {
+        return Err(ApiError::bad_request(
+            "local XY direction response requires a current top-camera working-plane map",
+        ));
+    }
+    if !state
+        .profile
+        .capabilities
+        .get("local_xy_direction_response")
+        .copied()
+        .unwrap_or(false)
+    {
+        return Err(ApiError::bad_request(
+            "active profile does not permit local XY direction-response calibration",
+        ));
+    }
+    let direction_profile = state
+        .profile
+        .local_xy_direction_response
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define local XY direction response")
+        })?;
+    direction_profile
+        .validate()
+        .map_err(ApiError::bad_request)?;
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    visual.validate().map_err(ApiError::bad_request)?;
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed {
+        return Err(ApiError::bad_request(
+            "local XY direction response requires a homed ready machine",
+        ));
+    }
+    let max_distance = direction_profile
+        .approach_distances_mm
+        .iter()
+        .copied()
+        .fold(0.0, f64::max);
+    let bound = max_distance + visual.max_correction_mm;
+    for (x_offset, y_offset) in [(-bound, 0.0), (bound, 0.0), (0.0, -bound), (0.0, bound)] {
+        if !state.profile.bounds.contains(Pose {
+            x_mm: visual.fiducial_x_mm + x_offset,
+            y_mm: visual.fiducial_y_mm + y_offset,
+            z_mm: visual.seed_pose.z_mm,
+            rotation_deg: status.pose.map_or(0.0, |pose| pose.rotation_deg),
+        }) {
+            return Err(ApiError::bad_request(
+                "local XY direction-response path is outside machine bounds",
+            ));
+        }
+    }
+    camera_path_for_role(CameraRole::TopCamera)?;
+    let mapping: BottomCameraMappingReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(
+            &snapshot,
+            CalibrationArtifactId::TopCameraWorkingPlaneMap,
+        )
+        .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored top-camera working-plane map is invalid"))?;
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if artifacts_changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    let prepared = PreparedLocalXyDirectionResponse {
+        calibration_id,
+        lease_id: body.lease_id,
+        pixel_error_to_machine_mm: mapping.pixel_error_to_machine_mm,
+    };
+    let task_state = state.clone();
+    spawn_operation(
+        state,
+        "calibration.local_xy_direction_response",
+        async move { execute_local_xy_direction_response(task_state, prepared).await },
+    )
+}
+
+async fn execute_local_xy_direction_response(
+    state: AppState,
+    prepared: PreparedLocalXyDirectionResponse,
+) -> Result<Option<String>, String> {
+    let visual_alignment = execute_visual_home(
+        &state,
+        VisualHomingRequest {
+            lease_id: prepared.lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let base_pose = visual_alignment
+        .final_pose
+        .ok_or_else(|| "visual alignment did not return a final pose".to_string())?;
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| "active profile has no visual homing".to_string())?;
+    let camera_profile =
+        stored_camera_profile(&state, CameraRole::TopCamera).map_err(|error| error.message)?;
+    let camera_path = camera_path_for_role(CameraRole::TopCamera).map_err(|error| error.message)?;
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(prepared.lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let measurement = measure_local_xy_direction_response(
+        &state,
+        prepared.lease_id,
+        base_pose,
+        &camera_profile,
+        &camera_path,
+        prepared.pixel_error_to_machine_mm,
+    )
+    .await;
+    let restore = if state.machine.status().state == MachineState::Ready {
+        state
+            .machine
+            .jog(prepared.lease_id, base_pose.into(), visual.feed_mm_per_min)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    };
+    let lights_off = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    let report = measurement.map_err(|error| {
+        append_xy_direction_cleanup_errors(error, restore.as_ref(), lights_off.as_ref())
+    })?;
+    restore.map_err(|error| format!("local XY calibration restore failed: {error}"))?;
+    lights_off.map_err(|error| format!("local XY light cleanup failed: {error}"))?;
+    persist_local_xy_direction_response(&state, prepared.calibration_id, &report)?;
+    let enabled = report
+        .axes
+        .iter()
+        .filter(|axis| axis.compensation_enabled)
+        .count();
+    Ok(Some(format!(
+        "Measured local X/Y direction response; {enabled} of 2 axis compensations passed holdout",
+    )))
+}
+
+fn append_xy_direction_cleanup_errors(
+    error: String,
+    restore: Result<&(), &String>,
+    lights_off: Result<&(), &anyhow::Error>,
+) -> String {
+    let mut message = error;
+    if let Err(cleanup) = restore {
+        message.push_str(&format!("; restore also failed: {cleanup}"));
+    }
+    if let Err(cleanup) = lights_off {
+        message.push_str(&format!("; light cleanup also failed: {cleanup}"));
+    }
+    message
+}
+
+async fn measure_local_xy_direction_response(
+    state: &AppState,
+    lease_id: Uuid,
+    base_pose: Pose,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    mapping: [[f64; 2]; 2],
+) -> Result<LocalXyDirectionResponseReport, String> {
+    let profile = state.profile.local_xy_direction_response.as_ref().unwrap();
+    let reference = capture_top_working_plane_fiducial(state, camera_profile, camera_path)
+        .await
+        .map_err(calibration_stop_message)?;
+    let mut samples = Vec::new();
+    let mut axes = Vec::new();
+    for axis in [LinearAxis::X, LinearAxis::Y] {
+        let estimate = measure_local_xy_axis(
+            state,
+            lease_id,
+            base_pose,
+            reference,
+            camera_profile,
+            camera_path,
+            mapping,
+            axis,
+            &mut samples,
+        )
+        .await?;
+        let negative_compensation = estimate.negative_compensation();
+        let positive_compensation = estimate.positive_compensation();
+        let compensation_bound = state
+            .profile
+            .visual_homing
+            .as_ref()
+            .unwrap()
+            .max_correction_mm;
+        if negative_compensation[0]
+            .hypot(negative_compensation[1])
+            .max(positive_compensation[0].hypot(positive_compensation[1]))
+            > compensation_bound
+        {
+            return Err(format!(
+                "{axis:?} direction-response compensation exceeds the {compensation_bound:.3}mm visual safety bound",
+            ));
+        }
+        let pair = estimate.sample_pairs + 1;
+        let condition = direction_response_condition(profile, pair - 1);
+        let negative_holdout = capture_local_xy_direction_sample(
+            state,
+            lease_id,
+            base_pose,
+            reference,
+            camera_profile,
+            camera_path,
+            mapping,
+            axis,
+            ApproachSide::Negative,
+            pair,
+            condition.0,
+            condition.1,
+            negative_compensation,
+        )
+        .await?;
+        let positive_holdout = capture_local_xy_direction_sample(
+            state,
+            lease_id,
+            base_pose,
+            reference,
+            camera_profile,
+            camera_path,
+            mapping,
+            axis,
+            ApproachSide::Positive,
+            pair,
+            condition.0,
+            condition.1,
+            positive_compensation,
+        )
+        .await?;
+        let holdout_gap = (positive_holdout.residual_correction_x_mm
+            - negative_holdout.residual_correction_x_mm)
+            .hypot(
+                positive_holdout.residual_correction_y_mm
+                    - negative_holdout.residual_correction_y_mm,
+            );
+        let improved = holdout_gap < estimate.uncompensated_direction_gap_mm();
+        let compensation_enabled = estimate.effect_resolved && improved;
+        let applied_negative = if compensation_enabled {
+            negative_compensation
+        } else {
+            [0.0, 0.0]
+        };
+        let applied_positive = if compensation_enabled {
+            positive_compensation
+        } else {
+            [0.0, 0.0]
+        };
+        let stopping_reason = direction_response_stopping_reason(profile, &estimate);
+        axes.push(LocalXyAxisDirectionReport {
+            estimate,
+            stopping_reason,
+            holdout: LocalXyCompensationHoldout {
+                negative_residual_x_mm: negative_holdout.residual_correction_x_mm,
+                negative_residual_y_mm: negative_holdout.residual_correction_y_mm,
+                positive_residual_x_mm: positive_holdout.residual_correction_x_mm,
+                positive_residual_y_mm: positive_holdout.residual_correction_y_mm,
+                direction_gap_mm: holdout_gap,
+                improved,
+                negative_sample: negative_holdout,
+                positive_sample: positive_holdout,
+            },
+            compensation_enabled,
+            applied_negative_compensation_x_mm: applied_negative[0],
+            applied_negative_compensation_y_mm: applied_negative[1],
+            applied_positive_compensation_x_mm: applied_positive[0],
+            applied_positive_compensation_y_mm: applied_positive[1],
+        });
+    }
+    Ok(LocalXyDirectionResponseReport {
+        reference_controller_x_mm: base_pose.x_mm,
+        reference_controller_y_mm: base_pose.y_mm,
+        reference_observed_x_px: reference.x_px,
+        reference_observed_y_px: reference.y_px,
+        pixel_error_to_machine_mm: mapping,
+        passed: axes.len() == 2,
+        axes,
+        samples,
+        observed_at: Utc::now(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_local_xy_axis(
+    state: &AppState,
+    lease_id: Uuid,
+    base_pose: Pose,
+    reference: FiducialDetection,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    mapping: [[f64; 2]; 2],
+    axis: LinearAxis,
+    samples: &mut Vec<LocalXyDirectionResponseSample>,
+) -> Result<LocalXyAxisEstimate, String> {
+    let profile = state.profile.local_xy_direction_response.as_ref().unwrap();
+    for pair in 1..=profile.maximum_sample_pairs {
+        let (distance, feed) = direction_response_condition(profile, pair - 1);
+        let sides = if pair % 2 == 1 {
+            [ApproachSide::Negative, ApproachSide::Positive]
+        } else {
+            [ApproachSide::Positive, ApproachSide::Negative]
+        };
+        for side in sides {
+            samples.push(
+                capture_local_xy_direction_sample(
+                    state,
+                    lease_id,
+                    base_pose,
+                    reference,
+                    camera_profile,
+                    camera_path,
+                    mapping,
+                    axis,
+                    side,
+                    pair,
+                    distance,
+                    feed,
+                    [0.0, 0.0],
+                )
+                .await?,
+            );
+        }
+        if let Some(estimate) = LocalXyAxisEstimate::from_samples(axis, samples) {
+            if estimate.sampling_complete(
+                profile.minimum_sample_pairs,
+                profile.maximum_sample_pairs,
+                profile.resolved_relative_uncertainty,
+            ) {
+                return Ok(estimate);
+            }
+        }
+    }
+    LocalXyAxisEstimate::from_samples(axis, samples)
+        .ok_or_else(|| format!("{axis:?} direction-response estimate is incomplete"))
+}
+
+fn direction_response_condition(
+    profile: &velocitypnp_domain::LocalXyDirectionResponseProfile,
+    zero_based_pair: u32,
+) -> (f64, f64) {
+    let index = zero_based_pair as usize;
+    let distance = profile.approach_distances_mm[index % profile.approach_distances_mm.len()];
+    let feed = profile.approach_feeds_mm_per_min
+        [(index / profile.approach_distances_mm.len()) % profile.approach_feeds_mm_per_min.len()];
+    (distance, feed)
+}
+
+fn direction_response_stopping_reason(
+    profile: &velocitypnp_domain::LocalXyDirectionResponseProfile,
+    estimate: &LocalXyAxisEstimate,
+) -> String {
+    if estimate.sample_pairs >= profile.maximum_sample_pairs {
+        "maximum adaptive sample count reached".into()
+    } else if estimate.effect_resolved {
+        "direction effect resolved with bounded relative uncertainty".into()
+    } else {
+        "direction effect was not distinguishable from measured repeatability".into()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_local_xy_direction_sample(
+    state: &AppState,
+    lease_id: Uuid,
+    base_pose: Pose,
+    reference: FiducialDetection,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    mapping: [[f64; 2]; 2],
+    axis: LinearAxis,
+    approach_side: ApproachSide,
+    pair: u32,
+    approach_distance_mm: f64,
+    feed_mm_per_min: f64,
+    compensation: [f64; 2],
+) -> Result<LocalXyDirectionResponseSample, String> {
+    let side_sign = match approach_side {
+        ApproachSide::Negative => -1.0,
+        ApproachSide::Positive => 1.0,
+    };
+    let mut away = base_pose;
+    match axis {
+        LinearAxis::X => away.x_mm += side_sign * approach_distance_mm,
+        LinearAxis::Y => away.y_mm += side_sign * approach_distance_mm,
+    }
+    state
+        .machine
+        .jog(lease_id, away.into(), feed_mm_per_min)
+        .await
+        .map_err(|error| error.to_string())?;
+    let target = JogTarget {
+        x_mm: base_pose.x_mm + compensation[0],
+        y_mm: base_pose.y_mm + compensation[1],
+        z_mm: base_pose.z_mm,
+        rotation_deg: None,
+    };
+    state
+        .machine
+        .jog(lease_id, target, feed_mm_per_min)
+        .await
+        .map_err(|error| error.to_string())?;
+    let observed = capture_top_working_plane_fiducial(state, camera_profile, camera_path)
+        .await
+        .map_err(calibration_stop_message)?;
+    let error_x_px = observed.x_px - reference.x_px;
+    let error_y_px = observed.y_px - reference.y_px;
+    let residual_correction_x_mm = mapping[0][0] * error_x_px + mapping[0][1] * error_y_px;
+    let residual_correction_y_mm = mapping[1][0] * error_x_px + mapping[1][1] * error_y_px;
+    Ok(LocalXyDirectionResponseSample {
+        axis,
+        approach_side,
+        pair,
+        approach_distance_mm,
+        feed_mm_per_min,
+        commanded_x_mm: target.x_mm,
+        commanded_y_mm: target.y_mm,
+        observed_x_px: observed.x_px,
+        observed_y_px: observed.y_px,
+        residual_correction_x_mm,
+        residual_correction_y_mm,
+        observed_at: Utc::now(),
+    })
+}
+
+fn persist_local_xy_direction_response(
+    state: &AppState,
+    calibration_id: Uuid,
+    report: &LocalXyDirectionResponseReport,
+) -> Result<(), String> {
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)?;
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    snapshot.values.as_object_mut().unwrap().insert(
+        CalibrationStepId::LocalXyDirectionResponse.as_str().into(),
+        serde_json::to_value(report).map_err(|error| error.to_string())?,
+    );
+    if report.passed {
+        crate::calibration_artifacts::record_captured_artifact(
+            state,
+            &mut snapshot,
+            CalibrationArtifactId::LocalXyDirectionResponse,
+            None,
+            serde_json::to_value(report).map_err(|error| error.to_string())?,
+        )?;
+        snapshot
+            .completed_steps
+            .insert(CalibrationStepId::LocalXyDirectionResponse);
+        if let Some(residuals) =
+            summarize_residuals(report.axes.iter().map(|axis| axis.holdout.direction_gap_mm))
+        {
+            snapshot
+                .residuals
+                .insert(CalibrationStepId::LocalXyDirectionResponse, residuals);
+        }
+    } else {
+        snapshot.invalidate_artifacts_from(&[CalibrationArtifactId::LocalXyDirectionResponse]);
+        snapshot
+            .completed_steps
+            .remove(&CalibrationStepId::LocalXyDirectionResponse);
     }
     snapshot.production_ready =
         calibration_is_production_ready(&snapshot, state.machine.status().simulated);
@@ -7977,6 +8523,47 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("sealing target"));
+    }
+
+    #[tokio::test]
+    async fn xy_direction_response_requires_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/xy-direction-response",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("level"));
+        assert!(message.contains("datum board"));
+        assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn xy_direction_conditions_cover_distances_and_feeds_before_repeating() {
+        let state = test_state();
+        let profile = state.profile.local_xy_direction_response.as_ref().unwrap();
+        assert_eq!(direction_response_condition(profile, 0), (1.0, 300.0));
+        assert_eq!(direction_response_condition(profile, 1), (5.0, 300.0));
+        assert_eq!(direction_response_condition(profile, 2), (1.0, 900.0));
+        assert_eq!(direction_response_condition(profile, 3), (5.0, 900.0));
     }
 
     #[tokio::test]

@@ -307,6 +307,24 @@ function CalibrationPanel({ status, devices, setError }: {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const calibrateXyDirectionResponse = async () => {
+    if (!active) return;
+    if (!window.confirm(
+      "Measure local X/Y direction response on the homing fiducial? Confirm both nozzles are level, the datum board is fixed, the travel envelope is clear, and power isolation is reachable. The head will approach the datum from both sides at several bounded distances and speeds.",
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 900)
+        : await api.lease("VelocityPnP XY direction response", 900);
+      await waitForOperation(await api.calibrateXyDirectionResponse(active.id, lease.id));
+      const snapshot = await api.calibration(active.id);
+      setActive(snapshot);
+      setSnapshots((current) => current.map((value) => value.id === snapshot.id ? snapshot : value));
+      setArtifactPlan(await api.calibrationPlan(active.id));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
   const recomputeDerived = async () => {
     if (!active) return;
     setStarting(true); setError(null);
@@ -351,6 +369,10 @@ function CalibrationPanel({ status, devices, setError }: {
   const canCharacterizeVacuum = (nozzleId: "N1" | "N2") => Boolean(
     canVacuumProbe && active?.values.vacuum_probe?.[nozzleId]?.passed,
   );
+  const canCalibrateXyDirectionResponse = Boolean(
+    active?.artifacts.top_camera_working_plane_map
+      && status.state === "ready" && status.homed,
+  );
 
   return <div className="calibration-layout">
     <section className="card calibration-summary">
@@ -365,6 +387,7 @@ function CalibrationPanel({ status, devices, setError }: {
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N2")}>Probe N2 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N1")} onClick={() => void characterizeVacuum("N1")}>Characterize N1 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N2")} onClick={() => void characterizeVacuum("N2")}>Characterize N2 vacuum</button>
+        <button className="secondary" disabled={starting || runActive || !canCalibrateXyDirectionResponse} onClick={() => void calibrateXyDirectionResponse()}>Measure XY direction response</button>
         <button className="secondary" disabled={starting || runActive} onClick={() => void recomputeDerived()}>Recompute derived transforms</button>
         <button className="secondary" disabled={starting || runActive || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
@@ -386,6 +409,10 @@ function CalibrationPanel({ status, devices, setError }: {
           const report = active.values.vacuum_sensor_characterization?.[nozzleId];
           return report && <p key={nozzleId}>{nozzleId} {report.tip_id}: <strong>{report.passed ? "reference seal characterized" : "distributions overlap"}</strong>; signal {report.median_signal_delta_counts.toFixed(1)} counts; robust gap {report.robust_distribution_gap_counts.toFixed(1)} counts; acquire/release {report.acquire_threshold_raw_value.toFixed(1)} / {report.release_threshold_raw_value.toFixed(1)}</p>;
         })}
+      </div>}
+      {active?.values.local_xy_direction_response && <div className="run-result">
+        {active.values.local_xy_direction_response.axes.map((axis) =>
+          <p key={axis.estimate.axis}>{axis.estimate.axis.toUpperCase()}: <strong>{axis.compensation_enabled ? "holdout-validated compensation" : axis.estimate.effect_resolved ? "compensation rejected by holdout" : "no resolved direction effect"}</strong>; gap {axis.estimate.primary_axis_gap_mm.toFixed(4)} mm ± {axis.estimate.primary_axis_confidence_interval_95_mm.toFixed(4)} mm; holdout {axis.holdout.direction_gap_mm.toFixed(4)} mm; {axis.estimate.sample_pairs} pairs</p>)}
       </div>}
       {activeRun && <div className="calibration-run">
         <div className="run-heading"><strong>{pretty(activeRun.status)}</strong><span>{pretty(activeRun.phase)}</span></div>
@@ -410,7 +437,7 @@ function CalibrationPanel({ status, devices, setError }: {
         <div className="workflow-index">{done ? "✓" : String(index + 1).padStart(2, "0")}</div>
         <div><div className="step-labels">{automated && <span>Automated</span>}{step.requires_motion && <span>Motion</span>}{step.requires_fixture && <span>Fixture</span>}</div><h3>{step.title}</h3><p>{step.description}</p>
           {step.dependencies.length > 0 && <small>Requires {step.dependencies.map(pretty).join(", ")}</small>}</div>
-        <button disabled>{done ? "Measured" : automated ? "In initial run" : "Not implemented"}</button>
+        <button disabled>{done ? "Measured" : automated ? "Use controls above" : "Not implemented"}</button>
       </article>;
     })}</section>
     {snapshots.length > 1 && <p className="snapshot-count">{snapshots.length} calibration snapshots retained</p>}
