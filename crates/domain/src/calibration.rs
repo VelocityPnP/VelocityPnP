@@ -572,7 +572,7 @@ impl AutomatedCalibrationConfig {
         .all(|value| value.is_finite());
         if !(30..=60).contains(&self.camera_sample_count)
             || !(5..=30).contains(&self.tooling_sample_count)
-            || !(30..=100).contains(&self.visual_homing_sample_count)
+            || !(3..=100).contains(&self.visual_homing_sample_count)
             || !finite
             || self.excursion_x_mm.hypot(self.excursion_y_mm) < 1.0
             || self.excursion_x_mm.abs() > 50.0
@@ -861,6 +861,23 @@ mod tests {
             excursion_feed_mm_per_min: 600.0,
             visual_homing_p95_limit_mm: 0.05,
         };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn automated_configuration_accepts_a_short_commissioning_check() {
+        let mut config = AutomatedCalibrationConfig {
+            camera_sample_count: 30,
+            tooling_sample_count: 5,
+            visual_homing_sample_count: 5,
+            excursion_x_mm: -10.0,
+            excursion_y_mm: -10.0,
+            excursion_feed_mm_per_min: 600.0,
+            visual_homing_p95_limit_mm: 0.05,
+        };
+        assert!(config.validate().is_ok());
+
+        config.visual_homing_sample_count = 2;
         assert!(config.validate().is_err());
     }
 }

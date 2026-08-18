@@ -153,6 +153,7 @@ export interface CalibrationSnapshot {
       models: NozzleHeightModel[];
     };
   };
+  parent_id: string | null;
   production_ready: boolean;
 }
 

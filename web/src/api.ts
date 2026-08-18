@@ -96,7 +96,7 @@ export const api = {
   calibrationRun: (runId: string) =>
     request<AutomatedCalibrationRun>(`/calibration-runs/${runId}`),
   startCalibration: (
-    snapshotId: string, leaseId: string, visualHomingSampleCount = 30,
+    snapshotId: string, leaseId: string, visualHomingSampleCount = 5,
   ) => jsonPost<{ run: AutomatedCalibrationRun; operation: Operation }>(
     `/calibrations/${snapshotId}/runs`,
     {
@@ -105,6 +105,14 @@ export const api = {
       visual_homing_sample_count: visualHomingSampleCount,
     },
   ),
+  startHeadGeometryCalibration: (snapshotId: string, leaseId: string) =>
+    jsonPost<{ run: AutomatedCalibrationRun; operation: Operation }>(
+      `/calibrations/${snapshotId}/head-geometry-runs`,
+      {
+        lease_id: leaseId,
+        confirmed_external_safety_checks: true,
+      },
+    ),
   vacuumProbe: (snapshotId: string, leaseId: string, nozzleId: "N1" | "N2") =>
     jsonPost<Operation>(`/calibrations/${snapshotId}/vacuum-probe`, {
       lease_id: leaseId,

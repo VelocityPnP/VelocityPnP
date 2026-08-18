@@ -27,7 +27,7 @@ use velocitypnp_domain::{
     JogTarget, MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
     NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus, Pose, Residuals,
     SensorReading, VacuumProbeReport, VacuumProbeSample, VisualHomingProfile,
-    VisualHomingValidationSample,
+    VisualHomingValidationReport, VisualHomingValidationSample,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -178,6 +178,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/runs",
             get(list_calibration_runs).post(start_calibration_run),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/head-geometry-runs",
+            post(start_head_geometry_run),
         )
         .route(
             "/api/v1/calibrations/{id}/vacuum-probe",
@@ -2454,7 +2458,7 @@ fn default_tooling_sample_count() -> u32 {
 }
 
 fn default_visual_homing_sample_count() -> u32 {
-    30
+    5
 }
 
 fn default_calibration_excursion() -> f64 {
@@ -2600,6 +2604,155 @@ async fn start_calibration_run(
     let lease_id = body.lease_id;
     spawn_prepared_operation(state, operation, async move {
         execute_calibration_run(task_state, run_id, lease_id).await
+    });
+    Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+#[derive(Deserialize)]
+struct StartHeadGeometryRunRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+}
+
+async fn start_head_geometry_run(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartHeadGeometryRunRequest>,
+) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "head geometry calibration requires confirmation that the travel envelope is clear, both nozzles are level, nozzle tubes are routed normally and free of snags, and power isolation is reachable",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let parent_id = snapshot.parent_id.ok_or_else(|| {
+        ApiError::bad_request(
+            "head geometry recalibration requires a child snapshot with a validated parent",
+        )
+    })?;
+    let parent = state
+        .store
+        .get_calibration(parent_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::bad_request("calibration parent snapshot was not found"))?;
+    let visual_homing_report = inherit_head_geometry_prerequisites(&mut snapshot, &parent)
+        .map_err(ApiError::bad_request)?;
+    if state
+        .store
+        .list_calibration_runs()
+        .map_err(ApiError::internal)?
+        .iter()
+        .any(|run| {
+            run.calibration_id == calibration_id
+                && matches!(
+                    run.status,
+                    CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+                )
+        })
+    {
+        return Err(ApiError::bad_request(
+            "this calibration snapshot already has an active run",
+        ));
+    }
+    let machine = state.machine.status();
+    machine
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if machine.state != MachineState::Ready || !machine.homed {
+        return Err(ApiError::bad_request(
+            "head geometry recalibration requires a ready, homed machine",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    visual.validate().map_err(ApiError::bad_request)?;
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?;
+    bottom.validate().map_err(ApiError::bad_request)?;
+    let top_camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let bottom_camera_path = camera_path_for_role(CameraRole::BottomCamera)?;
+    let config = AutomatedCalibrationConfig {
+        camera_sample_count: default_camera_sample_count(),
+        tooling_sample_count: default_tooling_sample_count(),
+        visual_homing_sample_count: default_visual_homing_sample_count(),
+        excursion_x_mm: default_calibration_excursion(),
+        excursion_y_mm: default_calibration_excursion(),
+        excursion_feed_mm_per_min: default_calibration_excursion_feed(),
+        visual_homing_p95_limit_mm: default_visual_homing_p95_limit(),
+    };
+    config.validate().map_err(ApiError::bad_request)?;
+    validate_calibration_targets(&state.profile, &config)?;
+    state
+        .machine
+        .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(ApiError::internal)?;
+    let operation = Operation::pending("calibration.head_geometry");
+    let now = Utc::now();
+    let run = AutomatedCalibrationRun {
+        id: Uuid::new_v4(),
+        calibration_id,
+        operation_id: operation.id,
+        profile_id: state.profile.id.clone(),
+        created_at: now,
+        updated_at: now,
+        status: CalibrationRunStatus::Pending,
+        phase: CalibrationRunPhase::Pending,
+        config,
+        checks: head_geometry_calibration_checks(
+            parent_id,
+            &visual_homing_report,
+            machine.pose,
+            json!({
+                "machine_profile_id": state.profile.id,
+                "top_camera": top_camera_path,
+                "bottom_camera": bottom_camera_path,
+            }),
+        ),
+        camera_reports: BTreeMap::new(),
+        visual_homing_samples: Vec::new(),
+        visual_homing_report: Some(visual_homing_report),
+        head_geometry_report: None,
+        failure: None,
+        simulated: machine.simulated,
+    };
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_calibration_run(&run)
+        .map_err(ApiError::internal)?;
+    let returned = StartCalibrationRunResponse {
+        run: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    let run_id = run.id;
+    let lease_id = body.lease_id;
+    spawn_prepared_operation(state, operation, async move {
+        execute_head_geometry_run(task_state, run_id, lease_id).await
     });
     Ok((StatusCode::ACCEPTED, Json(returned)))
 }
@@ -2877,6 +3030,110 @@ fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
             "Waiting for safe height-specific bottom-camera mapping probes",
         ),
     ]
+}
+
+const HEAD_GEOMETRY_PREREQUISITES: [CalibrationStepId; 3] = [
+    CalibrationStepId::CoarseHoming,
+    CalibrationStepId::CameraReproducibility,
+    CalibrationStepId::VisualHoming,
+];
+
+fn inherit_head_geometry_prerequisites(
+    target: &mut CalibrationSnapshot,
+    parent: &CalibrationSnapshot,
+) -> Result<VisualHomingValidationReport, String> {
+    if target.parent_id != Some(parent.id) {
+        return Err("calibration snapshot does not name the supplied parent".into());
+    }
+    if target.profile_id != parent.profile_id {
+        return Err("calibration parent uses a different machine profile".into());
+    }
+    if target.machine_serial != parent.machine_serial {
+        return Err("calibration parent belongs to a different machine".into());
+    }
+    if let Some(missing) = HEAD_GEOMETRY_PREREQUISITES
+        .iter()
+        .find(|step| !parent.completed_steps.contains(step))
+    {
+        return Err(format!(
+            "calibration parent has no completed {} step",
+            missing.as_str()
+        ));
+    }
+    let report = parent
+        .values
+        .get(CalibrationStepId::VisualHoming.as_str())
+        .and_then(|value| value.get("report"))
+        .cloned()
+        .ok_or_else(|| "calibration parent has no visual-homing report".to_string())
+        .and_then(|value| {
+            serde_json::from_value::<VisualHomingValidationReport>(value).map_err(|error| {
+                format!("calibration parent visual-homing report is invalid: {error}")
+            })
+        })?;
+    if !report.passed {
+        return Err("calibration parent did not pass visual-homing validation".into());
+    }
+
+    target.invalidate_from(CalibrationStepId::BottomCameraGeometry);
+    if !target.values.is_object() {
+        target.values = json!({});
+    }
+    let values = target.values.as_object_mut().unwrap();
+    values.remove("vacuum_probe");
+    for step in HEAD_GEOMETRY_PREREQUISITES {
+        target.completed_steps.remove(&step);
+        target.residuals.remove(&step);
+        values.remove(step.as_str());
+        target.completed_steps.insert(step);
+        if let Some(residuals) = parent.residuals.get(&step) {
+            target.residuals.insert(step, *residuals);
+        }
+        if let Some(value) = parent.values.get(step.as_str()) {
+            values.insert(step.as_str().into(), value.clone());
+        }
+    }
+    target.production_ready = false;
+    Ok(report)
+}
+
+fn head_geometry_calibration_checks(
+    parent_id: Uuid,
+    visual_homing_report: &VisualHomingValidationReport,
+    pose: Option<Pose>,
+    device_evidence: Value,
+) -> Vec<CalibrationCheck> {
+    let retained = [
+        "external_safety",
+        "device_discovery",
+        "coarse_homing",
+        "visual_homing",
+        "bottom_camera_mapping",
+        "top_camera_working_plane_mapping",
+        "reciprocal_camera_center",
+        "camera_ray_transfer",
+        "nozzle_offsets",
+        "runout_N1",
+        "runout_N2",
+        "height_N1",
+        "height_N2",
+    ];
+    let mut checks = initial_calibration_checks(device_evidence);
+    checks.retain(|check| retained.contains(&check.id.as_str()));
+    if let Some(check) = checks.iter_mut().find(|check| check.id == "coarse_homing") {
+        check.status = CalibrationCheckStatus::Passed;
+        check.message = "Current controller session is homed".into();
+        check.evidence = json!({"pose": pose, "source": "current_controller_session"});
+    }
+    if let Some(check) = checks.iter_mut().find(|check| check.id == "visual_homing") {
+        check.status = CalibrationCheckStatus::Passed;
+        check.message = "Reusing the validated parent result; live alignment is pending".into();
+        check.evidence = json!({
+            "parent_calibration_id": parent_id,
+            "report": visual_homing_report,
+        });
+    }
+    checks
 }
 
 fn calibration_check(
@@ -3230,6 +3487,125 @@ async fn execute_calibration_run(
     Ok(Some(format!(
         "Initial machine calibration passed {} visual-homing cycles, {} nozzle runout fits, and {} height models",
         run.config.visual_homing_sample_count,
+        geometry_report.nozzles.len(),
+        geometry_report.nozzle_height_models.len(),
+    )))
+}
+
+async fn execute_head_geometry_run(
+    state: AppState,
+    run_id: Uuid,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    let mut run = state
+        .store
+        .get_calibration_run(run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "head geometry run disappeared from storage".to_string())?;
+    run.status = CalibrationRunStatus::Running;
+    persist_calibration_run(&state, &mut run)?;
+
+    if let Err(error) = refresh_calibration_lease(&state, lease_id).await {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    let machine = state.machine.status();
+    if let Err(error) = machine.assert_lease(lease_id, Utc::now()) {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    if machine.state != MachineState::Ready || !machine.homed {
+        return fail_calibration_run(
+            &state,
+            &mut run,
+            "head geometry recalibration lost the ready, homed machine state".into(),
+        );
+    }
+
+    let alignment = match execute_visual_home_with_limit(
+        &state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+        Some(run.config.visual_homing_p95_limit_mm),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) if error.status == StatusCode::BAD_REQUEST => {
+            update_run_check(
+                &mut run,
+                "visual_homing",
+                CalibrationCheckStatus::Failed,
+                &error.message,
+                Value::Null,
+            );
+            return reject_calibration_run(&state, &mut run, error.message);
+        }
+        Err(error) => return fail_calibration_run(&state, &mut run, error.message),
+    };
+    let verification = match alignment.verification.as_ref() {
+        Some(verification) => verification,
+        None => {
+            return fail_calibration_run(
+                &state,
+                &mut run,
+                "live visual alignment returned no verification".into(),
+            )
+        }
+    };
+    let alignment_evidence = json!({
+        "validated_report": run.visual_homing_report,
+        "live_initial": alignment.initial,
+        "live_corrections": alignment.corrections,
+        "live_verification": verification,
+    });
+    update_run_check(
+        &mut run,
+        "visual_homing",
+        CalibrationCheckStatus::Passed,
+        "Validated parent result reused and current coordinates visually aligned",
+        alignment_evidence,
+    );
+    if let Err(error) = persist_calibration_run(&state, &mut run) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+
+    if let Err(error) = refresh_calibration_lease(&state, lease_id).await {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
+        if let Err(cleanup_error) = state.machine.disable_actuator("lights".into()).await {
+            tracing::error!(%cleanup_error, "head-geometry light cleanup also failed");
+        }
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let geometry_result = execute_head_geometry_calibration(&state, &mut run, lease_id).await;
+    if let Err(error) = state.machine.disable_actuator("lights".into()).await {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let geometry_report = match geometry_result {
+        Ok(report) => report,
+        Err(CalibrationStop::Rejected(message)) => {
+            return reject_calibration_run(&state, &mut run, message)
+        }
+        Err(CalibrationStop::Failed(message)) => {
+            return fail_calibration_run(&state, &mut run, message)
+        }
+    };
+    run.head_geometry_report = Some(geometry_report.clone());
+    if let Err(error) = persist_calibration_run(&state, &mut run) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    if let Err(error) = record_head_geometry_steps(&state, &run, &geometry_report) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    run.phase = CalibrationRunPhase::Complete;
+    run.status = CalibrationRunStatus::Succeeded;
+    run.failure = None;
+    persist_calibration_run(&state, &mut run)?;
+    Ok(Some(format!(
+        "Head geometry recalibration reused validated visual homing and measured {} nozzle runout fits and {} height models",
         geometry_report.nozzles.len(),
         geometry_report.nozzle_height_models.len(),
     )))
@@ -6065,6 +6441,124 @@ mod tests {
             failure: None,
             simulated: true,
         }
+    }
+
+    fn passed_visual_homing_report() -> VisualHomingValidationReport {
+        VisualHomingValidationReport {
+            visual_verification: Residuals {
+                sample_count: 5,
+                rms_mm: 0.01,
+                p95_mm: 0.02,
+                max_mm: 0.02,
+            },
+            independent_return: Residuals {
+                sample_count: 5,
+                rms_mm: 0.02,
+                p95_mm: 0.03,
+                max_mm: 0.03,
+            },
+            initial_correction_min_mm: 0.5,
+            initial_correction_mean_mm: 0.7,
+            initial_correction_max_mm: 0.9,
+            passed: true,
+        }
+    }
+
+    #[test]
+    fn head_geometry_revision_inherits_only_validated_prerequisites() {
+        let parent_id = Uuid::new_v4();
+        let report = passed_visual_homing_report();
+        let mut completed_steps = BTreeSet::new();
+        completed_steps.extend(HEAD_GEOMETRY_PREREQUISITES);
+        completed_steps.insert(CalibrationStepId::BottomCameraGeometry);
+        let parent = CalibrationSnapshot {
+            id: parent_id,
+            machine_serial: "test-machine".into(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: Utc::now(),
+            completed_steps,
+            residuals: BTreeMap::from([(
+                CalibrationStepId::VisualHoming,
+                report.independent_return,
+            )]),
+            values: json!({
+                "coarse_homing": {"source": "controller"},
+                "camera_reproducibility": {"source": "vision"},
+                "visual_homing": {"report": report},
+                "bottom_camera_geometry": {"stale": true},
+            }),
+            parent_id: None,
+            production_ready: false,
+        };
+        let mut target = CalibrationSnapshot {
+            id: Uuid::new_v4(),
+            machine_serial: parent.machine_serial.clone(),
+            profile_id: parent.profile_id.clone(),
+            created_at: Utc::now(),
+            completed_steps: BTreeSet::from([
+                CalibrationStepId::CoarseHoming,
+                CalibrationStepId::BottomCameraGeometry,
+                CalibrationStepId::NozzleOffsets,
+            ]),
+            residuals: BTreeMap::new(),
+            values: json!({
+                "coarse_homing": {"source": "interrupted_run"},
+                "bottom_camera_geometry": {"stale": true},
+                "nozzle_offsets": {"stale": true},
+                "vacuum_probe": {"N1": {"stale": true}},
+            }),
+            parent_id: Some(parent_id),
+            production_ready: true,
+        };
+
+        let inherited = inherit_head_geometry_prerequisites(&mut target, &parent).unwrap();
+
+        assert!(inherited.passed);
+        assert!(HEAD_GEOMETRY_PREREQUISITES
+            .iter()
+            .all(|step| target.completed_steps.contains(step)));
+        assert!(!target
+            .completed_steps
+            .contains(&CalibrationStepId::BottomCameraGeometry));
+        assert_eq!(target.values["coarse_homing"]["source"], "controller");
+        assert!(target.values.get("bottom_camera_geometry").is_none());
+        assert!(target.values.get("nozzle_offsets").is_none());
+        assert!(target.values.get("vacuum_probe").is_none());
+        assert!(!target.production_ready);
+    }
+
+    #[test]
+    fn head_geometry_revision_rejects_failed_parent_homing() {
+        let parent_id = Uuid::new_v4();
+        let mut report = passed_visual_homing_report();
+        report.passed = false;
+        let parent = CalibrationSnapshot {
+            id: parent_id,
+            machine_serial: "test-machine".into(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: Utc::now(),
+            completed_steps: BTreeSet::from(HEAD_GEOMETRY_PREREQUISITES),
+            residuals: BTreeMap::new(),
+            values: json!({"visual_homing": {"report": report}}),
+            parent_id: None,
+            production_ready: false,
+        };
+        let mut target = CalibrationSnapshot {
+            id: Uuid::new_v4(),
+            machine_serial: parent.machine_serial.clone(),
+            profile_id: parent.profile_id.clone(),
+            created_at: Utc::now(),
+            completed_steps: BTreeSet::new(),
+            residuals: BTreeMap::new(),
+            values: json!({}),
+            parent_id: Some(parent_id),
+            production_ready: false,
+        };
+
+        assert_eq!(
+            inherit_head_geometry_prerequisites(&mut target, &parent).unwrap_err(),
+            "calibration parent did not pass visual-homing validation"
+        );
     }
 
     fn test_nozzle_height_model() -> NozzleHeightModel {

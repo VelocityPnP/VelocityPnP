@@ -120,8 +120,17 @@ enum Command {
         /// tubes, and reachable power isolation.
         #[arg(long)]
         confirm_safety_checks: bool,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 5)]
         visual_homing_samples: u32,
+    },
+    CalibrateHeadGeometry {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Confirm level nozzles, a clear envelope, correctly routed nozzle
+        /// tubes, and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
     },
     VacuumProbe {
         calibration: Uuid,
@@ -404,6 +413,31 @@ async fn main() -> Result<()> {
             let run_id = started["run"]["id"]
                 .as_str()
                 .context("calibration response did not contain a run ID")?;
+            run_operation(&client, base, started["operation"].clone()).await?;
+            get(&client, &format!("{base}/calibration-runs/{run_id}")).await?
+        }
+        Command::CalibrateHeadGeometry {
+            calibration,
+            lease,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "head geometry calibration requires --confirm-safety-checks after inspecting the envelope, nozzles, tube routing, and power isolation"
+                );
+            }
+            let started = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/head-geometry-runs"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            let run_id = started["run"]["id"]
+                .as_str()
+                .context("head geometry response did not contain a run ID")?;
             run_operation(&client, base, started["operation"].clone()).await?;
             get(&client, &format!("{base}/calibration-runs/{run_id}")).await?
         }

@@ -249,6 +249,21 @@ function CalibrationPanel({ status, devices, setError }: {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const recalibrateHeadGeometry = async () => {
+    if (!active) return;
+    if (!window.confirm(
+      "Recalibrate head geometry from the validated parent snapshot? Confirm both nozzles are level, the travel envelope is clear, power isolation is within reach, and both nozzle tubes are seated, routed normally, and free of snags. The machine will perform one live visual alignment, then measure camera transfer, nozzle offsets, runout, and height models.",
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 3600)
+        : await api.lease("VelocityPnP head geometry", 3600);
+      const started = await api.startHeadGeometryCalibration(active.id, lease.id);
+      setActiveRun(started.run);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
   const vacuumProbe = async (nozzleId: "N1" | "N2") => {
     if (!active) return;
     if (!window.confirm(
@@ -269,6 +284,9 @@ function CalibrationPanel({ status, devices, setError }: {
 
   const runActive = Boolean(activeRun && ["pending", "running"].includes(activeRun.status));
   const machineReady = ["unhomed", "ready"].includes(status.state);
+  const canRecalibrateHeadGeometry = Boolean(
+    active?.parent_id && status.state === "ready" && status.homed,
+  );
   const canVacuumProbe = Boolean(active && completed.has("nozzle_height_model") && status.state === "ready" && status.homed);
 
   return <div className="calibration-layout">
@@ -278,6 +296,7 @@ function CalibrationPanel({ status, devices, setError }: {
       {status.simulated && <div className="notice">Simulation can exercise the runner but can never mark a machine production-ready.</div>}
       {!active ? <button onClick={() => void createSnapshot()}>Create calibration</button> : <>
         <button disabled={starting || runActive || !machineReady} onClick={() => void start()}>{runActive ? "Calibration running" : activeRun ? "Run calibration again" : "Run initial calibration"}</button>
+        <button className="secondary" disabled={starting || runActive || !canRecalibrateHeadGeometry} onClick={() => void recalibrateHeadGeometry()}>Recalibrate head geometry</button>
         <button className="secondary" disabled={starting || runActive} onClick={() => void createSnapshot()}>New revision</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N1")}>Probe N1 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N2")}>Probe N2 vacuum</button>
