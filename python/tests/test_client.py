@@ -151,8 +151,47 @@ class ClientTests(unittest.TestCase):
         send.assert_called_once_with("POST", "/calibrations/calibration/runs", {
             "lease_id": "lease",
             "confirmed_external_safety_checks": True,
-            "visual_homing_sample_count": 30,
+            "visual_homing_sample_count": 5,
         })
+
+    def test_calibration_artifacts_plan_recompute_and_targeted_capture(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request", return_value={"artifacts": [{"id": "x"}]}) as send:
+            self.assertEqual(client.calibration_artifacts(), [{"id": "x"}])
+        send.assert_called_once_with("GET", "/calibration/artifacts")
+
+        with patch.object(client, "_request", return_value={"requires_motion": False}) as send:
+            client.calibration_plan("calibration", ["camera_ray_transfer"])
+        send.assert_called_once_with(
+            "POST", "/calibrations/calibration/artifact-plan",
+            {"targets": ["camera_ray_transfer"]},
+        )
+
+        with patch.object(client, "_request", return_value={"recomputed": []}) as send:
+            client.recompute_calibration_artifacts("calibration")
+        send.assert_called_once_with(
+            "POST", "/calibrations/calibration/derived-artifacts/recompute",
+            {"targets": []},
+        )
+
+        started = {
+            "run": {"id": "run"},
+            "operation": {"id": "op", "status": "succeeded"},
+        }
+        completed = {"id": "run", "status": "succeeded"}
+        with patch.object(client, "_request", side_effect=[started, completed]) as send:
+            result = client.capture_calibration_artifacts(
+                "calibration", "lease", ["nozzle_height_n1"],
+                safety_checks_confirmed=True,
+            )
+        self.assertEqual(result, completed)
+        self.assertEqual(send.call_args_list[0].args, (
+            "POST", "/calibrations/calibration/artifact-runs", {
+                "lease_id": "lease",
+                "confirmed_external_safety_checks": True,
+                "targets": ["nozzle_height_n1"],
+            },
+        ))
 
     def test_vacuum_probe_requires_confirmation_and_returns_persisted_report(self):
         client = Client(timeout=1)

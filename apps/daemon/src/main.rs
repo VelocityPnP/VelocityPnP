@@ -1,4 +1,5 @@
 mod api;
+mod calibration_artifacts;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, waitForOperation } from "./api";
 import type {
-  AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CalibrationStep, Device,
-  MachineEvent, MachineStatus, Pose, SensorReading, VisualHomingResult,
+  AutomatedCalibrationRun, BoardDesign, CalibrationArtifactPlan, CalibrationSnapshot,
+  CalibrationStep, Device, MachineEvent, MachineStatus, Pose, SensorReading,
+  VisualHomingResult,
 } from "./types";
 import "./styles.css";
 
@@ -196,6 +197,7 @@ function CalibrationPanel({ status, devices, setError }: {
   const [snapshots, setSnapshots] = useState<CalibrationSnapshot[]>([]);
   const [active, setActive] = useState<CalibrationSnapshot | null>(null);
   const [activeRun, setActiveRun] = useState<AutomatedCalibrationRun | null>(null);
+  const [artifactPlan, setArtifactPlan] = useState<CalibrationArtifactPlan | null>(null);
   const [starting, setStarting] = useState(false);
 
   const load = useCallback(async () => {
@@ -210,6 +212,13 @@ function CalibrationPanel({ status, devices, setError }: {
     if (!active) { setActiveRun(null); return; }
     void api.calibrationRuns(active.id)
       .then((runs) => setActiveRun(runs[0] ?? null))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }, [active?.id, setError]);
+
+  useEffect(() => {
+    if (!active) { setArtifactPlan(null); return; }
+    void api.calibrationPlan(active.id)
+      .then(setArtifactPlan)
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
   }, [active?.id, setError]);
 
@@ -281,6 +290,40 @@ function CalibrationPanel({ status, devices, setError }: {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const recomputeDerived = async () => {
+    if (!active) return;
+    setStarting(true); setError(null);
+    try {
+      const result = await api.recomputeDerivedCalibration(active.id);
+      setActive(result.snapshot);
+      setSnapshots((current) => current.map((value) => value.id === result.snapshot.id ? result.snapshot : value));
+      setArtifactPlan(await api.calibrationPlan(active.id));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
+  const capturePlannedGeometry = async () => {
+    if (!active || !artifactPlan) return;
+    const supported = new Set([
+      "nozzle_axis_runout_n1", "nozzle_axis_runout_n2",
+      "nozzle_height_n1", "nozzle_height_n2",
+    ]);
+    const targets = artifactPlan.items
+      .filter((item) => item.action === "recapture" && supported.has(item.artifact))
+      .map((item) => item.artifact);
+    if (targets.length === 0) return;
+    if (!window.confirm(
+      `Capture only ${targets.map(pretty).join(", ")}? Confirm both nozzles are level, the envelope is clear, tube routing is normal, and power isolation is reachable.`,
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 3600)
+        : await api.lease("VelocityPnP targeted calibration", 3600);
+      const started = await api.startArtifactCalibration(active.id, lease.id, targets);
+      setActiveRun(started.run);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
 
   const runActive = Boolean(activeRun && ["pending", "running"].includes(activeRun.status));
   const machineReady = ["unhomed", "ready"].includes(status.state);
@@ -300,8 +343,16 @@ function CalibrationPanel({ status, devices, setError }: {
         <button className="secondary" disabled={starting || runActive} onClick={() => void createSnapshot()}>New revision</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N1")}>Probe N1 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N2")}>Probe N2 vacuum</button>
+        <button className="secondary" disabled={starting || runActive} onClick={() => void recomputeDerived()}>Recompute derived transforms</button>
+        <button className="secondary" disabled={starting || runActive || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
       </>}
+      {artifactPlan && <div className="run-result">
+        <p>Selective plan: <strong>{artifactPlan.requires_motion ? `${artifactPlan.estimated_duration_seconds} s estimated motion` : "no motion"}</strong></p>
+        {artifactPlan.items.filter((item) => item.action !== "reuse").map((item) =>
+          <p key={item.artifact}>{pretty(item.artifact)}: <strong>{pretty(item.action)}</strong></p>)}
+        {artifactPlan.items.every((item) => item.action === "reuse") && <p>All requested artifacts can be reused.</p>}
+      </div>}
       {active?.values.vacuum_probe && <div className="run-result">
         {(["N1", "N2"] as const).map((nozzleId) => {
           const report = active.values.vacuum_probe?.[nozzleId];

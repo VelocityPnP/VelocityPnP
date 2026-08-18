@@ -99,6 +99,7 @@ enum Command {
     },
     Boards,
     CalibrationWorkflow,
+    CalibrationArtifacts,
     NewCalibration {
         #[arg(long, default_value = "unassigned")]
         machine_serial: String,
@@ -111,6 +112,27 @@ enum Command {
     },
     CalibrationRun {
         run: Uuid,
+    },
+    CalibrationPlan {
+        calibration: Uuid,
+        #[arg(long)]
+        target: Vec<String>,
+    },
+    RecomputeDerivedCalibration {
+        calibration: Uuid,
+        #[arg(long)]
+        target: Vec<String>,
+    },
+    CaptureCalibrationArtifacts {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, required = true)]
+        target: Vec<String>,
+        /// Confirm level nozzles, a clear envelope, correctly routed nozzle
+        /// tubes, and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
     },
     Calibrate {
         calibration: Uuid,
@@ -372,6 +394,9 @@ async fn main() -> Result<()> {
         Command::CalibrationWorkflow => {
             get(&client, &format!("{base}/calibration/workflow")).await?
         }
+        Command::CalibrationArtifacts => {
+            get(&client, &format!("{base}/calibration/artifacts")).await?
+        }
         Command::NewCalibration { machine_serial } => {
             post(
                 &client,
@@ -388,6 +413,55 @@ async fn main() -> Result<()> {
         }
         Command::CalibrationRun { run } => {
             get(&client, &format!("{base}/calibration-runs/{run}")).await?
+        }
+        Command::CalibrationPlan {
+            calibration,
+            target,
+        } => {
+            post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/artifact-plan"),
+                Some(json!({"targets": target})),
+            )
+            .await?
+        }
+        Command::RecomputeDerivedCalibration {
+            calibration,
+            target,
+        } => {
+            post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/derived-artifacts/recompute"),
+                Some(json!({"targets": target})),
+            )
+            .await?
+        }
+        Command::CaptureCalibrationArtifacts {
+            calibration,
+            lease,
+            target,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "artifact capture requires --confirm-safety-checks after inspecting the envelope, nozzles, tube routing, and power isolation"
+                );
+            }
+            let started = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/artifact-runs"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                    "targets": target,
+                })),
+            )
+            .await?;
+            let run_id = started["run"]["id"]
+                .as_str()
+                .context("artifact capture response did not contain a run ID")?;
+            run_operation(&client, base, started["operation"].clone()).await?;
+            get(&client, &format!("{base}/calibration-runs/{run_id}")).await?
         }
         Command::Calibrate {
             calibration,

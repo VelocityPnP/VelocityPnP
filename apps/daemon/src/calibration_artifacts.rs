@@ -1,0 +1,953 @@
+use crate::api::AppState;
+use chrono::Utc;
+use serde::Serialize;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
+use velocitypnp_domain::{
+    lumen_calibration_artifacts, BottomCameraMappingReport, CalibrationArtifact,
+    CalibrationArtifactDefinition, CalibrationArtifactId, CalibrationArtifactKind,
+    CalibrationArtifactPlan, CalibrationPlanAction, CalibrationPlanItem, CalibrationSnapshot,
+    CalibrationStepId, CameraProfile, CameraRole, HeadFeatureCenterReport, NozzleHeightModel,
+    NozzleRunoutReport, VacuumProbeReport,
+};
+use velocitypnp_vision::calibrate_camera_ray_transfer;
+
+const MIGRATION_VERSION: &str = "legacy_snapshot.v1";
+
+pub fn reconcile_snapshot_artifacts(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+) -> Result<bool, String> {
+    let before = snapshot.artifacts.clone();
+    migrate_legacy_captures(state, snapshot)?;
+    recompute_stale_derived(state, snapshot, None)?;
+    Ok(snapshot.artifacts != before)
+}
+
+pub fn recompute_artifacts(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    targets: &[CalibrationArtifactId],
+) -> Result<Vec<CalibrationArtifactId>, String> {
+    migrate_legacy_captures(state, snapshot)?;
+    let mut requested =
+        (!targets.is_empty()).then(|| targets.iter().copied().collect::<BTreeSet<_>>());
+    if let Some(requested) = requested.as_mut() {
+        let definitions = definitions_by_id();
+        if let Some(target) = requested.iter().find(|target| {
+            definitions
+                .get(target)
+                .is_none_or(|definition| definition.kind != CalibrationArtifactKind::Derived)
+        }) {
+            return Err(format!("{target:?} is not a derived artifact"));
+        }
+        loop {
+            let before = requested.len();
+            for id in requested.clone() {
+                if let Some(definition) = definitions.get(&id) {
+                    requested.extend(definition.dependencies.iter().filter(|dependency| {
+                        definitions
+                            .get(dependency)
+                            .is_some_and(|dependency_definition| {
+                                dependency_definition.kind == CalibrationArtifactKind::Derived
+                            })
+                    }));
+                }
+            }
+            if requested.len() == before {
+                break;
+            }
+        }
+    }
+    recompute_stale_derived(state, snapshot, requested)
+}
+
+pub fn plan_artifacts(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    targets: &[CalibrationArtifactId],
+) -> Result<CalibrationArtifactPlan, String> {
+    let definitions = definitions_by_id();
+    let targets = if targets.is_empty() {
+        vec![
+            CalibrationArtifactId::RuntimeTipTransformN1,
+            CalibrationArtifactId::RuntimeTipTransformN2,
+            CalibrationArtifactId::VacuumContactN1,
+            CalibrationArtifactId::VacuumContactN2,
+        ]
+    } else {
+        targets.to_vec()
+    };
+    let mut actions = BTreeMap::new();
+    for target in &targets {
+        visit_plan(state, snapshot, *target, &definitions, &mut actions)?;
+    }
+    let items = actions.into_values().collect::<Vec<_>>();
+    let requires_motion = items
+        .iter()
+        .any(|item| item.requires_motion && !matches!(item.action, CalibrationPlanAction::Reuse));
+    let estimated_duration_seconds = items
+        .iter()
+        .filter(|item| !matches!(item.action, CalibrationPlanAction::Reuse))
+        .map(|item| item.estimated_duration_seconds)
+        .sum();
+    Ok(CalibrationArtifactPlan {
+        targets,
+        items,
+        requires_motion,
+        estimated_duration_seconds,
+    })
+}
+
+pub fn record_vacuum_contact_artifact(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    report: &VacuumProbeReport,
+) -> Result<(), String> {
+    reconcile_snapshot_artifacts(state, snapshot)?;
+    let id = CalibrationArtifactId::vacuum_contact(&report.nozzle_id)
+        .ok_or_else(|| "vacuum report names an unknown nozzle".to_string())?;
+    let definition = definition(id)?;
+    if !definition
+        .dependencies
+        .iter()
+        .all(|dependency| artifact_tree_is_current(state, snapshot, *dependency))
+    {
+        return Err(format!(
+            "{} vacuum contact depends on stale calibration artifacts",
+            report.nozzle_id
+        ));
+    }
+    insert_artifact(
+        state,
+        snapshot,
+        &definition,
+        None,
+        serde_json::to_value(report).map_err(|error| error.to_string())?,
+    )?;
+    Ok(())
+}
+
+pub fn record_captured_artifact(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    id: CalibrationArtifactId,
+    source_run_id: Option<Uuid>,
+    value: Value,
+) -> Result<Vec<CalibrationArtifactId>, String> {
+    let definition = definition(id)?;
+    if definition.kind == CalibrationArtifactKind::Derived {
+        return Err(format!("{id:?} is calculated, not captured"));
+    }
+    if !definition
+        .dependencies
+        .iter()
+        .all(|dependency| artifact_tree_is_current(state, snapshot, *dependency))
+    {
+        return Err(format!("{id:?} has a stale or missing dependency"));
+    }
+    snapshot.invalidate_artifacts_from(&[id]);
+    insert_artifact(state, snapshot, &definition, source_run_id, value)?;
+    recompute_stale_derived(state, snapshot, None)
+}
+
+pub fn artifact_tree_is_current(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    id: CalibrationArtifactId,
+) -> bool {
+    let definitions = definitions_by_id();
+    artifact_tree_is_current_inner(state, snapshot, id, &definitions, &mut BTreeSet::new())
+}
+
+fn artifact_tree_is_current_inner(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    id: CalibrationArtifactId,
+    definitions: &BTreeMap<CalibrationArtifactId, CalibrationArtifactDefinition>,
+    visiting: &mut BTreeSet<CalibrationArtifactId>,
+) -> bool {
+    if !visiting.insert(id) {
+        return false;
+    }
+    let current = definitions.get(&id).is_some_and(|definition| {
+        definition.dependencies.iter().all(|dependency| {
+            artifact_tree_is_current_inner(state, snapshot, *dependency, definitions, visiting)
+        }) && artifact_is_current(state, snapshot, definition)
+    });
+    visiting.remove(&id);
+    current
+}
+
+fn migrate_legacy_captures(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+) -> Result<(), String> {
+    let reports = snapshot
+        .values
+        .get(CalibrationStepId::CameraReproducibility.as_str())
+        .and_then(|value| value.get("reports"))
+        .cloned();
+    if let Some(reports) = reports {
+        migrate_value(
+            state,
+            snapshot,
+            CalibrationArtifactId::TopCameraReproducibility,
+            source_run_id(snapshot, CalibrationStepId::CameraReproducibility),
+            reports.get("top_camera").cloned(),
+        )?;
+        migrate_value(
+            state,
+            snapshot,
+            CalibrationArtifactId::BottomCameraReproducibility,
+            source_run_id(snapshot, CalibrationStepId::CameraReproducibility),
+            reports.get("bottom_camera").cloned(),
+        )?;
+        for nozzle_id in ["N1", "N2"] {
+            let id = if nozzle_id == "N1" {
+                CalibrationArtifactId::ToolingN1
+            } else {
+                CalibrationArtifactId::ToolingN2
+            };
+            migrate_value(
+                state,
+                snapshot,
+                id,
+                source_run_id(snapshot, CalibrationStepId::CameraReproducibility),
+                reports.get(format!("tooling_{nozzle_id}")).cloned(),
+            )?;
+        }
+    }
+
+    let visual = snapshot
+        .values
+        .get(CalibrationStepId::VisualHoming.as_str())
+        .cloned();
+    migrate_value(
+        state,
+        snapshot,
+        CalibrationArtifactId::VisualHomingQualification,
+        source_run_id(snapshot, CalibrationStepId::VisualHoming),
+        visual,
+    )?;
+
+    let bottom_geometry = snapshot
+        .values
+        .get(CalibrationStepId::BottomCameraGeometry.as_str())
+        .cloned();
+    if let Some(bottom_geometry) = bottom_geometry {
+        migrate_value(
+            state,
+            snapshot,
+            CalibrationArtifactId::TopCameraWorkingPlaneMap,
+            source_run_id(snapshot, CalibrationStepId::BottomCameraGeometry),
+            bottom_geometry
+                .get("top_camera_working_plane_mapping")
+                .cloned(),
+        )?;
+        migrate_value(
+            state,
+            snapshot,
+            CalibrationArtifactId::BottomCameraLocalMap,
+            source_run_id(snapshot, CalibrationStepId::BottomCameraGeometry),
+            bottom_geometry.get("mapping").cloned(),
+        )?;
+        let top_camera_lens = bottom_geometry.get("reciprocal_observation").cloned();
+        let bottom_camera_lens = snapshot
+            .values
+            .get(CalibrationStepId::NozzleOffsets.as_str())
+            .and_then(|value| value.get("top_camera_center"))
+            .cloned();
+        if let (Some(top_camera_lens), Some(bottom_camera_lens)) =
+            (top_camera_lens, bottom_camera_lens)
+        {
+            migrate_value(
+                state,
+                snapshot,
+                CalibrationArtifactId::ReciprocalCameraGeometry,
+                source_run_id(snapshot, CalibrationStepId::BottomCameraGeometry),
+                Some(json!({
+                    "top_camera_lens": top_camera_lens,
+                    "bottom_camera_lens": bottom_camera_lens,
+                })),
+            )?;
+        }
+    }
+
+    let runout_step = snapshot
+        .values
+        .get(CalibrationStepId::NozzleRunout.as_str())
+        .cloned();
+    if let Some(runout_step) = runout_step {
+        let reports = runout_step
+            .get("reports")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for report in reports {
+            let nozzle_id = report.get("nozzle_id").and_then(Value::as_str);
+            if let Some(id) = nozzle_id.and_then(CalibrationArtifactId::nozzle_runout) {
+                migrate_value(
+                    state,
+                    snapshot,
+                    id,
+                    source_run_id(snapshot, CalibrationStepId::NozzleRunout),
+                    Some(report),
+                )?;
+            }
+        }
+    }
+
+    let height_step = snapshot
+        .values
+        .get(CalibrationStepId::NozzleHeightModel.as_str())
+        .cloned();
+    if let Some(height_step) = height_step {
+        let models = height_step
+            .get("models")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for model in models {
+            let nozzle_id = model.get("nozzle_id").and_then(Value::as_str);
+            if let Some(id) = nozzle_id.and_then(CalibrationArtifactId::nozzle_height) {
+                migrate_value(
+                    state,
+                    snapshot,
+                    id,
+                    source_run_id(snapshot, CalibrationStepId::NozzleHeightModel),
+                    Some(model),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn migrate_value(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    id: CalibrationArtifactId,
+    source_run_id: Option<Uuid>,
+    value: Option<Value>,
+) -> Result<(), String> {
+    if snapshot.artifacts.contains_key(&id) || value.is_none() {
+        return Ok(());
+    }
+    let definition = definition(id)?;
+    if !definition
+        .dependencies
+        .iter()
+        .all(|dependency| snapshot.artifacts.contains_key(dependency))
+    {
+        return Ok(());
+    }
+    let value = json!({
+        "migration": MIGRATION_VERSION,
+        "result": value.unwrap(),
+    });
+    insert_artifact(state, snapshot, &definition, source_run_id, value)
+}
+
+fn recompute_stale_derived(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    requested: Option<BTreeSet<CalibrationArtifactId>>,
+) -> Result<Vec<CalibrationArtifactId>, String> {
+    let mut recomputed = Vec::new();
+    for definition in lumen_calibration_artifacts()
+        .into_iter()
+        .filter(|definition| definition.kind == CalibrationArtifactKind::Derived)
+    {
+        if requested
+            .as_ref()
+            .is_some_and(|requested| !requested.contains(&definition.id))
+        {
+            continue;
+        }
+        if artifact_tree_is_current(state, snapshot, definition.id) {
+            continue;
+        }
+        if !definition
+            .dependencies
+            .iter()
+            .all(|dependency| artifact_tree_is_current(state, snapshot, *dependency))
+        {
+            if requested.is_some() {
+                return Err(format!(
+                    "cannot recompute {:?}: a source artifact requires recapture",
+                    definition.id
+                ));
+            }
+            continue;
+        }
+        let value = derive_value(state, snapshot, definition.id)?;
+        insert_artifact(state, snapshot, &definition, None, value)?;
+        recomputed.push(definition.id);
+    }
+    Ok(recomputed)
+}
+
+fn derive_value(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    id: CalibrationArtifactId,
+) -> Result<Value, String> {
+    use CalibrationArtifactId::*;
+    match id {
+        CameraRayTransfer => {
+            let mapping: BottomCameraMappingReport =
+                artifact_result(snapshot, TopCameraWorkingPlaneMap)?;
+            let reciprocal = artifact_result_value(snapshot, ReciprocalCameraGeometry)?;
+            let top_camera_lens: HeadFeatureCenterReport = serde_json::from_value(
+                reciprocal
+                    .get("top_camera_lens")
+                    .cloned()
+                    .ok_or_else(|| "reciprocal geometry has no top-camera lens".to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let bottom_camera_lens: HeadFeatureCenterReport = serde_json::from_value(
+                reciprocal
+                    .get("bottom_camera_lens")
+                    .cloned()
+                    .ok_or_else(|| "reciprocal geometry has no bottom-camera lens".to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let geometry = &state
+                .profile
+                .bottom_vision
+                .as_ref()
+                .ok_or_else(|| "active profile has no bottom vision".to_string())?
+                .head_geometry;
+            let report = calibrate_camera_ray_transfer(
+                &top_camera_lens,
+                &bottom_camera_lens,
+                mapping.pixel_error_to_machine_mm,
+                geometry.bottom_camera_reference_diameter_mm,
+                geometry.camera_ray_transfer_max_mm,
+            )
+            .ok_or_else(|| "camera-ray transfer could not be derived".to_string())?;
+            if !report.passed {
+                return Err("derived camera-ray transfer exceeds profile bounds".into());
+            }
+            sync_legacy_camera_ray_transfer(snapshot, &report)?;
+            serde_json::to_value(report).map_err(|error| error.to_string())
+        }
+        HeadNozzleOffsets => {
+            let n1: NozzleRunoutReport = artifact_result(snapshot, NozzleAxisRunoutN1)?;
+            let n2: NozzleRunoutReport = artifact_result(snapshot, NozzleAxisRunoutN2)?;
+            Ok(json!({
+                "nozzles": [
+                    nozzle_offset_value(&n1),
+                    nozzle_offset_value(&n2),
+                ],
+                "n1_to_n2_x_mm": n1.axis_controller_x_mm - n2.axis_controller_x_mm,
+                "n1_to_n2_y_mm": n1.axis_controller_y_mm - n2.axis_controller_y_mm,
+            }))
+        }
+        RuntimeTipTransformN1 | RuntimeTipTransformN2 => {
+            let (runout, height) = if id == RuntimeTipTransformN1 {
+                (NozzleAxisRunoutN1, NozzleHeightN1)
+            } else {
+                (NozzleAxisRunoutN2, NozzleHeightN2)
+            };
+            Ok(json!({
+                "camera_ray_transfer": artifact_result_value(snapshot, CameraRayTransfer)?,
+                "nozzle_runout": artifact_result_value(snapshot, runout)?,
+                "nozzle_height": artifact_result_value(snapshot, height)?,
+            }))
+        }
+        _ => Err(format!("{id:?} is not a derived artifact")),
+    }
+}
+
+fn nozzle_offset_value(report: &NozzleRunoutReport) -> Value {
+    json!({
+        "nozzle_id": report.nozzle_id,
+        "head_offset_x_mm": report.head_offset_x_mm,
+        "head_offset_y_mm": report.head_offset_y_mm,
+        "axis_controller_x_mm": report.axis_controller_x_mm,
+        "axis_controller_y_mm": report.axis_controller_y_mm,
+    })
+}
+
+fn sync_legacy_camera_ray_transfer(
+    snapshot: &mut CalibrationSnapshot,
+    report: &velocitypnp_domain::CameraRayTransferReport,
+) -> Result<(), String> {
+    let height = snapshot
+        .values
+        .get_mut(CalibrationStepId::NozzleHeightModel.as_str())
+        .ok_or_else(|| "legacy nozzle-height step is missing".to_string())?;
+    height["camera_ray_transfer"] =
+        serde_json::to_value(report).map_err(|error| error.to_string())?;
+    if let Some(models) = height.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            let mut decoded: NozzleHeightModel =
+                serde_json::from_value(model.clone()).map_err(|error| error.to_string())?;
+            decoded.reference_transfer_correction_x_mm = report.transfer_correction_x_mm;
+            decoded.reference_transfer_correction_y_mm = report.transfer_correction_y_mm;
+            *model = serde_json::to_value(decoded).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn visit_plan(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    id: CalibrationArtifactId,
+    definitions: &BTreeMap<CalibrationArtifactId, CalibrationArtifactDefinition>,
+    actions: &mut BTreeMap<CalibrationArtifactId, CalibrationPlanItem>,
+) -> Result<(), String> {
+    if actions.contains_key(&id) {
+        return Ok(());
+    }
+    let definition = definitions
+        .get(&id)
+        .ok_or_else(|| format!("unknown calibration artifact {id:?}"))?;
+    for dependency in &definition.dependencies {
+        visit_plan(state, snapshot, *dependency, definitions, actions)?;
+    }
+    let dependencies_reusable = definition.dependencies.iter().all(|dependency| {
+        actions
+            .get(dependency)
+            .is_some_and(|item| item.action == CalibrationPlanAction::Reuse)
+    });
+    let current = dependencies_reusable && artifact_is_current(state, snapshot, definition);
+    let (action, reason) = if current {
+        (
+            CalibrationPlanAction::Reuse,
+            "artifact and provenance are current",
+        )
+    } else if definition.kind == CalibrationArtifactKind::Derived {
+        (
+            CalibrationPlanAction::Recompute,
+            "source data is available; recalculate without machine motion",
+        )
+    } else if definition.dependencies.iter().any(|dependency| {
+        actions
+            .get(dependency)
+            .is_some_and(|item| item.action == CalibrationPlanAction::Blocked)
+    }) {
+        (
+            CalibrationPlanAction::Blocked,
+            "a required source artifact is unavailable",
+        )
+    } else {
+        (
+            CalibrationPlanAction::Recapture,
+            "measurement is missing, stale, or depends on a changed input",
+        )
+    };
+    actions.insert(
+        id,
+        CalibrationPlanItem {
+            artifact: id,
+            action,
+            reason: reason.into(),
+            requires_motion: definition.requires_motion,
+            estimated_duration_seconds: if action == CalibrationPlanAction::Reuse {
+                0
+            } else {
+                definition.estimated_duration_seconds
+            },
+        },
+    );
+    Ok(())
+}
+
+fn insert_artifact(
+    state: &AppState,
+    snapshot: &mut CalibrationSnapshot,
+    definition: &CalibrationArtifactDefinition,
+    source_run_id: Option<Uuid>,
+    value: Value,
+) -> Result<(), String> {
+    let input_fingerprints = expected_inputs(state, definition.id)?;
+    let dependency_fingerprints = definition
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            snapshot
+                .artifacts
+                .get(dependency)
+                .map(|artifact| (*dependency, artifact.fingerprint.clone()))
+                .ok_or_else(|| format!("missing dependency {dependency:?}"))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let algorithm_version = algorithm_version(definition.id).to_string();
+    let fingerprint = artifact_fingerprint(
+        definition.id,
+        &algorithm_version,
+        &input_fingerprints,
+        &dependency_fingerprints,
+        &value,
+    )?;
+    snapshot.artifacts.insert(
+        definition.id,
+        CalibrationArtifact {
+            kind: definition.kind,
+            recorded_at: Utc::now(),
+            source_run_id,
+            algorithm_version,
+            input_fingerprints,
+            dependency_fingerprints,
+            fingerprint,
+            value,
+        },
+    );
+    Ok(())
+}
+
+fn artifact_is_current(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    definition: &CalibrationArtifactDefinition,
+) -> bool {
+    let Some(artifact) = snapshot.artifacts.get(&definition.id) else {
+        return false;
+    };
+    let Ok(inputs) = expected_inputs(state, definition.id) else {
+        return false;
+    };
+    let dependencies = definition
+        .dependencies
+        .iter()
+        .filter_map(|dependency| {
+            snapshot
+                .artifacts
+                .get(dependency)
+                .map(|artifact| (*dependency, artifact.fingerprint.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let algorithm = algorithm_version(definition.id);
+    let Ok(fingerprint) = artifact_fingerprint(
+        definition.id,
+        algorithm,
+        &inputs,
+        &dependencies,
+        &artifact.value,
+    ) else {
+        return false;
+    };
+    artifact.kind == definition.kind
+        && artifact.algorithm_version == algorithm
+        && artifact.input_fingerprints == inputs
+        && artifact.dependency_fingerprints == dependencies
+        && artifact.fingerprint == fingerprint
+        && dependencies.len() == definition.dependencies.len()
+}
+
+fn expected_inputs(
+    state: &AppState,
+    id: CalibrationArtifactId,
+) -> Result<BTreeMap<String, String>, String> {
+    use CalibrationArtifactId::*;
+    let mut inputs = BTreeMap::new();
+    let top_profile = || camera_profile(state, CameraRole::TopCamera);
+    let bottom_profile = || camera_profile(state, CameraRole::BottomCamera);
+    let visual = || {
+        state
+            .profile
+            .visual_homing
+            .as_ref()
+            .ok_or_else(|| "active profile has no visual homing".to_string())
+    };
+    let bottom = || {
+        state
+            .profile
+            .bottom_vision
+            .as_ref()
+            .ok_or_else(|| "active profile has no bottom vision".to_string())
+    };
+    let nozzle = |nozzle_id: &str| {
+        bottom()?
+            .nozzles
+            .iter()
+            .find(|nozzle| nozzle.nozzle_id == nozzle_id)
+            .ok_or_else(|| format!("active profile has no {nozzle_id} tooling"))
+    };
+    let add =
+        |inputs: &mut BTreeMap<String, String>, name: &str, value: &dyn erased::Fingerprint| {
+            inputs.insert(name.into(), value.fingerprint())
+        };
+
+    match id {
+        TopCameraReproducibility => {
+            add(&mut inputs, "top_camera_profile", &top_profile()?);
+        }
+        BottomCameraReproducibility => {
+            add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
+        }
+        ToolingN1 | NozzleAxisRunoutN1 | NozzleHeightN1 => {
+            add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
+            add(&mut inputs, "tooling", &nozzle("N1")?);
+        }
+        ToolingN2 | NozzleAxisRunoutN2 | NozzleHeightN2 => {
+            add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
+            add(&mut inputs, "tooling", &nozzle("N2")?);
+        }
+        VisualHomingQualification | TopCameraWorkingPlaneMap => {
+            add(&mut inputs, "top_camera_profile", &top_profile()?);
+            add(&mut inputs, "visual_homing_profile", &visual()?);
+        }
+        BottomCameraLocalMap => {
+            add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
+            add(
+                &mut inputs,
+                "mapping_profile",
+                &bottom()?.head_geometry.probe_distance_mm,
+            );
+        }
+        ReciprocalCameraGeometry => {
+            add(&mut inputs, "top_camera_profile", &top_profile()?);
+            add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
+            add(
+                &mut inputs,
+                "reciprocal_geometry_profile",
+                &bottom()?.head_geometry,
+            );
+        }
+        CameraRayTransfer => {
+            add(
+                &mut inputs,
+                "camera_ray_profile",
+                &json!({
+                    "bottom_camera_reference_diameter_mm": bottom()?.head_geometry.bottom_camera_reference_diameter_mm,
+                    "camera_ray_transfer_max_mm": bottom()?.head_geometry.camera_ray_transfer_max_mm,
+                }),
+            );
+        }
+        HeadNozzleOffsets | RuntimeTipTransformN1 | RuntimeTipTransformN2 => {}
+        VacuumContactN1 | VacuumContactN2 => {
+            let nozzle_id = if id == VacuumContactN1 { "N1" } else { "N2" };
+            add(
+                &mut inputs,
+                "vacuum_profile",
+                &state
+                    .profile
+                    .vacuum_calibration
+                    .as_ref()
+                    .ok_or_else(|| "active profile has no vacuum calibration".to_string())?,
+            );
+            add(&mut inputs, "tooling", &nozzle(nozzle_id)?);
+            let sensor_id = if nozzle_id == "N1" {
+                "vacuum_1"
+            } else {
+                "vacuum_2"
+            };
+            let sensor = state
+                .profile
+                .sensors
+                .iter()
+                .find(|sensor| sensor.id == sensor_id)
+                .ok_or_else(|| format!("active profile has no {sensor_id} sensor"))?;
+            add(&mut inputs, "sensor", &sensor);
+        }
+    }
+    if matches!(id, NozzleHeightN1 | NozzleHeightN2) {
+        add(
+            &mut inputs,
+            "z_kinematics",
+            &state
+                .profile
+                .z_kinematics
+                .as_ref()
+                .ok_or_else(|| "active profile has no Z kinematics".to_string())?,
+        );
+        add(
+            &mut inputs,
+            "height_profile",
+            &json!({
+                "samples": bottom()?.head_geometry.height_sample_nozzle_z_mm,
+                "max_slope": bottom()?.head_geometry.height_max_axis_slope_mm_per_mm,
+                "max_extrapolation": bottom()?.head_geometry.height_max_extrapolation_mm,
+            }),
+        );
+    }
+    if matches!(id, NozzleAxisRunoutN1 | NozzleAxisRunoutN2) {
+        add(
+            &mut inputs,
+            "runout_profile",
+            &json!({
+                "angles": bottom()?.head_geometry.rotation_angle_offsets_deg,
+                "fit_limit": bottom()?.head_geometry.runout_fit_p95_limit_mm,
+            }),
+        );
+    }
+    Ok(inputs)
+}
+
+mod erased {
+    use super::*;
+
+    pub trait Fingerprint {
+        fn fingerprint(&self) -> String;
+    }
+
+    impl<T: Serialize> Fingerprint for T {
+        fn fingerprint(&self) -> String {
+            digest(self).expect("serializable calibration input")
+        }
+    }
+}
+
+fn camera_profile(state: &AppState, role: CameraRole) -> Result<CameraProfile, String> {
+    state
+        .store
+        .get_camera_profile(&state.profile.id, role)
+        .map_err(|error| error.to_string())
+        .map(|profile| {
+            profile
+                .unwrap_or_else(|| CameraProfile::initial_lumenpnp(state.profile.id.clone(), role))
+        })
+}
+
+fn artifact_result<T: serde::de::DeserializeOwned>(
+    snapshot: &CalibrationSnapshot,
+    id: CalibrationArtifactId,
+) -> Result<T, String> {
+    serde_json::from_value(artifact_result_value(snapshot, id)?)
+        .map_err(|error| format!("invalid {id:?} artifact: {error}"))
+}
+
+pub fn artifact_result_value(
+    snapshot: &CalibrationSnapshot,
+    id: CalibrationArtifactId,
+) -> Result<Value, String> {
+    let value = snapshot
+        .artifacts
+        .get(&id)
+        .ok_or_else(|| format!("missing {id:?} artifact"))?
+        .value
+        .clone();
+    Ok(value.get("result").cloned().unwrap_or(value))
+}
+
+fn source_run_id(snapshot: &CalibrationSnapshot, step: CalibrationStepId) -> Option<Uuid> {
+    snapshot
+        .values
+        .get(step.as_str())
+        .and_then(|value| value.get("run_id"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn definition(id: CalibrationArtifactId) -> Result<CalibrationArtifactDefinition, String> {
+    lumen_calibration_artifacts()
+        .into_iter()
+        .find(|definition| definition.id == id)
+        .ok_or_else(|| format!("missing definition for {id:?}"))
+}
+
+fn definitions_by_id() -> BTreeMap<CalibrationArtifactId, CalibrationArtifactDefinition> {
+    lumen_calibration_artifacts()
+        .into_iter()
+        .map(|definition| (definition.id, definition))
+        .collect()
+}
+
+fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
+    use CalibrationArtifactId::*;
+    match id {
+        TopCameraReproducibility => "camera_reproducibility.v1",
+        BottomCameraReproducibility => "camera_reproducibility.v1",
+        ToolingN1 | ToolingN2 => "nozzle_tooling.v1",
+        VisualHomingQualification => "visual_homing_qualification.v2",
+        TopCameraWorkingPlaneMap | BottomCameraLocalMap => "camera_motion_mapping.v1",
+        ReciprocalCameraGeometry => "reciprocal_camera_geometry.v2",
+        CameraRayTransfer => "camera_ray_transfer.v2",
+        NozzleAxisRunoutN1 | NozzleAxisRunoutN2 => "nozzle_axis_runout.v1",
+        HeadNozzleOffsets => "head_nozzle_offsets.v2",
+        NozzleHeightN1 | NozzleHeightN2 => "nozzle_height_axis.v2",
+        RuntimeTipTransformN1 | RuntimeTipTransformN2 => "runtime_tip_transform.v1",
+        VacuumContactN1 | VacuumContactN2 => "vacuum_contact_probe.v2",
+    }
+}
+
+fn artifact_fingerprint(
+    id: CalibrationArtifactId,
+    algorithm_version: &str,
+    input_fingerprints: &BTreeMap<String, String>,
+    dependency_fingerprints: &BTreeMap<CalibrationArtifactId, String>,
+    value: &Value,
+) -> Result<String, String> {
+    digest(&json!({
+        "id": id,
+        "algorithm_version": algorithm_version,
+        "input_fingerprints": input_fingerprints,
+        "dependency_fingerprints": dependency_fingerprints,
+        "value": value,
+    }))
+}
+
+fn digest<T: Serialize + ?Sized>(value: &T) -> Result<String, String> {
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use velocitypnp_domain::{CalibrationArtifactKind, MachineProfile};
+    use velocitypnp_driver::{MachineHandle, SimulatorDriver};
+    use velocitypnp_store::Store;
+
+    fn state() -> AppState {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let machine = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile.clone(),
+        );
+        AppState::new(machine, profile, Store::memory().unwrap())
+    }
+
+    #[test]
+    fn dependency_graph_keeps_nozzle_branches_independent() {
+        let definitions = definitions_by_id();
+        let n1 = &definitions[&CalibrationArtifactId::NozzleHeightN1];
+        let n2 = &definitions[&CalibrationArtifactId::NozzleHeightN2];
+        assert!(n1
+            .dependencies
+            .contains(&CalibrationArtifactId::NozzleAxisRunoutN1));
+        assert!(!n1
+            .dependencies
+            .contains(&CalibrationArtifactId::NozzleAxisRunoutN2));
+        assert!(n2
+            .dependencies
+            .contains(&CalibrationArtifactId::NozzleAxisRunoutN2));
+        assert!(!n2
+            .dependencies
+            .contains(&CalibrationArtifactId::NozzleAxisRunoutN1));
+    }
+
+    #[test]
+    fn ray_transfer_is_a_zero_motion_derived_artifact() {
+        let definition = definition(CalibrationArtifactId::CameraRayTransfer).unwrap();
+        assert_eq!(definition.kind, CalibrationArtifactKind::Derived);
+        assert!(!definition.requires_motion);
+        assert_eq!(definition.estimated_duration_seconds, 0);
+    }
+
+    #[tokio::test]
+    async fn fingerprints_change_with_relevant_profile_input() {
+        let state = state();
+        let before = expected_inputs(&state, CalibrationArtifactId::CameraRayTransfer).unwrap();
+        let mut changed = (*state.profile).clone();
+        changed
+            .bottom_vision
+            .as_mut()
+            .unwrap()
+            .head_geometry
+            .bottom_camera_reference_diameter_mm += 1.0;
+        let changed_state = AppState::new(state.machine.clone(), changed, state.store.clone());
+        let after =
+            expected_inputs(&changed_state, CalibrationArtifactId::CameraRayTransfer).unwrap();
+        assert_ne!(before, after);
+    }
+}

@@ -139,6 +139,50 @@ export interface CalibrationStep {
   automation: "automated" | "planned";
 }
 
+export type CalibrationArtifactId =
+  | "top_camera_reproducibility"
+  | "bottom_camera_reproducibility"
+  | "tooling_n1"
+  | "tooling_n2"
+  | "visual_homing_qualification"
+  | "top_camera_working_plane_map"
+  | "bottom_camera_local_map"
+  | "reciprocal_camera_geometry"
+  | "camera_ray_transfer"
+  | "nozzle_axis_runout_n1"
+  | "nozzle_axis_runout_n2"
+  | "head_nozzle_offsets"
+  | "nozzle_height_n1"
+  | "nozzle_height_n2"
+  | "runtime_tip_transform_n1"
+  | "runtime_tip_transform_n2"
+  | "vacuum_contact_n1"
+  | "vacuum_contact_n2";
+
+export interface CalibrationArtifact {
+  kind: "captured" | "qualification" | "derived";
+  recorded_at: string;
+  source_run_id: string | null;
+  algorithm_version: string;
+  input_fingerprints: Record<string, string>;
+  dependency_fingerprints: Partial<Record<CalibrationArtifactId, string>>;
+  fingerprint: string;
+  value: unknown;
+}
+
+export interface CalibrationArtifactPlan {
+  targets: CalibrationArtifactId[];
+  items: Array<{
+    artifact: CalibrationArtifactId;
+    action: "reuse" | "recompute" | "recapture" | "blocked";
+    reason: string;
+    requires_motion: boolean;
+    estimated_duration_seconds: number;
+  }>;
+  requires_motion: boolean;
+  estimated_duration_seconds: number;
+}
+
 export interface CalibrationSnapshot {
   id: string;
   machine_serial: string;
@@ -153,6 +197,7 @@ export interface CalibrationSnapshot {
       models: NozzleHeightModel[];
     };
   };
+  artifacts: Partial<Record<CalibrationArtifactId, CalibrationArtifact>>;
   parent_id: string | null;
   production_ready: boolean;
 }

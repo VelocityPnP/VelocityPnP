@@ -19,14 +19,15 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    lumen_calibration_workflow, summarize_visual_homing_validation, AutomatedCalibrationConfig,
-    AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport, CalibrationCheck,
-    CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
-    CalibrationSnapshot, CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRole,
-    Feeder, HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus, Job,
-    JogTarget, MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
-    NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus, Pose, Residuals,
-    SensorReading, VacuumProbeReport, VacuumProbeSample, VisualHomingProfile,
+    lumen_calibration_artifacts, lumen_calibration_workflow, summarize_visual_homing_validation,
+    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport,
+    CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource,
+    CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
+    CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
+    CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, InspectionReport,
+    InspectionStatus, Job, JogTarget, MachineProfile, MachineState, NozzleHeightModel,
+    NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus, Pose,
+    Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
@@ -171,10 +172,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/operations/{id}", get(get_operation))
         .route("/api/v1/calibration/workflow", get(calibration_workflow))
         .route(
+            "/api/v1/calibration/artifacts",
+            get(calibration_artifact_workflow),
+        )
+        .route(
             "/api/v1/calibrations",
             get(list_calibrations).post(create_calibration),
         )
         .route("/api/v1/calibrations/{id}", get(get_calibration))
+        .route(
+            "/api/v1/calibrations/{id}/artifact-plan",
+            post(plan_calibration_artifacts),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/derived-artifacts/recompute",
+            post(recompute_calibration_artifacts),
+        )
         .route(
             "/api/v1/calibrations/{id}/runs",
             get(list_calibration_runs).post(start_calibration_run),
@@ -182,6 +195,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/head-geometry-runs",
             post(start_head_geometry_run),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/artifact-runs",
+            post(start_calibration_artifact_run),
         )
         .route(
             "/api/v1/calibrations/{id}/vacuum-probe",
@@ -1147,6 +1164,10 @@ async fn calibration_workflow() -> Json<Value> {
     Json(json!({"steps": lumen_calibration_workflow()}))
 }
 
+async fn calibration_artifact_workflow() -> Json<Value> {
+    Json(json!({"artifacts": lumen_calibration_artifacts()}))
+}
+
 #[derive(Deserialize)]
 struct CreateCalibrationRequest {
     #[serde(default = "default_machine_serial")]
@@ -1169,6 +1190,7 @@ async fn create_calibration(
         completed_steps: BTreeSet::new(),
         residuals: BTreeMap::new(),
         values: json!({}),
+        artifacts: BTreeMap::new(),
         parent_id: state
             .store
             .list_calibrations()
@@ -1200,6 +1222,74 @@ async fn get_calibration(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))
+}
+
+#[derive(Default, Deserialize)]
+struct CalibrationArtifactRequest {
+    #[serde(default)]
+    targets: Vec<CalibrationArtifactId>,
+}
+
+async fn plan_calibration_artifacts(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CalibrationArtifactRequest>,
+) -> ApiResult<Json<CalibrationArtifactPlan>> {
+    let mut snapshot = state
+        .store
+        .get_calibration(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let changed = crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+        .map_err(ApiError::bad_request)?;
+    if changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    crate::calibration_artifacts::plan_artifacts(&state, &snapshot, &body.targets)
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+#[derive(Serialize)]
+struct RecomputeCalibrationArtifactsResponse {
+    recomputed: Vec<CalibrationArtifactId>,
+    snapshot: CalibrationSnapshot,
+}
+
+async fn recompute_calibration_artifacts(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CalibrationArtifactRequest>,
+) -> ApiResult<Json<RecomputeCalibrationArtifactsResponse>> {
+    let mut snapshot = state
+        .store
+        .get_calibration(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let recomputed =
+        crate::calibration_artifacts::recompute_artifacts(&state, &mut snapshot, &body.targets)
+            .map_err(ApiError::bad_request)?;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(ApiError::internal)?;
+    Ok(Json(RecomputeCalibrationArtifactsResponse {
+        recomputed,
+        snapshot,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1255,6 +1345,15 @@ async fn record_nozzle_height_observation(
             "calibration snapshot does not match the active machine profile",
         ));
     }
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+        .map_err(ApiError::bad_request)?;
+    let artifact_tracking_ready = [
+        CalibrationArtifactId::BottomCameraLocalMap,
+        CalibrationArtifactId::NozzleAxisRunoutN1,
+        CalibrationArtifactId::NozzleAxisRunoutN2,
+    ]
+    .iter()
+    .all(|id| snapshot.artifacts.contains_key(id));
     let nozzle_z_mm = body
         .nozzle_z_mm
         .filter(|value| value.is_finite())
@@ -1324,6 +1423,25 @@ async fn record_nozzle_height_observation(
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()
         .map_err(ApiError::internal)?;
+    let changed_models = if body.post_correction_residual {
+        vec![decoded_models[source_index].clone()]
+    } else {
+        decoded_models.clone()
+    };
+    if artifact_tracking_ready {
+        for model in changed_models {
+            let artifact_id = CalibrationArtifactId::nozzle_height(&model.nozzle_id)
+                .ok_or_else(|| ApiError::bad_request("height model names an unknown nozzle"))?;
+            crate::calibration_artifacts::record_captured_artifact(
+                &state,
+                &mut snapshot,
+                artifact_id,
+                None,
+                serde_json::to_value(model).map_err(ApiError::internal)?,
+            )
+            .map_err(ApiError::bad_request)?;
+        }
+    }
     state
         .store
         .put_calibration(&snapshot)
@@ -1457,7 +1575,7 @@ async fn start_vacuum_probe(
             "vacuum probing requires confirmation that the datum board is fixed, the configured sealing target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
         ));
     }
-    let snapshot = state
+    let mut snapshot = state
         .store
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
@@ -1467,6 +1585,9 @@ async fn start_vacuum_probe(
             "calibration snapshot does not match the active machine profile",
         ));
     }
+    let artifacts_changed =
+        crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+            .map_err(ApiError::bad_request)?;
     if !snapshot
         .completed_steps
         .contains(&CalibrationStepId::NozzleOffsets)
@@ -1523,6 +1644,14 @@ async fn start_vacuum_probe(
         .iter()
         .find(|nozzle| nozzle.nozzle_id == body.nozzle_id)
         .ok_or_else(|| ApiError::bad_request("unknown nozzle for active machine profile"))?;
+    let runtime_artifact = CalibrationArtifactId::runtime_tip_transform(&body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("unknown nozzle for active machine profile"))?;
+    if !crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, runtime_artifact)
+    {
+        return Err(ApiError::bad_request(
+            "vacuum probing requires a current per-nozzle runtime tip transform",
+        ));
+    }
     let sensor_id = match nozzle.nozzle_id.as_str() {
         "N1" => "vacuum_1",
         "N2" => "vacuum_2",
@@ -1601,6 +1730,12 @@ async fn start_vacuum_probe(
         .renew_lease(body.lease_id, 900)
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if artifacts_changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
     let task_state = state.clone();
     let prepared = PreparedVacuumProbe {
         calibration_id,
@@ -2427,6 +2562,7 @@ fn persist_vacuum_probe_report(
         report.nozzle_id.clone(),
         serde_json::to_value(report).map_err(|error| error.to_string())?,
     );
+    crate::calibration_artifacts::record_vacuum_contact_artifact(state, &mut snapshot, report)?;
     state
         .store
         .put_calibration(&snapshot)
@@ -2639,11 +2775,19 @@ async fn start_head_geometry_run(
             "head geometry recalibration requires a child snapshot with a validated parent",
         )
     })?;
-    let parent = state
+    let mut parent = state
         .store
         .get_calibration(parent_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::bad_request("calibration parent snapshot was not found"))?;
+    if crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut parent)
+        .map_err(ApiError::bad_request)?
+    {
+        state
+            .store
+            .put_calibration(&parent)
+            .map_err(ApiError::internal)?;
+    }
     let visual_homing_report = inherit_head_geometry_prerequisites(&mut snapshot, &parent)
         .map_err(ApiError::bad_request)?;
     if state
@@ -2755,6 +2899,194 @@ async fn start_head_geometry_run(
         execute_head_geometry_run(task_state, run_id, lease_id).await
     });
     Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+#[derive(Deserialize)]
+struct StartCalibrationArtifactRunRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+    targets: Vec<CalibrationArtifactId>,
+}
+
+async fn start_calibration_artifact_run(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartCalibrationArtifactRunRequest>,
+) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "artifact capture requires confirmation that the travel envelope is clear, both nozzles are level, nozzle tubes are routed normally and free of snags, and power isolation is reachable",
+        ));
+    }
+    let supported = [
+        CalibrationArtifactId::NozzleAxisRunoutN1,
+        CalibrationArtifactId::NozzleAxisRunoutN2,
+        CalibrationArtifactId::NozzleHeightN1,
+        CalibrationArtifactId::NozzleHeightN2,
+    ];
+    let targets = body.targets.into_iter().collect::<BTreeSet<_>>();
+    if targets.is_empty() || targets.iter().any(|target| !supported.contains(target)) {
+        return Err(ApiError::bad_request(
+            "artifact capture supports per-nozzle runout and height targets",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+        .map_err(ApiError::bad_request)?;
+    let definitions = lumen_calibration_artifacts();
+    for target in &targets {
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.id == *target)
+            .unwrap();
+        if let Some(dependency) = definition.dependencies.iter().find(|dependency| {
+            !targets.contains(dependency)
+                && !crate::calibration_artifacts::artifact_tree_is_current(
+                    &state,
+                    &snapshot,
+                    **dependency,
+                )
+        }) {
+            return Err(ApiError::bad_request(format!(
+                "artifact capture requires current {dependency:?} evidence"
+            )));
+        }
+    }
+    if state
+        .store
+        .list_calibration_runs()
+        .map_err(ApiError::internal)?
+        .iter()
+        .any(|run| {
+            run.calibration_id == calibration_id
+                && matches!(
+                    run.status,
+                    CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+                )
+        })
+    {
+        return Err(ApiError::bad_request(
+            "this calibration snapshot already has an active run",
+        ));
+    }
+    let machine = state.machine.status();
+    machine
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if machine.state != MachineState::Ready || !machine.homed {
+        return Err(ApiError::bad_request(
+            "artifact capture requires a ready, homed machine",
+        ));
+    }
+    state
+        .machine
+        .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(ApiError::internal)?;
+
+    let operation = Operation::pending("calibration.artifact_capture");
+    let now = Utc::now();
+    let nozzle_ids = targets
+        .iter()
+        .filter_map(calibration_artifact_nozzle_id)
+        .collect::<BTreeSet<_>>();
+    let mut checks = nozzle_ids
+        .iter()
+        .map(|nozzle_id| CalibrationCheck {
+            id: format!("tooling_{nozzle_id}"),
+            title: format!("Verify {nozzle_id} tooling"),
+            source: CalibrationCheckSource::Vision,
+            status: CalibrationCheckStatus::Pending,
+            message: "Waiting for automatic tooling verification".into(),
+            evidence: Value::Null,
+        })
+        .collect::<Vec<_>>();
+    checks.extend(targets.iter().map(|target| CalibrationCheck {
+        id: calibration_artifact_check_id(*target),
+        title: format!("Capture {target:?}"),
+        source: CalibrationCheckSource::Vision,
+        status: CalibrationCheckStatus::Pending,
+        message: "Waiting for targeted machine measurement".into(),
+        evidence: Value::Null,
+    }));
+    let run = AutomatedCalibrationRun {
+        id: Uuid::new_v4(),
+        calibration_id,
+        operation_id: operation.id,
+        profile_id: state.profile.id.clone(),
+        created_at: now,
+        updated_at: now,
+        status: CalibrationRunStatus::Pending,
+        phase: CalibrationRunPhase::Pending,
+        config: AutomatedCalibrationConfig {
+            camera_sample_count: default_camera_sample_count(),
+            tooling_sample_count: default_tooling_sample_count(),
+            visual_homing_sample_count: default_visual_homing_sample_count(),
+            excursion_x_mm: default_calibration_excursion(),
+            excursion_y_mm: default_calibration_excursion(),
+            excursion_feed_mm_per_min: default_calibration_excursion_feed(),
+            visual_homing_p95_limit_mm: default_visual_homing_p95_limit(),
+        },
+        checks,
+        camera_reports: BTreeMap::new(),
+        visual_homing_samples: Vec::new(),
+        visual_homing_report: None,
+        head_geometry_report: None,
+        failure: None,
+        simulated: machine.simulated,
+    };
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_calibration_run(&run)
+        .map_err(ApiError::internal)?;
+    let returned = StartCalibrationRunResponse {
+        run: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    let run_id = run.id;
+    let lease_id = body.lease_id;
+    spawn_prepared_operation(state, operation, async move {
+        execute_calibration_artifact_run(task_state, run_id, lease_id, targets).await
+    });
+    Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+fn calibration_artifact_check_id(id: CalibrationArtifactId) -> String {
+    serde_json::to_value(id)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .map(|value| format!("artifact_{value}"))
+        .unwrap_or_else(|| "artifact_unknown".into())
+}
+
+fn calibration_artifact_nozzle_id(id: &CalibrationArtifactId) -> Option<&'static str> {
+    match id {
+        CalibrationArtifactId::NozzleAxisRunoutN1 | CalibrationArtifactId::NozzleHeightN1 => {
+            Some("N1")
+        }
+        CalibrationArtifactId::NozzleAxisRunoutN2 | CalibrationArtifactId::NozzleHeightN2 => {
+            Some("N2")
+        }
+        _ => None,
+    }
 }
 
 async fn list_calibration_runs(
@@ -3076,6 +3408,19 @@ fn inherit_head_geometry_prerequisites(
     }
 
     target.invalidate_from(CalibrationStepId::BottomCameraGeometry);
+    let retained_artifacts = [
+        CalibrationArtifactId::TopCameraReproducibility,
+        CalibrationArtifactId::BottomCameraReproducibility,
+        CalibrationArtifactId::ToolingN1,
+        CalibrationArtifactId::ToolingN2,
+        CalibrationArtifactId::VisualHomingQualification,
+    ];
+    target.artifacts.clear();
+    for id in retained_artifacts {
+        if let Some(artifact) = parent.artifacts.get(&id) {
+            target.artifacts.insert(id, artifact.clone());
+        }
+    }
     if !target.values.is_object() {
         target.values = json!({});
     }
@@ -3609,6 +3954,318 @@ async fn execute_head_geometry_run(
         geometry_report.nozzles.len(),
         geometry_report.nozzle_height_models.len(),
     )))
+}
+
+async fn execute_calibration_artifact_run(
+    state: AppState,
+    run_id: Uuid,
+    lease_id: Uuid,
+    targets: BTreeSet<CalibrationArtifactId>,
+) -> Result<Option<String>, String> {
+    let mut run = state
+        .store
+        .get_calibration_run(run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "artifact capture run disappeared from storage".to_string())?;
+    run.status = CalibrationRunStatus::Running;
+    run.phase = CalibrationRunPhase::HeadGeometryCalibration;
+    persist_calibration_run(&state, &mut run)?;
+    refresh_calibration_lease(&state, lease_id).await?;
+    let machine = state.machine.status();
+    machine
+        .assert_lease(lease_id, Utc::now())
+        .map_err(|error| error.to_string())?;
+    if machine.state != MachineState::Ready || !machine.homed {
+        return fail_calibration_run(
+            &state,
+            &mut run,
+            "artifact capture lost the ready, homed machine state".into(),
+        );
+    }
+    if let Err(error) = execute_visual_home_with_limit(
+        &state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+        Some(run.config.visual_homing_p95_limit_mm),
+    )
+    .await
+    {
+        return fail_calibration_run(&state, &mut run, error.message);
+    }
+
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| "active profile has no bottom vision".to_string())?
+        .clone();
+    let camera_profile =
+        stored_camera_profile(&state, CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let device_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let mut snapshot = state
+        .store
+        .get_calibration(run.calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)?;
+    let mapping: BottomCameraMappingReport =
+        serde_json::from_value(crate::calibration_artifacts::artifact_result_value(
+            &snapshot,
+            CalibrationArtifactId::BottomCameraLocalMap,
+        )?)
+        .map_err(|error| error.to_string())?;
+    let reciprocal = crate::calibration_artifacts::artifact_result_value(
+        &snapshot,
+        CalibrationArtifactId::ReciprocalCameraGeometry,
+    )?;
+    let top_camera_lens: HeadFeatureCenterReport = serde_json::from_value(
+        reciprocal
+            .get("top_camera_lens")
+            .cloned()
+            .ok_or_else(|| "reciprocal camera geometry has no top-camera lens".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let capture = async {
+        let tooling_sample_count = run.config.tooling_sample_count;
+        for nozzle_id in ["N1", "N2"] {
+            let nozzle_targets = targets
+                .iter()
+                .filter(|target| calibration_artifact_nozzle_id(target) == Some(nozzle_id))
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if nozzle_targets.is_empty() {
+                continue;
+            }
+            let nozzle = bottom
+                .nozzles
+                .iter()
+                .find(|nozzle| nozzle.nozzle_id == nozzle_id)
+                .ok_or_else(|| CalibrationStop::Failed(format!("profile has no {nozzle_id}")))?;
+            state
+                .machine
+                .jog(
+                    lease_id,
+                    bottom.nozzle_target(nozzle),
+                    bottom.feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+            let (tooling, attempts) = capture_nozzle_tooling_with_retries(
+                &state,
+                Some(&mut run),
+                &camera_profile,
+                &device_path,
+                tooling_sample_count,
+                &bottom,
+                nozzle,
+            )
+            .await?;
+            update_tooling_check(&mut run, &tooling);
+            run.camera_reports.insert(
+                format!("tooling_{nozzle_id}_attempts"),
+                serde_json::to_value(attempts).unwrap_or(Value::Null),
+            );
+            persist_calibration_run(&state, &mut run).map_err(CalibrationStop::Failed)?;
+            if !tooling.passed {
+                return Err(CalibrationStop::Rejected(format!(
+                    "{nozzle_id} tooling could not be identified as {}",
+                    nozzle.expected_tip_id
+                )));
+            }
+
+            let runout_id = CalibrationArtifactId::nozzle_runout(nozzle_id).unwrap();
+            if nozzle_targets.contains(&runout_id) {
+                let report = measure_nozzle_runout(
+                    &state,
+                    &mut run,
+                    lease_id,
+                    &bottom,
+                    nozzle,
+                    &camera_profile,
+                    &device_path,
+                    mapping.pixel_error_to_machine_mm,
+                    top_camera_lens.controller_x_mm,
+                    top_camera_lens.controller_y_mm,
+                )
+                .await?;
+                persist_targeted_runout(&state, &run, &mut snapshot, report)
+                    .map_err(CalibrationStop::Failed)?;
+                update_run_check(
+                    &mut run,
+                    &calibration_artifact_check_id(runout_id),
+                    CalibrationCheckStatus::Passed,
+                    "Targeted nozzle runout capture passed",
+                    Value::Null,
+                );
+                persist_calibration_run(&state, &mut run).map_err(CalibrationStop::Failed)?;
+            }
+
+            let height_id = CalibrationArtifactId::nozzle_height(nozzle_id).unwrap();
+            if nozzle_targets.contains(&height_id) {
+                let model = measure_nozzle_height_model(
+                    &state,
+                    &mut run,
+                    lease_id,
+                    &bottom,
+                    nozzle,
+                    &camera_profile,
+                    &device_path,
+                    &mapping,
+                )
+                .await?;
+                persist_targeted_height_model(&state, &run, &mut snapshot, model)
+                    .map_err(CalibrationStop::Failed)?;
+                update_run_check(
+                    &mut run,
+                    &calibration_artifact_check_id(height_id),
+                    CalibrationCheckStatus::Passed,
+                    "Targeted nozzle height-axis capture passed",
+                    Value::Null,
+                );
+                persist_calibration_run(&state, &mut run).map_err(CalibrationStop::Failed)?;
+            }
+        }
+        Ok::<(), CalibrationStop>(())
+    }
+    .await;
+    let lights_off = state.machine.disable_actuator("lights".into()).await;
+    if let Err(error) = lights_off {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    match capture {
+        Ok(()) => {}
+        Err(CalibrationStop::Rejected(message)) => {
+            return reject_calibration_run(&state, &mut run, message)
+        }
+        Err(CalibrationStop::Failed(message)) => {
+            return fail_calibration_run(&state, &mut run, message)
+        }
+    }
+    run.phase = CalibrationRunPhase::Complete;
+    run.status = CalibrationRunStatus::Succeeded;
+    run.failure = None;
+    persist_calibration_run(&state, &mut run)?;
+    Ok(Some(format!(
+        "Captured {} selected calibration artifacts",
+        targets.len()
+    )))
+}
+
+fn persist_targeted_runout(
+    state: &AppState,
+    run: &AutomatedCalibrationRun,
+    snapshot: &mut CalibrationSnapshot,
+    report: NozzleRunoutReport,
+) -> Result<(), String> {
+    let artifact_id = CalibrationArtifactId::nozzle_runout(&report.nozzle_id)
+        .ok_or_else(|| "runout report names an unknown nozzle".to_string())?;
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    let values = snapshot.values.as_object_mut().unwrap();
+    let runout = values
+        .entry(CalibrationStepId::NozzleRunout.as_str())
+        .or_insert_with(|| json!({"reports": []}));
+    let reports = runout
+        .get_mut("reports")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "stored nozzle runout reports are invalid".to_string())?;
+    reports
+        .retain(|value| value.get("nozzle_id").and_then(Value::as_str) != Some(&report.nozzle_id));
+    reports.push(serde_json::to_value(&report).map_err(|error| error.to_string())?);
+    let decoded = reports
+        .iter()
+        .cloned()
+        .map(serde_json::from_value::<NozzleRunoutReport>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    snapshot.residuals.insert(
+        CalibrationStepId::NozzleRunout,
+        combine_runout_residuals(&decoded),
+    );
+    snapshot.production_ready = false;
+    crate::calibration_artifacts::record_captured_artifact(
+        state,
+        snapshot,
+        artifact_id,
+        Some(run.id),
+        serde_json::to_value(report).map_err(|error| error.to_string())?,
+    )?;
+    state
+        .store
+        .put_calibration(snapshot)
+        .map_err(|error| error.to_string())
+}
+
+fn persist_targeted_height_model(
+    state: &AppState,
+    run: &AutomatedCalibrationRun,
+    snapshot: &mut CalibrationSnapshot,
+    model: NozzleHeightModel,
+) -> Result<(), String> {
+    let artifact_id = CalibrationArtifactId::nozzle_height(&model.nozzle_id)
+        .ok_or_else(|| "height model names an unknown nozzle".to_string())?;
+    let artifact_model = model.clone();
+    let mut legacy_model = model;
+    if crate::calibration_artifacts::artifact_tree_is_current(
+        state,
+        snapshot,
+        CalibrationArtifactId::CameraRayTransfer,
+    ) {
+        let transfer: CameraRayTransferReport =
+            serde_json::from_value(crate::calibration_artifacts::artifact_result_value(
+                snapshot,
+                CalibrationArtifactId::CameraRayTransfer,
+            )?)
+            .map_err(|error| error.to_string())?;
+        legacy_model.reference_transfer_correction_x_mm = transfer.transfer_correction_x_mm;
+        legacy_model.reference_transfer_correction_y_mm = transfer.transfer_correction_y_mm;
+    }
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    let values = snapshot.values.as_object_mut().unwrap();
+    let height = values
+        .entry(CalibrationStepId::NozzleHeightModel.as_str())
+        .or_insert_with(|| json!({"models": []}));
+    let models = height
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "stored nozzle height models are invalid".to_string())?;
+    models.retain(|value| {
+        value.get("nozzle_id").and_then(Value::as_str) != Some(&legacy_model.nozzle_id)
+    });
+    models.push(serde_json::to_value(&legacy_model).map_err(|error| error.to_string())?);
+    let decoded = models
+        .iter()
+        .cloned()
+        .map(serde_json::from_value::<NozzleHeightModel>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if let Some(residuals) = combine_height_residuals(&decoded) {
+        snapshot
+            .residuals
+            .insert(CalibrationStepId::NozzleHeightModel, residuals);
+    }
+    snapshot.production_ready = false;
+    crate::calibration_artifacts::record_captured_artifact(
+        state,
+        snapshot,
+        artifact_id,
+        Some(run.id),
+        serde_json::to_value(artifact_model).map_err(|error| error.to_string())?,
+    )?;
+    state
+        .store
+        .put_calibration(snapshot)
+        .map_err(|error| error.to_string())
 }
 
 async fn measure_independent_visual_return(
@@ -5553,7 +6210,17 @@ fn record_head_geometry_steps(
             "camera_ray_transfer": report.camera_ray_transfer,
             "models": report.nozzle_height_models,
         }),
-    )
+    )?;
+    let mut snapshot = state
+        .store
+        .get_calibration(run.calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)?;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(|error| error.to_string())
 }
 
 async fn execute_initial_actuator_checks(
@@ -6487,6 +7154,7 @@ mod tests {
                 "visual_homing": {"report": report},
                 "bottom_camera_geometry": {"stale": true},
             }),
+            artifacts: BTreeMap::new(),
             parent_id: None,
             production_ready: false,
         };
@@ -6507,6 +7175,7 @@ mod tests {
                 "nozzle_offsets": {"stale": true},
                 "vacuum_probe": {"N1": {"stale": true}},
             }),
+            artifacts: BTreeMap::new(),
             parent_id: Some(parent_id),
             production_ready: true,
         };
@@ -6540,6 +7209,7 @@ mod tests {
             completed_steps: BTreeSet::from(HEAD_GEOMETRY_PREREQUISITES),
             residuals: BTreeMap::new(),
             values: json!({"visual_homing": {"report": report}}),
+            artifacts: BTreeMap::new(),
             parent_id: None,
             production_ready: false,
         };
@@ -6551,6 +7221,7 @@ mod tests {
             completed_steps: BTreeSet::new(),
             residuals: BTreeMap::new(),
             values: json!({}),
+            artifacts: BTreeMap::new(),
             parent_id: Some(parent_id),
             production_ready: false,
         };
@@ -6611,6 +7282,7 @@ mod tests {
                     "camera_ray_transfer": {"passed": true}
                 }
             }),
+            artifacts: BTreeMap::new(),
             parent_id: None,
             production_ready: false,
         };
@@ -6977,6 +7649,7 @@ mod tests {
             values: json!({
                 "nozzle_height_model": {"models": [n1_model, n2_model]}
             }),
+            artifacts: BTreeMap::new(),
             parent_id: None,
             production_ready: false,
         };
@@ -7118,6 +7791,7 @@ mod tests {
                     "correction_sin_y_mm": 0.004,
                 }]},
             }),
+            artifacts: BTreeMap::new(),
             parent_id: None,
             production_ready: false,
         };

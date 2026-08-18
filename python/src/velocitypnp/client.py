@@ -252,6 +252,62 @@ class Client:
     def calibration(self, calibration_id: str | uuid.UUID) -> dict[str, Any]:
         return self._request("GET", f"/calibrations/{calibration_id}")
 
+    def calibration_artifacts(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/calibration/artifacts")["artifacts"]
+
+    def calibration_plan(
+        self,
+        calibration_id: str | uuid.UUID,
+        targets: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/artifact-plan",
+            {"targets": targets or []},
+        )
+
+    def recompute_calibration_artifacts(
+        self,
+        calibration_id: str | uuid.UUID,
+        targets: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/derived-artifacts/recompute",
+            {"targets": targets or []},
+        )
+
+    def capture_calibration_artifacts(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        targets: list[str],
+        *,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        supported = {
+            "nozzle_axis_runout_n1", "nozzle_axis_runout_n2",
+            "nozzle_height_n1", "nozzle_height_n2",
+        }
+        if not targets or not set(targets) <= supported:
+            raise ValueError("targets must name supported nozzle runout or height artifacts")
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "artifact capture requires explicit confirmation that both nozzles are "
+                "level, the envelope is clear, and power isolation is reachable"
+            )
+        started = self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/artifact-runs",
+            {
+                "lease_id": str(lease_id),
+                "confirmed_external_safety_checks": True,
+                "targets": targets,
+            },
+        )
+        self.wait(started["operation"])
+        return self.calibration_run(started["run"]["id"])
+
     def calibration_runs(
         self, calibration_id: str | uuid.UUID,
     ) -> list[dict[str, Any]]:
@@ -268,15 +324,15 @@ class Client:
         lease_id: str | uuid.UUID,
         *,
         safety_checks_confirmed: bool = False,
-        visual_homing_sample_count: int = 30,
+        visual_homing_sample_count: int = 5,
     ) -> dict[str, Any]:
         if not safety_checks_confirmed:
             raise ValueError(
                 "calibration requires explicit confirmation that both nozzles are level, "
                 "the envelope is clear, and power isolation is reachable"
             )
-        if not 30 <= visual_homing_sample_count <= 100:
-            raise ValueError("visual_homing_sample_count must be between 30 and 100")
+        if not 3 <= visual_homing_sample_count <= 100:
+            raise ValueError("visual_homing_sample_count must be between 3 and 100")
         return self._request(
             "POST",
             f"/calibrations/{calibration_id}/runs",
@@ -293,7 +349,7 @@ class Client:
         lease_id: str | uuid.UUID,
         *,
         safety_checks_confirmed: bool = False,
-        visual_homing_sample_count: int = 30,
+        visual_homing_sample_count: int = 5,
     ) -> dict[str, Any]:
         started = self.start_calibration_run(
             calibration_id,

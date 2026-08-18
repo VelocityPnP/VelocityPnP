@@ -1,5 +1,6 @@
 import type {
-  AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
+  AutomatedCalibrationRun, BoardDesign, CalibrationArtifactId, CalibrationArtifactPlan,
+  CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
   Operation, SensorReading, VisualHomingResult,
 } from "./types";
@@ -91,6 +92,13 @@ export const api = {
     jsonPost<CalibrationSnapshot>("/calibrations", { machine_serial: machineSerial }),
   calibration: (snapshotId: string) =>
     request<CalibrationSnapshot>(`/calibrations/${snapshotId}`),
+  calibrationPlan: (snapshotId: string, targets: CalibrationArtifactId[] = []) =>
+    jsonPost<CalibrationArtifactPlan>(`/calibrations/${snapshotId}/artifact-plan`, { targets }),
+  recomputeDerivedCalibration: (
+    snapshotId: string, targets: CalibrationArtifactId[] = [],
+  ) => jsonPost<{ recomputed: CalibrationArtifactId[]; snapshot: CalibrationSnapshot }>(
+    `/calibrations/${snapshotId}/derived-artifacts/recompute`, { targets },
+  ),
   calibrationRuns: async (snapshotId: string) =>
     (await request<{ runs: AutomatedCalibrationRun[] }>(`/calibrations/${snapshotId}/runs`)).runs,
   calibrationRun: (runId: string) =>
@@ -113,6 +121,16 @@ export const api = {
         confirmed_external_safety_checks: true,
       },
     ),
+  startArtifactCalibration: (
+    snapshotId: string, leaseId: string, targets: CalibrationArtifactId[],
+  ) => jsonPost<{ run: AutomatedCalibrationRun; operation: Operation }>(
+    `/calibrations/${snapshotId}/artifact-runs`,
+    {
+      lease_id: leaseId,
+      confirmed_external_safety_checks: true,
+      targets,
+    },
+  ),
   vacuumProbe: (snapshotId: string, leaseId: string, nozzleId: "N1" | "N2") =>
     jsonPost<Operation>(`/calibrations/${snapshotId}/vacuum-probe`, {
       lease_id: leaseId,

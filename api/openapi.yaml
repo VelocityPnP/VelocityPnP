@@ -315,6 +315,17 @@ paths:
       operationId: calibrationWorkflow
       responses:
         "200": { description: Ordered calibration dependency graph, content: { application/json: { schema: { type: object } } } }
+  /calibration/artifacts:
+    get:
+      operationId: calibrationArtifactWorkflow
+      description: >-
+        Returns the fine-grained captured, qualification, and derived artifact
+        dependency graph with motion and duration estimates.
+      responses:
+        "200":
+          description: Calibration artifact definitions
+          content:
+            application/json: { schema: { type: object } }
   /calibrations:
     get:
       operationId: listCalibrations
@@ -340,6 +351,87 @@ paths:
       responses:
         "200": { description: Calibration snapshot, content: { application/json: { schema: { type: object } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /calibrations/{id}/artifact-plan:
+    post:
+      operationId: planCalibrationArtifacts
+      description: >-
+        Classifies each requested artifact and its dependencies as reusable,
+        zero-motion recomputation, physical recapture, or blocked. Legacy
+        calibration snapshots are migrated to provenance-bearing artifacts.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targets:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Selective calibration plan with motion and duration estimates
+          content:
+            application/json: { schema: { type: object } }
+  /calibrations/{id}/derived-artifacts/recompute:
+    post:
+      operationId: recomputeDerivedCalibrationArtifacts
+      description: >-
+        Recalculates requested derived artifacts from current captured sources.
+        This endpoint never commands machine motion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targets:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Recomputed artifact IDs and updated snapshot
+          content:
+            application/json: { schema: { type: object } }
+  /calibrations/{id}/artifact-runs:
+    post:
+      operationId: startCalibrationArtifactRun
+      description: >-
+        Runs one live visual alignment, automatically verifies the selected
+        tooling, and captures only the requested N1/N2 runout or height
+        branches. Lateral motion occurs only while both nozzles are level.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, confirmed_external_safety_checks, targets]
+              properties:
+                lease_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+                targets:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    enum:
+                      - nozzle_axis_runout_n1
+                      - nozzle_axis_runout_n2
+                      - nozzle_height_n1
+                      - nozzle_height_n2
+      responses:
+        "202":
+          description: Persisted targeted calibration run and operation
+          content:
+            application/json: { schema: { type: object } }
   /calibrations/{id}/runs:
     get:
       operationId: listCalibrationRuns
@@ -380,7 +472,14 @@ paths:
                 confirmed_external_safety_checks: { type: boolean }
                 camera_sample_count: { type: integer, minimum: 30, maximum: 60, default: 30 }
                 tooling_sample_count: { type: integer, minimum: 5, maximum: 30, default: 5 }
-                visual_homing_sample_count: { type: integer, minimum: 30, maximum: 100, default: 30 }
+                visual_homing_sample_count:
+                  description: >-
+                    Three to five cycles are a commissioning check. Production
+                    qualification still requires at least 30 stored samples.
+                  type: integer
+                  minimum: 3
+                  maximum: 100
+                  default: 5
                 excursion_x_mm: { type: number, default: -10 }
                 excursion_y_mm: { type: number, default: -10 }
                 excursion_feed_mm_per_min: { type: number, exclusiveMinimum: 0, default: 600 }

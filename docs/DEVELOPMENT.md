@@ -159,14 +159,16 @@ The command stores camera target correction, the directly measured current-tip
 offset, applied height-model correction, raw off and open-nozzle values, and
 descent samples in `values.vacuum_probe.<nozzle>` on the calibration snapshot. A
 successful signal is feasibility evidence only. It does not complete the
-Z-plane or vacuum-threshold workflow steps.
+Z-plane or vacuum-threshold workflow steps. It also records an independent
+`vacuum_contact_n1` or `vacuum_contact_n2` artifact with the exact runtime-tip,
+tooling, sensor, and vacuum-profile fingerprints that authorized the probe.
 
 The automated head-geometry pass also holds each centered nozzle at fixed X/Y
 and captures it at the profile Z heights. Bounded X/Y probes measure the local
 image map at each height, and the runner fits XY shift per millimetre of nozzle
 Z. It always retracts to the level controller Z before the next lateral move.
-Reciprocal observations of the two 15 mm camera references supply the shared
-working-plane transfer term automatically.
+Reciprocal observations of the camera outlines, including the V3 top-camera
+33 mm cutout, supply the shared working-plane transfer term automatically.
 
 The observation command is retained as a diagnostic override:
 
@@ -224,17 +226,16 @@ attempts with 500 ms between attempts so a short USB re-enumeration does not
 discard a long calibration run. A persistent camera fault still stops the
 runner. Tooling identity uses dark thresholds 45, 60, and 90. It stores every
 identity frame and does not treat an unsupported wrong-feature sample as a
-confirmed different tool. It then repeats coarse home, bounded
-visual refinement, a deterministic -10/-10 mm excursion, return, and
-observation for 30 cycles by default. After the first successful cycle, the
-runner performs head geometry early so a camera or rotation problem does not
-waste the full repeatability run. The evidence remains provisional until all
-30 cycles pass. The runner:
+confirmed different tool. It then repeats coarse home, bounded visual
+refinement, a deterministic -10/-10 mm excursion, return, and observation. The
+default five cycles are a commissioning check. Production qualification is
+separate and still requires at least 30 stored visual-home samples. After the
+configured cycles pass, the runner performs head geometry. The runner:
 
 1. Uses bounded X/Y probes around the homing fiducial to measure the top-camera
    working-plane map.
 2. Uses bounded local X/Y probes to measure the bottom-camera map.
-3. Uses each camera to locate the opposing 15 mm camera reference. Their
+3. Uses each camera to locate the opposing camera outline. Their
    reciprocal poses and apparent scale solve the working-plane ray transfer.
 4. Locates each configured nozzle feature from the prior profile offset seed.
    Nozzle offsets use the top-camera reference and nozzle poses observed by the
@@ -261,5 +262,52 @@ Successful evidence advances the snapshot automatically. Calibration stages
 whose runners are not implemented are reported as planned and cannot be
 completed manually. Starting a run renews the caller's matching control lease
 to the machine actor's one-hour maximum. The runner refreshes that same lease
-before each long-running measurement checkpoint, so the default 30-cycle run
-keeps control without asking the operator to renew it manually.
+before each long-running measurement checkpoint, so long runs keep control
+without asking the operator to renew it manually.
+
+## Selective calibration artifacts
+
+The legacy ordered steps remain available to existing clients. Each measured
+or calculated result is also stored as a fine-grained artifact. Artifacts store
+the algorithm version, relevant machine/camera/tooling input fingerprints,
+dependency fingerprints, source run, value, and a stable SHA-256 fingerprint.
+The graph separates physical captures from mathematical calculations:
+
+```text
+top map + reciprocal cameras -> camera-ray transfer (calculated)
+bottom map + N1 tooling -> N1 runout -> N1 height model
+bottom map + N2 tooling -> N2 runout -> N2 height model
+camera-ray transfer + N1 branch -> N1 runtime tip -> N1 vacuum contact
+camera-ray transfer + N2 branch -> N2 runtime tip -> N2 vacuum contact
+```
+
+Coarse homing and one live visual alignment are session motion preconditions.
+They are not mathematical parents of every stored geometry result. A change to
+one nozzle branch does not invalidate the other nozzle's runtime transform.
+
+Preview reuse, zero-motion calculation, and required recapture:
+
+```bash
+velocitypnp calibration-plan CALIBRATION_UUID
+```
+
+Recalculate stale derived artifacts without commanding machine motion:
+
+```bash
+velocitypnp recompute-derived-calibration CALIBRATION_UUID
+```
+
+Capture only a selected physical branch. The run performs one live visual
+alignment and verifies the installed tooling before measurement:
+
+```bash
+velocitypnp capture-calibration-artifacts CALIBRATION_UUID \
+  --lease "$VELOCITYPNP_LEASE" \
+  --target nozzle_axis_runout_n1 --target nozzle_height_n1 \
+  --confirm-safety-checks
+```
+
+Use repeated `--target ARTIFACT_ID` arguments to limit either command. Legacy
+snapshots migrate automatically when the planner or a dependent operation first
+uses them. Camera-ray transfer, shared offset summaries, and per-nozzle runtime
+tip transforms are calculated from retained source captures.

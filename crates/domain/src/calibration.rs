@@ -109,8 +109,302 @@ pub struct CalibrationSnapshot {
     pub completed_steps: BTreeSet<CalibrationStepId>,
     pub residuals: BTreeMap<CalibrationStepId, Residuals>,
     pub values: serde_json::Value,
+    /// Fine-grained, provenance-bearing calibration results. The legacy step
+    /// fields remain available while clients migrate to artifact planning.
+    #[serde(default)]
+    pub artifacts: BTreeMap<CalibrationArtifactId, CalibrationArtifact>,
     pub parent_id: Option<Uuid>,
     pub production_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationArtifactId {
+    TopCameraReproducibility,
+    BottomCameraReproducibility,
+    ToolingN1,
+    ToolingN2,
+    VisualHomingQualification,
+    TopCameraWorkingPlaneMap,
+    BottomCameraLocalMap,
+    ReciprocalCameraGeometry,
+    CameraRayTransfer,
+    NozzleAxisRunoutN1,
+    NozzleAxisRunoutN2,
+    HeadNozzleOffsets,
+    NozzleHeightN1,
+    NozzleHeightN2,
+    RuntimeTipTransformN1,
+    RuntimeTipTransformN2,
+    VacuumContactN1,
+    VacuumContactN2,
+}
+
+impl CalibrationArtifactId {
+    pub const fn nozzle_runout(nozzle_id: &str) -> Option<Self> {
+        match nozzle_id.as_bytes() {
+            b"N1" => Some(Self::NozzleAxisRunoutN1),
+            b"N2" => Some(Self::NozzleAxisRunoutN2),
+            _ => None,
+        }
+    }
+
+    pub const fn nozzle_height(nozzle_id: &str) -> Option<Self> {
+        match nozzle_id.as_bytes() {
+            b"N1" => Some(Self::NozzleHeightN1),
+            b"N2" => Some(Self::NozzleHeightN2),
+            _ => None,
+        }
+    }
+
+    pub const fn runtime_tip_transform(nozzle_id: &str) -> Option<Self> {
+        match nozzle_id.as_bytes() {
+            b"N1" => Some(Self::RuntimeTipTransformN1),
+            b"N2" => Some(Self::RuntimeTipTransformN2),
+            _ => None,
+        }
+    }
+
+    pub const fn vacuum_contact(nozzle_id: &str) -> Option<Self> {
+        match nozzle_id.as_bytes() {
+            b"N1" => Some(Self::VacuumContactN1),
+            b"N2" => Some(Self::VacuumContactN2),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationArtifactKind {
+    Captured,
+    Qualification,
+    Derived,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrationArtifactDefinition {
+    pub id: CalibrationArtifactId,
+    pub title: String,
+    pub dependencies: Vec<CalibrationArtifactId>,
+    pub kind: CalibrationArtifactKind,
+    pub requires_motion: bool,
+    pub estimated_duration_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationArtifact {
+    pub kind: CalibrationArtifactKind,
+    pub recorded_at: DateTime<Utc>,
+    pub source_run_id: Option<Uuid>,
+    pub algorithm_version: String,
+    /// Fingerprints of only the profiles, tooling, or configuration that this
+    /// result consumes directly.
+    pub input_fingerprints: BTreeMap<String, String>,
+    /// Dependency fingerprints as they were when this result was produced.
+    pub dependency_fingerprints: BTreeMap<CalibrationArtifactId, String>,
+    /// Stable digest of the algorithm, inputs, dependencies, and value.
+    pub fingerprint: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationPlanAction {
+    Reuse,
+    Recompute,
+    Recapture,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrationPlanItem {
+    pub artifact: CalibrationArtifactId,
+    pub action: CalibrationPlanAction,
+    pub reason: String,
+    pub requires_motion: bool,
+    pub estimated_duration_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrationArtifactPlan {
+    pub targets: Vec<CalibrationArtifactId>,
+    pub items: Vec<CalibrationPlanItem>,
+    pub requires_motion: bool,
+    pub estimated_duration_seconds: u32,
+}
+
+pub fn lumen_calibration_artifacts() -> Vec<CalibrationArtifactDefinition> {
+    use CalibrationArtifactId::*;
+    use CalibrationArtifactKind::*;
+    vec![
+        artifact(
+            TopCameraReproducibility,
+            "Top-camera health",
+            &[],
+            Qualification,
+            true,
+            45,
+        ),
+        artifact(
+            BottomCameraReproducibility,
+            "Bottom-camera health",
+            &[],
+            Qualification,
+            true,
+            45,
+        ),
+        artifact(
+            ToolingN1,
+            "N1 tooling",
+            &[BottomCameraReproducibility],
+            Qualification,
+            true,
+            15,
+        ),
+        artifact(
+            ToolingN2,
+            "N2 tooling",
+            &[BottomCameraReproducibility],
+            Qualification,
+            true,
+            15,
+        ),
+        artifact(
+            VisualHomingQualification,
+            "Visual-home qualification",
+            &[TopCameraReproducibility],
+            Qualification,
+            true,
+            120,
+        ),
+        artifact(
+            TopCameraWorkingPlaneMap,
+            "Top-camera working-plane map",
+            &[VisualHomingQualification],
+            Captured,
+            true,
+            60,
+        ),
+        artifact(
+            BottomCameraLocalMap,
+            "Bottom-camera local map",
+            &[BottomCameraReproducibility, ToolingN1],
+            Captured,
+            true,
+            60,
+        ),
+        artifact(
+            ReciprocalCameraGeometry,
+            "Reciprocal camera geometry",
+            &[TopCameraWorkingPlaneMap, BottomCameraLocalMap],
+            Captured,
+            true,
+            120,
+        ),
+        artifact(
+            CameraRayTransfer,
+            "Camera-ray transfer",
+            &[TopCameraWorkingPlaneMap, ReciprocalCameraGeometry],
+            Derived,
+            false,
+            0,
+        ),
+        artifact(
+            NozzleAxisRunoutN1,
+            "N1 axis and runout",
+            &[BottomCameraLocalMap, ToolingN1, ReciprocalCameraGeometry],
+            Captured,
+            true,
+            180,
+        ),
+        artifact(
+            NozzleAxisRunoutN2,
+            "N2 axis and runout",
+            &[BottomCameraLocalMap, ToolingN2, ReciprocalCameraGeometry],
+            Captured,
+            true,
+            180,
+        ),
+        artifact(
+            HeadNozzleOffsets,
+            "Head and nozzle offsets",
+            &[
+                ReciprocalCameraGeometry,
+                NozzleAxisRunoutN1,
+                NozzleAxisRunoutN2,
+            ],
+            Derived,
+            false,
+            0,
+        ),
+        artifact(
+            NozzleHeightN1,
+            "N1 height-axis model",
+            &[BottomCameraLocalMap, ToolingN1, NozzleAxisRunoutN1],
+            Captured,
+            true,
+            180,
+        ),
+        artifact(
+            NozzleHeightN2,
+            "N2 height-axis model",
+            &[BottomCameraLocalMap, ToolingN2, NozzleAxisRunoutN2],
+            Captured,
+            true,
+            180,
+        ),
+        artifact(
+            RuntimeTipTransformN1,
+            "N1 runtime tip transform",
+            &[CameraRayTransfer, NozzleAxisRunoutN1, NozzleHeightN1],
+            Derived,
+            false,
+            0,
+        ),
+        artifact(
+            RuntimeTipTransformN2,
+            "N2 runtime tip transform",
+            &[CameraRayTransfer, NozzleAxisRunoutN2, NozzleHeightN2],
+            Derived,
+            false,
+            0,
+        ),
+        artifact(
+            VacuumContactN1,
+            "N1 vacuum contact",
+            &[RuntimeTipTransformN1],
+            Captured,
+            true,
+            120,
+        ),
+        artifact(
+            VacuumContactN2,
+            "N2 vacuum contact",
+            &[RuntimeTipTransformN2],
+            Captured,
+            true,
+            120,
+        ),
+    ]
+}
+
+fn artifact(
+    id: CalibrationArtifactId,
+    title: &str,
+    dependencies: &[CalibrationArtifactId],
+    kind: CalibrationArtifactKind,
+    requires_motion: bool,
+    estimated_duration_seconds: u32,
+) -> CalibrationArtifactDefinition {
+    CalibrationArtifactDefinition {
+        id,
+        title: title.into(),
+        dependencies: dependencies.to_vec(),
+        kind,
+        requires_motion,
+        estimated_duration_seconds,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,7 +965,61 @@ impl CalibrationSnapshot {
                     .any(|invalid_step| invalid_step.as_str() == key)
             });
         }
+        let artifact_roots = match changed {
+            CalibrationStepId::CameraReproducibility => vec![
+                CalibrationArtifactId::TopCameraReproducibility,
+                CalibrationArtifactId::BottomCameraReproducibility,
+                CalibrationArtifactId::ToolingN1,
+                CalibrationArtifactId::ToolingN2,
+            ],
+            CalibrationStepId::VisualHoming => {
+                vec![CalibrationArtifactId::VisualHomingQualification]
+            }
+            CalibrationStepId::BottomCameraGeometry => vec![
+                CalibrationArtifactId::TopCameraWorkingPlaneMap,
+                CalibrationArtifactId::BottomCameraLocalMap,
+                CalibrationArtifactId::ReciprocalCameraGeometry,
+            ],
+            CalibrationStepId::NozzleOffsets => {
+                vec![CalibrationArtifactId::HeadNozzleOffsets]
+            }
+            CalibrationStepId::NozzleRunout => vec![
+                CalibrationArtifactId::NozzleAxisRunoutN1,
+                CalibrationArtifactId::NozzleAxisRunoutN2,
+            ],
+            CalibrationStepId::NozzleHeightModel => vec![
+                CalibrationArtifactId::NozzleHeightN1,
+                CalibrationArtifactId::NozzleHeightN2,
+            ],
+            CalibrationStepId::VacuumThresholds => vec![
+                CalibrationArtifactId::VacuumContactN1,
+                CalibrationArtifactId::VacuumContactN2,
+            ],
+            _ => Vec::new(),
+        };
+        self.invalidate_artifacts_from(&artifact_roots);
         self.production_ready = false;
+    }
+
+    pub fn invalidate_artifacts_from(&mut self, changed: &[CalibrationArtifactId]) {
+        let definitions = lumen_calibration_artifacts();
+        let mut invalid = changed.iter().copied().collect::<BTreeSet<_>>();
+        loop {
+            let before = invalid.len();
+            for definition in &definitions {
+                if definition
+                    .dependencies
+                    .iter()
+                    .any(|dependency| invalid.contains(dependency))
+                {
+                    invalid.insert(definition.id);
+                }
+            }
+            if invalid.len() == before {
+                break;
+            }
+        }
+        self.artifacts.retain(|id, _| !invalid.contains(id));
     }
 }
 
@@ -692,6 +1040,7 @@ mod tests {
                 .collect(),
             residuals: BTreeMap::new(),
             values: serde_json::json!({}),
+            artifacts: BTreeMap::new(),
             parent_id: None,
             production_ready: true,
         };
@@ -740,6 +1089,61 @@ mod tests {
             let step = workflow.iter().find(|step| step.id == id).unwrap();
             assert_eq!(step.automation, CalibrationAutomation::Automated);
         }
+    }
+
+    #[test]
+    fn n1_artifact_invalidation_keeps_n2_measurements() {
+        let artifact = CalibrationArtifact {
+            kind: CalibrationArtifactKind::Captured,
+            recorded_at: Utc::now(),
+            source_run_id: None,
+            algorithm_version: "test".into(),
+            input_fingerprints: BTreeMap::new(),
+            dependency_fingerprints: BTreeMap::new(),
+            fingerprint: "test".into(),
+            value: serde_json::json!({}),
+        };
+        let mut snapshot = CalibrationSnapshot {
+            id: Uuid::new_v4(),
+            machine_serial: "test".into(),
+            profile_id: "test".into(),
+            created_at: Utc::now(),
+            completed_steps: BTreeSet::new(),
+            residuals: BTreeMap::new(),
+            values: serde_json::json!({}),
+            artifacts: BTreeMap::from([
+                (CalibrationArtifactId::NozzleAxisRunoutN1, artifact.clone()),
+                (CalibrationArtifactId::NozzleAxisRunoutN2, artifact.clone()),
+                (CalibrationArtifactId::NozzleHeightN1, artifact.clone()),
+                (CalibrationArtifactId::NozzleHeightN2, artifact.clone()),
+                (
+                    CalibrationArtifactId::RuntimeTipTransformN1,
+                    artifact.clone(),
+                ),
+                (CalibrationArtifactId::RuntimeTipTransformN2, artifact),
+            ]),
+            parent_id: None,
+            production_ready: false,
+        };
+        snapshot.invalidate_artifacts_from(&[CalibrationArtifactId::NozzleAxisRunoutN1]);
+        assert!(!snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::NozzleAxisRunoutN1));
+        assert!(!snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::NozzleHeightN1));
+        assert!(!snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::RuntimeTipTransformN1));
+        assert!(snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::NozzleHeightN2));
+        assert!(snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::NozzleAxisRunoutN2));
+        assert!(snapshot
+            .artifacts
+            .contains_key(&CalibrationArtifactId::RuntimeTipTransformN2));
     }
 
     #[test]
