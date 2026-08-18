@@ -23,6 +23,7 @@ This repository contains the first working platform slice:
 - React operator UI with discovery, control, calibration and board import
 - persisted machine-executed calibration runs with progress and evidence
 - automatic reciprocal camera, N1/N2 offset, and nozzle-runout calibration
+- installed-target planar camera calibration and height-aware, occlusion-tolerant plate scans
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

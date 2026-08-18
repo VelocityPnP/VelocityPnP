@@ -139,6 +139,8 @@ pub struct MachineProfile {
     pub vacuum_characterization: Option<VacuumCharacterizationProfile>,
     #[serde(default)]
     pub local_xy_direction_response: Option<LocalXyDirectionResponseProfile>,
+    #[serde(default)]
+    pub installed_geometry_calibration: Option<InstalledGeometryCalibrationProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -382,6 +384,56 @@ pub struct LocalXyDirectionResponseProfile {
     pub resolved_relative_uncertainty: f64,
 }
 
+/// A camera sweep at its normal operating height. The offsets move the
+/// observed feature through the image without adding a removable target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarCameraSweepProfile {
+    pub x_offsets_mm: Vec<f64>,
+    pub y_offsets_mm: Vec<f64>,
+    pub samples_per_position: u32,
+    pub target_search_radius_px: f64,
+}
+
+/// One installed plate whose nominal hole grid is known from its PCB source.
+/// The origin is relative to the visual-homing fiducial. Column and row steps
+/// permit either installed plate orientation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledPlateGridProfile {
+    pub id: String,
+    pub origin_offset_x_mm: f64,
+    pub origin_offset_y_mm: f64,
+    pub column_step_x_mm: f64,
+    pub column_step_y_mm: f64,
+    pub row_step_x_mm: f64,
+    pub row_step_y_mm: f64,
+    pub column_count: u32,
+    pub row_count: u32,
+    /// When set, only intersections whose column-plus-row parity matches are
+    /// physical holes. The V3 plates use a staggered half-grid.
+    #[serde(default)]
+    pub target_parity: Option<u8>,
+    pub preferred_column_stride: u32,
+    pub minimum_detected_targets: u32,
+    pub minimum_distinct_columns: u32,
+    pub minimum_distinct_rows: u32,
+    pub minimum_x_span_mm: f64,
+    pub minimum_y_span_mm: f64,
+    pub maximum_attempts: u32,
+}
+
+/// Calibration targets that ship on and remain installed on the machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledGeometryCalibrationProfile {
+    pub top_camera_sweep: PlanarCameraSweepProfile,
+    pub bottom_camera_sweep: PlanarCameraSweepProfile,
+    pub plates: Vec<InstalledPlateGridProfile>,
+    pub plate_hole_diameter_mm: f64,
+    pub plate_pad_diameter_mm: f64,
+    pub plate_diameter_tolerance_mm: f64,
+    pub plate_search_radius_mm: f64,
+    pub feed_mm_per_min: f64,
+}
+
 impl ZKinematicsProfile {
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self.level_controller_z_mm.is_finite()
@@ -501,6 +553,116 @@ impl LocalXyDirectionResponseProfile {
             || !(0.1..=1.0).contains(&self.resolved_relative_uncertainty)
         {
             return Err("local XY direction-response profile is invalid");
+        }
+        Ok(())
+    }
+}
+
+impl PlanarCameraSweepProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let valid_offsets = |values: &[f64]| {
+            (3..=9).contains(&values.len())
+                && values.iter().all(|value| value.is_finite())
+                && values.windows(2).all(|pair| pair[0] < pair[1])
+                && values.first().is_some_and(|value| *value < 0.0)
+                && values.last().is_some_and(|value| *value > 0.0)
+                && values.iter().any(|value| value.abs() <= f64::EPSILON)
+        };
+        if !valid_offsets(&self.x_offsets_mm)
+            || !valid_offsets(&self.y_offsets_mm)
+            || !(1..=5).contains(&self.samples_per_position)
+            || !self.target_search_radius_px.is_finite()
+            || !(5.0..=150.0).contains(&self.target_search_radius_px)
+        {
+            return Err("planar camera sweep profile is invalid");
+        }
+        Ok(())
+    }
+}
+
+impl InstalledPlateGridProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let values = [
+            self.origin_offset_x_mm,
+            self.origin_offset_y_mm,
+            self.column_step_x_mm,
+            self.column_step_y_mm,
+            self.row_step_x_mm,
+            self.row_step_y_mm,
+            self.minimum_x_span_mm,
+            self.minimum_y_span_mm,
+        ];
+        let determinant =
+            self.column_step_x_mm * self.row_step_y_mm - self.column_step_y_mm * self.row_step_x_mm;
+        if self.id.trim().is_empty()
+            || values.iter().any(|value| !value.is_finite())
+            || determinant.abs() < 1.0
+            || !(3..=100).contains(&self.column_count)
+            || !(2..=20).contains(&self.row_count)
+            || self.target_parity.is_some_and(|parity| parity > 1)
+            || self.preferred_column_stride == 0
+            || self.preferred_column_stride >= self.column_count
+            || self.minimum_detected_targets < 6
+            || self.minimum_detected_targets > self.maximum_attempts
+            || self.minimum_distinct_columns < 3
+            || self.minimum_distinct_columns > self.column_count
+            || self.minimum_distinct_rows < 2
+            || self.minimum_distinct_rows > self.row_count
+            || self.minimum_x_span_mm <= 0.0
+            || self.minimum_y_span_mm <= 0.0
+            || !(6..=200).contains(&self.maximum_attempts)
+        {
+            return Err("installed plate grid profile is invalid");
+        }
+        Ok(())
+    }
+
+    pub fn target_offset(&self, column: u32, row: u32) -> Option<[f64; 2]> {
+        if column >= self.column_count
+            || row >= self.row_count
+            || self
+                .target_parity
+                .is_some_and(|parity| (column + row) % 2 != u32::from(parity))
+        {
+            return None;
+        }
+        Some([
+            self.origin_offset_x_mm
+                + f64::from(column) * self.column_step_x_mm
+                + f64::from(row) * self.row_step_x_mm,
+            self.origin_offset_y_mm
+                + f64::from(column) * self.column_step_y_mm
+                + f64::from(row) * self.row_step_y_mm,
+        ])
+    }
+}
+
+impl InstalledGeometryCalibrationProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let values = [
+            self.plate_hole_diameter_mm,
+            self.plate_pad_diameter_mm,
+            self.plate_diameter_tolerance_mm,
+            self.plate_search_radius_mm,
+            self.feed_mm_per_min,
+        ];
+        let mut ids = BTreeMap::new();
+        if self.top_camera_sweep.validate().is_err()
+            || self.bottom_camera_sweep.validate().is_err()
+            || self.plates.is_empty()
+            || self.plates.len() > 4
+            || self.plates.iter().any(|plate| {
+                plate.validate().is_err() || ids.insert(plate.id.clone(), true).is_some()
+            })
+            || values.iter().any(|value| !value.is_finite())
+            || self.plate_hole_diameter_mm <= 0.0
+            || self.plate_pad_diameter_mm <= self.plate_hole_diameter_mm
+            || self.plate_diameter_tolerance_mm <= 0.0
+            || self.plate_diameter_tolerance_mm >= self.plate_hole_diameter_mm
+            || !(0.5..=5.0).contains(&self.plate_search_radius_mm)
+            || self.feed_mm_per_min <= 0.0
+        {
+            return Err("installed geometry calibration profile is invalid");
         }
         Ok(())
     }
@@ -780,12 +942,14 @@ mod tests {
         let vacuum = profile.vacuum_calibration.as_ref().unwrap();
         let characterization = profile.vacuum_characterization.as_ref().unwrap();
         let direction_response = profile.local_xy_direction_response.as_ref().unwrap();
+        let installed = profile.installed_geometry_calibration.as_ref().unwrap();
         assert!(z.validate().is_ok());
         assert!(vacuum.validate().is_ok());
         assert!(characterization
             .validate(vacuum.minimum_signal_delta_counts)
             .is_ok());
         assert!(direction_response.validate().is_ok());
+        assert!(installed.validate().is_ok());
         assert_eq!(z.controller_z("N1", 30.0), Some(30.0));
         assert_eq!(z.controller_z("N2", 30.0), Some(33.0));
         assert_eq!(z.controller_z("N1", 33.0), Some(33.0));
@@ -817,6 +981,13 @@ mod tests {
         assert_eq!(direction_response.approach_feeds_mm_per_min, [300.0, 900.0]);
         assert_eq!(direction_response.minimum_sample_pairs, 3);
         assert_eq!(direction_response.maximum_sample_pairs, 7);
+        assert_eq!(installed.plates.len(), 2);
+        assert_eq!(installed.plates[0].target_offset(19, 1), Some([0.0, -12.0]));
+        assert_eq!(installed.plates[0].target_offset(18, 1), None);
+        assert_eq!(
+            installed.plates[1].target_offset(18, 0),
+            Some([-15.0, -72.0])
+        );
         assert!(
             vacuum.target_offset_x_mm.hypot(vacuum.target_offset_y_mm)
                 >= vacuum.fiducial_protected_radius_mm

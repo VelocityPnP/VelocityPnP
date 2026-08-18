@@ -374,6 +374,7 @@ mod tests {
             visual_homing_samples: vec![],
             visual_homing_report: None,
             head_geometry_report: None,
+            installed_geometry_report: None,
             failure: None,
             simulated: true,
         };

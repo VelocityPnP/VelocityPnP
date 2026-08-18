@@ -284,6 +284,33 @@ class ClientTests(unittest.TestCase):
             },
         ))
 
+    def test_installed_geometry_requires_confirmation_and_returns_run(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.calibrate_installed_geometry("calibration", "lease")
+        send.assert_not_called()
+
+        started = {
+            "run": {"id": "run"},
+            "operation": {"id": "op", "status": "succeeded"},
+        }
+        completed = {"id": "run", "status": "succeeded"}
+        with patch.object(client, "_request", side_effect=[started, completed]) as send:
+            with patch.object(client, "wait"):
+                report = client.calibrate_installed_geometry(
+                    "calibration", "lease", safety_checks_confirmed=True,
+                )
+        self.assertEqual(report, completed)
+        self.assertEqual(send.call_args_list[0].args, (
+            "POST",
+            "/calibrations/calibration/installed-geometry-runs",
+            {
+                "lease_id": "lease",
+                "confirmed_external_safety_checks": True,
+            },
+        ))
+
     def test_nozzle_height_observation_records_bounded_working_plane_error(self):
         client = Client(timeout=1)
         snapshot = {"values": {"nozzle_height_model": {"models": []}}}

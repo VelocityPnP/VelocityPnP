@@ -187,6 +187,15 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    CalibrateInstalledGeometry {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Confirm level nozzles, secure installed hardware, a clear envelope,
+        /// correctly routed tubes, and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
     ObserveNozzleHeight {
         calibration: Uuid,
         #[arg(long)]
@@ -614,6 +623,31 @@ async fn main() -> Result<()> {
             run_operation(&client, base, operation).await?;
             let snapshot = get(&client, &format!("{base}/calibrations/{calibration}")).await?;
             snapshot["values"]["local_xy_direction_response"].clone()
+        }
+        Command::CalibrateInstalledGeometry {
+            calibration,
+            lease,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "installed geometry calibration requires --confirm-safety-checks after inspecting the level nozzles, installed hardware, tube routing, travel envelope, and power isolation"
+                );
+            }
+            let started = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/installed-geometry-runs"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            let run_id = started["run"]["id"]
+                .as_str()
+                .context("installed geometry response did not contain a run ID")?;
+            run_operation(&client, base, started["operation"].clone()).await?;
+            get(&client, &format!("{base}/calibration-runs/{run_id}")).await?
         }
         Command::ObserveNozzleHeight {
             calibration,

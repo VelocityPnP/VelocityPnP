@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub enum CalibrationStepId {
     CameraReproducibility,
     TopCameraIntrinsics,
+    BottomCameraIntrinsics,
     CoarseHoming,
     VisualHoming,
     LocalXyDirectionResponse,
@@ -29,6 +30,7 @@ impl CalibrationStepId {
         match self {
             Self::CameraReproducibility => "camera_reproducibility",
             Self::TopCameraIntrinsics => "top_camera_intrinsics",
+            Self::BottomCameraIntrinsics => "bottom_camera_intrinsics",
             Self::CoarseHoming => "coarse_homing",
             Self::VisualHoming => "visual_homing",
             Self::LocalXyDirectionResponse => "local_xy_direction_response",
@@ -77,9 +79,10 @@ pub fn lumen_calibration_workflow() -> Vec<CalibrationStepDefinition> {
         step(NozzleRunout, "Nozzle runout", "Rotate each identified tip through the bounded profile angles and fit its correction curve.", &[NozzleOffsets], true, false, Automated),
         step(NozzleHeightModel, "Nozzle height model", "Track each nozzle over several safe Z heights and fit its lateral axis slope. Store a separate working-plane transfer correction when an observed target residual is available.", &[NozzleRunout], true, false, Automated),
         step(VacuumSensorCharacterization, "Vacuum sensor characterization", "Measure pump-off, open-nozzle, sealed-reference, and release distributions per nozzle and installed tip.", &[NozzleHeightModel], true, false, Automated),
-        step(TopCameraIntrinsics, "Top camera intrinsics", "Measure lens distortion and camera matrix from a known target after visual homing.", &[VisualHoming], true, true, Planned),
-        step(MotionGeometry, "Full-bed motion geometry", "Measure scale, skew, and spatial residuals over the work envelope after local direction response and lens distortion are known.", &[LocalXyDirectionResponse, TopCameraIntrinsics], true, true, Planned),
-        step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to corrected machine coordinates at calibrated Z planes.", &[MotionGeometry], true, true, Planned),
+        step(TopCameraIntrinsics, "Top camera planar optics", "Sweep the installed datum through the top-camera image and fit its working-plane distortion map.", &[VisualHoming], true, false, Automated),
+        step(BottomCameraIntrinsics, "Bottom camera planar optics", "Sweep an automatically identified nozzle through the bottom-camera image at its normal inspection height.", &[BottomCameraGeometry, NozzleRunout], true, false, Automated),
+        step(MotionGeometry, "Installed-plate motion geometry", "Measure scale, skew, and bed residuals from all visible staging and build-plate holes.", &[TopCameraIntrinsics], true, false, Automated),
+        step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to the installed-plate machine geometry at the camera working plane.", &[MotionGeometry], true, false, Automated),
         step(ZPlanes, "Z planes", "Capture safe, board, feeder, discard, and camera-clearance planes.", &[NozzleHeightModel], true, false, Planned),
         step(VacuumThresholds, "Known-part vacuum thresholds", "Learn known-part pressure distributions per nozzle, tip, and applicable part class.", &[ZPlanes, VacuumSensorCharacterization], true, false, Planned),
         step(Validation, "Known-board validation", "Measure homing, geometry, pick, alignment, and placement acceptance metrics.", &[NozzleHeightModel, VacuumThresholds], true, true, Planned),
@@ -132,8 +135,11 @@ pub enum CalibrationArtifactId {
     ToolingN2,
     VisualHomingQualification,
     TopCameraWorkingPlaneMap,
+    TopCameraPlanarModel,
     LocalXyDirectionResponse,
     BottomCameraLocalMap,
+    BottomCameraPlanarModel,
+    InstalledPlateGeometry,
     ReciprocalCameraGeometry,
     CameraRayTransfer,
     NozzleAxisRunoutN1,
@@ -312,12 +318,36 @@ pub fn lumen_calibration_artifacts() -> Vec<CalibrationArtifactDefinition> {
             180,
         ),
         artifact(
+            TopCameraPlanarModel,
+            "Top-camera planar optical model",
+            &[TopCameraWorkingPlaneMap],
+            Captured,
+            true,
+            240,
+        ),
+        artifact(
             BottomCameraLocalMap,
             "Bottom-camera local map",
             &[BottomCameraReproducibility, ToolingN1],
             Captured,
             true,
             60,
+        ),
+        artifact(
+            BottomCameraPlanarModel,
+            "Bottom-camera planar optical model",
+            &[BottomCameraLocalMap, ToolingN1],
+            Captured,
+            true,
+            240,
+        ),
+        artifact(
+            InstalledPlateGeometry,
+            "Installed staging and build-plate geometry",
+            &[TopCameraPlanarModel],
+            Captured,
+            true,
+            600,
         ),
         artifact(
             ReciprocalCameraGeometry,
@@ -469,6 +499,9 @@ pub enum CalibrationRunPhase {
     BottomCameraReproducibility,
     VisualHomingValidation,
     HeadGeometryCalibration,
+    TopCameraPlanarCalibration,
+    BottomCameraPlanarCalibration,
+    InstalledPlateGeometry,
     Complete,
 }
 
@@ -546,6 +579,216 @@ pub struct BottomCameraMappingReport {
     pub probe_distance_mm: f64,
     pub returned_center_error_px: f64,
     pub returned_center_error_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanarCameraModelKind {
+    Affine,
+    DistortionPolynomial,
+}
+
+/// An inverse planar camera model. It converts an observed feature pixel into
+/// the XY move that centers that feature at the calibrated working plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarCameraModel {
+    pub role: crate::CameraRole,
+    pub center_x_px: f64,
+    pub center_y_px: f64,
+    pub normalization_x_px: f64,
+    pub normalization_y_px: f64,
+    /// Coefficients for u, v, u^2, uv, v^2, u(u^2+v^2), and v(u^2+v^2).
+    pub correction_x_coefficients_mm: [f64; 7],
+    pub correction_y_coefficients_mm: [f64; 7],
+    pub supported_min_x_px: f64,
+    pub supported_max_x_px: f64,
+    pub supported_min_y_px: f64,
+    pub supported_max_y_px: f64,
+    pub kind: PlanarCameraModelKind,
+}
+
+impl PlanarCameraModel {
+    pub fn correction_at(&self, x_px: f64, y_px: f64) -> Option<[f64; 2]> {
+        if !x_px.is_finite()
+            || !y_px.is_finite()
+            || self.normalization_x_px <= 0.0
+            || self.normalization_y_px <= 0.0
+            || x_px < self.supported_min_x_px
+            || x_px > self.supported_max_x_px
+            || y_px < self.supported_min_y_px
+            || y_px > self.supported_max_y_px
+        {
+            return None;
+        }
+        let u = (x_px - self.center_x_px) / self.normalization_x_px;
+        let v = (y_px - self.center_y_px) / self.normalization_y_px;
+        let radius_squared = u * u + v * v;
+        let basis = [
+            u,
+            v,
+            u * u,
+            u * v,
+            v * v,
+            u * radius_squared,
+            v * radius_squared,
+        ];
+        let apply = |coefficients: &[f64; 7]| {
+            coefficients
+                .iter()
+                .zip(basis)
+                .map(|(coefficient, value)| coefficient * value)
+                .sum::<f64>()
+        };
+        let correction = [
+            apply(&self.correction_x_coefficients_mm),
+            apply(&self.correction_y_coefficients_mm),
+        ];
+        correction
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(correction)
+    }
+
+    pub fn local_mm_per_pixel(&self, x_px: f64, y_px: f64) -> Option<f64> {
+        let center = self.correction_at(x_px, y_px)?;
+        let x = self.correction_at(x_px + 1.0, y_px)?;
+        let y = self.correction_at(x_px, y_px + 1.0)?;
+        let x_scale = (x[0] - center[0]).hypot(x[1] - center[1]);
+        let y_scale = (y[0] - center[0]).hypot(y[1] - center[1]);
+        let scale = (x_scale + y_scale) / 2.0;
+        (scale.is_finite() && scale > f64::EPSILON).then_some(scale)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarCameraCalibrationSample {
+    pub grid_x: u32,
+    pub grid_y: u32,
+    pub offset_x_mm: f64,
+    pub offset_y_mm: f64,
+    pub commanded_x_mm: f64,
+    pub commanded_y_mm: f64,
+    pub expected_x_px: f64,
+    pub expected_y_px: f64,
+    pub target: Option<crate::FiducialObservation>,
+    pub holdout: bool,
+    pub rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarCameraCalibrationReport {
+    pub model: PlanarCameraModel,
+    pub attempted_positions: u32,
+    pub detected_positions: u32,
+    pub rejected_positions: u32,
+    pub image_span_x_px: f64,
+    pub image_span_y_px: f64,
+    pub fit_residuals: Residuals,
+    pub holdout_residuals: Residuals,
+    pub affine_holdout_residuals: Residuals,
+    pub selected_model_improved_holdout: bool,
+    pub samples: Vec<PlanarCameraCalibrationSample>,
+    pub passed: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// A serializable circular-feature observation shared by camera and fixture
+/// calibration reports.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FiducialObservation {
+    pub x_px: f64,
+    pub y_px: f64,
+    pub diameter_px: f64,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledPlateHoleSample {
+    pub plate_id: String,
+    pub column: u32,
+    pub row: u32,
+    pub nominal_x_mm: f64,
+    pub nominal_y_mm: f64,
+    pub commanded_x_mm: f64,
+    pub commanded_y_mm: f64,
+    pub expected_x_px: f64,
+    pub expected_y_px: f64,
+    pub target: Option<FiducialObservation>,
+    pub observed_center_x_mm: Option<f64>,
+    pub observed_center_y_mm: Option<f64>,
+    pub holdout: bool,
+    pub rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AffineGeometryModel {
+    /// Controller XY = matrix * nominal fixture XY + translation.
+    pub matrix: [[f64; 2]; 2],
+    pub translation_mm: [f64; 2],
+}
+
+impl AffineGeometryModel {
+    pub fn apply(&self, x_mm: f64, y_mm: f64) -> [f64; 2] {
+        [
+            self.matrix[0][0] * x_mm + self.matrix[0][1] * y_mm + self.translation_mm[0],
+            self.matrix[1][0] * x_mm + self.matrix[1][1] * y_mm + self.translation_mm[1],
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledPlateFitReport {
+    pub plate_id: String,
+    pub model: AffineGeometryModel,
+    pub attempted_targets: u32,
+    pub detected_targets: u32,
+    pub distinct_columns: u32,
+    pub distinct_rows: u32,
+    pub nominal_span_x_mm: f64,
+    pub nominal_span_y_mm: f64,
+    pub fit_residuals: Residuals,
+    pub holdout_residuals: Residuals,
+    pub nominal_holdout_residuals: Residuals,
+    pub affine_model_selected: bool,
+    pub coverage_sufficient: bool,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledPlateRegistrationReport {
+    pub plate_id: String,
+    pub attempted_positions: u32,
+    pub detected_positions: u32,
+    pub offset_x_mm: Option<f64>,
+    pub offset_y_mm: Option<f64>,
+    #[serde(default)]
+    pub pixel_error_to_machine_mm: Option<[[f64; 2]; 2]>,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledPlateGeometryReport {
+    pub datum_controller_x_mm: f64,
+    pub datum_controller_y_mm: f64,
+    #[serde(default)]
+    pub registrations: Vec<InstalledPlateRegistrationReport>,
+    pub plates: Vec<InstalledPlateFitReport>,
+    pub samples: Vec<InstalledPlateHoleSample>,
+    pub attempted_targets: u32,
+    pub detected_targets: u32,
+    pub rejected_targets: u32,
+    pub qualified_plate_count: u32,
+    pub limitations: Vec<String>,
+    pub passed: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledGeometryCalibrationReport {
+    pub top_camera: PlanarCameraCalibrationReport,
+    pub bottom_camera: PlanarCameraCalibrationReport,
+    pub plate_geometry: InstalledPlateGeometryReport,
+    pub passed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1245,6 +1488,8 @@ pub struct AutomatedCalibrationRun {
     pub visual_homing_report: Option<VisualHomingValidationReport>,
     #[serde(default)]
     pub head_geometry_report: Option<HeadGeometryReport>,
+    #[serde(default)]
+    pub installed_geometry_report: Option<InstalledGeometryCalibrationReport>,
     pub failure: Option<String>,
     pub simulated: bool,
 }
@@ -1372,6 +1617,15 @@ impl CalibrationSnapshot {
             }
             CalibrationStepId::LocalXyDirectionResponse => {
                 vec![CalibrationArtifactId::LocalXyDirectionResponse]
+            }
+            CalibrationStepId::TopCameraIntrinsics => {
+                vec![CalibrationArtifactId::TopCameraPlanarModel]
+            }
+            CalibrationStepId::BottomCameraIntrinsics => {
+                vec![CalibrationArtifactId::BottomCameraPlanarModel]
+            }
+            CalibrationStepId::MotionGeometry => {
+                vec![CalibrationArtifactId::InstalledPlateGeometry]
             }
             CalibrationStepId::BottomCameraGeometry => vec![
                 CalibrationArtifactId::TopCameraWorkingPlaneMap,

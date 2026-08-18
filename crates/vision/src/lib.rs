@@ -9,12 +9,14 @@ mod v4l2_capture;
 pub use v4l2_capture::*;
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use velocitypnp_domain::{
-    BottomCameraMappingReport, BottomVisionProfile, CameraRayTransferReport,
-    CameraReproducibilityThresholds, CameraRole, HeadFeatureCenterReport,
-    NozzleCalibrationFeatureKind, NozzleHeightModel, NozzleHeightSample, NozzleRunoutReport,
-    NozzleRunoutSample, NozzleToolingProfile, Residuals, Transform2d, VisualHomingProfile,
+    AffineGeometryModel, BottomCameraMappingReport, BottomVisionProfile, CameraRayTransferReport,
+    CameraReproducibilityThresholds, CameraRole, HeadFeatureCenterReport, InstalledPlateFitReport,
+    InstalledPlateGridProfile, InstalledPlateHoleSample, NozzleCalibrationFeatureKind,
+    NozzleHeightModel, NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample,
+    NozzleToolingProfile, PlanarCameraCalibrationSample, PlanarCameraModel, PlanarCameraModelKind,
+    Residuals, Transform2d, VisualHomingProfile,
 };
 
 const TOOLING_CENTER_JITTER_P95_LIMIT_PX: f64 = 3.0;
@@ -1059,6 +1061,396 @@ pub fn fit_nozzle_height_model(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarCameraFit {
+    pub model: PlanarCameraModel,
+    pub image_span_x_px: f64,
+    pub image_span_y_px: f64,
+    pub fit_residuals: Residuals,
+    pub holdout_residuals: Residuals,
+    pub affine_holdout_residuals: Residuals,
+    pub selected_model_improved_holdout: bool,
+    pub passed: bool,
+}
+
+/// Fits the practical inverse image map at the camera's installed working
+/// plane. A polynomial is selected only when it improves independent holdout
+/// data. Otherwise, the lower-variance affine model is retained.
+pub fn fit_planar_camera_model(
+    role: CameraRole,
+    center_x_px: f64,
+    center_y_px: f64,
+    frame_width: u32,
+    frame_height: u32,
+    samples: &[PlanarCameraCalibrationSample],
+) -> Option<PlanarCameraFit> {
+    let normalization_x_px = f64::from(frame_width) / 2.0;
+    let normalization_y_px = f64::from(frame_height) / 2.0;
+    if frame_width < 64 || frame_height < 64 || !center_x_px.is_finite() || !center_y_px.is_finite()
+    {
+        return None;
+    }
+    let observations = samples
+        .iter()
+        .filter_map(|sample| {
+            let target = sample.target?;
+            let u = (target.x_px - center_x_px) / normalization_x_px;
+            let v = (target.y_px - center_y_px) / normalization_y_px;
+            let radius_squared = u * u + v * v;
+            let basis = [
+                u,
+                v,
+                u * u,
+                u * v,
+                v * v,
+                u * radius_squared,
+                v * radius_squared,
+            ];
+            basis
+                .iter()
+                .chain(
+                    [
+                        -sample.offset_x_mm,
+                        -sample.offset_y_mm,
+                        target.x_px,
+                        target.y_px,
+                    ]
+                    .iter(),
+                )
+                .all(|value| value.is_finite())
+                .then_some((
+                    sample,
+                    target,
+                    basis,
+                    [-sample.offset_x_mm, -sample.offset_y_mm],
+                ))
+        })
+        .collect::<Vec<_>>();
+    let training = observations
+        .iter()
+        .filter(|(sample, ..)| !sample.holdout)
+        .copied()
+        .collect::<Vec<_>>();
+    let holdout = observations
+        .iter()
+        .filter(|(sample, ..)| sample.holdout)
+        .copied()
+        .collect::<Vec<_>>();
+    if training.len() < 10 || holdout.len() < 3 {
+        return None;
+    }
+
+    let affine = fit_camera_coefficients(&training, 2)?;
+    let polynomial = fit_camera_coefficients(&training, 7)?;
+    let affine_holdout_residuals = camera_model_residuals(&holdout, affine)?;
+    let polynomial_holdout_residuals = camera_model_residuals(&holdout, polynomial)?;
+    let selected_model_improved_holdout =
+        polynomial_holdout_residuals.rms_mm < affine_holdout_residuals.rms_mm;
+    let (kind, coefficient_count) = if selected_model_improved_holdout {
+        (PlanarCameraModelKind::DistortionPolynomial, 7)
+    } else {
+        (PlanarCameraModelKind::Affine, 2)
+    };
+    let final_coefficients = fit_camera_coefficients(&observations, coefficient_count)?;
+    let fit_residuals = camera_model_residuals(&observations, final_coefficients)?;
+    let holdout_residuals = if selected_model_improved_holdout {
+        polynomial_holdout_residuals
+    } else {
+        affine_holdout_residuals
+    };
+    let min_x = observations
+        .iter()
+        .map(|(_, target, ..)| target.x_px)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = observations
+        .iter()
+        .map(|(_, target, ..)| target.x_px)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = observations
+        .iter()
+        .map(|(_, target, ..)| target.y_px)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = observations
+        .iter()
+        .map(|(_, target, ..)| target.y_px)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let image_span_x_px = max_x - min_x;
+    let image_span_y_px = max_y - min_y;
+    let model = PlanarCameraModel {
+        role,
+        center_x_px,
+        center_y_px,
+        normalization_x_px,
+        normalization_y_px,
+        correction_x_coefficients_mm: final_coefficients[0],
+        correction_y_coefficients_mm: final_coefficients[1],
+        supported_min_x_px: min_x.max(0.0),
+        supported_max_x_px: max_x.min(f64::from(frame_width - 1)),
+        supported_min_y_px: min_y.max(0.0),
+        supported_max_y_px: max_y.min(f64::from(frame_height - 1)),
+        kind,
+    };
+    // The installed target must cover a useful part of each image axis. Do
+    // not require an exact half-frame span: capture and detector rounding can
+    // move an otherwise complete sweep by a fraction of one pixel.
+    const MIN_IMAGE_COVERAGE_FRACTION: f64 = 0.45;
+    let passed = image_span_x_px >= f64::from(frame_width) * MIN_IMAGE_COVERAGE_FRACTION
+        && image_span_y_px >= f64::from(frame_height) * MIN_IMAGE_COVERAGE_FRACTION
+        && holdout_residuals.rms_mm <= affine_holdout_residuals.rms_mm;
+    Some(PlanarCameraFit {
+        model,
+        image_span_x_px,
+        image_span_y_px,
+        fit_residuals,
+        holdout_residuals,
+        affine_holdout_residuals,
+        selected_model_improved_holdout,
+        passed,
+    })
+}
+
+type CameraFitObservation<'a> = (
+    &'a PlanarCameraCalibrationSample,
+    velocitypnp_domain::FiducialObservation,
+    [f64; 7],
+    [f64; 2],
+);
+
+fn fit_camera_coefficients(
+    observations: &[CameraFitObservation<'_>],
+    coefficient_count: usize,
+) -> Option<[[f64; 7]; 2]> {
+    if !(1..=7).contains(&coefficient_count) || observations.len() < coefficient_count {
+        return None;
+    }
+    let rows = observations
+        .iter()
+        .map(|(_, _, basis, _)| basis[..coefficient_count].to_vec())
+        .collect::<Vec<_>>();
+    let mut coefficients = [[0.0; 7]; 2];
+    for axis in 0..2 {
+        let values = observations
+            .iter()
+            .map(|(_, _, _, correction)| correction[axis])
+            .collect::<Vec<_>>();
+        let fit = fit_linear_model(&rows, &values)?;
+        coefficients[axis][..coefficient_count].copy_from_slice(&fit);
+    }
+    Some(coefficients)
+}
+
+fn camera_model_residuals(
+    observations: &[CameraFitObservation<'_>],
+    coefficients: [[f64; 7]; 2],
+) -> Option<Residuals> {
+    summarize_residuals(observations.iter().map(|(_, _, basis, correction)| {
+        let predicted = coefficients.map(|axis| {
+            axis.iter()
+                .zip(basis)
+                .map(|(coefficient, value)| coefficient * value)
+                .sum::<f64>()
+        });
+        (predicted[0] - correction[0]).hypot(predicted[1] - correction[1])
+    }))
+}
+
+/// Fits one installed plate independently. Missing or occupied targets remain
+/// in the report but do not enter the fit.
+pub fn fit_installed_plate_geometry(
+    profile: &InstalledPlateGridProfile,
+    samples: &[InstalledPlateHoleSample],
+) -> Option<InstalledPlateFitReport> {
+    let attempted = samples
+        .iter()
+        .filter(|sample| sample.plate_id == profile.id)
+        .collect::<Vec<_>>();
+    let detected = attempted
+        .iter()
+        .filter(|sample| {
+            sample.observed_center_x_mm.is_some() && sample.observed_center_y_mm.is_some()
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let training = detected
+        .iter()
+        .filter(|sample| !sample.holdout)
+        .copied()
+        .collect::<Vec<_>>();
+    let holdout = detected
+        .iter()
+        .filter(|sample| sample.holdout)
+        .copied()
+        .collect::<Vec<_>>();
+    if training.len() < 6 || holdout.len() < 3 {
+        return None;
+    }
+    let training_model = fit_affine_geometry(&training)?;
+    let affine_holdout_residuals = plate_residuals(&holdout, training_model)?;
+    let nominal_holdout_residuals = summarize_residuals(holdout.iter().map(|sample| {
+        (sample.observed_center_x_mm.unwrap() - sample.nominal_x_mm)
+            .hypot(sample.observed_center_y_mm.unwrap() - sample.nominal_y_mm)
+    }))?;
+    let affine_model_selected = affine_holdout_residuals.rms_mm < nominal_holdout_residuals.rms_mm;
+    let model = if affine_model_selected {
+        fit_affine_geometry(&detected)?
+    } else {
+        AffineGeometryModel {
+            matrix: [[1.0, 0.0], [0.0, 1.0]],
+            translation_mm: [0.0, 0.0],
+        }
+    };
+    let fit_residuals = plate_residuals(&detected, model)?;
+    let holdout_residuals = if affine_model_selected {
+        affine_holdout_residuals
+    } else {
+        nominal_holdout_residuals
+    };
+    let columns = detected
+        .iter()
+        .map(|sample| sample.column)
+        .collect::<BTreeSet<_>>();
+    let rows = detected
+        .iter()
+        .map(|sample| sample.row)
+        .collect::<BTreeSet<_>>();
+    let min_x = detected
+        .iter()
+        .map(|sample| sample.nominal_x_mm)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = detected
+        .iter()
+        .map(|sample| sample.nominal_x_mm)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = detected
+        .iter()
+        .map(|sample| sample.nominal_y_mm)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = detected
+        .iter()
+        .map(|sample| sample.nominal_y_mm)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let nominal_span_x_mm = max_x - min_x;
+    let nominal_span_y_mm = max_y - min_y;
+    let coverage_sufficient = detected.len() >= profile.minimum_detected_targets as usize
+        && columns.len() >= profile.minimum_distinct_columns as usize
+        && rows.len() >= profile.minimum_distinct_rows as usize
+        && nominal_span_x_mm >= profile.minimum_x_span_mm
+        && nominal_span_y_mm >= profile.minimum_y_span_mm;
+    Some(InstalledPlateFitReport {
+        plate_id: profile.id.clone(),
+        model,
+        attempted_targets: attempted.len() as u32,
+        detected_targets: detected.len() as u32,
+        distinct_columns: columns.len() as u32,
+        distinct_rows: rows.len() as u32,
+        nominal_span_x_mm,
+        nominal_span_y_mm,
+        fit_residuals,
+        holdout_residuals,
+        nominal_holdout_residuals,
+        affine_model_selected,
+        coverage_sufficient,
+        passed: coverage_sufficient,
+    })
+}
+
+fn fit_affine_geometry(samples: &[&InstalledPlateHoleSample]) -> Option<AffineGeometryModel> {
+    let rows = samples
+        .iter()
+        .map(|sample| vec![sample.nominal_x_mm, sample.nominal_y_mm, 1.0])
+        .collect::<Vec<_>>();
+    let x = samples
+        .iter()
+        .map(|sample| sample.observed_center_x_mm.unwrap())
+        .collect::<Vec<_>>();
+    let y = samples
+        .iter()
+        .map(|sample| sample.observed_center_y_mm.unwrap())
+        .collect::<Vec<_>>();
+    let x = fit_linear_model(&rows, &x)?;
+    let y = fit_linear_model(&rows, &y)?;
+    Some(AffineGeometryModel {
+        matrix: [[x[0], x[1]], [y[0], y[1]]],
+        translation_mm: [x[2], y[2]],
+    })
+}
+
+fn plate_residuals(
+    samples: &[&InstalledPlateHoleSample],
+    model: AffineGeometryModel,
+) -> Option<Residuals> {
+    summarize_residuals(samples.iter().map(|sample| {
+        let predicted = model.apply(sample.nominal_x_mm, sample.nominal_y_mm);
+        (predicted[0] - sample.observed_center_x_mm.unwrap())
+            .hypot(predicted[1] - sample.observed_center_y_mm.unwrap())
+    }))
+}
+
+fn fit_linear_model(rows: &[Vec<f64>], values: &[f64]) -> Option<Vec<f64>> {
+    let width = rows.first()?.len();
+    if rows.len() != values.len()
+        || rows.len() < width
+        || width == 0
+        || rows
+            .iter()
+            .any(|row| row.len() != width || row.iter().any(|value| !value.is_finite()))
+        || values.iter().any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let mut normal = vec![vec![0.0; width]; width];
+    let mut right = vec![0.0; width];
+    for (row, value) in rows.iter().zip(values) {
+        for i in 0..width {
+            right[i] += row[i] * value;
+            for j in 0..width {
+                normal[i][j] += row[i] * row[j];
+            }
+        }
+    }
+    let trace = (0..width).map(|index| normal[index][index]).sum::<f64>();
+    let regularization = trace.abs().max(1.0) * 1e-12;
+    for (index, row) in normal.iter_mut().enumerate() {
+        row[index] += regularization;
+    }
+    solve_linear_system(normal, right)
+}
+
+fn solve_linear_system(mut matrix: Vec<Vec<f64>>, mut right: Vec<f64>) -> Option<Vec<f64>> {
+    let size = matrix.len();
+    if size == 0 || right.len() != size || matrix.iter().any(|row| row.len() != size) {
+        return None;
+    }
+    for pivot in 0..size {
+        let selected = (pivot..size).max_by(|left, right_index| {
+            matrix[*left][pivot]
+                .abs()
+                .total_cmp(&matrix[*right_index][pivot].abs())
+        })?;
+        if matrix[selected][pivot].abs() < 1e-12 {
+            return None;
+        }
+        matrix.swap(pivot, selected);
+        right.swap(pivot, selected);
+        let divisor = matrix[pivot][pivot];
+        for column in pivot..size {
+            matrix[pivot][column] /= divisor;
+        }
+        right[pivot] /= divisor;
+        for row in 0..size {
+            if row == pivot {
+                continue;
+            }
+            let factor = matrix[row][pivot];
+            for column in pivot..size {
+                matrix[row][column] -= factor * matrix[pivot][column];
+            }
+            right[row] -= factor * right[pivot];
+        }
+    }
+    right.iter().all(|value| value.is_finite()).then_some(right)
+}
+
 pub fn summarize_residuals(values: impl Iterator<Item = f64>) -> Option<Residuals> {
     let mut values = values.collect::<Vec<_>>();
     if values.is_empty()
@@ -1386,6 +1778,210 @@ pub fn detect_bright_fiducials(
     )
 }
 
+/// Finds the installed datum near its predicted pixel location. This avoids
+/// selecting another datum-board feature when the primary datum is swept near
+/// an image edge.
+pub fn detect_bright_fiducial_near(
+    frame: &GrayFrame,
+    expected_x_px: f64,
+    expected_y_px: f64,
+    search_radius_px: f64,
+    min_diameter_px: f64,
+    max_diameter_px: f64,
+) -> Option<FiducialDetection> {
+    if !expected_x_px.is_finite()
+        || !expected_y_px.is_finite()
+        || !search_radius_px.is_finite()
+        || search_radius_px <= 0.0
+    {
+        return None;
+    }
+    [130, 150, 170, 190, 210]
+        .into_iter()
+        .flat_map(|threshold| {
+            detect_bright_fiducials(frame, threshold, min_diameter_px, max_diameter_px)
+        })
+        .filter(|target| {
+            (target.x_px - expected_x_px).hypot(target.y_px - expected_y_px) <= search_radius_px
+        })
+        .min_by(|left, right| {
+            let score = |target: &FiducialDetection| {
+                (target.x_px - expected_x_px).hypot(target.y_px - expected_y_px) / search_radius_px
+                    + 1.0
+                    - target.confidence
+            };
+            score(left).total_cmp(&score(right))
+        })
+}
+
+/// Detects an unoccupied staging-plate hole. A concentric dark opening and
+/// bright annulus is preferred. A clean dark opening is accepted when glare
+/// prevents detection of the annulus.
+#[allow(clippy::too_many_arguments)]
+pub fn detect_installed_plate_hole(
+    frame: &GrayFrame,
+    expected_x_px: f64,
+    expected_y_px: f64,
+    search_radius_px: f64,
+    expected_hole_diameter_px: f64,
+    hole_diameter_tolerance_px: f64,
+    expected_pad_diameter_px: f64,
+    pad_diameter_tolerance_px: f64,
+) -> Option<FiducialDetection> {
+    let values = [
+        expected_x_px,
+        expected_y_px,
+        search_radius_px,
+        expected_hole_diameter_px,
+        hole_diameter_tolerance_px,
+        expected_pad_diameter_px,
+        pad_diameter_tolerance_px,
+    ];
+    if values.iter().any(|value| !value.is_finite())
+        || search_radius_px <= 0.0
+        || expected_hole_diameter_px <= hole_diameter_tolerance_px
+        || expected_pad_diameter_px <= pad_diameter_tolerance_px
+    {
+        return None;
+    }
+    let maximum_diameter_px = (expected_pad_diameter_px + pad_diameter_tolerance_px)
+        .max(expected_hole_diameter_px + hole_diameter_tolerance_px);
+    let crop_radius_px = search_radius_px + maximum_diameter_px / 2.0 + 3.0;
+    let (search_frame, crop_x, crop_y) =
+        crop_frame_around(frame, expected_x_px, expected_y_px, crop_radius_px)?;
+    let expected_x_px = expected_x_px - f64::from(crop_x);
+    let expected_y_px = expected_y_px - f64::from(crop_y);
+    let near = |target: &FiducialDetection| {
+        (target.x_px - expected_x_px).hypot(target.y_px - expected_y_px) <= search_radius_px
+    };
+    let dark = REFERENCE_PAD_THRESHOLDS
+        .into_iter()
+        .flat_map(|threshold| {
+            detect_dark_fiducials(
+                &search_frame,
+                threshold,
+                expected_hole_diameter_px - hole_diameter_tolerance_px,
+                expected_hole_diameter_px + hole_diameter_tolerance_px,
+            )
+        })
+        .filter(near)
+        .collect::<Vec<_>>();
+    let bright = REFERENCE_PAD_THRESHOLDS
+        .into_iter()
+        .flat_map(|threshold| {
+            detect_bright_annular_fiducials(
+                &search_frame,
+                threshold,
+                expected_pad_diameter_px - pad_diameter_tolerance_px,
+                expected_pad_diameter_px + pad_diameter_tolerance_px,
+            )
+        })
+        .filter(near)
+        .collect::<Vec<_>>();
+    let mut candidates = dark
+        .into_iter()
+        .map(|hole| {
+            let annulus = bright
+                .iter()
+                .filter(|pad| (pad.x_px - hole.x_px).hypot(pad.y_px - hole.y_px) <= 12.0)
+                .max_by(|left, right| left.confidence.total_cmp(&right.confidence));
+            let center_distance = (hole.x_px - expected_x_px).hypot(hole.y_px - expected_y_px);
+            let diameter_error =
+                (hole.diameter_px - expected_hole_diameter_px).abs() / hole_diameter_tolerance_px;
+            let score = center_distance / search_radius_px + diameter_error + 1.0
+                - hole.confidence
+                - annulus.map_or(0.0, |pad| 0.5 * pad.confidence);
+            (
+                score,
+                FiducialDetection {
+                    confidence: (hole.confidence + annulus.map_or(0.0, |pad| pad.confidence))
+                        .min(1.0),
+                    ..hole
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let cluster_radius_px = (expected_hole_diameter_px * 0.08).clamp(3.0, 15.0);
+    let mut distinct: Vec<(f64, FiducialDetection)> = Vec::new();
+    for candidate in candidates {
+        if distinct.iter().all(|(_, accepted)| {
+            (candidate.1.x_px - accepted.x_px).hypot(candidate.1.y_px - accepted.y_px)
+                > cluster_radius_px
+        }) {
+            distinct.push(candidate);
+        }
+    }
+    let best = distinct.first().copied()?;
+    if distinct
+        .get(1)
+        .is_some_and(|second| second.0 <= best.0 + 0.2)
+    {
+        return None;
+    }
+    Some(FiducialDetection {
+        x_px: best.1.x_px + f64::from(crop_x),
+        y_px: best.1.y_px + f64::from(crop_y),
+        ..best.1
+    })
+}
+
+fn crop_frame_around(
+    frame: &GrayFrame,
+    center_x_px: f64,
+    center_y_px: f64,
+    radius_px: f64,
+) -> Option<(GrayFrame, u32, u32)> {
+    if frame.pixels.len() != frame.width as usize * frame.height as usize
+        || !center_x_px.is_finite()
+        || !center_y_px.is_finite()
+        || !radius_px.is_finite()
+        || radius_px <= 0.0
+    {
+        return None;
+    }
+    let x0 = (center_x_px - radius_px).floor().max(0.0) as u32;
+    let y0 = (center_y_px - radius_px).floor().max(0.0) as u32;
+    let x1 = (center_x_px + radius_px).ceil().min(f64::from(frame.width)) as u32;
+    let y1 = (center_y_px + radius_px)
+        .ceil()
+        .min(f64::from(frame.height)) as u32;
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    let width = x1 - x0;
+    let height = y1 - y0;
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for y in y0..y1 {
+        let start = (y * frame.width + x0) as usize;
+        pixels.extend_from_slice(&frame.pixels[start..start + width as usize]);
+    }
+    Some((
+        GrayFrame {
+            width,
+            height,
+            pixels,
+        },
+        x0,
+        y0,
+    ))
+}
+
+fn detect_bright_annular_fiducials(
+    frame: &GrayFrame,
+    threshold: u8,
+    min_diameter_px: f64,
+    max_diameter_px: f64,
+) -> Vec<FiducialDetection> {
+    detect_circular_components(
+        frame,
+        |value| value >= threshold,
+        min_diameter_px,
+        max_diameter_px,
+        CircularComponentKind::Annular,
+    )
+}
+
 /// Finds a bright circular reference pad near the expected image center.
 /// Multiple thresholds make the detector tolerant of matte copper, solder
 /// mask, and automatic-exposure differences without changing camera controls.
@@ -1689,6 +2285,7 @@ pub fn placement_within_tolerance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use velocitypnp_domain::{FiducialObservation, PlanarCameraCalibrationSample};
 
     #[test]
     fn detects_synthetic_circular_fiducial() {
@@ -1713,6 +2310,181 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!((results[0].x_px - 10.0).abs() < 1e-9);
         assert!(results[0].confidence > 0.8);
+    }
+
+    #[test]
+    fn plate_hole_detector_rejects_two_equally_plausible_features() {
+        let frame = frame_with_dark_disks(400, 200, &[(140, 100, 20), (260, 100, 20)]);
+        assert!(
+            detect_installed_plate_hole(&frame, 200.0, 100.0, 80.0, 40.0, 5.0, 70.0, 10.0,)
+                .is_none()
+        );
+        let target =
+            detect_installed_plate_hole(&frame, 140.0, 100.0, 50.0, 40.0, 5.0, 70.0, 10.0).unwrap();
+        assert!((target.x_px - 140.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn planar_camera_fit_uses_holdouts_to_select_distortion() {
+        let mut samples = Vec::new();
+        for grid_y in 0..5 {
+            for grid_x in 0..5 {
+                let u = (grid_x as f64 - 2.0) * 0.35;
+                let v = (grid_y as f64 - 2.0) * 0.2499;
+                let radius_squared = u * u + v * v;
+                let correction_x = 7.0 * u + 0.3 * v + 0.8 * u * radius_squared;
+                let correction_y = -0.2 * u + 5.5 * v - 0.6 * v * radius_squared;
+                samples.push(PlanarCameraCalibrationSample {
+                    grid_x,
+                    grid_y,
+                    offset_x_mm: -correction_x,
+                    offset_y_mm: -correction_y,
+                    commanded_x_mm: 100.0 - correction_x,
+                    commanded_y_mm: 100.0 - correction_y,
+                    expected_x_px: 500.0 + u * 500.0,
+                    expected_y_px: 400.0 + v * 400.0,
+                    target: Some(FiducialObservation {
+                        x_px: 500.0 + u * 500.0,
+                        y_px: 400.0 + v * 400.0,
+                        diameter_px: 70.0,
+                        confidence: 1.0,
+                    }),
+                    holdout: camera_grid_holdout_for_test(grid_x, grid_y),
+                    rejection_reason: None,
+                });
+            }
+        }
+        let fit = fit_planar_camera_model(CameraRole::TopCamera, 500.0, 400.0, 1000, 800, &samples)
+            .unwrap();
+        assert_eq!(fit.model.kind, PlanarCameraModelKind::DistortionPolynomial);
+        assert!(fit.selected_model_improved_holdout);
+        assert!(fit.holdout_residuals.rms_mm < fit.affine_holdout_residuals.rms_mm);
+        assert!(fit.image_span_y_px < 400.0);
+        assert!(fit.passed);
+    }
+
+    fn camera_grid_holdout_for_test(grid_x: u32, grid_y: u32) -> bool {
+        (grid_x + 2 * grid_y) % 4 == 0 && (grid_x != 2 || grid_y != 2)
+    }
+
+    #[test]
+    fn plate_fit_ignores_occupied_targets_and_qualifies_visible_coverage() {
+        let profile = InstalledPlateGridProfile {
+            id: "build_plate".into(),
+            origin_offset_x_mm: 0.0,
+            origin_offset_y_mm: 0.0,
+            column_step_x_mm: 15.0,
+            column_step_y_mm: 0.0,
+            row_step_x_mm: 0.0,
+            row_step_y_mm: 15.0,
+            column_count: 7,
+            row_count: 3,
+            target_parity: None,
+            preferred_column_stride: 2,
+            minimum_detected_targets: 12,
+            minimum_distinct_columns: 4,
+            minimum_distinct_rows: 3,
+            minimum_x_span_mm: 60.0,
+            minimum_y_span_mm: 30.0,
+            maximum_attempts: 21,
+        };
+        let mut samples = Vec::new();
+        for row in 0..3 {
+            for column in 0..7 {
+                let x = f64::from(column) * 15.0;
+                let y = f64::from(row) * 15.0;
+                let occupied = matches!((column, row), (1, 0) | (4, 1) | (5, 2));
+                let observed = (!occupied)
+                    .then_some([1.001 * x + 0.002 * y + 2.0, -0.001 * x + 0.999 * y - 1.0]);
+                samples.push(InstalledPlateHoleSample {
+                    plate_id: profile.id.clone(),
+                    column,
+                    row,
+                    nominal_x_mm: x,
+                    nominal_y_mm: y,
+                    commanded_x_mm: x,
+                    commanded_y_mm: y,
+                    expected_x_px: 500.0,
+                    expected_y_px: 400.0,
+                    target: observed.map(|_| FiducialObservation {
+                        x_px: 500.0,
+                        y_px: 400.0,
+                        diameter_px: 230.0,
+                        confidence: 1.0,
+                    }),
+                    observed_center_x_mm: observed.map(|point| point[0]),
+                    observed_center_y_mm: observed.map(|point| point[1]),
+                    holdout: (column + 2 * row) % 4 == 0,
+                    rejection_reason: occupied.then(|| "occupied".into()),
+                });
+            }
+        }
+        let fit = fit_installed_plate_geometry(&profile, &samples).unwrap();
+        assert_eq!(fit.attempted_targets, 21);
+        assert_eq!(fit.detected_targets, 18);
+        assert!(fit.coverage_sufficient);
+        assert!(fit.affine_model_selected);
+        assert!(fit.passed);
+        assert!(fit.holdout_residuals.rms_mm < 1e-4);
+    }
+
+    #[test]
+    fn plate_fit_retains_nominal_geometry_when_affine_does_not_predict_better() {
+        let profile = InstalledPlateGridProfile {
+            id: "build_plate".into(),
+            origin_offset_x_mm: 0.0,
+            origin_offset_y_mm: 0.0,
+            column_step_x_mm: 15.0,
+            column_step_y_mm: 0.0,
+            row_step_x_mm: 0.0,
+            row_step_y_mm: 15.0,
+            column_count: 7,
+            row_count: 3,
+            target_parity: None,
+            preferred_column_stride: 1,
+            minimum_detected_targets: 12,
+            minimum_distinct_columns: 4,
+            minimum_distinct_rows: 3,
+            minimum_x_span_mm: 60.0,
+            minimum_y_span_mm: 30.0,
+            maximum_attempts: 21,
+        };
+        let plate_id = profile.id.clone();
+        let samples = (0..3)
+            .flat_map(|row| {
+                let plate_id = plate_id.clone();
+                (0..7).map(move |column| {
+                    let x = f64::from(column) * 15.0;
+                    let y = f64::from(row) * 15.0;
+                    InstalledPlateHoleSample {
+                        plate_id: plate_id.clone(),
+                        column,
+                        row,
+                        nominal_x_mm: x,
+                        nominal_y_mm: y,
+                        commanded_x_mm: x,
+                        commanded_y_mm: y,
+                        expected_x_px: 500.0,
+                        expected_y_px: 400.0,
+                        target: Some(FiducialObservation {
+                            x_px: 500.0,
+                            y_px: 400.0,
+                            diameter_px: 230.0,
+                            confidence: 1.0,
+                        }),
+                        observed_center_x_mm: Some(x),
+                        observed_center_y_mm: Some(y),
+                        holdout: (column + 2 * row) % 4 == 0,
+                        rejection_reason: None,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let fit = fit_installed_plate_geometry(&profile, &samples).unwrap();
+        assert!(!fit.affine_model_selected);
+        assert_eq!(fit.model.matrix, [[1.0, 0.0], [0.0, 1.0]]);
+        assert_eq!(fit.model.translation_mm, [0.0, 0.0]);
+        assert!(fit.passed);
     }
 
     #[test]

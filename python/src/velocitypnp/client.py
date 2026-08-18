@@ -444,6 +444,31 @@ class Client:
             "local_xy_direction_response"
         ]
 
+    def calibrate_installed_geometry(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "installed geometry calibration requires explicit confirmation "
+                "that both nozzles are level, installed hardware is secure, "
+                "tube routing and the envelope are clear, and power isolation "
+                "is reachable"
+            )
+        started = self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/installed-geometry-runs",
+            {
+                "lease_id": str(lease_id),
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        self.wait(started["operation"])
+        return self.calibration_run(started["run"]["id"])
+
     def observe_nozzle_height(
         self,
         calibration_id: str | uuid.UUID,

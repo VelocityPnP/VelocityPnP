@@ -52,8 +52,13 @@ The project is organized by measurable gates rather than calendar estimates.
 ## Gate 3 — Full calibration
 
 - [ ] Fabricate and publish the known-dimension multi-fiducial calibration PCB
-- [ ] Bind OpenCV camera intrinsics/distortion calibration to recorded workflow steps
-- [ ] Add machine runners for full-bed XY scale, skew, and spatial distortion
+- [x] Fit fixed-height top- and bottom-camera planar models from installed targets,
+  with independent holdouts selecting affine or distortion-polynomial models
+- [x] Add an occlusion-tolerant machine runner for installed staging/build-plate
+  scale, skew, and affine geometry
+- [x] Pass installed-camera and plate-geometry calibration on attached hardware
+- [ ] Evaluate whether residual full-bed error justifies a dedicated
+  multi-fiducial PCB or a higher-order spatial model
 - [x] Measure the top-camera working-plane map from bounded homing-fiducial moves
 - [x] Add automatic bottom-camera local mapping, reciprocal camera centering,
   and N1/N2 head-offset measurement

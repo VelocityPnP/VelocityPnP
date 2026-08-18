@@ -866,6 +866,50 @@ at X=220.13, Y=190.27, Z=31.5. Manual jog and calibration moves do not yet use
 the stored correction; consumption belongs to the future physical motion
 planner.
 
+## Installed camera and plate geometry
+
+Installed-geometry run `8fc53288-e0d9-46ca-b342-37a0d0ef6798` passed on the
+attached V3.0.4 on 2026-08-18. It requalified 25-position top- and
+bottom-camera sweeps from run `f0cfaf51-c278-40ff-89d5-e7d02643f1cd`. The
+top-camera distortion model had a 0.04544 mm holdout RMS. The bottom-camera
+model had a 0.03601 mm holdout RMS. Both models used eight spatial holdouts.
+
+The staging plate registered from two holes. Its controller-to-grid offset was
+(-0.20247, -4.33066) mm. A three-pose probe measured this local
+pixel-error-to-machine map at the plate height:
+
+```text
+[[-0.0180044,  0.0000284],
+ [ 0.0002130,  0.0180416]] mm/pixel
+```
+
+The occlusion-tolerant scan retained 12 empty holes and rejected eight covered
+or ambiguous positions. The retained holes covered seven columns, all seven
+rows, 420 mm in X, and 90 mm in Y. Three spatial holdouts had a 0.13538 mm RMS
+and a 0.22953 mm maximum residual. The selected affine plate model was:
+
+```text
+[[1.0014176, -0.0001498],
+ [0.0047962,  0.9999571]]
+translation = [-0.21763, -4.38178] mm
+```
+
+Live tuning exposed three runner defects. A half-frame camera coverage rule
+rejected a valid bottom-camera sweep by 0.245 pixels. The rule now requires
+45 percent coverage while the independent holdout must still pass. The first
+plate scan used datum-plane scale for the lower plate. A local three-pose map
+now supplies the plate-height scale. The initial holdout expression assigned
+whole alternating-hole columns to the test set. The current expression
+distributes holdouts across valid holes and rows.
+
+The final run resumed 17 staged samples from interrupted run
+`8b425ffd-6b26-4d1b-beb7-23ede58f3470`. It captured only three missing staging
+samples. No build-plate grid feature was visible at five predicted poses. The
+runner classified the plate as unavailable and retained this as a limitation.
+It did not search the remaining offset hypotheses. The complete run passed
+because the staging plate qualified. The machine returned homed, ready, and
+fault-free at X=220.131, Y=190.271, Z=31.5.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

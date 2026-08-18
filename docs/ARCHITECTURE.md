@@ -101,6 +101,24 @@ separate compensated holdout reduces the observed endpoint gap. This artifact
 stores the zero-mean half-gap, so common camera drift is not encoded as
 backlash. It is not a substitute for later multi-fiducial full-bed geometry.
 
+Installed-geometry calibration uses the machine's existing fixed-height
+targets. It moves the primary datum through the top-camera image and N1 through
+the bottom-camera image. Independent holdouts select an affine inverse camera
+map unless the distortion-polynomial map predicts unseen positions better.
+The top-camera map then finds candidate mounting holes from the documented
+staging- and build-plate grids. A three-pose probe measures the local camera
+map at each plate height, and a second hole confirms plate registration. Each
+candidate can be absent, occupied, clipped, or ambiguous. The bounded detector
+rejects an implausible first frame immediately and confirms plausible holes
+with the configured extra frames. Plate fits use only accepted concentric
+hole/pad observations and must cover enough distinct rows, columns, and
+physical span. Spatially distributed holdouts select an affine correction only
+when it predicts better than the nominal grid; otherwise the nominal map is
+retained. Each checkpoint stores partial samples and separate training/holdout
+counts.
+This produces an empirical planar map for the installed working geometry. It
+does not claim an unconstrained camera matrix for arbitrary depths or angles.
+
 ## Crates and applications
 
 - `velocitypnp-domain`: geometry, machine state, manufacturing entities, and calibration graph

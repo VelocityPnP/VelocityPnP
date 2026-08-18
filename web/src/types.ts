@@ -160,7 +160,10 @@ export type CalibrationArtifactId =
   | "vacuum_contact_n1"
   | "vacuum_contact_n2"
   | "vacuum_characterization_n1"
-  | "vacuum_characterization_n2";
+  | "vacuum_characterization_n2"
+  | "top_camera_planar_model"
+  | "bottom_camera_planar_model"
+  | "installed_plate_geometry";
 
 export interface CalibrationArtifact {
   kind: "captured" | "qualification" | "derived";
@@ -490,6 +493,43 @@ export interface CameraRayTransferReport {
   passed: boolean;
 }
 
+export interface PlanarCameraCalibrationReport {
+  model: { kind: "affine" | "distortion_polynomial" };
+  attempted_positions: number;
+  detected_positions: number;
+  rejected_positions: number;
+  fit_residuals: Residuals;
+  holdout_residuals: Residuals;
+  affine_holdout_residuals: Residuals;
+  selected_model_improved_holdout: boolean;
+  passed: boolean;
+}
+
+export interface InstalledPlateGeometryReport {
+  registrations: Array<{
+    plate_id: string;
+    attempted_positions: number;
+    detected_positions: number;
+    offset_x_mm: number | null;
+    offset_y_mm: number | null;
+    pixel_error_to_machine_mm: [[number, number], [number, number]] | null;
+    passed: boolean;
+  }>;
+  attempted_targets: number;
+  detected_targets: number;
+  rejected_targets: number;
+  qualified_plate_count: number;
+  limitations: string[];
+  passed: boolean;
+}
+
+export interface InstalledGeometryCalibrationReport {
+  top_camera: PlanarCameraCalibrationReport;
+  bottom_camera: PlanarCameraCalibrationReport;
+  plate_geometry: InstalledPlateGeometryReport;
+  passed: boolean;
+}
+
 export interface AutomatedCalibrationRun {
   id: string;
   calibration_id: string;
@@ -513,6 +553,7 @@ export interface AutomatedCalibrationRun {
   visual_homing_samples: VisualHomingValidationSample[];
   visual_homing_report: VisualHomingValidationReport | null;
   head_geometry_report: HeadGeometryReport | null;
+  installed_geometry_report: InstalledGeometryCalibrationReport | null;
   failure: string | null;
   simulated: boolean;
 }

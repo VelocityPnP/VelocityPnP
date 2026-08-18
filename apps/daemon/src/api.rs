@@ -26,13 +26,15 @@ use velocitypnp_domain::{
     CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
     CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
     CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, InspectionReport,
-    InspectionStatus, Job, JogTarget, LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate,
-    LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
-    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample, NozzleRunoutReport,
-    NozzleRunoutSample, Operation, OperationStatus, Pose, Residuals, SensorReading,
-    VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
-    VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
-    VisualHomingValidationSample,
+    InspectionStatus, InstalledGeometryCalibrationReport, InstalledPlateGeometryReport,
+    InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job, JogTarget, LinearAxis,
+    LocalXyAxisDirectionReport, LocalXyAxisEstimate, LocalXyCompensationHoldout,
+    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, MachineProfile, MachineState,
+    NozzleHeightModel, NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation,
+    OperationStatus, PlanarCameraCalibrationReport, PlanarCameraCalibrationSample,
+    PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
+    VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
+    VisualHomingValidationReport, VisualHomingValidationSample,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -43,14 +45,16 @@ use velocitypnp_planner::{
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
     apply_camera_controls, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
-    camera_sample_metrics, capture_gray_frame, capture_gray_frames, detect_bright_reference_pad,
-    detect_camera_target, encode_gray_png, fit_nozzle_height_model, fit_nozzle_runout,
-    mean_nozzle_detection, plan_bottom_camera_correction, plan_pixel_correction,
-    plan_visual_homing, query_camera_controls, summarize_camera_reproducibility,
-    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
-    summarize_opposed_camera_feature, summarize_residuals, BottomCameraCorrection,
-    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
-    GrayFrame, NozzleToolingReport, V4l2CaptureConfig, VisualHomingPlan,
+    camera_sample_metrics, capture_gray_frame, capture_gray_frames, detect_bright_fiducial_near,
+    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
+    encode_gray_png, fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    fit_planar_camera_model, mean_nozzle_detection, plan_bottom_camera_correction,
+    plan_pixel_correction, plan_visual_homing, query_camera_controls,
+    summarize_camera_reproducibility, summarize_head_camera_feature,
+    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
+    summarize_residuals, BottomCameraCorrection, CameraControlUpdate, CameraControlValue,
+    CameraReproducibilityReport, FiducialDetection, GrayFrame, NozzleToolingReport,
+    V4l2CaptureConfig, VisualHomingPlan,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -58,6 +62,12 @@ const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
+const REUSED_TOP_PLANAR_REPORT: &str = "reused_top_camera_planar_report";
+const REUSED_BOTTOM_PLANAR_REPORT: &str = "reused_bottom_camera_planar_report";
+const REUSED_INSTALLED_GEOMETRY_SOURCE_RUN: &str = "reused_installed_geometry_source_run";
+const REUSED_INSTALLED_PLATE_PROGRESS: &str = "reused_installed_plate_progress";
+const INSTALLED_PLATE_PROGRESS: &str = "installed_plate_progress";
+const INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v1";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -217,6 +227,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/xy-direction-response",
             post(start_local_xy_direction_response),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/installed-geometry-runs",
+            post(start_installed_geometry_run),
         )
         .route(
             "/api/v1/calibrations/{id}/nozzle-height-observation",
@@ -3584,6 +3598,7 @@ async fn start_calibration_run(
         visual_homing_samples: Vec::new(),
         visual_homing_report: None,
         head_geometry_report: None,
+        installed_geometry_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -3741,6 +3756,7 @@ async fn start_head_geometry_run(
         visual_homing_samples: Vec::new(),
         visual_homing_report: Some(visual_homing_report),
         head_geometry_report: None,
+        installed_geometry_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -3909,6 +3925,7 @@ async fn start_calibration_artifact_run(
         visual_homing_samples: Vec::new(),
         visual_homing_report: None,
         head_geometry_report: None,
+        installed_geometry_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -3929,6 +3946,392 @@ async fn start_calibration_artifact_run(
     let lease_id = body.lease_id;
     spawn_prepared_operation(state, operation, async move {
         execute_calibration_artifact_run(task_state, run_id, lease_id, targets).await
+    });
+    Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+#[derive(Deserialize)]
+struct StartInstalledGeometryRunRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+}
+
+fn requalify_planar_camera_report(
+    report: &PlanarCameraCalibrationReport,
+) -> Option<PlanarCameraCalibrationReport> {
+    let width = report.model.normalization_x_px * 2.0;
+    let height = report.model.normalization_y_px * 2.0;
+    if !width.is_finite()
+        || !height.is_finite()
+        || !(64.0..=16_384.0).contains(&width)
+        || !(64.0..=16_384.0).contains(&height)
+    {
+        return None;
+    }
+    let fit = fit_planar_camera_model(
+        report.model.role,
+        report.model.center_x_px,
+        report.model.center_y_px,
+        width.round() as u32,
+        height.round() as u32,
+        &report.samples,
+    )?;
+    let detected_positions = report
+        .samples
+        .iter()
+        .filter(|sample| sample.target.is_some())
+        .count() as u32;
+    Some(PlanarCameraCalibrationReport {
+        model: fit.model,
+        attempted_positions: report.samples.len() as u32,
+        detected_positions,
+        rejected_positions: report.samples.len() as u32 - detected_positions,
+        image_span_x_px: fit.image_span_x_px,
+        image_span_y_px: fit.image_span_y_px,
+        fit_residuals: fit.fit_residuals,
+        holdout_residuals: fit.holdout_residuals,
+        affine_holdout_residuals: fit.affine_holdout_residuals,
+        selected_model_improved_holdout: fit.selected_model_improved_holdout,
+        samples: report.samples.clone(),
+        passed: fit.passed,
+        observed_at: report.observed_at,
+    })
+}
+
+fn planar_report_matches_sweep(
+    report: &PlanarCameraCalibrationReport,
+    role: CameraRole,
+    sweep: &velocitypnp_domain::PlanarCameraSweepProfile,
+) -> bool {
+    let expected_positions = sweep.x_offsets_mm.len() * sweep.y_offsets_mm.len();
+    report.model.role == role
+        && report.samples.len() == expected_positions
+        && sweep.y_offsets_mm.iter().enumerate().all(|(grid_y, y)| {
+            sweep.x_offsets_mm.iter().enumerate().all(|(grid_x, x)| {
+                report.samples.iter().any(|sample| {
+                    sample.grid_x == grid_x as u32
+                        && sample.grid_y == grid_y as u32
+                        && (sample.offset_x_mm - x).abs() <= 1e-9
+                        && (sample.offset_y_mm - y).abs() <= 1e-9
+                })
+            })
+        })
+}
+
+fn run_has_planar_artifacts(
+    run: &AutomatedCalibrationRun,
+    group: &str,
+    expected_positions: usize,
+) -> bool {
+    run.camera_reports
+        .get("installed_geometry_artifacts")
+        .and_then(Value::as_array)
+        .is_some_and(|artifacts| {
+            artifacts
+                .iter()
+                .filter(|artifact| artifact["group"].as_str() == Some(group))
+                .count()
+                >= expected_positions
+        })
+}
+
+fn reusable_installed_geometry_camera_reports(
+    state: &AppState,
+    calibration_id: Uuid,
+    profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+) -> Result<
+    Option<(
+        Uuid,
+        PlanarCameraCalibrationReport,
+        PlanarCameraCalibrationReport,
+    )>,
+    String,
+> {
+    let mut runs = state
+        .store
+        .list_calibration_runs()
+        .map_err(|error| error.to_string())?;
+    runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    for run in runs.into_iter().filter(|run| {
+        run.calibration_id == calibration_id
+            && run.profile_id == state.profile.id
+            && run.simulated == state.machine.status().simulated
+            && !matches!(
+                run.status,
+                CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+            )
+    }) {
+        let report = |check_id: &str| {
+            run.checks
+                .iter()
+                .find(|check| check.id == check_id)
+                .and_then(|check| {
+                    serde_json::from_value::<PlanarCameraCalibrationReport>(check.evidence.clone())
+                        .ok()
+                })
+                .and_then(|report| requalify_planar_camera_report(&report))
+        };
+        let (Some(top), Some(bottom)) = (
+            report("top_camera_planar_model"),
+            report("bottom_camera_planar_model"),
+        ) else {
+            continue;
+        };
+        let top_positions = profile.top_camera_sweep.x_offsets_mm.len()
+            * profile.top_camera_sweep.y_offsets_mm.len();
+        let bottom_positions = profile.bottom_camera_sweep.x_offsets_mm.len()
+            * profile.bottom_camera_sweep.y_offsets_mm.len();
+        if top.passed
+            && bottom.passed
+            && planar_report_matches_sweep(&top, CameraRole::TopCamera, &profile.top_camera_sweep)
+            && planar_report_matches_sweep(
+                &bottom,
+                CameraRole::BottomCamera,
+                &profile.bottom_camera_sweep,
+            )
+            && run_has_planar_artifacts(&run, "top-planar", top_positions)
+            && run_has_planar_artifacts(&run, "bottom-planar", bottom_positions)
+        {
+            return Ok(Some((run.id, top, bottom)));
+        }
+    }
+    Ok(None)
+}
+
+fn reusable_installed_plate_progress(
+    state: &AppState,
+    calibration_id: Uuid,
+    profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+) -> Result<Option<(Uuid, Value)>, String> {
+    let plate_ids = profile
+        .plates
+        .iter()
+        .map(|plate| plate.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut runs = state
+        .store
+        .list_calibration_runs()
+        .map_err(|error| error.to_string())?;
+    runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    for run in runs.into_iter().filter(|run| {
+        run.calibration_id == calibration_id
+            && run.profile_id == state.profile.id
+            && run.simulated == state.machine.status().simulated
+            && !matches!(
+                run.status,
+                CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+            )
+    }) {
+        let Some(progress) = run.camera_reports.get(INSTALLED_PLATE_PROGRESS) else {
+            continue;
+        };
+        if progress.get("algorithm").and_then(Value::as_str)
+            != Some(INSTALLED_PLATE_PROGRESS_ALGORITHM)
+            || progress.get("profile") != Some(&json!(profile))
+        {
+            continue;
+        }
+        let registrations = progress.get("registrations").cloned().and_then(|value| {
+            serde_json::from_value::<Vec<InstalledPlateRegistrationReport>>(value).ok()
+        });
+        let samples = progress
+            .get("samples")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Vec<InstalledPlateHoleSample>>(value).ok());
+        let (Some(registrations), Some(samples)) = (registrations, samples) else {
+            continue;
+        };
+        if registrations.iter().any(|registration| {
+            !plate_ids.contains(registration.plate_id.as_str())
+                || (registration.passed && registration.pixel_error_to_machine_mm.is_none())
+        }) || samples
+            .iter()
+            .any(|sample| !plate_ids.contains(sample.plate_id.as_str()))
+        {
+            continue;
+        }
+        return Ok(Some((run.id, progress.clone())));
+    }
+    Ok(None)
+}
+
+async fn start_installed_geometry_run(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartInstalledGeometryRunRequest>,
+) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "installed geometry calibration requires confirmation that both nozzles are level, the travel envelope is clear, installed plate hardware is secure, nozzle tubes are free of snags, and power isolation is reachable",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let profile = state
+        .profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile has no installed geometry calibration")
+        })?;
+    profile.validate().map_err(ApiError::bad_request)?;
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+        .map_err(ApiError::bad_request)?;
+    for required in [
+        CalibrationArtifactId::TopCameraWorkingPlaneMap,
+        CalibrationArtifactId::BottomCameraLocalMap,
+        CalibrationArtifactId::ToolingN1,
+    ] {
+        if !crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, required) {
+            return Err(ApiError::bad_request(format!(
+                "installed geometry calibration requires current {required:?} evidence"
+            )));
+        }
+    }
+    if state
+        .store
+        .list_calibration_runs()
+        .map_err(ApiError::internal)?
+        .iter()
+        .any(|run| {
+            run.calibration_id == calibration_id
+                && matches!(
+                    run.status,
+                    CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+                )
+        })
+    {
+        return Err(ApiError::bad_request(
+            "this calibration snapshot already has an active run",
+        ));
+    }
+    let machine = state.machine.status();
+    machine
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if machine.state != MachineState::Ready || !machine.homed {
+        return Err(ApiError::bad_request(
+            "installed geometry calibration requires a ready, homed machine",
+        ));
+    }
+    state
+        .machine
+        .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(ApiError::internal)?;
+
+    let operation = Operation::pending("calibration.installed_geometry");
+    let now = Utc::now();
+    let checks = [
+        (
+            "top_camera_planar_model",
+            "Calibrate top-camera working plane",
+        ),
+        (
+            "bottom_camera_planar_model",
+            "Calibrate bottom-camera working plane",
+        ),
+        (
+            "installed_plate_geometry",
+            "Scan visible installed-plate holes",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, title)| CalibrationCheck {
+        id: id.into(),
+        title: title.into(),
+        source: CalibrationCheckSource::Vision,
+        status: CalibrationCheckStatus::Pending,
+        message: "Waiting for machine measurement".into(),
+        evidence: Value::Null,
+    })
+    .collect();
+    let mut camera_reports = BTreeMap::new();
+    if let Some((source_run_id, top_camera, bottom_camera)) =
+        reusable_installed_geometry_camera_reports(&state, calibration_id, profile)
+            .map_err(ApiError::internal)?
+    {
+        camera_reports.insert(
+            REUSED_INSTALLED_GEOMETRY_SOURCE_RUN.into(),
+            json!(source_run_id),
+        );
+        camera_reports.insert(
+            REUSED_TOP_PLANAR_REPORT.into(),
+            serde_json::to_value(top_camera).unwrap_or(Value::Null),
+        );
+        camera_reports.insert(
+            REUSED_BOTTOM_PLANAR_REPORT.into(),
+            serde_json::to_value(bottom_camera).unwrap_or(Value::Null),
+        );
+    }
+    if let Some((source_run_id, progress)) =
+        reusable_installed_plate_progress(&state, calibration_id, profile)
+            .map_err(ApiError::internal)?
+    {
+        camera_reports.insert(
+            REUSED_INSTALLED_PLATE_PROGRESS.into(),
+            json!({
+                "source_run_id": source_run_id,
+                "progress": progress,
+            }),
+        );
+    }
+    let run = AutomatedCalibrationRun {
+        id: Uuid::new_v4(),
+        calibration_id,
+        operation_id: operation.id,
+        profile_id: state.profile.id.clone(),
+        created_at: now,
+        updated_at: now,
+        status: CalibrationRunStatus::Pending,
+        phase: CalibrationRunPhase::Pending,
+        config: AutomatedCalibrationConfig {
+            camera_sample_count: default_camera_sample_count(),
+            tooling_sample_count: default_tooling_sample_count(),
+            visual_homing_sample_count: default_visual_homing_sample_count(),
+            excursion_x_mm: default_calibration_excursion(),
+            excursion_y_mm: default_calibration_excursion(),
+            excursion_feed_mm_per_min: default_calibration_excursion_feed(),
+            visual_homing_p95_limit_mm: default_visual_homing_p95_limit(),
+        },
+        checks,
+        camera_reports,
+        visual_homing_samples: Vec::new(),
+        visual_homing_report: None,
+        head_geometry_report: None,
+        installed_geometry_report: None,
+        failure: None,
+        simulated: machine.simulated,
+    };
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_calibration_run(&run)
+        .map_err(ApiError::internal)?;
+    let returned = StartCalibrationRunResponse {
+        run: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    let run_id = run.id;
+    let lease_id = body.lease_id;
+    spawn_prepared_operation(state, operation, async move {
+        execute_installed_geometry_run(task_state, run_id, lease_id).await
     });
     Ok((StatusCode::ACCEPTED, Json(returned)))
 }
@@ -5021,6 +5424,1701 @@ async fn execute_calibration_artifact_run(
         "Captured {} selected calibration artifacts",
         targets.len()
     )))
+}
+
+async fn execute_installed_geometry_run(
+    state: AppState,
+    run_id: Uuid,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    let mut run = state
+        .store
+        .get_calibration_run(run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "installed geometry run disappeared from storage".to_string())?;
+    run.status = CalibrationRunStatus::Running;
+    persist_calibration_run(&state, &mut run)?;
+    refresh_calibration_lease(&state, lease_id).await?;
+    let machine = state.machine.status();
+    machine
+        .assert_lease(lease_id, Utc::now())
+        .map_err(|error| error.to_string())?;
+    if machine.state != MachineState::Ready || !machine.homed {
+        return fail_calibration_run(
+            &state,
+            &mut run,
+            "installed geometry calibration lost the ready, homed machine state".into(),
+        );
+    }
+    if let Err(error) = execute_visual_home_with_limit(
+        &state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+        Some(run.config.visual_homing_p95_limit_mm),
+    )
+    .await
+    {
+        return fail_calibration_run(&state, &mut run, error.message);
+    }
+    if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let capture = execute_installed_geometry_calibration(&state, &mut run, lease_id).await;
+    let lights_off = state.machine.disable_actuator("lights".into()).await;
+    if let Err(error) = lights_off {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let report = match capture {
+        Ok(report) => report,
+        Err(CalibrationStop::Rejected(message)) => {
+            return reject_calibration_run(&state, &mut run, message)
+        }
+        Err(CalibrationStop::Failed(message)) => {
+            return fail_calibration_run(&state, &mut run, message)
+        }
+    };
+    run.installed_geometry_report = Some(report.clone());
+    if let Err(error) = persist_installed_geometry_results(&state, &run, &report) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    if !report.passed {
+        if let Err(error) = persist_calibration_run(&state, &mut run) {
+            return fail_calibration_run(&state, &mut run, error);
+        }
+        return reject_calibration_run(
+            &state,
+            &mut run,
+            "installed targets did not provide qualified coverage for all requested models".into(),
+        );
+    }
+    run.phase = CalibrationRunPhase::Complete;
+    run.status = CalibrationRunStatus::Succeeded;
+    run.failure = None;
+    persist_calibration_run(&state, &mut run)?;
+    Ok(Some(format!(
+        "Calibrated both planar camera maps and qualified {} installed plate grids from {} visible holes",
+        report.plate_geometry.qualified_plate_count,
+        report.plate_geometry.detected_targets,
+    )))
+}
+
+async fn execute_installed_geometry_calibration(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+) -> Result<InstalledGeometryCalibrationReport, CalibrationStop> {
+    let profile = state
+        .profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            CalibrationStop::Failed("profile has no installed geometry calibration".into())
+        })?
+        .clone();
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| CalibrationStop::Failed("profile has no visual homing".into()))?
+        .clone();
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| CalibrationStop::Failed("profile has no bottom vision".into()))?
+        .clone();
+    let top_profile =
+        stored_camera_profile(state, CameraRole::TopCamera).map_err(api_calibration_stop)?;
+    let bottom_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(api_calibration_stop)?;
+    let top_path = camera_path_for_role(CameraRole::TopCamera).map_err(api_calibration_stop)?;
+    let bottom_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(api_calibration_stop)?;
+    let snapshot = state
+        .store
+        .get_calibration(run.calibration_id)
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?
+        .ok_or_else(|| CalibrationStop::Failed("calibration snapshot not found".into()))?;
+    let bottom_mapping: BottomCameraMappingReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(
+            &snapshot,
+            CalibrationArtifactId::BottomCameraLocalMap,
+        )
+        .map_err(CalibrationStop::Failed)?,
+    )
+    .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let reused_source = run
+        .camera_reports
+        .get(REUSED_INSTALLED_GEOMETRY_SOURCE_RUN)
+        .and_then(Value::as_str)
+        .unwrap_or("an earlier run")
+        .to_string();
+
+    set_run_phase(state, run, CalibrationRunPhase::TopCameraPlanarCalibration)
+        .map_err(CalibrationStop::Failed)?;
+    let reused_top_camera = run
+        .camera_reports
+        .get(REUSED_TOP_PLANAR_REPORT)
+        .and_then(|value| {
+            serde_json::from_value::<PlanarCameraCalibrationReport>(value.clone()).ok()
+        })
+        .and_then(|report| requalify_planar_camera_report(&report))
+        .filter(|report| {
+            report.passed
+                && planar_report_matches_sweep(
+                    report,
+                    CameraRole::TopCamera,
+                    &profile.top_camera_sweep,
+                )
+        });
+    let top_reused = reused_top_camera.is_some();
+    let top_camera = match reused_top_camera {
+        Some(report) => report,
+        None => {
+            measure_top_planar_camera(
+                state,
+                run,
+                lease_id,
+                &visual,
+                &profile.top_camera_sweep,
+                &top_profile,
+                &top_path,
+            )
+            .await?
+        }
+    };
+    let top_message = if top_reused && top_camera.passed {
+        format!("Requalified captured top-camera sweep from run {reused_source}")
+    } else if top_camera.passed {
+        "Installed datum sweep produced a holdout-qualified top-camera model".into()
+    } else {
+        "Installed datum sweep did not produce qualified image coverage".into()
+    };
+    update_run_check(
+        run,
+        "top_camera_planar_model",
+        if top_camera.passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        &top_message,
+        serde_json::to_value(&top_camera).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+
+    set_run_phase(
+        state,
+        run,
+        CalibrationRunPhase::BottomCameraPlanarCalibration,
+    )
+    .map_err(CalibrationStop::Failed)?;
+    let reused_bottom_camera = run
+        .camera_reports
+        .get(REUSED_BOTTOM_PLANAR_REPORT)
+        .and_then(|value| {
+            serde_json::from_value::<PlanarCameraCalibrationReport>(value.clone()).ok()
+        })
+        .and_then(|report| requalify_planar_camera_report(&report))
+        .filter(|report| {
+            report.passed
+                && planar_report_matches_sweep(
+                    report,
+                    CameraRole::BottomCamera,
+                    &profile.bottom_camera_sweep,
+                )
+        });
+    let bottom_reused = reused_bottom_camera.is_some();
+    let bottom_camera = match reused_bottom_camera {
+        Some(report) => report,
+        None => {
+            measure_bottom_planar_camera(
+                state,
+                run,
+                lease_id,
+                &bottom,
+                &profile.bottom_camera_sweep,
+                &bottom_profile,
+                &bottom_path,
+                bottom_mapping.pixel_error_to_machine_mm,
+            )
+            .await?
+        }
+    };
+    let bottom_message = if bottom_reused && bottom_camera.passed {
+        format!("Requalified captured bottom-camera sweep from run {reused_source}")
+    } else if bottom_camera.passed {
+        "Installed nozzle sweep produced a holdout-qualified bottom-camera model".into()
+    } else {
+        "Installed nozzle sweep did not produce qualified image coverage".into()
+    };
+    update_run_check(
+        run,
+        "bottom_camera_planar_model",
+        if bottom_camera.passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        &bottom_message,
+        serde_json::to_value(&bottom_camera).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+
+    set_run_phase(state, run, CalibrationRunPhase::InstalledPlateGeometry)
+        .map_err(CalibrationStop::Failed)?;
+    let plate_geometry = measure_installed_plate_geometry(
+        state,
+        run,
+        lease_id,
+        &visual,
+        &profile,
+        &top_profile,
+        &top_path,
+        &top_camera.model,
+    )
+    .await?;
+    update_run_check(
+        run,
+        "installed_plate_geometry",
+        if plate_geometry.passed {
+            CalibrationCheckStatus::Passed
+        } else {
+            CalibrationCheckStatus::Failed
+        },
+        if plate_geometry.passed {
+            "Visible plate holes provided qualified coverage with independent holdouts"
+        } else {
+            "Visible plate holes were recorded, but available coverage was not sufficient"
+        },
+        serde_json::to_value(&plate_geometry).unwrap_or(Value::Null),
+    );
+    persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+
+    Ok(InstalledGeometryCalibrationReport {
+        passed: top_camera.passed && bottom_camera.passed && plate_geometry.passed,
+        top_camera,
+        bottom_camera,
+        plate_geometry,
+    })
+}
+
+async fn measure_top_planar_camera(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    visual: &VisualHomingProfile,
+    sweep: &velocitypnp_domain::PlanarCameraSweepProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> Result<PlanarCameraCalibrationReport, CalibrationStop> {
+    let base_pose = state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: visual.fiducial_x_mm,
+                y_mm: visual.fiducial_y_mm,
+                z_mm: visual.seed_pose.z_mm,
+                rotation_deg: None,
+            },
+            visual.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let reference = capture_top_working_plane_fiducial(state, camera_profile, device_path).await?;
+    let mut samples = Vec::new();
+    for (grid_y, offset_y_mm) in sweep.y_offsets_mm.iter().copied().enumerate() {
+        for (grid_x, offset_x_mm) in sweep.x_offsets_mm.iter().copied().enumerate() {
+            refresh_calibration_lease(state, lease_id)
+                .await
+                .map_err(CalibrationStop::Failed)?;
+            let expected = expected_pixel_for_camera_offset(
+                reference,
+                visual.pixel_error_to_machine_mm,
+                offset_x_mm,
+                offset_y_mm,
+            )
+            .ok_or_else(|| CalibrationStop::Failed("top-camera seed map is singular".into()))?;
+            let pose = jog_with_negative_xy_approach(
+                state,
+                lease_id,
+                Pose {
+                    x_mm: base_pose.x_mm + offset_x_mm,
+                    y_mm: base_pose.y_mm + offset_y_mm,
+                    ..base_pose
+                },
+                visual.feed_mm_per_min,
+            )
+            .await?;
+            let frames = capture_profiled_frames(
+                state,
+                camera_profile,
+                device_path,
+                sweep.samples_per_position,
+            )
+            .await
+            .map_err(api_calibration_stop)?;
+            record_installed_geometry_frame(
+                state,
+                run,
+                "top-planar",
+                grid_x as u32,
+                grid_y as u32,
+                frames.last().unwrap(),
+            )?;
+            let detections = frames
+                .iter()
+                .filter_map(|frame| {
+                    detect_bright_fiducial_near(
+                        frame,
+                        expected[0],
+                        expected[1],
+                        sweep.target_search_radius_px,
+                        45.0,
+                        110.0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let target = (detections.len() == frames.len())
+                .then(|| mean_fiducial_detection(&detections))
+                .flatten();
+            samples.push(PlanarCameraCalibrationSample {
+                grid_x: grid_x as u32,
+                grid_y: grid_y as u32,
+                offset_x_mm,
+                offset_y_mm,
+                commanded_x_mm: pose.x_mm,
+                commanded_y_mm: pose.y_mm,
+                expected_x_px: expected[0],
+                expected_y_px: expected[1],
+                target: target.map(fiducial_observation),
+                holdout: camera_grid_holdout(grid_x, grid_y, offset_x_mm, offset_y_mm),
+                rejection_reason: target.is_none().then(|| {
+                    format!(
+                        "datum detected in {} of {} frames",
+                        detections.len(),
+                        frames.len()
+                    )
+                }),
+            });
+        }
+    }
+    state
+        .machine
+        .jog(lease_id, base_pose.into(), visual.feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    build_planar_camera_report(CameraRole::TopCamera, reference, camera_profile, samples)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_bottom_planar_camera(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    sweep: &velocitypnp_domain::PlanarCameraSweepProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    seed_mapping: [[f64; 2]; 2],
+) -> Result<PlanarCameraCalibrationReport, CalibrationStop> {
+    let nozzle = bottom
+        .nozzles
+        .iter()
+        .find(|nozzle| nozzle.nozzle_id == "N1")
+        .ok_or_else(|| CalibrationStop::Failed("bottom profile has no N1 tooling".into()))?;
+    let seed_pose = state
+        .machine
+        .jog(
+            lease_id,
+            bottom.nozzle_target(nozzle),
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let base_pose = center_nozzle_for_runout(
+        state,
+        lease_id,
+        bottom,
+        nozzle,
+        camera_profile,
+        device_path,
+        seed_mapping,
+        seed_pose,
+    )
+    .await?;
+    let reference =
+        capture_geometry_nozzle(state, bottom, nozzle, camera_profile, device_path).await?;
+    let mut samples = Vec::new();
+    for (grid_y, offset_y_mm) in sweep.y_offsets_mm.iter().copied().enumerate() {
+        for (grid_x, offset_x_mm) in sweep.x_offsets_mm.iter().copied().enumerate() {
+            refresh_calibration_lease(state, lease_id)
+                .await
+                .map_err(CalibrationStop::Failed)?;
+            let expected =
+                expected_pixel_for_camera_offset(reference, seed_mapping, offset_x_mm, offset_y_mm)
+                    .ok_or_else(|| {
+                        CalibrationStop::Failed("bottom-camera seed map is singular".into())
+                    })?;
+            let pose = jog_with_negative_xy_approach(
+                state,
+                lease_id,
+                Pose {
+                    x_mm: base_pose.x_mm + offset_x_mm,
+                    y_mm: base_pose.y_mm + offset_y_mm,
+                    ..base_pose
+                },
+                bottom.feed_mm_per_min,
+            )
+            .await?;
+            let frames = capture_profiled_frames(
+                state,
+                camera_profile,
+                device_path,
+                sweep.samples_per_position,
+            )
+            .await
+            .map_err(api_calibration_stop)?;
+            record_installed_geometry_frame(
+                state,
+                run,
+                "bottom-planar",
+                grid_x as u32,
+                grid_y as u32,
+                frames.last().unwrap(),
+            )?;
+            let target = summarize_nozzle_height_feature(
+                &frames,
+                expected[0],
+                expected[1],
+                reference.diameter_px,
+                sweep.target_search_radius_px,
+                nozzle.calibration_feature_kind,
+            );
+            samples.push(PlanarCameraCalibrationSample {
+                grid_x: grid_x as u32,
+                grid_y: grid_y as u32,
+                offset_x_mm,
+                offset_y_mm,
+                commanded_x_mm: pose.x_mm,
+                commanded_y_mm: pose.y_mm,
+                expected_x_px: expected[0],
+                expected_y_px: expected[1],
+                target: target.map(fiducial_observation),
+                holdout: camera_grid_holdout(grid_x, grid_y, offset_x_mm, offset_y_mm),
+                rejection_reason: target
+                    .is_none()
+                    .then(|| "configured N1 feature was not stable in the capture group".into()),
+            });
+        }
+    }
+    state
+        .machine
+        .jog(lease_id, base_pose.into(), bottom.feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    build_planar_camera_report(CameraRole::BottomCamera, reference, camera_profile, samples)
+}
+
+fn build_planar_camera_report(
+    role: CameraRole,
+    reference: FiducialDetection,
+    camera_profile: &CameraProfile,
+    samples: Vec<PlanarCameraCalibrationSample>,
+) -> Result<PlanarCameraCalibrationReport, CalibrationStop> {
+    let fit = fit_planar_camera_model(
+        role,
+        reference.x_px,
+        reference.y_px,
+        camera_profile.width,
+        camera_profile.height,
+        &samples,
+    )
+    .ok_or_else(|| {
+        CalibrationStop::Rejected(format!(
+            "{} sweep did not retain enough independent target observations",
+            role.as_str()
+        ))
+    })?;
+    let attempted_positions = samples.len() as u32;
+    let detected_positions = samples
+        .iter()
+        .filter(|sample| sample.target.is_some())
+        .count() as u32;
+    Ok(PlanarCameraCalibrationReport {
+        model: fit.model,
+        attempted_positions,
+        detected_positions,
+        rejected_positions: attempted_positions - detected_positions,
+        image_span_x_px: fit.image_span_x_px,
+        image_span_y_px: fit.image_span_y_px,
+        fit_residuals: fit.fit_residuals,
+        holdout_residuals: fit.holdout_residuals,
+        affine_holdout_residuals: fit.affine_holdout_residuals,
+        selected_model_improved_holdout: fit.selected_model_improved_holdout,
+        samples,
+        passed: fit.passed,
+        observed_at: Utc::now(),
+    })
+}
+
+fn camera_grid_holdout(grid_x: usize, grid_y: usize, offset_x_mm: f64, offset_y_mm: f64) -> bool {
+    (offset_x_mm.abs() > f64::EPSILON || offset_y_mm.abs() > f64::EPSILON)
+        && (grid_x + 2 * grid_y) % 4 == 0
+}
+
+fn expected_pixel_for_camera_offset(
+    reference: FiducialDetection,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    offset_x_mm: f64,
+    offset_y_mm: f64,
+) -> Option<[f64; 2]> {
+    let determinant = pixel_error_to_machine_mm[0][0] * pixel_error_to_machine_mm[1][1]
+        - pixel_error_to_machine_mm[0][1] * pixel_error_to_machine_mm[1][0];
+    if !determinant.is_finite() || determinant.abs() < 1e-12 {
+        return None;
+    }
+    let correction = [-offset_x_mm, -offset_y_mm];
+    let error_x_px = (pixel_error_to_machine_mm[1][1] * correction[0]
+        - pixel_error_to_machine_mm[0][1] * correction[1])
+        / determinant;
+    let error_y_px = (-pixel_error_to_machine_mm[1][0] * correction[0]
+        + pixel_error_to_machine_mm[0][0] * correction[1])
+        / determinant;
+    let expected = [reference.x_px + error_x_px, reference.y_px + error_y_px];
+    expected
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(expected)
+}
+
+fn fiducial_observation(target: FiducialDetection) -> velocitypnp_domain::FiducialObservation {
+    velocitypnp_domain::FiducialObservation {
+        x_px: target.x_px,
+        y_px: target.y_px,
+        diameter_px: target.diameter_px,
+        confidence: target.confidence,
+    }
+}
+
+async fn jog_with_negative_xy_approach(
+    state: &AppState,
+    lease_id: Uuid,
+    target: Pose,
+    feed_mm_per_min: f64,
+) -> Result<Pose, CalibrationStop> {
+    let approach = Pose {
+        x_mm: target.x_mm - 1.0,
+        y_mm: target.y_mm - 1.0,
+        ..target
+    };
+    if state.profile.bounds.contains(approach) {
+        state
+            .machine
+            .jog(lease_id, approach.into(), feed_mm_per_min)
+            .await
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    }
+    state
+        .machine
+        .jog(lease_id, target.into(), feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_installed_plate_geometry(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    visual: &VisualHomingProfile,
+    profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    camera_model: &PlanarCameraModel,
+) -> Result<InstalledPlateGeometryReport, CalibrationStop> {
+    let scale = camera_model
+        .local_mm_per_pixel(camera_model.center_x_px, camera_model.center_y_px)
+        .ok_or_else(|| CalibrationStop::Failed("top-camera planar scale is unavailable".into()))?;
+    let hole_diameter_px = profile.plate_hole_diameter_mm / scale;
+    let pad_diameter_px = profile.plate_pad_diameter_mm / scale;
+    let diameter_tolerance_px = profile.plate_diameter_tolerance_mm / scale;
+    let hole_diameter_tolerance_px = diameter_tolerance_px.max(hole_diameter_px * 0.48);
+    let pad_diameter_tolerance_px = diameter_tolerance_px.max(pad_diameter_px * 0.48);
+    let search_radius_px = profile.plate_search_radius_mm / scale;
+    let mut samples = Vec::new();
+    let base_pose = Pose {
+        x_mm: visual.fiducial_x_mm,
+        y_mm: visual.fiducial_y_mm,
+        z_mm: visual.seed_pose.z_mm,
+        rotation_deg: state
+            .machine
+            .status()
+            .pose
+            .map_or(0.0, |pose| pose.rotation_deg),
+    };
+    let mut plate_fits = Vec::new();
+    let mut registrations = Vec::new();
+    let reused_progress = run
+        .camera_reports
+        .get(REUSED_INSTALLED_PLATE_PROGRESS)
+        .and_then(|value| value.get("progress"));
+    let reused_registrations = reused_progress
+        .and_then(|value| value.get("registrations"))
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<Vec<InstalledPlateRegistrationReport>>(value).ok()
+        })
+        .unwrap_or_default();
+    let reused_samples = reused_progress
+        .and_then(|value| value.get("samples"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<InstalledPlateHoleSample>>(value).ok())
+        .unwrap_or_default();
+
+    for plate in &profile.plates {
+        let candidates = ordered_plate_targets(plate, base_pose, state.profile.bounds);
+        let resumed_registration = reused_registrations
+            .iter()
+            .find(|registration| registration.plate_id == plate.id && registration.passed)
+            .cloned();
+        let mut resumed_samples = reused_samples
+            .iter()
+            .filter(|sample| sample.plate_id == plate.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for sample in &mut resumed_samples {
+            sample.holdout = plate_grid_holdout(sample.column, sample.row);
+        }
+        let (registration, registration_samples) = if let Some(registration) = resumed_registration
+        {
+            (registration, resumed_samples)
+        } else {
+            register_installed_plate(
+                state,
+                run,
+                lease_id,
+                plate,
+                profile,
+                camera_profile,
+                device_path,
+                camera_model,
+                base_pose,
+                &candidates,
+                hole_diameter_px,
+                pad_diameter_px,
+                hole_diameter_tolerance_px,
+                pad_diameter_tolerance_px,
+                search_radius_px,
+            )
+            .await?
+        };
+        let registration_offset = [
+            registration.offset_x_mm.unwrap_or(0.0),
+            registration.offset_y_mm.unwrap_or(0.0),
+        ];
+        let plate_mapping = registration.pixel_error_to_machine_mm;
+        let registration_passed = registration.passed;
+        registrations.push(registration);
+        if !registration_passed {
+            run.camera_reports.insert(
+                INSTALLED_PLATE_PROGRESS.into(),
+                json!({
+                    "algorithm": INSTALLED_PLATE_PROGRESS_ALGORITHM,
+                    "active_plate_id": plate.id,
+                    "profile": profile,
+                    "registrations": &registrations,
+                    "samples": &samples,
+                }),
+            );
+            persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+            continue;
+        }
+        let plate_scale = plate_mapping
+            .and_then(plate_plane_mm_per_pixel)
+            .unwrap_or(scale);
+        let scan_hole_diameter_px = profile.plate_hole_diameter_mm / plate_scale;
+        let scan_pad_diameter_px = profile.plate_pad_diameter_mm / plate_scale;
+        let scan_diameter_tolerance_px = profile.plate_diameter_tolerance_mm / plate_scale;
+        let scan_hole_diameter_tolerance_px =
+            scan_diameter_tolerance_px.max(scan_hole_diameter_px * 0.2);
+        let scan_pad_diameter_tolerance_px =
+            scan_diameter_tolerance_px.max(scan_pad_diameter_px * 0.2);
+        let scan_search_radius_px = profile.plate_search_radius_mm / plate_scale;
+        let registered_targets = registration_samples
+            .iter()
+            .map(|sample| (sample.column, sample.row))
+            .collect::<BTreeSet<_>>();
+        samples.extend(registration_samples);
+        run.camera_reports.insert(
+            INSTALLED_PLATE_PROGRESS.into(),
+            json!({
+                "algorithm": INSTALLED_PLATE_PROGRESS_ALGORITHM,
+                "active_plate_id": plate.id,
+                "profile": profile,
+                "registrations": &registrations,
+                "samples": &samples,
+            }),
+        );
+        persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+        if fit_installed_plate_geometry(plate, &samples).is_some_and(|fit| fit.passed) {
+            if let Some(fit) = fit_installed_plate_geometry(plate, &samples) {
+                plate_fits.push(fit);
+            }
+            continue;
+        }
+        let remaining_attempts = plate
+            .maximum_attempts
+            .saturating_sub(registered_targets.len() as u32)
+            as usize;
+        for (attempt, (column, row, nominal_x_mm, nominal_y_mm)) in candidates
+            .into_iter()
+            .filter(|(column, row, ..)| !registered_targets.contains(&(*column, *row)))
+            .take(remaining_attempts)
+            .enumerate()
+        {
+            refresh_calibration_lease(state, lease_id)
+                .await
+                .map_err(CalibrationStop::Failed)?;
+            let approach = JogTarget {
+                x_mm: nominal_x_mm + registration_offset[0] - 1.0,
+                y_mm: nominal_y_mm + registration_offset[1] - 1.0,
+                z_mm: base_pose.z_mm,
+                rotation_deg: None,
+            };
+            let approach_pose = approach.resolve(base_pose);
+            if approach_pose.is_some_and(|pose| state.profile.bounds.contains(pose)) {
+                state
+                    .machine
+                    .jog(lease_id, approach, profile.feed_mm_per_min)
+                    .await
+                    .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+            }
+            let pose = state
+                .machine
+                .jog(
+                    lease_id,
+                    JogTarget {
+                        x_mm: nominal_x_mm + registration_offset[0],
+                        y_mm: nominal_y_mm + registration_offset[1],
+                        z_mm: base_pose.z_mm,
+                        rotation_deg: None,
+                    },
+                    profile.feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+            let mut frames = capture_profiled_frames(state, camera_profile, device_path, 1)
+                .await
+                .map_err(api_calibration_stop)?;
+            let mut detections = detect_installed_plate_hole(
+                frames.first().unwrap(),
+                camera_model.center_x_px,
+                camera_model.center_y_px,
+                scan_search_radius_px,
+                scan_hole_diameter_px,
+                scan_hole_diameter_tolerance_px,
+                scan_pad_diameter_px,
+                scan_pad_diameter_tolerance_px,
+            )
+            .into_iter()
+            .collect::<Vec<_>>();
+            let requested_samples = profile.top_camera_sweep.samples_per_position;
+            if !detections.is_empty() && requested_samples > 1 {
+                let mut confirmation_frames = capture_profiled_frames(
+                    state,
+                    camera_profile,
+                    device_path,
+                    requested_samples - 1,
+                )
+                .await
+                .map_err(api_calibration_stop)?;
+                detections.extend(confirmation_frames.iter().filter_map(|frame| {
+                    detect_installed_plate_hole(
+                        frame,
+                        camera_model.center_x_px,
+                        camera_model.center_y_px,
+                        scan_search_radius_px,
+                        scan_hole_diameter_px,
+                        scan_hole_diameter_tolerance_px,
+                        scan_pad_diameter_px,
+                        scan_pad_diameter_tolerance_px,
+                    )
+                }));
+                frames.append(&mut confirmation_frames);
+            }
+            record_installed_geometry_frame(
+                state,
+                run,
+                &format!("plate-{}", plate.id),
+                column,
+                row,
+                frames.last().unwrap(),
+            )?;
+            let target = (frames.len() == requested_samples as usize
+                && detections.len() == frames.len())
+            .then(|| mean_fiducial_detection(&detections))
+            .flatten();
+            let correction = target.and_then(|target| {
+                plate_mapping.map(|mapping| {
+                    plate_pixel_correction(
+                        mapping,
+                        target,
+                        camera_model.center_x_px,
+                        camera_model.center_y_px,
+                    )
+                })
+            });
+            let observed_center =
+                correction.map(|correction| [pose.x_mm + correction[0], pose.y_mm + correction[1]]);
+            samples.push(InstalledPlateHoleSample {
+                plate_id: plate.id.clone(),
+                column,
+                row,
+                nominal_x_mm,
+                nominal_y_mm,
+                commanded_x_mm: pose.x_mm,
+                commanded_y_mm: pose.y_mm,
+                expected_x_px: camera_model.center_x_px,
+                expected_y_px: camera_model.center_y_px,
+                target: target.map(fiducial_observation),
+                observed_center_x_mm: observed_center.map(|center| center[0]),
+                observed_center_y_mm: observed_center.map(|center| center[1]),
+                holdout: plate_grid_holdout(column, row),
+                rejection_reason: if target.is_none() {
+                    Some(format!(
+                        "unambiguous empty hole detected in {} of {} frames",
+                        detections.len(),
+                        frames.len()
+                    ))
+                } else if correction.is_none() {
+                    Some("hole fell outside calibrated top-camera image coverage".into())
+                } else {
+                    None
+                },
+            });
+            if (attempt + 1) % 5 == 0 {
+                let accepted = samples
+                    .iter()
+                    .filter(|sample| {
+                        sample.plate_id == plate.id && sample.observed_center_x_mm.is_some()
+                    })
+                    .collect::<Vec<_>>();
+                let holdout_targets = accepted.iter().filter(|sample| sample.holdout).count();
+                let training_targets = accepted.len() - holdout_targets;
+                let provisional_fit = fit_installed_plate_geometry(plate, &samples);
+                update_run_check(
+                    run,
+                    "installed_plate_geometry",
+                    CalibrationCheckStatus::Pending,
+                    &format!(
+                        "Scanned {} candidates; {} visible holes accepted ({} training, {} holdout)",
+                        samples.len(),
+                        accepted.len(),
+                        training_targets,
+                        holdout_targets,
+                    ),
+                    json!({
+                        "training_targets": training_targets,
+                        "holdout_targets": holdout_targets,
+                        "provisional_fit": &provisional_fit,
+                    }),
+                );
+                run.camera_reports.insert(
+                    INSTALLED_PLATE_PROGRESS.into(),
+                    json!({
+                        "algorithm": INSTALLED_PLATE_PROGRESS_ALGORITHM,
+                        "active_plate_id": plate.id,
+                        "profile": profile,
+                        "registrations": &registrations,
+                        "samples": &samples,
+                        "provisional_fit": &provisional_fit,
+                    }),
+                );
+                persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+            }
+            if fit_installed_plate_geometry(plate, &samples).is_some_and(|fit| fit.passed) {
+                break;
+            }
+        }
+        if let Some(fit) = fit_installed_plate_geometry(plate, &samples) {
+            plate_fits.push(fit);
+        }
+    }
+    state
+        .machine
+        .jog(lease_id, base_pose.into(), visual.feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+
+    let qualified_plate_count = plate_fits.iter().filter(|fit| fit.passed).count() as u32;
+    let attempted_targets = samples.len() as u32;
+    let detected_targets = samples
+        .iter()
+        .filter(|sample| sample.observed_center_x_mm.is_some())
+        .count() as u32;
+    let mut limitations = Vec::new();
+    for plate in &profile.plates {
+        match plate_fits.iter().find(|fit| fit.plate_id == plate.id) {
+            Some(fit) if fit.passed => {}
+            Some(fit) => limitations.push(format!(
+                "{} retained {} visible targets across {} columns and {} rows, which did not qualify its holdout",
+                plate.id, fit.detected_targets, fit.distinct_columns, fit.distinct_rows
+            )),
+            None => limitations.push(format!(
+                "{} did not retain enough unoccupied targets for an affine fit",
+                plate.id
+            )),
+        }
+    }
+    Ok(InstalledPlateGeometryReport {
+        datum_controller_x_mm: base_pose.x_mm,
+        datum_controller_y_mm: base_pose.y_mm,
+        registrations,
+        plates: plate_fits,
+        samples,
+        attempted_targets,
+        detected_targets,
+        rejected_targets: attempted_targets - detected_targets,
+        qualified_plate_count,
+        limitations,
+        passed: qualified_plate_count > 0,
+        observed_at: Utc::now(),
+    })
+}
+
+fn plate_registration_offsets(
+    plate: &velocitypnp_domain::InstalledPlateGridProfile,
+) -> Vec<[f64; 2]> {
+    let scaled = |x: f64, y: f64, factor: f64| [x * factor, y * factor];
+    vec![
+        [0.0, 0.0],
+        scaled(plate.row_step_x_mm, plate.row_step_y_mm, 0.8),
+        scaled(plate.row_step_x_mm, plate.row_step_y_mm, -0.8),
+        scaled(plate.column_step_x_mm, plate.column_step_y_mm, 0.8),
+        scaled(plate.column_step_x_mm, plate.column_step_y_mm, -0.8),
+        scaled(plate.row_step_x_mm, plate.row_step_y_mm, 0.4),
+        scaled(plate.row_step_x_mm, plate.row_step_y_mm, -0.4),
+        scaled(plate.column_step_x_mm, plate.column_step_y_mm, 0.4),
+        scaled(plate.column_step_x_mm, plate.column_step_y_mm, -0.4),
+    ]
+}
+
+fn consistent_registration_offset(
+    support: &[InstalledPlateHoleSample],
+    maximum_deviation_mm: f64,
+) -> Option<[f64; 2]> {
+    if support.len() < 2 {
+        return None;
+    }
+    let count = support.len() as f64;
+    let offset_x_mm = support
+        .iter()
+        .map(|sample| sample.observed_center_x_mm.unwrap() - sample.nominal_x_mm)
+        .sum::<f64>()
+        / count;
+    let offset_y_mm = support
+        .iter()
+        .map(|sample| sample.observed_center_y_mm.unwrap() - sample.nominal_y_mm)
+        .sum::<f64>()
+        / count;
+    support
+        .iter()
+        .all(|sample| {
+            let x = sample.observed_center_x_mm.unwrap() - sample.nominal_x_mm;
+            let y = sample.observed_center_y_mm.unwrap() - sample.nominal_y_mm;
+            (x - offset_x_mm).hypot(y - offset_y_mm) <= maximum_deviation_mm
+        })
+        .then_some([offset_x_mm, offset_y_mm])
+}
+
+fn plate_pixel_correction(
+    mapping: [[f64; 2]; 2],
+    target: FiducialDetection,
+    center_x_px: f64,
+    center_y_px: f64,
+) -> [f64; 2] {
+    let error = [target.x_px - center_x_px, target.y_px - center_y_px];
+    [
+        mapping[0][0] * error[0] + mapping[0][1] * error[1],
+        mapping[1][0] * error[0] + mapping[1][1] * error[1],
+    ]
+}
+
+fn plate_plane_mm_per_pixel(mapping: [[f64; 2]; 2]) -> Option<f64> {
+    let x_scale = mapping[0][0].hypot(mapping[1][0]);
+    let y_scale = mapping[0][1].hypot(mapping[1][1]);
+    let scale = (x_scale + y_scale) / 2.0;
+    (mapping.iter().flatten().all(|value| value.is_finite())
+        && scale.is_finite()
+        && (0.005..=0.05).contains(&scale))
+    .then_some(scale)
+}
+
+fn linearized_camera_correction(
+    model: &PlanarCameraModel,
+    target: FiducialDetection,
+) -> Option<[f64; 2]> {
+    let center = model.correction_at(model.center_x_px, model.center_y_px)?;
+    let x = model.correction_at(model.center_x_px + 1.0, model.center_y_px)?;
+    let y = model.correction_at(model.center_x_px, model.center_y_px + 1.0)?;
+    let error_x_px = target.x_px - model.center_x_px;
+    let error_y_px = target.y_px - model.center_y_px;
+    Some([
+        (x[0] - center[0]) * error_x_px + (y[0] - center[0]) * error_y_px,
+        (x[1] - center[1]) * error_x_px + (y[1] - center[1]) * error_y_px,
+    ])
+}
+
+fn solve_plate_plane_mapping(
+    base: FiducialDetection,
+    x_probe: FiducialDetection,
+    y_probe: FiducialDetection,
+    x_move_mm: f64,
+    y_move_mm: f64,
+) -> Option<[[f64; 2]; 2]> {
+    let dxx = x_probe.x_px - base.x_px;
+    let dyx = x_probe.y_px - base.y_px;
+    let dxy = y_probe.x_px - base.x_px;
+    let dyy = y_probe.y_px - base.y_px;
+    let determinant = dxx * dyy - dxy * dyx;
+    if !determinant.is_finite() || determinant.abs() < 100.0 {
+        return None;
+    }
+    let mapping = [
+        [
+            -x_move_mm * dyy / determinant,
+            x_move_mm * dxy / determinant,
+        ],
+        [
+            y_move_mm * dyx / determinant,
+            -y_move_mm * dxx / determinant,
+        ],
+    ];
+    let x_scale = mapping[0][0].hypot(mapping[1][0]);
+    let y_scale = mapping[0][1].hypot(mapping[1][1]);
+    (mapping.iter().flatten().all(|value| value.is_finite())
+        && (0.005..=0.05).contains(&x_scale)
+        && (0.005..=0.05).contains(&y_scale))
+    .then_some(mapping)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_plate_target_at_pose(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    artifact_group: &str,
+    column: u32,
+    row: u32,
+    target_pose: Pose,
+    profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    camera_model: &PlanarCameraModel,
+    search_radius_px: f64,
+    hole_diameter_px: f64,
+    hole_diameter_tolerance_px: f64,
+    pad_diameter_px: f64,
+    pad_diameter_tolerance_px: f64,
+) -> Result<Option<FiducialDetection>, CalibrationStop> {
+    let approach = Pose {
+        x_mm: target_pose.x_mm - 1.0,
+        y_mm: target_pose.y_mm - 1.0,
+        ..target_pose
+    };
+    if state.profile.bounds.contains(approach) {
+        state
+            .machine
+            .jog(lease_id, approach.into(), profile.feed_mm_per_min)
+            .await
+            .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    }
+    state
+        .machine
+        .jog(lease_id, target_pose.into(), profile.feed_mm_per_min)
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let frames = capture_profiled_frames(
+        state,
+        camera_profile,
+        device_path,
+        profile.top_camera_sweep.samples_per_position,
+    )
+    .await
+    .map_err(api_calibration_stop)?;
+    record_installed_geometry_frame(
+        state,
+        run,
+        artifact_group,
+        column,
+        row,
+        frames.last().unwrap(),
+    )?;
+    let detections = frames
+        .iter()
+        .filter_map(|frame| {
+            detect_installed_plate_hole(
+                frame,
+                camera_model.center_x_px,
+                camera_model.center_y_px,
+                search_radius_px,
+                hole_diameter_px,
+                hole_diameter_tolerance_px,
+                pad_diameter_px,
+                pad_diameter_tolerance_px,
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok((detections.len() == frames.len())
+        .then(|| mean_fiducial_detection(&detections))
+        .flatten())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn calibrate_plate_plane_mapping(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    plate_id: &str,
+    column: u32,
+    row: u32,
+    pose: Pose,
+    initial: FiducialDetection,
+    profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    camera_model: &PlanarCameraModel,
+    search_radius_px: f64,
+    hole_diameter_px: f64,
+    hole_diameter_tolerance_px: f64,
+    pad_diameter_px: f64,
+    pad_diameter_tolerance_px: f64,
+) -> Result<Option<[[f64; 2]; 2]>, CalibrationStop> {
+    const PROBE_DISTANCE_MM: f64 = 1.5;
+    let approximate = linearized_camera_correction(camera_model, initial).unwrap_or([1.0, 1.0]);
+    let x_move_mm = PROBE_DISTANCE_MM * if approximate[0] < 0.0 { -1.0 } else { 1.0 };
+    let y_move_mm = PROBE_DISTANCE_MM * if approximate[1] < 0.0 { -1.0 } else { 1.0 };
+    let x_probe = capture_plate_target_at_pose(
+        state,
+        run,
+        lease_id,
+        &format!("plate-registration-{plate_id}-mapping-x"),
+        column,
+        row,
+        Pose {
+            x_mm: pose.x_mm + x_move_mm,
+            ..pose
+        },
+        profile,
+        camera_profile,
+        device_path,
+        camera_model,
+        search_radius_px,
+        hole_diameter_px,
+        hole_diameter_tolerance_px,
+        pad_diameter_px,
+        pad_diameter_tolerance_px,
+    )
+    .await?;
+    let y_probe = capture_plate_target_at_pose(
+        state,
+        run,
+        lease_id,
+        &format!("plate-registration-{plate_id}-mapping-y"),
+        column,
+        row,
+        Pose {
+            y_mm: pose.y_mm + y_move_mm,
+            ..pose
+        },
+        profile,
+        camera_profile,
+        device_path,
+        camera_model,
+        search_radius_px,
+        hole_diameter_px,
+        hole_diameter_tolerance_px,
+        pad_diameter_px,
+        pad_diameter_tolerance_px,
+    )
+    .await?;
+    let return_probe = capture_plate_target_at_pose(
+        state,
+        run,
+        lease_id,
+        &format!("plate-registration-{plate_id}-mapping-return"),
+        column,
+        row,
+        pose,
+        profile,
+        camera_profile,
+        device_path,
+        camera_model,
+        search_radius_px,
+        hole_diameter_px,
+        hole_diameter_tolerance_px,
+        pad_diameter_px,
+        pad_diameter_tolerance_px,
+    )
+    .await?;
+    let repeatable = return_probe.is_some_and(|returned| {
+        (returned.x_px - initial.x_px).hypot(returned.y_px - initial.y_px) <= 20.0
+    });
+    Ok((repeatable.then_some(())).and_then(|()| {
+        x_probe.zip(y_probe).and_then(|(x_probe, y_probe)| {
+            solve_plate_plane_mapping(initial, x_probe, y_probe, x_move_mm, y_move_mm)
+        })
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn register_installed_plate(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    plate: &velocitypnp_domain::InstalledPlateGridProfile,
+    profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+    camera_model: &PlanarCameraModel,
+    base_pose: Pose,
+    candidates: &[(u32, u32, f64, f64)],
+    hole_diameter_px: f64,
+    pad_diameter_px: f64,
+    hole_diameter_tolerance_px: f64,
+    pad_diameter_tolerance_px: f64,
+    search_radius_px: f64,
+) -> Result<
+    (
+        InstalledPlateRegistrationReport,
+        Vec<InstalledPlateHoleSample>,
+    ),
+    CalibrationStop,
+> {
+    const TARGETS_PER_HYPOTHESIS: usize = 5;
+    const MINIMUM_SUPPORT_TARGETS: usize = 2;
+    let mut attempted_positions = 0_u32;
+    let mut detected_positions = 0_u32;
+    let mut plausible_positions = 0_u32;
+    let mut plate_mapping = None;
+
+    for (hypothesis_index, offset) in plate_registration_offsets(plate).into_iter().enumerate() {
+        let mut support = Vec::new();
+        for &(column, row, nominal_x_mm, nominal_y_mm) in
+            candidates.iter().take(TARGETS_PER_HYPOTHESIS)
+        {
+            let target_pose = Pose {
+                x_mm: nominal_x_mm + offset[0],
+                y_mm: nominal_y_mm + offset[1],
+                ..base_pose
+            };
+            if !state.profile.bounds.contains(target_pose) {
+                continue;
+            }
+            refresh_calibration_lease(state, lease_id)
+                .await
+                .map_err(CalibrationStop::Failed)?;
+            let approach = Pose {
+                x_mm: target_pose.x_mm - 1.0,
+                y_mm: target_pose.y_mm - 1.0,
+                ..target_pose
+            };
+            if state.profile.bounds.contains(approach) {
+                state
+                    .machine
+                    .jog(lease_id, approach.into(), profile.feed_mm_per_min)
+                    .await
+                    .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+            }
+            let pose = state
+                .machine
+                .jog(lease_id, target_pose.into(), profile.feed_mm_per_min)
+                .await
+                .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+            let requested_samples = profile.top_camera_sweep.samples_per_position;
+            let mut frames = capture_profiled_frames(state, camera_profile, device_path, 1)
+                .await
+                .map_err(api_calibration_stop)?;
+            let mut detections = detect_installed_plate_hole(
+                frames.first().unwrap(),
+                camera_model.center_x_px,
+                camera_model.center_y_px,
+                search_radius_px,
+                hole_diameter_px,
+                hole_diameter_tolerance_px,
+                pad_diameter_px,
+                pad_diameter_tolerance_px,
+            )
+            .into_iter()
+            .collect::<Vec<_>>();
+            if !detections.is_empty() && requested_samples > 1 {
+                let mut confirmation_frames = capture_profiled_frames(
+                    state,
+                    camera_profile,
+                    device_path,
+                    requested_samples - 1,
+                )
+                .await
+                .map_err(api_calibration_stop)?;
+                detections.extend(confirmation_frames.iter().filter_map(|frame| {
+                    detect_installed_plate_hole(
+                        frame,
+                        camera_model.center_x_px,
+                        camera_model.center_y_px,
+                        search_radius_px,
+                        hole_diameter_px,
+                        hole_diameter_tolerance_px,
+                        pad_diameter_px,
+                        pad_diameter_tolerance_px,
+                    )
+                }));
+                frames.append(&mut confirmation_frames);
+            }
+            record_installed_geometry_frame(
+                state,
+                run,
+                &format!("plate-registration-{}-{hypothesis_index}", plate.id),
+                column,
+                row,
+                frames.last().unwrap(),
+            )?;
+            attempted_positions += 1;
+            let target = (frames.len() == requested_samples as usize
+                && detections.len() == frames.len())
+            .then(|| mean_fiducial_detection(&detections))
+            .flatten();
+            if target.is_some() {
+                plausible_positions += 1;
+            }
+            if plate_mapping.is_none() {
+                if let Some(target) = target {
+                    plate_mapping = calibrate_plate_plane_mapping(
+                        state,
+                        run,
+                        lease_id,
+                        &plate.id,
+                        column,
+                        row,
+                        pose,
+                        target,
+                        profile,
+                        camera_profile,
+                        device_path,
+                        camera_model,
+                        search_radius_px,
+                        hole_diameter_px,
+                        hole_diameter_tolerance_px,
+                        pad_diameter_px,
+                        pad_diameter_tolerance_px,
+                    )
+                    .await?;
+                }
+            }
+            let correction = target.and_then(|target| {
+                plate_mapping.map(|mapping| {
+                    plate_pixel_correction(
+                        mapping,
+                        target,
+                        camera_model.center_x_px,
+                        camera_model.center_y_px,
+                    )
+                })
+            });
+            let observed_center =
+                correction.map(|correction| [pose.x_mm + correction[0], pose.y_mm + correction[1]]);
+            if observed_center.is_some() {
+                detected_positions += 1;
+            }
+            if let Some(observed_center) = observed_center {
+                support.push(InstalledPlateHoleSample {
+                    plate_id: plate.id.clone(),
+                    column,
+                    row,
+                    nominal_x_mm,
+                    nominal_y_mm,
+                    commanded_x_mm: pose.x_mm,
+                    commanded_y_mm: pose.y_mm,
+                    expected_x_px: camera_model.center_x_px,
+                    expected_y_px: camera_model.center_y_px,
+                    target: target.map(fiducial_observation),
+                    observed_center_x_mm: Some(observed_center[0]),
+                    observed_center_y_mm: Some(observed_center[1]),
+                    holdout: plate_grid_holdout(column, row),
+                    rejection_reason: None,
+                });
+                if support.len() >= MINIMUM_SUPPORT_TARGETS {
+                    if let Some(offset) = consistent_registration_offset(
+                        &support,
+                        profile.plate_search_radius_mm / 2.0,
+                    ) {
+                        return Ok((
+                            InstalledPlateRegistrationReport {
+                                plate_id: plate.id.clone(),
+                                attempted_positions,
+                                detected_positions,
+                                offset_x_mm: Some(offset[0]),
+                                offset_y_mm: Some(offset[1]),
+                                pixel_error_to_machine_mm: plate_mapping,
+                                passed: true,
+                            },
+                            support,
+                        ));
+                    }
+                }
+            }
+        }
+        update_run_check(
+            run,
+            "installed_plate_geometry",
+            CalibrationCheckStatus::Pending,
+            &format!(
+                "Tested {} registration poses for {}; {} candidate holes detected",
+                attempted_positions, plate.id, detected_positions
+            ),
+            Value::Null,
+        );
+        persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
+        if hypothesis_index == 0 && plausible_positions == 0 {
+            break;
+        }
+    }
+    Ok((
+        InstalledPlateRegistrationReport {
+            plate_id: plate.id.clone(),
+            attempted_positions,
+            detected_positions,
+            offset_x_mm: None,
+            offset_y_mm: None,
+            pixel_error_to_machine_mm: plate_mapping,
+            passed: false,
+        },
+        Vec::new(),
+    ))
+}
+
+fn ordered_plate_targets(
+    plate: &velocitypnp_domain::InstalledPlateGridProfile,
+    datum: Pose,
+    bounds: velocitypnp_domain::Bounds,
+) -> Vec<(u32, u32, f64, f64)> {
+    let preferred_rows = [0, plate.row_count / 2, plate.row_count - 1];
+    let mut preferred_columns = (0..plate.column_count)
+        .step_by(plate.preferred_column_stride as usize)
+        .collect::<Vec<_>>();
+    if preferred_columns.last().copied() != Some(plate.column_count - 1) {
+        preferred_columns.push(plate.column_count - 1);
+    }
+    let mut order = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut add = |column: u32, row: u32| {
+        if !seen.insert((column, row)) {
+            return;
+        }
+        let Some(offset) = plate.target_offset(column, row) else {
+            return;
+        };
+        let pose = Pose {
+            x_mm: datum.x_mm + offset[0],
+            y_mm: datum.y_mm + offset[1],
+            ..datum
+        };
+        if bounds.contains(pose) {
+            order.push((column, row, pose.x_mm, pose.y_mm));
+        }
+    };
+    for column in &preferred_columns {
+        for row in preferred_rows {
+            add(*column, row);
+        }
+    }
+    for column in 0..plate.column_count {
+        for row in 0..plate.row_count {
+            add(column, row);
+        }
+    }
+    order
+}
+
+fn plate_grid_holdout(column: u32, row: u32) -> bool {
+    ((column + row) / 2).is_multiple_of(4)
+}
+
+fn record_installed_geometry_frame(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    prefix: &str,
+    x: u32,
+    y: u32,
+    frame: &GrayFrame,
+) -> Result<(), CalibrationStop> {
+    let safe_prefix = prefix
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let name = format!("{safe_prefix}-{x}-{y}.png");
+    let data =
+        encode_gray_png(frame).map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    state
+        .store
+        .put_calibration_artifact(run.id, &name, "image/png", &data)
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+    let artifacts = run
+        .camera_reports
+        .entry("installed_geometry_artifacts".into())
+        .or_insert_with(|| json!([]));
+    let artifacts = artifacts.as_array_mut().ok_or_else(|| {
+        CalibrationStop::Failed("installed geometry artifact report is not an array".into())
+    })?;
+    artifacts.push(json!({
+        "group": prefix,
+        "x": x,
+        "y": y,
+        "name": name,
+        "url": format!("/api/v1/calibration-runs/{}/artifacts/{name}", run.id),
+    }));
+    Ok(())
+}
+
+fn persist_installed_geometry_results(
+    state: &AppState,
+    run: &AutomatedCalibrationRun,
+    report: &InstalledGeometryCalibrationReport,
+) -> Result<(), String> {
+    let mut snapshot = state
+        .store
+        .get_calibration(run.calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)?;
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    snapshot.invalidate_from(CalibrationStepId::TopCameraIntrinsics);
+    snapshot.invalidate_from(CalibrationStepId::BottomCameraIntrinsics);
+    let values = snapshot.values.as_object_mut().unwrap();
+    values.insert(
+        CalibrationStepId::TopCameraIntrinsics.as_str().into(),
+        json!({"run_id": run.id, "report": report.top_camera}),
+    );
+    values.insert(
+        CalibrationStepId::BottomCameraIntrinsics.as_str().into(),
+        json!({"run_id": run.id, "report": report.bottom_camera}),
+    );
+    if report.top_camera.passed {
+        snapshot
+            .completed_steps
+            .insert(CalibrationStepId::TopCameraIntrinsics);
+        snapshot.residuals.insert(
+            CalibrationStepId::TopCameraIntrinsics,
+            report.top_camera.holdout_residuals,
+        );
+        crate::calibration_artifacts::record_captured_artifact(
+            state,
+            &mut snapshot,
+            CalibrationArtifactId::TopCameraPlanarModel,
+            Some(run.id),
+            serde_json::to_value(&report.top_camera).map_err(|error| error.to_string())?,
+        )?;
+    }
+    if report.bottom_camera.passed {
+        snapshot
+            .completed_steps
+            .insert(CalibrationStepId::BottomCameraIntrinsics);
+        snapshot.residuals.insert(
+            CalibrationStepId::BottomCameraIntrinsics,
+            report.bottom_camera.holdout_residuals,
+        );
+        crate::calibration_artifacts::record_captured_artifact(
+            state,
+            &mut snapshot,
+            CalibrationArtifactId::BottomCameraPlanarModel,
+            Some(run.id),
+            serde_json::to_value(&report.bottom_camera).map_err(|error| error.to_string())?,
+        )?;
+    }
+    snapshot.invalidate_from(CalibrationStepId::MotionGeometry);
+    snapshot.values.as_object_mut().unwrap().insert(
+        CalibrationStepId::MotionGeometry.as_str().into(),
+        json!({"run_id": run.id, "report": report.plate_geometry}),
+    );
+    if report.plate_geometry.passed && report.top_camera.passed {
+        let residuals = combine_plate_holdout_residuals(&report.plate_geometry.plates)
+            .ok_or_else(|| "plate geometry has no qualified holdout residuals".to_string())?;
+        snapshot
+            .completed_steps
+            .insert(CalibrationStepId::MotionGeometry);
+        snapshot
+            .residuals
+            .insert(CalibrationStepId::MotionGeometry, residuals);
+        crate::calibration_artifacts::record_captured_artifact(
+            state,
+            &mut snapshot,
+            CalibrationArtifactId::InstalledPlateGeometry,
+            Some(run.id),
+            serde_json::to_value(&report.plate_geometry).map_err(|error| error.to_string())?,
+        )?;
+        snapshot
+            .completed_steps
+            .insert(CalibrationStepId::TopCameraScale);
+        snapshot.values.as_object_mut().unwrap().insert(
+            CalibrationStepId::TopCameraScale.as_str().into(),
+            json!({
+                "run_id": run.id,
+                "model": report.top_camera.model,
+                "plate_geometry_artifact": "installed_plate_geometry",
+            }),
+        );
+    }
+    snapshot.production_ready = false;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(|error| error.to_string())
+}
+
+fn combine_plate_holdout_residuals(
+    plates: &[velocitypnp_domain::InstalledPlateFitReport],
+) -> Option<Residuals> {
+    let qualified = plates
+        .iter()
+        .filter(|plate| plate.passed)
+        .collect::<Vec<_>>();
+    let sample_count = qualified
+        .iter()
+        .map(|plate| plate.holdout_residuals.sample_count)
+        .sum::<u32>();
+    if sample_count == 0 {
+        return None;
+    }
+    let squared_sum = qualified
+        .iter()
+        .map(|plate| {
+            plate.holdout_residuals.rms_mm.powi(2) * f64::from(plate.holdout_residuals.sample_count)
+        })
+        .sum::<f64>();
+    Some(Residuals {
+        sample_count,
+        rms_mm: (squared_sum / f64::from(sample_count)).sqrt(),
+        p95_mm: qualified
+            .iter()
+            .map(|plate| plate.holdout_residuals.p95_mm)
+            .fold(0.0, f64::max),
+        max_mm: qualified
+            .iter()
+            .map(|plate| plate.holdout_residuals.max_mm)
+            .fold(0.0, f64::max),
+    })
 }
 
 fn persist_targeted_runout(
@@ -8127,6 +10225,7 @@ mod tests {
             visual_homing_samples: vec![],
             visual_homing_report: None,
             head_geometry_report: None,
+            installed_geometry_report: None,
             failure: None,
             simulated: true,
         }
@@ -8857,6 +10956,119 @@ mod tests {
         assert!(message.contains("level"));
         assert!(message.contains("datum board"));
         assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn installed_geometry_requires_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/installed-geometry-runs",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("installed plate hardware is secure"));
+        assert!(message.contains("travel envelope"));
+    }
+
+    #[test]
+    fn plate_registration_requires_a_consistent_shared_offset() {
+        let sample =
+            |column: u32, nominal: [f64; 2], observed: [f64; 2]| InstalledPlateHoleSample {
+                plate_id: "staging_plate".into(),
+                column,
+                row: 0,
+                nominal_x_mm: nominal[0],
+                nominal_y_mm: nominal[1],
+                commanded_x_mm: observed[0],
+                commanded_y_mm: observed[1],
+                expected_x_px: 640.0,
+                expected_y_px: 360.0,
+                target: None,
+                observed_center_x_mm: Some(observed[0]),
+                observed_center_y_mm: Some(observed[1]),
+                holdout: false,
+                rejection_reason: None,
+            };
+        let consistent = vec![
+            sample(1, [10.0, 20.0], [10.2, 19.7]),
+            sample(9, [130.0, 20.0], [130.3, 19.8]),
+        ];
+        let offset = consistent_registration_offset(&consistent, 0.25).unwrap();
+        assert!((offset[0] - 0.25).abs() < 1e-12);
+        assert!((offset[1] + 0.25).abs() < 1e-12);
+
+        let inconsistent = vec![
+            sample(1, [10.0, 20.0], [10.2, 19.7]),
+            sample(9, [130.0, 20.0], [132.0, 18.0]),
+        ];
+        assert!(consistent_registration_offset(&inconsistent, 0.25).is_none());
+    }
+
+    #[test]
+    fn plate_holdouts_are_distributed_across_alternating_holes() {
+        assert!(plate_grid_holdout(5, 3));
+        assert!(plate_grid_holdout(6, 2));
+        assert!(plate_grid_holdout(21, 3));
+        assert!(!plate_grid_holdout(5, 1));
+        assert!(!plate_grid_holdout(6, 0));
+
+        let holdouts = (0..8)
+            .flat_map(|column| (0..7).map(move |row| (column, row)))
+            .filter(|(column, row)| (column + row) % 2 == 0)
+            .filter(|(column, row)| plate_grid_holdout(*column, *row))
+            .collect::<Vec<_>>();
+        assert_eq!(holdouts.len(), 7);
+        assert_eq!(
+            holdouts
+                .iter()
+                .map(|(_, row)| *row)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1, 2, 3, 4, 5, 6])
+        );
+    }
+
+    #[test]
+    fn plate_plane_probe_recovers_its_local_pixel_mapping() {
+        let target = |x_px: f64, y_px: f64| FiducialDetection {
+            x_px,
+            y_px,
+            diameter_px: 160.0,
+            confidence: 0.9,
+        };
+        let mapping = solve_plate_plane_mapping(
+            target(600.0, 100.0),
+            target(675.0, 100.0),
+            target(600.0, 25.0),
+            1.5,
+            1.5,
+        )
+        .unwrap();
+        assert!((mapping[0][0] + 0.02).abs() < 1e-12);
+        assert!(mapping[0][1].abs() < 1e-12);
+        assert!(mapping[1][0].abs() < 1e-12);
+        assert!((mapping[1][1] - 0.02).abs() < 1e-12);
+        assert!((plate_plane_mm_per_pixel(mapping).unwrap() - 0.02).abs() < 1e-12);
+        let correction = plate_pixel_correction(mapping, target(600.0, 100.0), 640.0, 360.0);
+        assert!((correction[0] - 0.8).abs() < 1e-12);
+        assert!((correction[1] + 5.2).abs() < 1e-12);
     }
 
     #[tokio::test]

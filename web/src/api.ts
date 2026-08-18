@@ -121,6 +121,14 @@ export const api = {
         confirmed_external_safety_checks: true,
       },
     ),
+  startInstalledGeometryCalibration: (snapshotId: string, leaseId: string) =>
+    jsonPost<{ run: AutomatedCalibrationRun; operation: Operation }>(
+      `/calibrations/${snapshotId}/installed-geometry-runs`,
+      {
+        lease_id: leaseId,
+        confirmed_external_safety_checks: true,
+      },
+    ),
   startArtifactCalibration: (
     snapshotId: string, leaseId: string, targets: CalibrationArtifactId[],
   ) => jsonPost<{ run: AutomatedCalibrationRun; operation: Operation }>(

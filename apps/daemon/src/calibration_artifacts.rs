@@ -851,12 +851,57 @@ fn expected_inputs(
                     })?,
             );
         }
+        TopCameraPlanarModel => {
+            add(&mut inputs, "top_camera_profile", &top_profile()?);
+            add(&mut inputs, "visual_homing_profile", &visual()?);
+            add(
+                &mut inputs,
+                "installed_geometry_profile",
+                &state
+                    .profile
+                    .installed_geometry_calibration
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "active profile has no installed geometry calibration".to_string()
+                    })?
+                    .top_camera_sweep,
+            );
+        }
         BottomCameraLocalMap => {
             add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
             add(
                 &mut inputs,
                 "mapping_profile",
                 &bottom()?.head_geometry.probe_distance_mm,
+            );
+        }
+        BottomCameraPlanarModel => {
+            add(&mut inputs, "bottom_camera_profile", &bottom_profile()?);
+            add(&mut inputs, "tooling", &nozzle("N1")?);
+            add(
+                &mut inputs,
+                "installed_geometry_profile",
+                &state
+                    .profile
+                    .installed_geometry_calibration
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "active profile has no installed geometry calibration".to_string()
+                    })?
+                    .bottom_camera_sweep,
+            );
+        }
+        InstalledPlateGeometry => {
+            add(
+                &mut inputs,
+                "installed_geometry_profile",
+                &state
+                    .profile
+                    .installed_geometry_calibration
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "active profile has no installed geometry calibration".to_string()
+                    })?,
             );
         }
         ReciprocalCameraGeometry => {
@@ -1032,6 +1077,8 @@ fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
         ToolingN1 | ToolingN2 => "nozzle_tooling.v1",
         VisualHomingQualification => "visual_homing_qualification.v2",
         TopCameraWorkingPlaneMap | BottomCameraLocalMap => "camera_motion_mapping.v1",
+        TopCameraPlanarModel | BottomCameraPlanarModel => "planar_camera_model.v1",
+        InstalledPlateGeometry => "installed_plate_geometry.v1",
         LocalXyDirectionResponse => "local_xy_direction_response.v2",
         ReciprocalCameraGeometry => "reciprocal_camera_geometry.v2",
         CameraRayTransfer => "camera_ray_transfer.v2",

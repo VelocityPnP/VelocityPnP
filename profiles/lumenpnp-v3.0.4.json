@@ -183,6 +183,65 @@
     "maximum_sample_pairs": 7,
     "resolved_relative_uncertainty": 0.5
   },
+  "installed_geometry_calibration": {
+    "top_camera_sweep": {
+      "x_offsets_mm": [-6.0, -3.0, 0.0, 3.0, 6.0],
+      "y_offsets_mm": [-3.0, -1.5, 0.0, 1.5, 3.0],
+      "samples_per_position": 3,
+      "target_search_radius_px": 60.0
+    },
+    "bottom_camera_sweep": {
+      "x_offsets_mm": [-11.0, -5.5, 0.0, 5.5, 11.0],
+      "y_offsets_mm": [-6.0, -3.0, 0.0, 3.0, 6.0],
+      "samples_per_position": 3,
+      "target_search_radius_px": 70.0
+    },
+    "plates": [
+      {
+        "id": "staging_plate",
+        "origin_offset_x_mm": -285.0,
+        "origin_offset_y_mm": 3.0,
+        "column_step_x_mm": 15.0,
+        "column_step_y_mm": 0.0,
+        "row_step_x_mm": 0.0,
+        "row_step_y_mm": -15.0,
+        "column_count": 40,
+        "row_count": 7,
+        "target_parity": 0,
+        "preferred_column_stride": 3,
+        "minimum_detected_targets": 12,
+        "minimum_distinct_columns": 4,
+        "minimum_distinct_rows": 3,
+        "minimum_x_span_mm": 180.0,
+        "minimum_y_span_mm": 30.0,
+        "maximum_attempts": 60
+      },
+      {
+        "id": "build_plate",
+        "origin_offset_x_mm": -285.0,
+        "origin_offset_y_mm": -72.0,
+        "column_step_x_mm": 15.0,
+        "column_step_y_mm": 0.0,
+        "row_step_x_mm": 0.0,
+        "row_step_y_mm": -15.0,
+        "column_count": 40,
+        "row_count": 7,
+        "target_parity": 0,
+        "preferred_column_stride": 3,
+        "minimum_detected_targets": 12,
+        "minimum_distinct_columns": 4,
+        "minimum_distinct_rows": 3,
+        "minimum_x_span_mm": 180.0,
+        "minimum_y_span_mm": 30.0,
+        "maximum_attempts": 60
+      }
+    ],
+    "plate_hole_diameter_mm": 3.2,
+    "plate_pad_diameter_mm": 5.6,
+    "plate_diameter_tolerance_mm": 0.8,
+    "plate_search_radius_mm": 4.0,
+    "feed_mm_per_min": 600.0
+  },
   "capabilities": {
     "dual_nozzle": true,
     "rotation_motion": false,
@@ -192,6 +251,7 @@
     "vacuum_probe_calibration": true,
     "vacuum_sensor_characterization": true,
     "local_xy_direction_response": true,
+    "installed_geometry_calibration": true,
     "photon_bus": false,
     "physical_endstops": false,
     "contact_probe": false

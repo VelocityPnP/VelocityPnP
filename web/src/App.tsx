@@ -325,6 +325,21 @@ function CalibrationPanel({ status, devices, setError }: {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const calibrateInstalledGeometry = async () => {
+    if (!active) return;
+    if (!window.confirm(
+      "Calibrate the cameras and installed plate geometry? Confirm both nozzles are level, all installed hardware is secure, the travel envelope is clear, and power isolation is reachable. The machine will scan widely. Components, feeders, and fixtures can obscure plate features; unavailable targets will be skipped.",
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 3600)
+        : await api.lease("VelocityPnP installed geometry", 3600);
+      const started = await api.startInstalledGeometryCalibration(active.id, lease.id);
+      setActiveRun(started.run);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
   const recomputeDerived = async () => {
     if (!active) return;
     setStarting(true); setError(null);
@@ -373,6 +388,12 @@ function CalibrationPanel({ status, devices, setError }: {
     active?.artifacts.top_camera_working_plane_map
       && status.state === "ready" && status.homed,
   );
+  const canCalibrateInstalledGeometry = Boolean(
+    active?.artifacts.top_camera_working_plane_map
+      && active?.artifacts.bottom_camera_local_map
+      && active?.artifacts.tooling_n1
+      && status.state === "ready" && status.homed,
+  );
 
   return <div className="calibration-layout">
     <section className="card calibration-summary">
@@ -388,6 +409,7 @@ function CalibrationPanel({ status, devices, setError }: {
         <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N1")} onClick={() => void characterizeVacuum("N1")}>Characterize N1 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N2")} onClick={() => void characterizeVacuum("N2")}>Characterize N2 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canCalibrateXyDirectionResponse} onClick={() => void calibrateXyDirectionResponse()}>Measure XY direction response</button>
+        <button className="secondary" disabled={starting || runActive || !canCalibrateInstalledGeometry} onClick={() => void calibrateInstalledGeometry()}>Calibrate cameras and plates</button>
         <button className="secondary" disabled={starting || runActive} onClick={() => void recomputeDerived()}>Recompute derived transforms</button>
         <button className="secondary" disabled={starting || runActive || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
@@ -418,6 +440,9 @@ function CalibrationPanel({ status, devices, setError }: {
         <div className="run-heading"><strong>{pretty(activeRun.status)}</strong><span>{pretty(activeRun.phase)}</span></div>
         {activeRun.phase === "visual_homing_validation" && <p>{activeRun.visual_homing_samples.length} / {activeRun.config.visual_homing_sample_count} homing cycles measured</p>}
         {activeRun.phase === "head_geometry_calibration" && <p>Mapping cameras and measuring nozzle runout and Z-dependent axis shift</p>}
+        {activeRun.phase === "top_camera_planar_calibration" && <p>Measuring the top-camera image plane with the installed datum fiducial</p>}
+        {activeRun.phase === "bottom_camera_planar_calibration" && <p>Measuring the bottom-camera image plane with the installed N1 tip</p>}
+        {activeRun.phase === "installed_plate_geometry" && <p>Registering installed plates, then scanning candidate holes; occupied and ambiguous targets are skipped</p>}
         <div className="calibration-checks">{activeRun.checks.map((check) => <div key={check.id} className={`check-${check.status}`}><span>{check.status === "passed" ? "✓" : check.status === "failed" ? "!" : "·"}</span><div><strong>{check.title}</strong><small>{check.message}</small></div></div>)}</div>
         {activeRun.visual_homing_report && <p className="run-result">Independent return p95 <strong>{activeRun.visual_homing_report.independent_return.p95_mm.toFixed(4)} mm</strong></p>}
         {activeRun.head_geometry_report && <div className="run-result">
@@ -426,6 +451,13 @@ function CalibrationPanel({ status, devices, setError }: {
           <p>N1 to N2 <strong>{activeRun.head_geometry_report.n1_to_n2_x_mm.toFixed(3)}, {activeRun.head_geometry_report.n1_to_n2_y_mm.toFixed(3)} mm</strong></p>
           {activeRun.head_geometry_report.nozzles.map((nozzle) => <p key={nozzle.nozzle_id}>{nozzle.nozzle_id} {nozzle.tip_id} runout <strong>{nozzle.runout_radius_mm.toFixed(4)} mm</strong>; fit p95 <strong>{nozzle.fit_residuals.p95_mm.toFixed(4)} mm</strong></p>)}
           {(activeRun.head_geometry_report.nozzle_height_models ?? []).map((model) => <p key={model.nozzle_id}>{model.nozzle_id} axis slope <strong>{model.axis_slope_x_mm_per_mm.toFixed(5)}, {model.axis_slope_y_mm_per_mm.toFixed(5)} mm/mm</strong>; fit p95 <strong>{model.fit_residuals.p95_mm.toFixed(4)} mm</strong></p>)}
+        </div>}
+        {activeRun.installed_geometry_report && <div className="run-result">
+          <p>Top camera <strong>{pretty(activeRun.installed_geometry_report.top_camera.model.kind)}</strong>; holdout RMS <strong>{activeRun.installed_geometry_report.top_camera.holdout_residuals.rms_mm.toFixed(4)} mm</strong>; {activeRun.installed_geometry_report.top_camera.detected_positions} / {activeRun.installed_geometry_report.top_camera.attempted_positions} positions visible</p>
+          <p>Bottom camera <strong>{pretty(activeRun.installed_geometry_report.bottom_camera.model.kind)}</strong>; holdout RMS <strong>{activeRun.installed_geometry_report.bottom_camera.holdout_residuals.rms_mm.toFixed(4)} mm</strong>; {activeRun.installed_geometry_report.bottom_camera.detected_positions} / {activeRun.installed_geometry_report.bottom_camera.attempted_positions} positions visible</p>
+          <p>Installed plates <strong>{activeRun.installed_geometry_report.plate_geometry.qualified_plate_count} qualified</strong>; {activeRun.installed_geometry_report.plate_geometry.detected_targets} / {activeRun.installed_geometry_report.plate_geometry.attempted_targets} candidate holes visible</p>
+          {activeRun.installed_geometry_report.plate_geometry.registrations.map((registration) => <p key={registration.plate_id}>{pretty(registration.plate_id)} registration <strong>{registration.passed ? "passed" : "not found"}</strong>{registration.offset_x_mm !== null && registration.offset_y_mm !== null ? ` at ${registration.offset_x_mm.toFixed(3)} mm X, ${registration.offset_y_mm.toFixed(3)} mm Y` : ""}</p>)}
+          {activeRun.installed_geometry_report.plate_geometry.limitations.map((limitation) => <p key={limitation}>{limitation}</p>)}
         </div>}
         {activeRun.failure && <div className="notice">{activeRun.failure}</div>}
       </div>}

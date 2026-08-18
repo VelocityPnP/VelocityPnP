@@ -573,6 +573,41 @@ paths:
                 confirmed_external_safety_checks: { type: boolean }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /calibrations/{id}/installed-geometry-runs:
+    post:
+      operationId: startInstalledGeometryRun
+      description: >-
+        Sweeps the installed datum through the top-camera image, sweeps the
+        identified N1 tip through the bottom-camera image, and scans candidate
+        holes from the installed staging and build plates. The daemon first
+        registers each plate from two consistent visible holes. Occupied, clipped,
+        or ambiguous holes are recorded and skipped. Compatible camera sweeps
+        from an interrupted run are requalified and reused. Distortion-polynomial and
+        affine plate corrections are selected only when they improve
+        independent holdout observations.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, confirmed_external_safety_checks]
+              properties:
+                lease_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202":
+          description: Persisted installed-geometry run and operation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, operation]
+                properties:
+                  run: { $ref: "#/components/schemas/AutomatedCalibrationRun" }
+                  operation: { $ref: "#/components/schemas/Operation" }
   /calibrations/{id}/nozzle-height-observation:
     post:
       operationId: recordNozzleHeightObservation
@@ -1051,7 +1086,7 @@ components:
         status: { type: string, enum: [pending, running, succeeded, rejected, failed] }
         phase:
           type: string
-          enum: [pending, coarse_homing, actuator_checks, top_camera_reproducibility, tooling_verification, bottom_camera_reproducibility, visual_homing_validation, head_geometry_calibration, complete]
+          enum: [pending, coarse_homing, actuator_checks, top_camera_reproducibility, tooling_verification, bottom_camera_reproducibility, visual_homing_validation, head_geometry_calibration, top_camera_planar_calibration, bottom_camera_planar_calibration, installed_plate_geometry, complete]
         config: { type: object }
         checks:
           type: array
@@ -1065,6 +1100,10 @@ components:
             - { $ref: "#/components/schemas/VisualHomingValidationReport" }
             - { type: "null" }
         head_geometry_report:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: "null" }
+        installed_geometry_report:
           oneOf:
             - { type: object, additionalProperties: true }
             - { type: "null" }

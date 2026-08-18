@@ -268,6 +268,55 @@ and apply its holdout-enabled vectors while retaining logical coordinates.
 Manual jog and calibration motion remain raw, and physical job execution is
 not implemented.
 
+## Installed camera and plate geometry
+
+The installed-geometry runner calibrates the fixed-height optical paths and
+the plate geometry without a loose checkerboard or a cleared machine bed:
+
+```bash
+velocitypnp calibrate-installed-geometry CALIBRATION_UUID \
+  --lease "$VELOCITYPNP_LEASE" \
+  --confirm-safety-checks
+```
+
+The top-camera sweep moves the installed primary datum through a profile-bounded
+image grid. The bottom-camera sweep moves the verified N1 tip through its image
+grid. Each fit reserves spatial holdouts. The distortion-polynomial model is
+selected only when it predicts those unseen positions better than the affine
+model. The result is a planar pixel-to-centering model over the observed image
+support. It is intentionally not an unconstrained intrinsic calibration for
+arbitrary object depths.
+Every camera and plate observation uses the same bounded negative-X/negative-Y
+approach. Direction response is therefore a separate artifact, not a hidden
+mathematical input to the optical fit.
+
+The runner then scans documented staging- and build-plate hole positions. It
+first observes one hole from three known camera poses. This gives each plate a
+local pixel-to-machine map at its installed height. A second hole must confirm
+the shared plate offset before the wider scan starts. Thus, the runner does not
+assume that the raised datum PCB and the lower plates have the same image
+scale. Plate drawings provide candidate coordinates, not an assertion that
+each feature is visible. A target with no stable concentric hole and pad
+observation is recorded as rejected and skipped. The detector searches only
+the bounded target region. It takes extra confirmation frames only after the
+first frame contains a plausible hole. This permits feeders, boards, brackets,
+or other installed hardware to obscure part of a plate without making each
+rejection expensive. A plate qualifies only when the remaining observations
+span enough rows, columns, and millimetres. Independent holdouts select the
+fitted affine map only when it predicts better than the documented nominal
+grid. Otherwise, the runner retains the simpler nominal map. Holdouts are
+distributed across the alternating valid-hole pattern, not assigned to whole
+columns. Checkpoints report the training and holdout counts and retain partial
+samples. The scan stops early after it has enough distributed evidence; it
+does not need to inspect every hole.
+
+The run requalifies and reuses compatible camera sweeps from an interrupted
+run. It stores `top_camera_planar_model`, `bottom_camera_planar_model`, and
+`installed_plate_geometry` artifacts with the raw samples, missing-target
+reasons, holdout residuals, coverage results, and image evidence. Failure to
+qualify one plate is a reported limitation. The complete run passes when both
+camera models and at least one installed plate qualify.
+
 ## Automated calibration runs
 
 The supported calibration path completes automated steps only from machine
@@ -346,6 +395,9 @@ The graph separates physical captures from mathematical calculations:
 ```text
 top map + reciprocal cameras -> camera-ray transfer (calculated)
 top map -> local X/Y direction response (captured and holdout-validated)
+top map -> top planar camera model
+bottom map + N1 tooling -> bottom planar camera model
+top planar camera model -> installed plate geometry
 bottom map + N1 tooling -> N1 runout -> N1 height model
 bottom map + N2 tooling -> N2 runout -> N2 height model
 camera-ray transfer + N1 branch -> N1 runtime tip -> N1 vacuum contact
