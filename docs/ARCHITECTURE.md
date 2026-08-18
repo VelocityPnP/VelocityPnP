@@ -8,13 +8,14 @@ React UI / CLI / Python
           │ HTTP + SSE
           ▼
     velocitypnpd API
-          │ typed operations
-          ▼
-   single machine actor ───── event journal
-          │
-    MachineDriver trait
-       ├── simulator
-       └── Marlin serial ─── Photon RS-485 bridge
+       ├── logical job plan ── calibrated motion planner ─┐
+       └── raw calibration and manual motion ─────────────┤
+                                                         ▼
+                                              single machine actor
+                                                   │       └── event journal
+                                             MachineDriver trait
+                                               ├── simulator
+                                               └── Marlin serial ── Photon
 
 KiCad importer ── board/part model ── deterministic planner
 Vision datasets ─ calibration graph ─ SQLite snapshots/artifacts
@@ -44,6 +45,24 @@ camera, then resets the controller's current X/Y working coordinates to the
 datum's calibrated machine location. The reset is applied only after a second
 image passes the configured residual gate; Z and rotation coordinates remain
 controller-reported and untouched.
+
+Job planning and motion planning are separate. The job planner produces
+logical feeder, board, and safe-Z poses. The motion planner owns the conversion
+from those logical poses to controller targets. Its state retains both poses
+and the last X/Y approach side. A Z-only move therefore keeps the active X/Y
+correction. A move that changes X or Y selects the correction measured for the
+side that the axis approaches from. Corrections from simultaneous X and Y
+motion are additive. Both the logical target and final controller target must
+be inside the machine bounds.
+
+A simulated job can select one calibration snapshot explicitly. The daemon
+accepts its local direction response only when the artifact and all of its
+dependencies are current, both axis vectors are zero-mean, and every enabled
+vector has resolved-effect and improved-holdout evidence. Calibration runners
+continue to send raw controller poses, so they cannot consume the result that
+they are measuring. Active motion state binds both the snapshot UUID and
+artifact fingerprint, because a recapture can update an existing snapshot.
+Physical job execution remains disabled.
 
 ## Persistence and reproducibility
 
@@ -88,7 +107,7 @@ backlash. It is not a substitute for later multi-fiducial full-bed geometry.
 - `velocitypnp-driver`: simulator, Linux discovery, Marlin transport, Photon framing, and machine actor
 - `velocitypnp-kicad`: direct `.kicad_pcb` parser and optional BOM merge
 - `velocitypnp-openpnp`: one-way migration of user-owned OpenPnP XML into untrusted calibration/configuration seeds
-- `velocitypnp-planner`: job validation and conservative placement planning
+- `velocitypnp-planner`: job validation plus logical-to-controller motion planning
 - `velocitypnp-vision`: deterministic image/geometry primitives, native Linux V4L2 capture, and optional OpenCV calibration
 - `velocitypnp-store`: SQLite migrations, entities, operations, and event journal
 - `velocitypnpd`: REST/SSE API and static web hosting

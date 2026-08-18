@@ -51,6 +51,29 @@ CLI jog commands preserve the controller-reported primary-nozzle angle when
 `--rotation` is omitted. Physical rotation requests are rejected while the
 active profile's `rotation_motion` capability is false.
 
+## Simulated job motion
+
+The job planner produces logical pick, place, and safe-Z poses. The separate
+motion planner converts them to controller poses. The simulator endpoint uses
+raw controller coordinates when `calibration_id` is absent. Supply a snapshot
+ID to test its current, holdout-enabled local direction compensation:
+
+```json
+POST /api/v1/jobs/JOB_UUID/simulate
+{
+  "lease_id": "LEASE_UUID",
+  "calibration_id": "CALIBRATION_UUID"
+}
+```
+
+The planner retains logical and controller pose state independently. It keeps
+the active X/Y correction during Z-only moves and checks bounds again after
+correction. A stale, wrong-profile, failed, non-zero-mean, or unvalidated
+artifact is rejected before the operation starts. Existing calibration runners
+use the raw machine-actor path deliberately. Each active sequence binds the
+snapshot UUID and artifact fingerprint. The physical job endpoint remains
+disabled.
+
 Attached PnP camera roles are available without opening the motion controller:
 
 ```bash
@@ -240,10 +263,10 @@ direction gap. The two direction corrections are the zero-mean half-gap. This
 removes camera drift and other common offset from the backlash term.
 
 This result is local to the homing datum. It does not establish full-bed scale,
-skew, or lens distortion. The physical job executor is not implemented, so
-stored corrections do not silently alter manual jog or existing calibration
-motion. A future executor must consume only holdout-enabled vectors and retain
-logical coordinate reporting.
+skew, or lens distortion. A simulated job can select the snapshot explicitly
+and apply its holdout-enabled vectors while retaining logical coordinates.
+Manual jog and calibration motion remain raw, and physical job execution is
+not implemented.
 
 ## Automated calibration runs
 

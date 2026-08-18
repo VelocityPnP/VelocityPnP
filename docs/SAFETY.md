@@ -86,6 +86,14 @@ also remain inside the visual-homing correction safety bound before a holdout
 move is allowed. A motion fault does not trigger an emergency stop or an
 uncertain return move; the normal fault state invalidates homing.
 
+Job motion has separate logical and controller poses. The motion planner checks
+the requested logical pose, applies only current holdout-enabled compensation,
+and checks the corrected controller pose again. It rejects a calibration change
+during an active sequence. Raw mode bypasses and clears direction state.
+Calibration runners and manual jog remain on the raw machine-actor path. Only
+the simulator job endpoint uses the calibrated path; physical job execution is
+still disabled.
+
 Physical disconnect and graceful daemon shutdown command both vacuum channels
 and the shared lights off before releasing serial. SIGINT and SIGTERM use this
 path. A process crash, `SIGKILL`, USB failure, controller failure, or loss of

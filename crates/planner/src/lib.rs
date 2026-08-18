@@ -1,5 +1,9 @@
 //! Deterministic, conservative job preflight and placement planning.
 
+mod motion;
+
+pub use motion::*;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;

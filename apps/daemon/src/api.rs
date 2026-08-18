@@ -37,7 +37,9 @@ use velocitypnp_domain::{
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
 use velocitypnp_openpnp::import_openpnp;
-use velocitypnp_planner::plan_job;
+use velocitypnp_planner::{
+    plan_job, MotionCalibration, MotionMode, MotionPlanner, MotionState, PlannedMotion,
+};
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
     apply_camera_controls, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
@@ -7709,6 +7711,8 @@ async fn get_job_plan(
 #[derive(Deserialize)]
 struct SimulateJobRequest {
     lease_id: Uuid,
+    /// Omit this only when deliberately testing raw controller motion.
+    calibration_id: Option<Uuid>,
 }
 
 async fn simulate_job(
@@ -7719,6 +7723,15 @@ async fn simulate_job(
     if !state.machine.status().simulated {
         return Err(ApiError::bad_request(
             "this endpoint is simulator-only; physical job execution remains calibration-gated",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+        return Err(ApiError::bad_request(
+            "job simulation requires a homed ready simulator",
         ));
     }
     let job = state
@@ -7741,8 +7754,26 @@ async fn simulate_job(
             plan.report.errors.join("; ")
         )));
     }
+    let motion_calibration = body
+        .calibration_id
+        .map(|id| load_simulation_motion_calibration(&state, id))
+        .transpose()?;
+    let motion_mode = if motion_calibration.is_some() {
+        MotionMode::Calibrated
+    } else {
+        MotionMode::Raw
+    };
+    let motion_planner = MotionPlanner::new(state.profile.bounds, motion_calibration);
     let machine = state.machine.clone();
     spawn_operation(state, "job.simulate", async move {
+        let controller_pose = machine
+            .status()
+            .pose
+            .ok_or_else(|| "job simulation lost the controller pose".to_string())?;
+        let mut motion_state = motion_planner
+            .initial_state(controller_pose)
+            .map_err(|error| error.to_string())?;
+        let mut corrected_moves = 0_u32;
         for step in &plan.steps {
             let pick_safe = Pose {
                 z_mm: step.safe_z_mm,
@@ -7752,44 +7783,172 @@ async fn simulate_job(
                 z_mm: step.safe_z_mm,
                 ..step.board_place
             };
-            machine
-                .jog(body.lease_id, pick_safe.into(), 300.0)
-                .await
-                .map_err(|error| error.to_string())?;
-            machine
-                .jog(body.lease_id, step.feeder_pick.into(), 120.0)
-                .await
-                .map_err(|error| error.to_string())?;
+            corrected_moves += execute_job_motion(
+                &machine,
+                body.lease_id,
+                &motion_planner,
+                &mut motion_state,
+                pick_safe,
+                300.0,
+                motion_mode,
+            )
+            .await?
+            .correction
+            .applied() as u32;
+            corrected_moves += execute_job_motion(
+                &machine,
+                body.lease_id,
+                &motion_planner,
+                &mut motion_state,
+                step.feeder_pick,
+                120.0,
+                motion_mode,
+            )
+            .await?
+            .correction
+            .applied() as u32;
             machine
                 .actuate(body.lease_id, "vacuum_1".into(), true)
                 .await
                 .map_err(|error| error.to_string())?;
-            machine
-                .jog(body.lease_id, pick_safe.into(), 120.0)
-                .await
-                .map_err(|error| error.to_string())?;
-            machine
-                .jog(body.lease_id, place_safe.into(), 300.0)
-                .await
-                .map_err(|error| error.to_string())?;
-            machine
-                .jog(body.lease_id, step.board_place.into(), 120.0)
-                .await
-                .map_err(|error| error.to_string())?;
+            corrected_moves += execute_job_motion(
+                &machine,
+                body.lease_id,
+                &motion_planner,
+                &mut motion_state,
+                pick_safe,
+                120.0,
+                motion_mode,
+            )
+            .await?
+            .correction
+            .applied() as u32;
+            corrected_moves += execute_job_motion(
+                &machine,
+                body.lease_id,
+                &motion_planner,
+                &mut motion_state,
+                place_safe,
+                300.0,
+                motion_mode,
+            )
+            .await?
+            .correction
+            .applied() as u32;
+            corrected_moves += execute_job_motion(
+                &machine,
+                body.lease_id,
+                &motion_planner,
+                &mut motion_state,
+                step.board_place,
+                120.0,
+                motion_mode,
+            )
+            .await?
+            .correction
+            .applied() as u32;
             machine
                 .actuate(body.lease_id, "vacuum_1".into(), false)
                 .await
                 .map_err(|error| error.to_string())?;
-            machine
-                .jog(body.lease_id, place_safe.into(), 120.0)
-                .await
-                .map_err(|error| error.to_string())?;
+            corrected_moves += execute_job_motion(
+                &machine,
+                body.lease_id,
+                &motion_planner,
+                &mut motion_state,
+                place_safe,
+                120.0,
+                motion_mode,
+            )
+            .await?
+            .correction
+            .applied() as u32;
         }
         Ok(Some(format!(
-            "Simulated {} conservative placement cycles",
-            plan.steps.len()
+            "Simulated {} conservative placement cycles in {motion_mode:?} mode; \
+             {corrected_moves} moves used local direction compensation",
+            plan.steps.len(),
         )))
     })
+}
+
+fn load_simulation_motion_calibration(
+    state: &AppState,
+    calibration_id: Uuid,
+) -> ApiResult<MotionCalibration> {
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if snapshot.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let changed = crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)
+        .map_err(ApiError::bad_request)?;
+    if !crate::calibration_artifacts::artifact_tree_is_current(
+        state,
+        &snapshot,
+        CalibrationArtifactId::LocalXyDirectionResponse,
+    ) {
+        return Err(ApiError::bad_request(
+            "job motion requires a current local XY direction-response artifact",
+        ));
+    }
+    let artifact = snapshot
+        .artifacts
+        .get(&CalibrationArtifactId::LocalXyDirectionResponse)
+        .ok_or_else(|| ApiError::bad_request("missing local XY direction-response artifact"))?;
+    let artifact_fingerprint = artifact.fingerprint.clone();
+    let report: LocalXyDirectionResponseReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(
+            &snapshot,
+            CalibrationArtifactId::LocalXyDirectionResponse,
+        )
+        .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|error| {
+        ApiError::bad_request(format!(
+            "stored local XY direction-response artifact is invalid: {error}",
+        ))
+    })?;
+    let calibration = MotionCalibration::from_local_direction_response(
+        snapshot.id,
+        artifact_fingerprint,
+        &report,
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    Ok(calibration)
+}
+
+async fn execute_job_motion(
+    machine: &MachineHandle,
+    lease_id: Uuid,
+    planner: &MotionPlanner,
+    state: &mut MotionState,
+    logical_target: Pose,
+    feed_mm_per_min: f64,
+    mode: MotionMode,
+) -> Result<PlannedMotion, String> {
+    let planned = planner
+        .plan(state, logical_target, feed_mm_per_min, mode)
+        .map_err(|error| error.to_string())?;
+    let actual = machine
+        .jog(lease_id, planned.controller_target.into(), feed_mm_per_min)
+        .await
+        .map_err(|error| error.to_string())?;
+    planner
+        .commit(state, &planned, actual)
+        .map_err(|error| error.to_string())?;
+    Ok(planned)
 }
 
 async fn put_inspection(
@@ -7991,6 +8150,82 @@ mod tests {
             initial_correction_mean_mm: 0.7,
             initial_correction_max_mm: 0.9,
             passed: true,
+        }
+    }
+
+    fn test_direction_sample(
+        axis: LinearAxis,
+        side: ApproachSide,
+    ) -> LocalXyDirectionResponseSample {
+        LocalXyDirectionResponseSample {
+            axis,
+            approach_side: side,
+            pair: 1,
+            approach_distance_mm: 1.0,
+            feed_mm_per_min: 300.0,
+            commanded_x_mm: 10.0,
+            commanded_y_mm: 10.0,
+            observed_x_px: 320.0,
+            observed_y_px: 240.0,
+            residual_correction_x_mm: 0.0,
+            residual_correction_y_mm: 0.0,
+            observed_at: Utc::now(),
+        }
+    }
+
+    fn test_direction_axis(
+        axis: LinearAxis,
+        negative: [f64; 2],
+        positive: [f64; 2],
+    ) -> LocalXyAxisDirectionReport {
+        LocalXyAxisDirectionReport {
+            estimate: LocalXyAxisEstimate {
+                axis,
+                sample_pairs: 3,
+                negative_mean_correction_x_mm: 0.0,
+                negative_mean_correction_y_mm: 0.0,
+                positive_mean_correction_x_mm: 0.0,
+                positive_mean_correction_y_mm: 0.0,
+                direction_gap_x_mm: 0.0,
+                direction_gap_y_mm: 0.0,
+                primary_axis_gap_mm: 0.05,
+                cross_axis_gap_mm: 0.01,
+                primary_axis_confidence_interval_95_mm: 0.01,
+                effect_resolved: true,
+            },
+            stopping_reason: "test fixture".into(),
+            holdout: LocalXyCompensationHoldout {
+                negative_residual_x_mm: 0.0,
+                negative_residual_y_mm: 0.0,
+                positive_residual_x_mm: 0.0,
+                positive_residual_y_mm: 0.0,
+                direction_gap_mm: 0.01,
+                improved: true,
+                negative_sample: test_direction_sample(axis, ApproachSide::Negative),
+                positive_sample: test_direction_sample(axis, ApproachSide::Positive),
+            },
+            compensation_enabled: true,
+            applied_negative_compensation_x_mm: negative[0],
+            applied_negative_compensation_y_mm: negative[1],
+            applied_positive_compensation_x_mm: positive[0],
+            applied_positive_compensation_y_mm: positive[1],
+        }
+    }
+
+    fn test_direction_report() -> LocalXyDirectionResponseReport {
+        LocalXyDirectionResponseReport {
+            reference_controller_x_mm: 0.0,
+            reference_controller_y_mm: 0.0,
+            reference_observed_x_px: 320.0,
+            reference_observed_y_px: 240.0,
+            pixel_error_to_machine_mm: [[0.01, 0.0], [0.0, 0.01]],
+            axes: vec![
+                test_direction_axis(LinearAxis::X, [0.03, -0.005], [-0.03, 0.005]),
+                test_direction_axis(LinearAxis::Y, [0.002, 0.02], [-0.002, -0.02]),
+            ],
+            samples: vec![],
+            passed: true,
+            observed_at: Utc::now(),
         }
     }
 
@@ -8212,6 +8447,74 @@ mod tests {
                 .raw_value,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn simulated_job_motion_keeps_logical_and_controller_poses_separate() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        state.machine.complete_preflight(true).await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("motion planner test".into(), 60)
+            .await
+            .unwrap();
+        let home = state.machine.home(lease.id, true).await.unwrap();
+        let calibration = MotionCalibration::from_local_direction_response(
+            Uuid::new_v4(),
+            "0".repeat(64),
+            &test_direction_report(),
+        )
+        .unwrap();
+        let planner = MotionPlanner::new(state.profile.bounds, Some(calibration));
+        let mut motion_state = planner.initial_state(home).unwrap();
+        let logical_target = Pose {
+            x_mm: 10.0,
+            y_mm: 10.0,
+            z_mm: 31.5,
+            rotation_deg: 0.0,
+        };
+
+        let lateral = execute_job_motion(
+            &state.machine,
+            lease.id,
+            &planner,
+            &mut motion_state,
+            logical_target,
+            300.0,
+            MotionMode::Calibrated,
+        )
+        .await
+        .unwrap();
+        assert_eq!(motion_state.logical_pose, logical_target);
+        assert_eq!(
+            lateral.controller_target,
+            Pose {
+                x_mm: 10.032,
+                y_mm: 10.015,
+                ..logical_target
+            }
+        );
+        assert_eq!(state.machine.status().pose, Some(lateral.controller_target));
+
+        let vertical_target = Pose {
+            z_mm: 10.0,
+            ..logical_target
+        };
+        let vertical = execute_job_motion(
+            &state.machine,
+            lease.id,
+            &planner,
+            &mut motion_state,
+            vertical_target,
+            120.0,
+            MotionMode::Calibrated,
+        )
+        .await
+        .unwrap();
+        assert_eq!(motion_state.logical_pose, vertical_target);
+        assert_eq!(vertical.controller_target.x_mm, 10.032);
+        assert_eq!(vertical.controller_target.y_mm, 10.015);
     }
 
     #[tokio::test]

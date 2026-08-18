@@ -491,11 +491,19 @@ class Client:
         return self._request("GET", f"/jobs/{job_id}/plan")["plan"]
 
     def simulate_job(
-        self, job_id: str | uuid.UUID, lease_id: str | uuid.UUID,
+        self,
+        job_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        calibration_id: str | uuid.UUID | None = None,
     ) -> dict[str, Any]:
-        return self.wait(self._request("POST", f"/jobs/{job_id}/simulate", {
+        request = {
             "lease_id": str(lease_id),
-        }))
+        }
+        if calibration_id is not None:
+            request["calibration_id"] = str(calibration_id)
+        return self.wait(
+            self._request("POST", f"/jobs/{job_id}/simulate", request),
+        )
 
     def inspections(self) -> list[dict[str, Any]]:
         return self._request("GET", "/inspections")["inspections"]

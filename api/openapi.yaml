@@ -727,10 +727,26 @@ paths:
   /jobs/{id}/simulate:
     post:
       operationId: simulateJob
-      description: Executes conservative placement cycles only when the daemon uses the simulator driver.
+      description: >-
+        Executes conservative placement cycles only with the simulator driver.
+        Supplying a calibration snapshot routes every logical move through the
+        calibrated motion planner. Omitting it deliberately uses raw controller
+        coordinates.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/LeaseRequest" } } } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id]
+              properties:
+                lease_id: { type: string, format: uuid }
+                calibration_id:
+                  type: string
+                  format: uuid
+                  description: Current snapshot whose validated motion corrections are applied.
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
   /inspections:

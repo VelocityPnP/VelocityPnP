@@ -73,12 +73,14 @@ The project is organized by measurable gates rather than calendar estimates.
 
 ## Gate 4 — Feeder and job production validation
 
+- [x] Add logical-to-controller motion state, explicit raw mode, calibrated
+  bounds checks, and simulator consumption of current local direction vectors
 - [ ] Validate vision-assisted strip setup and indexing
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
 - [ ] Add vacuum and bottom-vision feedback to the physical job executor
-- [ ] Consume holdout-enabled local direction compensation in the physical
-  motion planner without changing logical coordinates
+- [ ] Route the future physical job executor through the validated motion
+  planner without enabling compensation for calibration or manual jog
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
 
 ## Gate 5 — Inspection and newer machines

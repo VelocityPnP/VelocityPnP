@@ -307,6 +307,25 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "N1 or N2"):
             client.observe_nozzle_height("calibration", "N3", 0.0, 0.0, 0.3)
 
+    def test_job_simulation_selects_calibration_explicitly(self):
+        client = Client(timeout=1)
+        operation = {"id": "op", "status": "succeeded", "message": "done"}
+        with patch.object(client, "_request", return_value=operation) as send:
+            self.assertEqual(
+                client.simulate_job("job", "lease", "calibration"),
+                operation,
+            )
+        send.assert_called_once_with("POST", "/jobs/job/simulate", {
+            "lease_id": "lease",
+            "calibration_id": "calibration",
+        })
+
+        with patch.object(client, "_request", return_value=operation) as send:
+            client.simulate_job("job", "lease")
+        send.assert_called_once_with("POST", "/jobs/job/simulate", {
+            "lease_id": "lease",
+        })
+
 
 if __name__ == "__main__":
     unittest.main()
