@@ -1,6 +1,6 @@
 use crate::GrayFrame;
 use anyhow::{ensure, Context, Result};
-use opencv::core::{self, Mat, MatTraitConst, Scalar, CV_32S, CV_64F, CV_8UC1};
+use opencv::core::{self, Mat, MatTraitConst, Scalar, Size, CV_32S, CV_64F, CV_8UC1};
 use opencv::imgproc;
 use opencv::prelude::*;
 
@@ -82,6 +82,28 @@ pub fn gray_frame_from_mat(mat: &Mat) -> Result<GrayFrame> {
         height: owned.rows() as u32,
         pixels,
     })
+}
+
+pub fn resize_gray_frame(frame: &GrayFrame, width: u32, height: u32) -> Result<GrayFrame> {
+    ensure!(
+        width > 0 && height > 0,
+        "resized frame dimensions must be non-zero"
+    );
+    ensure!(
+        width <= i32::MAX as u32 && height <= i32::MAX as u32,
+        "resized frame dimensions exceed OpenCV limits"
+    );
+    let source = gray_frame_to_mat(frame)?;
+    let mut resized = Mat::default();
+    imgproc::resize(
+        &source,
+        &mut resized,
+        Size::new(width as i32, height as i32),
+        0.0,
+        0.0,
+        imgproc::INTER_AREA,
+    )?;
+    gray_frame_from_mat(&resized)
 }
 
 pub(crate) fn frame_statistics(frame: &GrayFrame) -> Result<FrameStatistics> {

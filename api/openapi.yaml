@@ -126,6 +126,82 @@ paths:
                   profile: { $ref: "#/components/schemas/CameraProfile" }
                   controls: { type: array, items: { type: object } }
                   report: { $ref: "#/components/schemas/CameraReproducibilityReport" }
+  /workspace-scans:
+    get:
+      operationId: listWorkspaceScans
+      responses:
+        "200":
+          description: Stored workspace scan reports
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scans]
+                properties:
+                  scans:
+                    type: array
+                    items: { $ref: "#/components/schemas/WorkspaceScanReport" }
+    post:
+      operationId: startWorkspaceScan
+      description: >-
+        Starts a calibrated serpentine scan. External safety confirmation
+        covers level nozzles, a clear travel envelope, and reachable power
+        isolation. The machine returns to the visual datum with lights off.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartWorkspaceScanRequest" }
+      responses:
+        "202":
+          description: Accepted workspace scan and its preflight estimate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scan, operation, estimate]
+                properties:
+                  scan: { $ref: "#/components/schemas/WorkspaceScanReport" }
+                  operation: { $ref: "#/components/schemas/Operation" }
+                  estimate: { $ref: "#/components/schemas/WorkspaceScanEstimate" }
+  /workspace-scans/estimate:
+    post:
+      operationId: estimateWorkspaceScan
+      description: Plans a scan and checks size and artifact quotas without motion.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkspaceScanSpecification" }
+      responses:
+        "200":
+          description: Workspace scan preflight estimate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceScanEstimate" }
+  /workspace-scans/{id}:
+    get:
+      operationId: getWorkspaceScan
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Workspace scan report and progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceScanReport" }
+  /workspace-scans/{id}/artifacts/{name}:
+    get:
+      operationId: getWorkspaceScanArtifact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: PNG image or JSON manifest
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            application/json: { schema: { type: object } }
   /machine/profile:
     get:
       operationId: getMachineProfile
@@ -981,6 +1057,173 @@ components:
         rms_mm: { type: number, minimum: 0 }
         p95_mm: { type: number, minimum: 0 }
         max_mm: { type: number, minimum: 0 }
+    WorkspaceScanRegion:
+      type: object
+      required: [x_min_mm, x_max_mm, y_min_mm, y_max_mm]
+      properties:
+        x_min_mm: { type: number }
+        x_max_mm: { type: number }
+        y_min_mm: { type: number }
+        y_max_mm: { type: number }
+    WorkspaceScanSpecification:
+      type: object
+      required: [calibration_id]
+      oneOf:
+        - required: [region]
+        - required: [region_preset]
+      properties:
+        calibration_id: { type: string, format: uuid }
+        mode:
+          type: string
+          enum: [precision, survey]
+          default: precision
+        artifact_retention:
+          type: string
+          enum: [full_sources, thumbnails, mosaic_only]
+        region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        region_preset:
+          type: string
+          enum: [installed_plates]
+        overlap_fraction:
+          type: number
+          minimum: 0.2
+          maximum: 0.75
+        output_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
+        max_tiles: { type: integer, minimum: 1, maximum: 4096 }
+        artifact_quota_bytes:
+          type: integer
+          minimum: 1
+          maximum: 536870912
+    StartWorkspaceScanRequest:
+      allOf:
+        - $ref: "#/components/schemas/WorkspaceScanSpecification"
+        - type: object
+          required: [lease_id, confirmed_external_safety_checks]
+          properties:
+            lease_id: { type: string, format: uuid }
+            confirmed_external_safety_checks: { type: boolean }
+    WorkspaceScanEstimate:
+      type: object
+      required:
+        - mode
+        - artifact_retention
+        - surface_model
+        - region
+        - raster_transform
+        - overlap_fraction
+        - output_mm_per_pixel
+        - rows
+        - columns
+        - planned_tiles
+        - planned_registrations
+        - mosaic_width_px
+        - mosaic_height_px
+        - estimated_duration_seconds
+        - estimated_retained_bytes
+        - artifact_quota_bytes
+        - persistent_capture
+      properties:
+        mode: { type: string, enum: [precision, survey] }
+        artifact_retention:
+          type: string
+          enum: [full_sources, thumbnails, mosaic_only]
+        surface_model:
+          type: string
+          enum: [top_camera_working_plane, installed_plate_planes]
+        region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        raster_transform: { $ref: "#/components/schemas/WorkspaceRasterTransform" }
+        overlap_fraction: { type: number }
+        output_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
+        rows: { type: integer, minimum: 1 }
+        columns: { type: integer, minimum: 1 }
+        planned_tiles: { type: integer, minimum: 1 }
+        planned_registrations: { type: integer, minimum: 0 }
+        mosaic_width_px: { type: integer, minimum: 2 }
+        mosaic_height_px: { type: integer, minimum: 2 }
+        estimated_duration_seconds: { type: integer, minimum: 0 }
+        estimated_retained_bytes: { type: integer, minimum: 0 }
+        artifact_quota_bytes: { type: integer, minimum: 1 }
+        persistent_capture: { type: boolean }
+    WorkspaceScanReport:
+      type: object
+      required:
+        - id
+        - operation_id
+        - calibration_id
+        - profile_id
+        - created_at
+        - updated_at
+        - status
+        - mode
+        - artifact_retention
+        - surface_model
+        - region
+        - planned_tiles
+        - captured_tiles
+        - estimated_duration_seconds
+        - estimated_retained_bytes
+        - artifact_quota_bytes
+        - retained_artifact_bytes
+        - persistent_capture
+        - tiles
+        - registrations
+        - warnings
+      properties:
+        id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        calibration_id: { type: string, format: uuid }
+        profile_id: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed]
+        mode: { type: string, enum: [precision, survey] }
+        artifact_retention:
+          type: string
+          enum: [full_sources, thumbnails, mosaic_only]
+        surface_model:
+          type: string
+          enum: [top_camera_working_plane, installed_plate_planes]
+        region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        raster_transform:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceRasterTransform"
+            - type: "null"
+        planned_tiles: { type: integer, minimum: 1 }
+        captured_tiles: { type: integer, minimum: 0 }
+        mosaic_width_px: { type: [integer, "null"], minimum: 2 }
+        mosaic_height_px: { type: [integer, "null"], minimum: 2 }
+        covered_fraction: { type: [number, "null"], minimum: 0, maximum: 1 }
+        nominal_fallback_fraction: { type: number, minimum: 0, maximum: 1 }
+        estimated_duration_seconds: { type: integer, minimum: 0 }
+        estimated_retained_bytes: { type: integer, minimum: 0 }
+        artifact_quota_bytes: { type: integer, minimum: 1 }
+        retained_artifact_bytes: { type: integer, minimum: 0 }
+        persistent_capture: { type: boolean }
+        accepted_registrations: { type: integer, minimum: 0 }
+        attempted_registrations: { type: integer, minimum: 0 }
+        tiles: { type: array, items: { type: object } }
+        registrations: { type: array, items: { type: object } }
+        mosaic_artifact_name: { type: [string, "null"] }
+        warnings: { type: array, items: { type: string } }
+        failure: { type: [string, "null"] }
+    WorkspaceRasterTransform:
+      type: object
+      required:
+        - top_left_x_mm
+        - top_left_y_mm
+        - x_mm_per_pixel
+        - y_mm_per_pixel
+      description: >-
+        Maps mosaic pixel coordinates to machine XY. Pixel (0, 0) is at the
+        upper left. Pixel X points toward positive machine X. Pixel Y points
+        toward negative machine Y.
+      properties:
+        top_left_x_mm: { type: number }
+        top_left_y_mm: { type: number }
+        x_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
+        y_mm_per_pixel: { type: number, exclusiveMaximum: 0 }
     MachineStatus:
       type: object
       required: [state, simulated, profile_id, homed]

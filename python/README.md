@@ -29,6 +29,15 @@ with Client("http://127.0.0.1:4080/api/v1") as pnp:
         lease["id"],
         safety_checks_confirmed=True,
     )
+    estimate = pnp.estimate_workspace_scan(
+        snapshot["id"], region_preset="installed_plates",
+    )
+    survey = pnp.start_workspace_scan(
+        snapshot["id"],
+        lease["id"],
+        region_preset="installed_plates",
+        safety_checks_confirmed=True,
+    )
     vacuum = pnp.vacuum_probe(
         snapshot["id"],
         lease["id"],
@@ -50,3 +59,8 @@ or marks workflow steps complete. Use `start_calibration_run` plus
 move the machine or complete a workflow step. Pass
 `post_correction_residual=True` when the inspected pose already used the stored
 correction; the service then updates only that nozzle's remaining constant.
+
+Workspace scans are asynchronous because a full survey can take close to an
+hour. Use `workspace_scan(survey["scan"]["id"])` to poll progress, then use
+`workspace_scan_mosaic` to retrieve the final PNG. The survey defaults retain
+only the coarse mosaic and manifest, not every full-resolution camera frame.

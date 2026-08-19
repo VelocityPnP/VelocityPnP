@@ -377,7 +377,8 @@ mod tests {
     use std::collections::BTreeMap;
     use velocitypnp_domain::{
         AutomatedCalibrationConfig, BoardDesign, CalibrationRunPhase, CalibrationRunStatus,
-        WorkspacePixelBounds, WorkspaceScanRegion, WorkspaceScanStatus,
+        WorkspaceArtifactRetention, WorkspacePixelBounds, WorkspaceRasterTransform,
+        WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanStatus, WorkspaceSurfaceModel,
     };
 
     #[test]
@@ -475,12 +476,21 @@ mod tests {
             created_at: now,
             updated_at: now,
             status: WorkspaceScanStatus::Pending,
+            mode: WorkspaceScanMode::Precision,
+            artifact_retention: WorkspaceArtifactRetention::FullSources,
+            surface_model: WorkspaceSurfaceModel::TopCameraWorkingPlane,
             region: WorkspaceScanRegion {
                 x_min_mm: 10.0,
                 x_max_mm: 20.0,
                 y_min_mm: 30.0,
                 y_max_mm: 40.0,
             },
+            raster_transform: Some(WorkspaceRasterTransform {
+                top_left_x_mm: 10.0,
+                top_left_y_mm: 40.0,
+                x_mm_per_pixel: 0.02,
+                y_mm_per_pixel: -0.02,
+            }),
             overlap_fraction: 0.35,
             output_mm_per_pixel: 0.02,
             frame_width_px: 1280,
@@ -499,6 +509,11 @@ mod tests {
             mosaic_height_px: None,
             covered_fraction: None,
             nominal_fallback_fraction: 0.0,
+            estimated_duration_seconds: 30,
+            estimated_retained_bytes: 1_000_000,
+            artifact_quota_bytes: 128 * 1024 * 1024,
+            retained_artifact_bytes: 0,
+            persistent_capture: false,
             accepted_registrations: 0,
             attempted_registrations: 0,
             tiles: vec![],

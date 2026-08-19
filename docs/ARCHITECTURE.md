@@ -134,6 +134,21 @@ RANSAC similarity estimation refine overlapping tile placement only inside
 strict translation, rotation, scale, and residual limits. Machine geometry
 remains the fallback when an overlap is blank, occupied, or rejected.
 
+Large survey scans keep one V4L2 stream open across the motion path. The
+streaming mosaic builder keeps only the current and prior full-resolution tile
+rows. It samples them directly into lower-resolution corrected and nominal
+mosaic accumulators, then releases the old row. Survey requests default to
+mosaic-only retention and enforce estimated and actual artifact-byte quotas.
+This avoids total-tile memory and storage growth while retaining calibrated
+machine placement for low-texture overlaps.
+
+Workspace rasters use an overhead machine-coordinate convention. Pixel X
+increases with machine X. Pixel Y increases as machine Y decreases, so the
+upper-left pixel maps to `(x_min, y_max)`. Each scan report contains this
+signed pixel-to-machine transform. Installed-plate presets also replace the
+datum working-plane scale with the measured local plate-plane mappings and use
+the fitted plate geometry to define the scan region.
+
 ## Crates and applications
 
 - `velocitypnp-domain`: geometry, machine state, manufacturing entities, and calibration graph

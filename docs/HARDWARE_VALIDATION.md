@@ -984,10 +984,70 @@ uses a sampled, inscribed camera footprint with a two-pixel margin. A second
 scan covered 99.5 percent before nominal edge fallback was added. The final
 mosaic had no visible seam or edge gap. The acceptance gate is now 99 percent.
 
-Each raw tile, the mosaic, and the JSON manifest remain in SQLite. The scan
-does not change calibration data. It parks at the visual datum and switches
-the lights off after report finalization. The final machine state was homed,
-ready, and fault-free at X=220.131, Y=190.271, Z=31.5.
+For that precision scan, each raw tile, the mosaic, and the JSON manifest
+remain in SQLite. The scan does not change calibration data. It parks at the
+visual datum and switches the lights off after report finalization. The final
+machine state was homed, ready, and fault-free at X=220.131, Y=190.271,
+Z=31.5.
+
+### Streaming datum-PCB survey
+
+Scan `57efc86e-1b2f-4052-9ea6-4f4ff6dae09e` exercised the streaming survey
+path over the complete V3.0.4 datum-PCB bounding box. The tagged drawing puts
+the PCB at X=0–80 mm and Y=-35–0 mm, with the visual datum at (40, -25).
+After the installed Y-axis inversion, the requested machine region was
+X=180.131–260.131 mm and Y=165.271–200.271 mm.
+
+The preflight estimate specified 72 tiles in an 8-by-9 serpentine grid, 149
+seconds, and 411,282 retained bytes. The attached scan completed in 125.0
+seconds. It produced an 801-by-351 grayscale mosaic at 0.10 mm/pixel with 100
+percent region coverage and 0.202 percent nominal edge fallback. Fifty-seven
+of 127 overlap registrations passed. Textureless or rejected overlaps used the
+calibrated machine placement.
+
+Mosaic-only retention stored 166,004 image bytes and an 89,810-byte manifest,
+or 255,814 bytes total. It stored no full-resolution source tiles. The mosaic
+SHA-256 was
+`86efd4921d91870b787b9edd3596365d2ff2f829779347da5bbb3e8c89e0a4c3`.
+Visual inspection showed the complete PCB outline, mounting holes, fiducials,
+sealing targets, and central grid without a visible broken seam. The machine
+returned ready and fault-free to X=220.131, Y=190.271, Z=31.5 with the lights
+off.
+
+The first survey raster put `y_min` at its top edge and was vertically
+inverted relative to an overhead machine view. It was superseded. The renderer
+now puts `y_max` at the top edge. The report gives the signed transform:
+pixel X advances with machine X, and pixel Y advances against machine Y.
+
+### Streaming installed-plate survey
+
+Scan `6ecb42ce-c310-4b5d-9c6a-8f252c3dced7` covered the complete configured
+staging and build plates. It used the current installed-plate geometry
+artifact, not the datum working-plane scale. The measured and machine-clamped
+region was X=0–433 mm and Y=91.038–288.440 mm. The preflight specified 1,054
+tiles in a 31-by-34 serpentine grid, 2,260 seconds, and 10,754,405 retained
+bytes.
+
+The attached scan completed in 2,073.2 seconds. It produced a
+4,331-by-1,976 grayscale mosaic at 0.10 mm/pixel with 100 percent coverage and
+no nominal edge fallback. Mosaic-only retention stored a 4,420,970-byte PNG
+and a 1,293,122-byte manifest, or 5,714,092 bytes total. The mosaic SHA-256 was
+`8b20e88ce2f5814c20ea7710072ba38722156e5663375ad4176524bacb10a711`.
+
+Nine of 2,043 ORB registrations passed the strict geometry gates. Of the
+rejected overlaps, 1,964 had too few plausible matches and 70 exceeded a
+transform gate. This is expected on the repetitive, low-texture plate grid.
+Those overlaps used calibrated machine placement. Visual inspection showed
+the north build plate and south staging plate in the correct orientation, with
+aligned grid features and no broken seam. The machine returned homed, ready,
+and fault-free to X=220.131, Y=190.271, Z=31.5 with the lights off.
+
+An earlier full scan was stopped normally after 322 tiles. Its plan used the
+datum-plane camera scale for the lower installed plates and would have
+distorted the workspace. The installed-plate preset now rescales the complete
+top-camera distortion model to the mean measured plate-plane mapping and uses
+the fitted plate affine models for its region. This reduced the live plan from
+1,886 to 1,054 tiles. No emergency stop was used.
 
 ## Procedure sources
 

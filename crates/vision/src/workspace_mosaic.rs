@@ -38,6 +38,210 @@ pub struct WorkspaceMosaic {
     pub registrations: Vec<WorkspaceTileRegistration>,
 }
 
+pub struct WorkspaceMosaicStream {
+    plan: WorkspaceScanPlan,
+    model: PlanarCameraModel,
+    tiles: Vec<WorkspaceScanTile>,
+    registrations: Vec<WorkspaceTileRegistration>,
+    next_row: u32,
+    pending_row: Vec<Option<GrayFrame>>,
+    previous_row: Option<Vec<GrayFrame>>,
+    width: u32,
+    height: u32,
+    sample_step_px: usize,
+    corrected_luma: Vec<f32>,
+    corrected_weights: Vec<f32>,
+    nominal_luma: Vec<f32>,
+    nominal_weights: Vec<f32>,
+}
+
+impl WorkspaceMosaicStream {
+    pub fn new(plan: WorkspaceScanPlan, model: PlanarCameraModel) -> Result<Self> {
+        ensure!(
+            plan.tiles.len() == (plan.rows * plan.columns) as usize,
+            "workspace scan plan tile dimensions do not agree"
+        );
+        ensure!(
+            plan.rows > 0 && plan.columns > 0,
+            "workspace scan plan is empty"
+        );
+        ensure!(
+            model.role == velocitypnp_domain::CameraRole::TopCamera,
+            "workspace scan requires a top-camera planar model"
+        );
+        let width = mosaic_axis_pixels(
+            plan.region.x_max_mm - plan.region.x_min_mm,
+            plan.output_mm_per_pixel,
+        )?;
+        let height = mosaic_axis_pixels(
+            plan.region.y_max_mm - plan.region.y_min_mm,
+            plan.output_mm_per_pixel,
+        )?;
+        let pixel_count = width as usize * height as usize;
+        let camera_scale = model
+            .local_mm_per_pixel(model.center_x_px, model.center_y_px)
+            .context("top-camera center scale is unavailable")?;
+        let sample_step_px = ((plan.output_mm_per_pixel / camera_scale) * 0.75)
+            .floor()
+            .clamp(1.0, 12.0) as usize;
+        let columns = plan.columns as usize;
+        let tiles = plan.tiles.clone();
+        Ok(Self {
+            plan,
+            model,
+            tiles,
+            registrations: Vec::new(),
+            next_row: 0,
+            pending_row: vec![None; columns],
+            previous_row: None,
+            width,
+            height,
+            sample_step_px,
+            corrected_luma: vec![0.0; pixel_count],
+            corrected_weights: vec![0.0; pixel_count],
+            nominal_luma: vec![0.0; pixel_count],
+            nominal_weights: vec![0.0; pixel_count],
+        })
+    }
+
+    pub fn push_frame(&mut self, tile_index: u32, frame: GrayFrame) -> Result<bool> {
+        let tile = self
+            .plan
+            .tiles
+            .get(tile_index as usize)
+            .context("workspace tile index is outside the scan plan")?;
+        ensure!(
+            tile.row == self.next_row,
+            "workspace stream received a tile outside the active row"
+        );
+        ensure!(
+            frame.width == self.plan.frame_width_px && frame.height == self.plan.frame_height_px,
+            "workspace frame dimensions changed during the scan"
+        );
+        let slot = self
+            .pending_row
+            .get_mut(tile.column as usize)
+            .context("workspace tile column is outside the scan plan")?;
+        ensure!(slot.is_none(), "workspace stream received a duplicate tile");
+        *slot = Some(frame);
+        if self.pending_row.iter().any(Option::is_none) {
+            return Ok(false);
+        }
+
+        let completed_row = std::mem::replace(
+            &mut self.pending_row,
+            (0..self.plan.columns).map(|_| None).collect(),
+        )
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .context("workspace row completion lost a captured frame")?;
+        self.process_row(&completed_row)?;
+        self.previous_row = Some(completed_row);
+        self.next_row += 1;
+        Ok(true)
+    }
+
+    pub fn finish(self) -> Result<WorkspaceMosaic> {
+        ensure!(
+            self.next_row == self.plan.rows,
+            "workspace stream did not receive every planned row"
+        );
+        let pixel_count = self.width as usize * self.height as usize;
+        let mut corrected_covered = 0_usize;
+        let mut covered = 0_usize;
+        let pixels = self
+            .corrected_luma
+            .into_iter()
+            .zip(self.corrected_weights)
+            .zip(self.nominal_luma.into_iter().zip(self.nominal_weights))
+            .map(
+                |((corrected_sum, corrected_weight), (nominal_sum, nominal_weight))| {
+                    if corrected_weight > 0.0 {
+                        corrected_covered += 1;
+                        covered += 1;
+                        (corrected_sum / corrected_weight).round().clamp(0.0, 255.0) as u8
+                    } else if nominal_weight > 0.0 {
+                        covered += 1;
+                        (nominal_sum / nominal_weight).round().clamp(0.0, 255.0) as u8
+                    } else {
+                        0
+                    }
+                },
+            )
+            .collect();
+        Ok(WorkspaceMosaic {
+            frame: GrayFrame {
+                width: self.width,
+                height: self.height,
+                pixels,
+            },
+            covered_fraction: covered as f64 / pixel_count as f64,
+            nominal_fallback_fraction: (covered - corrected_covered) as f64 / pixel_count as f64,
+            tiles: self.tiles,
+            registrations: self.registrations,
+        })
+    }
+
+    fn process_row(&mut self, frames: &[GrayFrame]) -> Result<()> {
+        let row = self.next_row;
+        for column in 0..self.plan.columns {
+            let index = (row * self.plan.columns + column) as usize;
+            if column > 0 {
+                let fixed_index = index - 1;
+                self.registrations.push(register_pair(
+                    &self.tiles[fixed_index],
+                    &frames[column as usize - 1],
+                    &self.tiles[index],
+                    &frames[column as usize],
+                    &self.model,
+                )?);
+            }
+            if row > 0 {
+                let fixed_index = index - self.plan.columns as usize;
+                let previous = self
+                    .previous_row
+                    .as_ref()
+                    .context("workspace stream lost the preceding row")?;
+                self.registrations.push(register_pair(
+                    &self.tiles[fixed_index],
+                    &previous[column as usize],
+                    &self.tiles[index],
+                    &frames[column as usize],
+                    &self.model,
+                )?);
+            }
+            apply_registration_correction(index, &self.registrations, &mut self.tiles);
+            splat_workspace_tile(
+                &self.plan,
+                &self.model,
+                &frames[column as usize],
+                &self.tiles[index],
+                self.width,
+                self.height,
+                self.sample_step_px,
+                true,
+                false,
+                &mut self.corrected_luma,
+                &mut self.corrected_weights,
+            );
+            splat_workspace_tile(
+                &self.plan,
+                &self.model,
+                &frames[column as usize],
+                &self.tiles[index],
+                self.width,
+                self.height,
+                self.sample_step_px,
+                false,
+                false,
+                &mut self.nominal_luma,
+                &mut self.nominal_weights,
+            );
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn plan_workspace_scan(
     region: WorkspaceScanRegion,
@@ -547,32 +751,40 @@ fn apply_registration_corrections(
     tiles: &mut [WorkspaceScanTile],
 ) {
     for index in 1..tiles.len() {
-        let mut weighted_x = 0.0;
-        let mut weighted_y = 0.0;
-        let mut total_weight = 0.0;
-        for registration in registrations
-            .iter()
-            .filter(|registration| registration.moving_tile_index as usize == index)
-            .filter(|registration| registration.accepted)
-        {
-            let fixed = &tiles[registration.fixed_tile_index as usize];
-            let weight = f64::from(registration.inlier_count.max(1));
-            weighted_x += weight
-                * (fixed.placement_correction_x_mm + registration.correction_x_mm.unwrap_or(0.0));
-            weighted_y += weight
-                * (fixed.placement_correction_y_mm + registration.correction_y_mm.unwrap_or(0.0));
-            total_weight += weight;
-        }
-        if total_weight > 0.0 {
-            let correction_x = weighted_x / total_weight;
-            let correction_y = weighted_y / total_weight;
-            if correction_x.hypot(correction_y) <= MAX_APPLIED_CORRECTION_MM {
-                tiles[index].placement_correction_x_mm = correction_x;
-                tiles[index].placement_correction_y_mm = correction_y;
-            }
-        }
+        apply_registration_correction(index, registrations, tiles);
     }
     debug_assert_eq!(tiles.len(), (plan.rows * plan.columns) as usize);
+}
+
+fn apply_registration_correction(
+    index: usize,
+    registrations: &[WorkspaceTileRegistration],
+    tiles: &mut [WorkspaceScanTile],
+) {
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    let mut total_weight = 0.0;
+    for registration in registrations
+        .iter()
+        .filter(|registration| registration.moving_tile_index as usize == index)
+        .filter(|registration| registration.accepted)
+    {
+        let fixed = &tiles[registration.fixed_tile_index as usize];
+        let weight = f64::from(registration.inlier_count.max(1));
+        weighted_x += weight
+            * (fixed.placement_correction_x_mm + registration.correction_x_mm.unwrap_or(0.0));
+        weighted_y += weight
+            * (fixed.placement_correction_y_mm + registration.correction_y_mm.unwrap_or(0.0));
+        total_weight += weight;
+    }
+    if total_weight > 0.0 {
+        let correction_x = weighted_x / total_weight;
+        let correction_y = weighted_y / total_weight;
+        if correction_x.hypot(correction_y) <= MAX_APPLIED_CORRECTION_MM {
+            tiles[index].placement_correction_x_mm = correction_x;
+            tiles[index].placement_correction_y_mm = correction_y;
+        }
+    }
 }
 
 fn render_mosaic(
@@ -655,60 +867,89 @@ fn splat_mosaic_tiles(
     weighted_luma: &mut [f32],
     weights: &mut [f32],
 ) {
-    let bounds = plan.usable_pixel_bounds;
     for (tile, frame) in tiles.iter().zip(frames) {
-        let correction_x = if apply_registration_correction {
-            tile.placement_correction_x_mm
-        } else {
-            0.0
-        };
-        let correction_y = if apply_registration_correction {
-            tile.placement_correction_y_mm
-        } else {
-            0.0
-        };
-        for y in bounds.top..bounds.bottom {
-            for x in bounds.left..bounds.right {
-                let Some(camera_offset) = model.correction_at(f64::from(x), f64::from(y)) else {
-                    continue;
-                };
-                let world_x = tile.nominal_pose.x_mm + correction_x + camera_offset[0];
-                let world_y = tile.nominal_pose.y_mm + correction_y + camera_offset[1];
-                let output_x = (world_x - plan.region.x_min_mm) / plan.output_mm_per_pixel;
-                let output_y = (world_y - plan.region.y_min_mm) / plan.output_mm_per_pixel;
-                if output_x < 0.0
-                    || output_y < 0.0
-                    || output_x > f64::from(width - 1)
-                    || output_y > f64::from(height - 1)
-                {
+        splat_workspace_tile(
+            plan,
+            model,
+            frame,
+            tile,
+            width,
+            height,
+            1,
+            apply_registration_correction,
+            uncovered_only,
+            weighted_luma,
+            weights,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn splat_workspace_tile(
+    plan: &WorkspaceScanPlan,
+    model: &PlanarCameraModel,
+    frame: &GrayFrame,
+    tile: &WorkspaceScanTile,
+    width: u32,
+    height: u32,
+    sample_step_px: usize,
+    apply_registration_correction: bool,
+    uncovered_only: bool,
+    weighted_luma: &mut [f32],
+    weights: &mut [f32],
+) {
+    let bounds = plan.usable_pixel_bounds;
+    let correction_x = if apply_registration_correction {
+        tile.placement_correction_x_mm
+    } else {
+        0.0
+    };
+    let correction_y = if apply_registration_correction {
+        tile.placement_correction_y_mm
+    } else {
+        0.0
+    };
+    for y in (bounds.top..bounds.bottom).step_by(sample_step_px) {
+        for x in (bounds.left..bounds.right).step_by(sample_step_px) {
+            let Some(camera_offset) = model.correction_at(f64::from(x), f64::from(y)) else {
+                continue;
+            };
+            let world_x = tile.nominal_pose.x_mm + correction_x + camera_offset[0];
+            let world_y = tile.nominal_pose.y_mm + correction_y + camera_offset[1];
+            let output_x = (world_x - plan.region.x_min_mm) / plan.output_mm_per_pixel;
+            let output_y = (plan.region.y_max_mm - world_y) / plan.output_mm_per_pixel;
+            if output_x < 0.0
+                || output_y < 0.0
+                || output_x > f64::from(width - 1)
+                || output_y > f64::from(height - 1)
+            {
+                continue;
+            }
+            let edge_distance = (x - bounds.left)
+                .min(bounds.right - 1 - x)
+                .min(y - bounds.top)
+                .min(bounds.bottom - 1 - y);
+            let feather = (edge_distance + 1).min(32) as f32 / 32.0;
+            let x0 = output_x.floor() as u32;
+            let y0 = output_y.floor() as u32;
+            let fraction_x = (output_x - f64::from(x0)) as f32;
+            let fraction_y = (output_y - f64::from(y0)) as f32;
+            let luma = f32::from(frame.pixels[(y * frame.width + x) as usize]);
+            for (target_x, x_weight) in [(x0, 1.0 - fraction_x), (x0 + 1, fraction_x)] {
+                if target_x >= width || x_weight <= 0.0 {
                     continue;
                 }
-                let edge_distance = (x - bounds.left)
-                    .min(bounds.right - 1 - x)
-                    .min(y - bounds.top)
-                    .min(bounds.bottom - 1 - y);
-                let feather = (edge_distance + 1).min(32) as f32 / 32.0;
-                let x0 = output_x.floor() as u32;
-                let y0 = output_y.floor() as u32;
-                let fraction_x = (output_x - f64::from(x0)) as f32;
-                let fraction_y = (output_y - f64::from(y0)) as f32;
-                let luma = f32::from(frame.pixels[(y * frame.width + x) as usize]);
-                for (target_x, x_weight) in [(x0, 1.0 - fraction_x), (x0 + 1, fraction_x)] {
-                    if target_x >= width || x_weight <= 0.0 {
+                for (target_y, y_weight) in [(y0, 1.0 - fraction_y), (y0 + 1, fraction_y)] {
+                    if target_y >= height || y_weight <= 0.0 {
                         continue;
                     }
-                    for (target_y, y_weight) in [(y0, 1.0 - fraction_y), (y0 + 1, fraction_y)] {
-                        if target_y >= height || y_weight <= 0.0 {
-                            continue;
-                        }
-                        let weight = feather * x_weight * y_weight;
-                        let target = (target_y * width + target_x) as usize;
-                        if uncovered_only && weights[target] > 0.0 {
-                            continue;
-                        }
-                        weighted_luma[target] += luma * weight;
-                        weights[target] += weight;
+                    let weight = feather * x_weight * y_weight;
+                    let target = (target_y * width + target_x) as usize;
+                    if uncovered_only && weights[target] > 0.0 {
+                        continue;
                     }
+                    weighted_luma[target] += luma * weight;
+                    weights[target] += weight;
                 }
             }
         }
@@ -957,11 +1198,12 @@ mod tests {
         assert!(mosaic.nominal_fallback_fraction < 0.01);
         assert_eq!(mosaic.registrations.len(), 1);
         assert!(mosaic.registrations[0].accepted);
+        let expected = global.chunks(stride).rev().flatten();
         let mean_error = mosaic
             .frame
             .pixels
             .iter()
-            .zip(&global)
+            .zip(expected)
             .map(|(actual, expected)| (f64::from(*actual) - f64::from(*expected)).abs())
             .sum::<f64>()
             / global.len() as f64;
@@ -974,5 +1216,89 @@ mod tests {
         assert!(covered_fraction > 0.9999);
         assert!(fallback_fraction > 0.0);
         assert!(fallback_fraction < 0.02);
+    }
+
+    #[test]
+    fn streaming_mosaic_keeps_only_two_rows_and_accepts_serpentine_input() {
+        let width = 256;
+        let height = 192;
+        let global_width = 384_usize;
+        let global_height = 288_usize;
+        let model = affine_model(width, height, 0.01);
+        let mut state = 0xa216_974b_3360_1fc2_u64;
+        let mut global = vec![0_u8; global_width * global_height];
+        for pixel in &mut global {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            *pixel = (state >> 56) as u8;
+        }
+        let frame = |start_x: usize, start_y: usize| GrayFrame {
+            width,
+            height,
+            pixels: (start_y..start_y + height as usize)
+                .flat_map(|y| {
+                    global[y * global_width + start_x..y * global_width + start_x + width as usize]
+                        .iter()
+                        .copied()
+                })
+                .collect(),
+        };
+        let tiles = (0..4)
+            .map(|index| {
+                let row = index / 2;
+                let column = index % 2;
+                WorkspaceScanTile {
+                    index,
+                    row,
+                    column,
+                    capture_order: [0, 1, 3, 2][index as usize],
+                    nominal_pose: Pose {
+                        x_mm: 1.28 + f64::from(column) * 1.28,
+                        y_mm: 0.96 + f64::from(row) * 0.96,
+                        z_mm: 31.5,
+                        rotation_deg: 0.0,
+                    },
+                    placement_correction_x_mm: 0.0,
+                    placement_correction_y_mm: 0.0,
+                    artifact_name: format!("tile-{index:03}.png"),
+                }
+            })
+            .collect();
+        let plan = WorkspaceScanPlan {
+            region: WorkspaceScanRegion {
+                x_min_mm: 0.0,
+                x_max_mm: 3.83,
+                y_min_mm: 0.0,
+                y_max_mm: 2.87,
+            },
+            overlap_fraction: 0.5,
+            output_mm_per_pixel: 0.04,
+            frame_width_px: width,
+            frame_height_px: height,
+            usable_pixel_bounds: WorkspacePixelBounds {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            rows: 2,
+            columns: 2,
+            tiles,
+        };
+        let frames = [frame(0, 0), frame(128, 0), frame(0, 96), frame(128, 96)];
+        let mut stream = WorkspaceMosaicStream::new(plan, model).unwrap();
+        for index in [0, 1, 3, 2] {
+            stream
+                .push_frame(index, frames[index as usize].clone())
+                .unwrap();
+        }
+        let mosaic = stream.finish().unwrap();
+
+        assert_eq!(mosaic.frame.width, 97);
+        assert_eq!(mosaic.frame.height, 73);
+        assert!(mosaic.covered_fraction > 0.99);
+        assert_eq!(mosaic.registrations.len(), 4);
+        assert!(mosaic.registrations.iter().all(|item| item.accepted));
     }
 }

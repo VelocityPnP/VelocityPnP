@@ -86,6 +86,55 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sample_count"):
             client.camera_reproducibility("top_camera", "lease", sample_count=0)
 
+    def test_workspace_survey_estimates_then_starts_with_explicit_safety(self):
+        client = Client(timeout=1)
+        estimate = {"planned_tiles": 1886, "estimated_retained_bytes": 12000000}
+        started = {"scan": {"id": "scan"}, "operation": {"id": "operation"}}
+        with patch.object(client, "_request", side_effect=[estimate, started]) as send:
+            self.assertEqual(
+                client.estimate_workspace_scan(
+                    "calibration", region_preset="installed_plates",
+                ),
+                estimate,
+            )
+            self.assertEqual(
+                client.start_workspace_scan(
+                    "calibration",
+                    "lease",
+                    region_preset="installed_plates",
+                    safety_checks_confirmed=True,
+                ),
+                started,
+            )
+        specification = {
+            "calibration_id": "calibration",
+            "mode": "survey",
+            "artifact_retention": "mosaic_only",
+            "region_preset": "installed_plates",
+        }
+        self.assertEqual(
+            send.call_args_list[0].args,
+            ("POST", "/workspace-scans/estimate", specification),
+        )
+        self.assertEqual(send.call_args_list[1].args, (
+            "POST",
+            "/workspace-scans",
+            {
+                "lease_id": "lease",
+                "confirmed_external_safety_checks": True,
+                **specification,
+            },
+        ))
+
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.start_workspace_scan(
+                    "calibration", "lease", region_preset="installed_plates",
+                )
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                client.estimate_workspace_scan("calibration")
+        send.assert_not_called()
+
     def test_home_requires_explicit_physical_confirmation(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:

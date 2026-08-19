@@ -34,8 +34,9 @@ use velocitypnp_domain::{
     OperationStatus, PlanarCameraCalibrationReport, PlanarCameraCalibrationSample,
     PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
-    VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceScanRegion,
-    WorkspaceScanReport, WorkspaceScanStatus,
+    VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
+    WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion,
+    WorkspaceScanReport, WorkspaceScanStatus, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -51,11 +52,12 @@ use velocitypnp_vision::{
     detect_installed_plate_hole, encode_gray_png, fit_installed_plate_geometry,
     fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model, mean_nozzle_detection,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, summarize_camera_reproducibility, summarize_head_camera_feature,
-    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
-    summarize_residuals, BottomCameraCorrection, CameraControlUpdate, CameraControlValue,
-    CameraReproducibilityReport, FiducialDetection, GrayFrame, NozzleToolingReport,
-    V4l2CaptureConfig, VisualHomingPlan, WorkspaceScanPlan,
+    query_camera_controls, resize_gray_frame, summarize_camera_reproducibility,
+    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
+    summarize_opposed_camera_feature, summarize_residuals, BottomCameraCorrection,
+    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
+    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -71,9 +73,20 @@ const INSTALLED_PLATE_PROGRESS: &str = "installed_plate_progress";
 const LEGACY_INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v1";
 const INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v2";
 const MAX_WORKSPACE_SCAN_TILES: u32 = 64;
+const MAX_WORKSPACE_SURVEY_TILES: u32 = 4_096;
 const MAX_WORKSPACE_MOSAIC_PIXELS: usize = 25_000_000;
+const MAX_WORKSPACE_SURVEY_PIXELS: usize = 12_000_000;
 const WORKSPACE_SCAN_SETTLE_FRAMES: u32 = 5;
 const MIN_WORKSPACE_COVERAGE: f64 = 0.99;
+const DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL: f64 = 0.10;
+const DEFAULT_SURVEY_OVERLAP: f64 = 0.20;
+const DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_PRECISION_ARTIFACT_QUOTA_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
+const WORKSPACE_THUMBNAIL_WIDTH: u32 = 192;
+const WORKSPACE_THUMBNAIL_HEIGHT: u32 = 108;
+const WORKSPACE_PROGRESS_TILE_INTERVAL: u32 = 25;
+const ESTIMATED_REGISTRATION_SECONDS: f64 = 0.12;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -92,6 +105,7 @@ impl AppState {
             camera_capture_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         state.recover_interrupted_calibration_runs();
+        state.recover_interrupted_workspace_scans();
         state
     }
 
@@ -130,6 +144,46 @@ impl AppState {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(%error, operation_id = %run.operation_id, "failed to inspect calibration operation");
+                }
+            }
+        }
+    }
+
+    fn recover_interrupted_workspace_scans(&self) {
+        let Ok(scans) = self.store.list_workspace_scans() else {
+            tracing::error!("failed to inspect workspace scans during startup");
+            return;
+        };
+        for mut scan in scans.into_iter().filter(|scan| {
+            matches!(
+                scan.status,
+                WorkspaceScanStatus::Pending | WorkspaceScanStatus::Running
+            )
+        }) {
+            let message = "daemon restarted before the workspace scan completed";
+            scan.status = WorkspaceScanStatus::Failed;
+            scan.failure = Some(message.into());
+            scan.updated_at = Utc::now();
+            if let Err(error) = self.store.put_workspace_scan(&scan) {
+                tracing::error!(%error, scan_id = %scan.id, "failed to recover workspace scan");
+            }
+            match self.store.get_operation(scan.operation_id) {
+                Ok(Some(mut operation))
+                    if matches!(
+                        operation.status,
+                        OperationStatus::Pending | OperationStatus::Running
+                    ) =>
+                {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some(message.into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(%error, operation_id = %operation.id, "failed to recover workspace scan operation");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, operation_id = %scan.operation_id, "failed to inspect workspace scan operation");
                 }
             }
         }
@@ -177,6 +231,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspace-scans",
             get(list_workspace_scans).post(start_workspace_scan),
+        )
+        .route(
+            "/api/v1/workspace-scans/estimate",
+            post(estimate_workspace_scan),
         )
         .route("/api/v1/workspace-scans/{id}", get(get_workspace_scan))
         .route(
@@ -581,32 +639,82 @@ async fn vision_smoke_test(
     result.map(Json)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceRegionPreset {
+    InstalledPlates,
+}
+
+#[derive(Clone, Deserialize)]
+struct WorkspaceScanSpecification {
+    calibration_id: Uuid,
+    #[serde(default)]
+    mode: WorkspaceScanMode,
+    #[serde(default)]
+    artifact_retention: Option<WorkspaceArtifactRetention>,
+    #[serde(default)]
+    region: Option<WorkspaceScanRegion>,
+    #[serde(default)]
+    region_preset: Option<WorkspaceRegionPreset>,
+    #[serde(default)]
+    overlap_fraction: Option<f64>,
+    #[serde(default)]
+    output_mm_per_pixel: Option<f64>,
+    #[serde(default)]
+    max_tiles: Option<u32>,
+    #[serde(default)]
+    artifact_quota_bytes: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct EstimateWorkspaceScanRequest {
+    #[serde(flatten)]
+    specification: WorkspaceScanSpecification,
+}
+
 #[derive(Deserialize)]
 struct StartWorkspaceScanRequest {
     lease_id: Uuid,
-    calibration_id: Uuid,
     confirmed_external_safety_checks: bool,
-    region: WorkspaceScanRegion,
-    #[serde(default = "default_workspace_scan_overlap")]
-    overlap_fraction: f64,
-    #[serde(default)]
-    output_mm_per_pixel: Option<f64>,
-    #[serde(default = "default_workspace_scan_tile_limit")]
-    max_tiles: u32,
-}
-
-fn default_workspace_scan_overlap() -> f64 {
-    0.35
-}
-
-fn default_workspace_scan_tile_limit() -> u32 {
-    MAX_WORKSPACE_SCAN_TILES
+    #[serde(flatten)]
+    specification: WorkspaceScanSpecification,
 }
 
 #[derive(Serialize)]
 struct StartWorkspaceScanResponse {
     scan: WorkspaceScanReport,
     operation: Operation,
+    estimate: WorkspaceScanEstimate,
+}
+
+async fn estimate_workspace_scan(
+    State(state): State<AppState>,
+    Json(body): Json<EstimateWorkspaceScanRequest>,
+) -> ApiResult<Json<WorkspaceScanEstimate>> {
+    let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let (snapshot, top_camera_model) =
+        load_workspace_camera_model(&state, body.specification.calibration_id)?;
+    let (camera_model, surface_model, installed_geometry) = select_workspace_surface_model(
+        &state,
+        &snapshot,
+        top_camera_model,
+        body.specification.region_preset,
+    )?;
+    let current_pose = state
+        .machine
+        .status()
+        .pose
+        .unwrap_or(state.profile.home_pose);
+    let (_, estimate) = prepare_workspace_scan(
+        &state,
+        &body.specification,
+        &top_profile,
+        &camera_model,
+        surface_model,
+        installed_geometry.as_ref(),
+        current_pose,
+    )?;
+    Ok(Json(estimate))
 }
 
 async fn start_workspace_scan(
@@ -617,11 +725,6 @@ async fn start_workspace_scan(
         return Err(ApiError::bad_request(
             "workspace scan requires confirmation that the region and travel envelope are clear, both nozzles are level, and power isolation is reachable",
         ));
-    }
-    if body.max_tiles == 0 || body.max_tiles > MAX_WORKSPACE_SCAN_TILES {
-        return Err(ApiError::bad_request(format!(
-            "workspace max_tiles must be between 1 and {MAX_WORKSPACE_SCAN_TILES}"
-        )));
     }
     let status = state.machine.status();
     status
@@ -635,28 +738,25 @@ async fn start_workspace_scan(
     let current_pose = status
         .pose
         .ok_or_else(|| ApiError::bad_request("workspace scan requires a known machine pose"))?;
-    let visual = state
-        .profile
-        .visual_homing
-        .as_ref()
-        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
-    let (snapshot, camera_model) = load_workspace_camera_model(&state, body.calibration_id)?;
-    let plan = plan_workspace_scan(
-        body.region,
+    let (snapshot, top_camera_model) =
+        load_workspace_camera_model(&state, body.specification.calibration_id)?;
+    let (camera_model, surface_model, installed_geometry) = select_workspace_surface_model(
+        &state,
+        &snapshot,
+        top_camera_model,
+        body.specification.region_preset,
+    )?;
+    let (plan, estimate) = prepare_workspace_scan(
+        &state,
+        &body.specification,
+        &top_profile,
         &camera_model,
-        state.profile.bounds,
-        visual.seed_pose.z_mm,
-        current_pose.rotation_deg,
-        top_profile.width,
-        top_profile.height,
-        body.overlap_fraction,
-        body.output_mm_per_pixel,
-        body.max_tiles,
-        MAX_WORKSPACE_MOSAIC_PIXELS,
-    )
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        surface_model,
+        installed_geometry.as_ref(),
+        current_pose,
+    )?;
     state
         .machine
         .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
@@ -673,7 +773,11 @@ async fn start_workspace_scan(
         created_at: now,
         updated_at: now,
         status: WorkspaceScanStatus::Pending,
+        mode: estimate.mode,
+        artifact_retention: estimate.artifact_retention,
+        surface_model: estimate.surface_model,
         region: plan.region,
+        raster_transform: Some(estimate.raster_transform),
         overlap_fraction: plan.overlap_fraction,
         output_mm_per_pixel: plan.output_mm_per_pixel,
         frame_width_px: plan.frame_width_px,
@@ -687,6 +791,11 @@ async fn start_workspace_scan(
         mosaic_height_px: None,
         covered_fraction: None,
         nominal_fallback_fraction: 0.0,
+        estimated_duration_seconds: estimate.estimated_duration_seconds,
+        estimated_retained_bytes: estimate.estimated_retained_bytes,
+        artifact_quota_bytes: estimate.artifact_quota_bytes,
+        retained_artifact_bytes: 0,
+        persistent_capture: estimate.persistent_capture,
         accepted_registrations: 0,
         attempted_registrations: 0,
         tiles: plan.tiles.clone(),
@@ -707,6 +816,7 @@ async fn start_workspace_scan(
     let returned = StartWorkspaceScanResponse {
         scan: scan.clone(),
         operation: operation.clone(),
+        estimate,
     };
     let task_state = state.clone();
     spawn_prepared_operation(
@@ -723,6 +833,439 @@ async fn start_workspace_scan(
         ),
     );
     Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+fn prepare_workspace_scan(
+    state: &AppState,
+    specification: &WorkspaceScanSpecification,
+    top_profile: &CameraProfile,
+    camera_model: &PlanarCameraModel,
+    surface_model: WorkspaceSurfaceModel,
+    installed_geometry: Option<&InstalledPlateGeometryReport>,
+    start_pose: Pose,
+) -> ApiResult<(WorkspaceScanPlan, WorkspaceScanEstimate)> {
+    if specification.region.is_some() && specification.region_preset.is_some() {
+        return Err(ApiError::bad_request(
+            "workspace scan cannot specify both region and region_preset",
+        ));
+    }
+    let region = match (specification.region, specification.region_preset) {
+        (Some(region), None) => region,
+        (None, Some(WorkspaceRegionPreset::InstalledPlates)) => {
+            installed_plates_scan_region(&state.profile, installed_geometry)?
+        }
+        (None, None) => {
+            return Err(ApiError::bad_request(
+                "workspace scan requires region or region_preset",
+            ));
+        }
+        (Some(_), Some(_)) => unreachable!(),
+    };
+    let survey = specification.mode == WorkspaceScanMode::Survey;
+    let overlap_fraction = specification.overlap_fraction.unwrap_or(if survey {
+        DEFAULT_SURVEY_OVERLAP
+    } else {
+        0.35
+    });
+    let output_mm_per_pixel = specification
+        .output_mm_per_pixel
+        .or_else(|| survey.then_some(DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL));
+    if survey && output_mm_per_pixel.is_some_and(|scale| scale < 0.05) {
+        return Err(ApiError::bad_request(
+            "survey output_mm_per_pixel must be at least 0.05",
+        ));
+    }
+    let tile_limit = if survey {
+        MAX_WORKSPACE_SURVEY_TILES
+    } else {
+        MAX_WORKSPACE_SCAN_TILES
+    };
+    let max_tiles = specification.max_tiles.unwrap_or(tile_limit);
+    if max_tiles == 0 || max_tiles > tile_limit {
+        return Err(ApiError::bad_request(format!(
+            "workspace max_tiles must be between 1 and {tile_limit} for this mode"
+        )));
+    }
+    let artifact_retention = specification.artifact_retention.unwrap_or(if survey {
+        WorkspaceArtifactRetention::MosaicOnly
+    } else {
+        WorkspaceArtifactRetention::FullSources
+    });
+    let default_quota = if survey {
+        DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES
+    } else {
+        DEFAULT_PRECISION_ARTIFACT_QUOTA_BYTES
+    };
+    let artifact_quota_bytes = specification.artifact_quota_bytes.unwrap_or(default_quota);
+    if artifact_quota_bytes == 0 || artifact_quota_bytes > MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "workspace artifact quota must be between 1 and {MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES} bytes"
+        )));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let mut plan = plan_workspace_scan(
+        region,
+        camera_model,
+        state.profile.bounds,
+        visual.seed_pose.z_mm,
+        start_pose.rotation_deg,
+        top_profile.width,
+        top_profile.height,
+        overlap_fraction,
+        output_mm_per_pixel,
+        max_tiles,
+        if survey {
+            MAX_WORKSPACE_SURVEY_PIXELS
+        } else {
+            MAX_WORKSPACE_MOSAIC_PIXELS
+        },
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    for tile in &mut plan.tiles {
+        tile.artifact_name = match artifact_retention {
+            WorkspaceArtifactRetention::FullSources => format!("tile-{:03}.png", tile.index),
+            WorkspaceArtifactRetention::Thumbnails => {
+                format!("thumbnail-{:03}.png", tile.index)
+            }
+            WorkspaceArtifactRetention::MosaicOnly => String::new(),
+        };
+    }
+    let estimate = workspace_scan_estimate(
+        &plan,
+        WorkspaceScanEstimateContext {
+            mode: specification.mode,
+            artifact_retention,
+            surface_model,
+            artifact_quota_bytes,
+            top_profile,
+            park_pose: Pose {
+                x_mm: visual.seed_pose.x_mm,
+                y_mm: visual.seed_pose.y_mm,
+                z_mm: visual.seed_pose.z_mm,
+                rotation_deg: start_pose.rotation_deg,
+            },
+            start_pose,
+            feed_mm_per_min: workspace_scan_feed(&state.profile),
+        },
+    );
+    if estimate.estimated_retained_bytes > artifact_quota_bytes {
+        return Err(ApiError::bad_request(format!(
+            "workspace scan estimates {} retained bytes, above the quota of {artifact_quota_bytes}; choose mosaic_only, increase output scale, reduce the region, or raise the quota",
+            estimate.estimated_retained_bytes
+        )));
+    }
+    Ok((plan, estimate))
+}
+
+fn select_workspace_surface_model(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    top_camera_model: PlanarCameraModel,
+    region_preset: Option<WorkspaceRegionPreset>,
+) -> ApiResult<(
+    PlanarCameraModel,
+    WorkspaceSurfaceModel,
+    Option<InstalledPlateGeometryReport>,
+)> {
+    if region_preset != Some(WorkspaceRegionPreset::InstalledPlates) {
+        return Ok((
+            top_camera_model,
+            WorkspaceSurfaceModel::TopCameraWorkingPlane,
+            None,
+        ));
+    }
+    if !crate::calibration_artifacts::artifact_tree_is_current(
+        state,
+        snapshot,
+        CalibrationArtifactId::InstalledPlateGeometry,
+    ) {
+        return Err(ApiError::bad_request(
+            "installed-plates scan requires current installed plate geometry",
+        ));
+    }
+    let geometry: InstalledPlateGeometryReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(
+            snapshot,
+            CalibrationArtifactId::InstalledPlateGeometry,
+        )
+        .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|error| {
+        ApiError::bad_request(format!(
+            "stored installed plate geometry is invalid: {error}"
+        ))
+    })?;
+    if !geometry.passed {
+        return Err(ApiError::bad_request(
+            "installed-plates scan requires passing installed plate geometry",
+        ));
+    }
+    let profile = state
+        .profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define installed plate geometry")
+        })?;
+    let mut mappings = Vec::new();
+    for plate in &profile.plates {
+        let mapping = geometry
+            .registrations
+            .iter()
+            .find(|registration| registration.plate_id == plate.id && registration.passed)
+            .and_then(|registration| registration.pixel_error_to_machine_mm)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "installed plate {} has no passing local camera map",
+                    plate.id
+                ))
+            })?;
+        mappings.push(mapping);
+    }
+    if mappings.is_empty() {
+        return Err(ApiError::bad_request(
+            "installed plate geometry contains no local camera maps",
+        ));
+    }
+    let mut mean_mapping = [[0.0; 2]; 2];
+    for mapping in &mappings {
+        for axis in 0..2 {
+            for pixel_axis in 0..2 {
+                mean_mapping[axis][pixel_axis] += mapping[axis][pixel_axis];
+            }
+        }
+    }
+    for axis in &mut mean_mapping {
+        for value in axis {
+            *value /= mappings.len() as f64;
+        }
+    }
+    let model = rescale_planar_camera_model(&top_camera_model, mean_mapping)
+        .map_err(ApiError::bad_request)?;
+    Ok((
+        model,
+        WorkspaceSurfaceModel::InstalledPlatePlanes,
+        Some(geometry),
+    ))
+}
+
+fn rescale_planar_camera_model(
+    model: &PlanarCameraModel,
+    target_mapping: [[f64; 2]; 2],
+) -> Result<PlanarCameraModel, String> {
+    let center = model
+        .correction_at(model.center_x_px, model.center_y_px)
+        .ok_or_else(|| "top-camera center is outside calibrated support".to_string())?;
+    let x = model
+        .correction_at(model.center_x_px + 1.0, model.center_y_px)
+        .ok_or_else(|| "top-camera X derivative is outside calibrated support".to_string())?;
+    let y = model
+        .correction_at(model.center_x_px, model.center_y_px + 1.0)
+        .ok_or_else(|| "top-camera Y derivative is outside calibrated support".to_string())?;
+    let source = [
+        [x[0] - center[0], y[0] - center[0]],
+        [x[1] - center[1], y[1] - center[1]],
+    ];
+    let determinant = source[0][0] * source[1][1] - source[0][1] * source[1][0];
+    if !determinant.is_finite() || determinant.abs() <= f64::EPSILON {
+        return Err("top-camera center mapping is singular".into());
+    }
+    let inverse = [
+        [source[1][1] / determinant, -source[0][1] / determinant],
+        [-source[1][0] / determinant, source[0][0] / determinant],
+    ];
+    let transform = [
+        [
+            target_mapping[0][0] * inverse[0][0] + target_mapping[0][1] * inverse[1][0],
+            target_mapping[0][0] * inverse[0][1] + target_mapping[0][1] * inverse[1][1],
+        ],
+        [
+            target_mapping[1][0] * inverse[0][0] + target_mapping[1][1] * inverse[1][0],
+            target_mapping[1][0] * inverse[0][1] + target_mapping[1][1] * inverse[1][1],
+        ],
+    ];
+    let mut scaled = model.clone();
+    for index in 0..7 {
+        let x = model.correction_x_coefficients_mm[index];
+        let y = model.correction_y_coefficients_mm[index];
+        scaled.correction_x_coefficients_mm[index] = transform[0][0] * x + transform[0][1] * y;
+        scaled.correction_y_coefficients_mm[index] = transform[1][0] * x + transform[1][1] * y;
+    }
+    Ok(scaled)
+}
+
+fn installed_plates_scan_region(
+    profile: &MachineProfile,
+    geometry: Option<&InstalledPlateGeometryReport>,
+) -> ApiResult<WorkspaceScanRegion> {
+    let visual = profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let installed = profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define installed plate geometry")
+        })?;
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for plate in &installed.plates {
+        if plate.column_count == 0 || plate.row_count == 0 {
+            continue;
+        }
+        let fitted_model = geometry.and_then(|report| {
+            report
+                .plates
+                .iter()
+                .find(|fit| fit.plate_id == plate.id && fit.passed)
+                .map(|fit| fit.model)
+        });
+        for column in [-0.5, f64::from(plate.column_count) - 0.5] {
+            for row in [-0.5, f64::from(plate.row_count) - 0.5] {
+                let nominal_x = visual.fiducial_x_mm
+                    + plate.origin_offset_x_mm
+                    + column * plate.column_step_x_mm
+                    + row * plate.row_step_x_mm;
+                let nominal_y = visual.fiducial_y_mm
+                    + plate.origin_offset_y_mm
+                    + column * plate.column_step_y_mm
+                    + row * plate.row_step_y_mm;
+                let [x, y] = fitted_model
+                    .map(|model| model.apply(nominal_x, nominal_y))
+                    .unwrap_or([nominal_x, nominal_y]);
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    let region = WorkspaceScanRegion {
+        x_min_mm: min_x.max(profile.bounds.x_min_mm),
+        x_max_mm: max_x.min(profile.bounds.x_max_mm),
+        y_min_mm: min_y.max(profile.bounds.y_min_mm),
+        y_max_mm: max_y.min(profile.bounds.y_max_mm),
+    };
+    region.validate().map_err(ApiError::bad_request)?;
+    Ok(region)
+}
+
+fn workspace_scan_feed(profile: &MachineProfile) -> f64 {
+    profile
+        .installed_geometry_calibration
+        .as_ref()
+        .map(|installed| installed.feed_mm_per_min)
+        .unwrap_or(profile.default_feed_mm_per_min)
+}
+
+struct WorkspaceScanEstimateContext<'a> {
+    mode: WorkspaceScanMode,
+    artifact_retention: WorkspaceArtifactRetention,
+    surface_model: WorkspaceSurfaceModel,
+    artifact_quota_bytes: u64,
+    top_profile: &'a CameraProfile,
+    park_pose: Pose,
+    start_pose: Pose,
+    feed_mm_per_min: f64,
+}
+
+fn workspace_scan_estimate(
+    plan: &WorkspaceScanPlan,
+    context: WorkspaceScanEstimateContext<'_>,
+) -> WorkspaceScanEstimate {
+    let WorkspaceScanEstimateContext {
+        mode,
+        artifact_retention,
+        surface_model,
+        artifact_quota_bytes,
+        top_profile,
+        park_pose,
+        start_pose,
+        feed_mm_per_min,
+    } = context;
+    let mut sequence = plan.tiles.iter().collect::<Vec<_>>();
+    sequence.sort_by_key(|tile| tile.capture_order);
+    let mut prior = start_pose;
+    let mut travel_mm = 0.0;
+    for tile in &sequence {
+        travel_mm +=
+            (tile.nominal_pose.x_mm - prior.x_mm).hypot(tile.nominal_pose.y_mm - prior.y_mm);
+        prior = tile.nominal_pose;
+    }
+    travel_mm += (park_pose.x_mm - prior.x_mm).hypot(park_pose.y_mm - prior.y_mm);
+    let planned_tiles = plan.tiles.len() as u32;
+    let planned_registrations =
+        plan.rows * plan.columns.saturating_sub(1) + plan.rows.saturating_sub(1) * plan.columns;
+    let mosaic_width_px = ((plan.region.x_max_mm - plan.region.x_min_mm) / plan.output_mm_per_pixel)
+        .ceil() as u32
+        + 1;
+    let mosaic_height_px =
+        ((plan.region.y_max_mm - plan.region.y_min_mm) / plan.output_mm_per_pixel).ceil() as u32
+            + 1;
+    let mosaic_pixels = u64::from(mosaic_width_px) * u64::from(mosaic_height_px);
+    let metadata_bytes =
+        u64::from(planned_tiles) * 512 + u64::from(planned_registrations) * 384 + 16_384;
+    let source_bytes = u64::from(plan.frame_width_px)
+        * u64::from(plan.frame_height_px)
+        * u64::from(planned_tiles)
+        * 11
+        / 10;
+    let thumbnail_bytes = u64::from(WORKSPACE_THUMBNAIL_WIDTH)
+        * u64::from(WORKSPACE_THUMBNAIL_HEIGHT)
+        * u64::from(planned_tiles)
+        * 11
+        / 10;
+    let retained_image_bytes = match artifact_retention {
+        WorkspaceArtifactRetention::FullSources => source_bytes,
+        WorkspaceArtifactRetention::Thumbnails => thumbnail_bytes,
+        WorkspaceArtifactRetention::MosaicOnly => 0,
+    };
+    let estimated_retained_bytes = mosaic_pixels * 11 / 10 + metadata_bytes + retained_image_bytes;
+    let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
+    let estimated_duration_seconds = if mode == WorkspaceScanMode::Survey {
+        let first_frames = top_profile.settle_frames + 1;
+        let later_frames = WORKSPACE_SCAN_SETTLE_FRAMES + 1;
+        let capture_frames = u64::from(first_frames)
+            + u64::from(planned_tiles.saturating_sub(1)) * u64::from(later_frames);
+        (movement_seconds
+            + capture_frames as f64 / f64::from(top_profile.frames_per_second)
+            + f64::from(planned_registrations) * ESTIMATED_REGISTRATION_SECONDS
+            + 20.0)
+            .ceil() as u64
+    } else {
+        (f64::from(planned_tiles) * 5.3).ceil() as u64
+    };
+    WorkspaceScanEstimate {
+        mode,
+        artifact_retention,
+        surface_model,
+        region: plan.region,
+        raster_transform: WorkspaceRasterTransform {
+            top_left_x_mm: plan.region.x_min_mm,
+            top_left_y_mm: plan.region.y_max_mm,
+            x_mm_per_pixel: plan.output_mm_per_pixel,
+            y_mm_per_pixel: -plan.output_mm_per_pixel,
+        },
+        overlap_fraction: plan.overlap_fraction,
+        output_mm_per_pixel: plan.output_mm_per_pixel,
+        rows: plan.rows,
+        columns: plan.columns,
+        planned_tiles,
+        planned_registrations,
+        mosaic_width_px,
+        mosaic_height_px,
+        estimated_duration_seconds,
+        estimated_retained_bytes,
+        artifact_quota_bytes,
+        persistent_capture: mode == WorkspaceScanMode::Survey,
+    }
 }
 
 fn load_workspace_camera_model(
@@ -844,23 +1387,7 @@ async fn execute_workspace_scan(
         scan.status = WorkspaceScanStatus::Succeeded;
         scan.updated_at = Utc::now();
         scan.failure = None;
-        let finalize = (|| -> Result<(), String> {
-            state
-                .store
-                .put_workspace_scan(&scan)
-                .map_err(|error| error.to_string())?;
-            let manifest = serde_json::to_vec_pretty(&scan).map_err(|error| error.to_string())?;
-            state
-                .store
-                .put_workspace_scan_artifact(
-                    scan.id,
-                    "manifest.json",
-                    "application/json",
-                    &manifest,
-                )
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        })();
+        let finalize = persist_workspace_manifest(&state, &mut scan);
         if let Err(error) = finalize {
             result = Err(format!(
                 "workspace scan could not finalize its report: {error}"
@@ -891,6 +1418,43 @@ async fn capture_and_build_workspace_scan(
     lease_id: Uuid,
     use_lights: bool,
 ) -> Result<String, String> {
+    if scan.mode == WorkspaceScanMode::Survey {
+        return capture_and_build_workspace_survey(
+            state,
+            scan,
+            plan,
+            camera_model,
+            top_profile,
+            top_path,
+            lease_id,
+            use_lights,
+        )
+        .await;
+    }
+    capture_and_build_precision_workspace_scan(
+        state,
+        scan,
+        plan,
+        camera_model,
+        top_profile,
+        top_path,
+        lease_id,
+        use_lights,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_and_build_precision_workspace_scan(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+    plan: &WorkspaceScanPlan,
+    camera_model: &PlanarCameraModel,
+    top_profile: &CameraProfile,
+    top_path: &str,
+    lease_id: Uuid,
+    use_lights: bool,
+) -> Result<String, String> {
     if use_lights {
         state
             .machine
@@ -899,12 +1463,13 @@ async fn capture_and_build_workspace_scan(
             .map_err(|error| error.to_string())?;
     }
     let mut frames = vec![None; plan.tiles.len()];
+    let feed_mm_per_min = workspace_scan_feed(&state.profile);
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     for (capture_index, tile) in capture_sequence.into_iter().enumerate() {
         state
             .machine
-            .jog(lease_id, tile.nominal_pose.into(), 600.0)
+            .jog(lease_id, tile.nominal_pose.into(), feed_mm_per_min)
             .await
             .map_err(|error| error.to_string())?;
         let mut capture_profile = top_profile.clone();
@@ -918,11 +1483,7 @@ async fn capture_and_build_workspace_scan(
             .map_err(|error| error.message)?
             .pop()
             .ok_or_else(|| "top camera returned no workspace frame".to_string())?;
-        let png = encode_gray_png(&frame).map_err(|error| error.to_string())?;
-        state
-            .store
-            .put_workspace_scan_artifact(scan.id, &tile.artifact_name, "image/png", &png)
-            .map_err(|error| error.to_string())?;
+        persist_workspace_tile_artifact(state, scan, tile, &frame)?;
         frames[tile.index as usize] = Some(frame);
         scan.captured_tiles += 1;
         scan.updated_at = Utc::now();
@@ -943,11 +1504,202 @@ async fn capture_and_build_workspace_scan(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    let mosaic_png = encode_gray_png(&mosaic.frame).map_err(|error| error.to_string())?;
-    state
-        .store
-        .put_workspace_scan_artifact(scan.id, "mosaic.png", "image/png", &mosaic_png)
+    complete_workspace_mosaic(state, scan, mosaic)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_and_build_workspace_survey(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+    plan: &WorkspaceScanPlan,
+    camera_model: &PlanarCameraModel,
+    top_profile: &CameraProfile,
+    top_path: &str,
+    lease_id: Uuid,
+    use_lights: bool,
+) -> Result<String, String> {
+    if use_lights {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    let updates = profile_control_updates(top_profile);
+    let config = camera_capture_config(top_profile, top_path.to_owned());
+    let mut session = Some(open_persistent_workspace_camera_with_retry(&config, &updates).await?);
+    let mut stream = Some(
+        WorkspaceMosaicStream::new(plan.clone(), camera_model.clone())
+            .map_err(|error| error.to_string())?,
+    );
+    let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
+    capture_sequence.sort_by_key(|tile| tile.capture_order);
+    let feed_mm_per_min = workspace_scan_feed(&state.profile);
+
+    for (capture_index, tile) in capture_sequence.into_iter().enumerate() {
+        if capture_index > 0 && capture_index as u32 % 100 == 0 {
+            state
+                .machine
+                .renew_lease(lease_id, CALIBRATION_LEASE_SECONDS)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        state
+            .machine
+            .jog(lease_id, tile.nominal_pose.into(), feed_mm_per_min)
+            .await
+            .map_err(|error| error.to_string())?;
+        let settle_frames = if capture_index == 0 {
+            top_profile.settle_frames
+        } else {
+            top_profile.settle_frames.min(WORKSPACE_SCAN_SETTLE_FRAMES)
+        };
+        let frame = capture_persistent_workspace_frame(
+            &mut session,
+            &config,
+            &updates,
+            settle_frames,
+            top_profile.settle_frames,
+        )
+        .await?;
+        persist_workspace_tile_artifact(state, scan, tile, &frame)?;
+
+        let mut active_stream = stream
+            .take()
+            .ok_or_else(|| "workspace mosaic stream is unavailable".to_string())?;
+        let tile_index = tile.index;
+        let (returned_stream, row_completed) = tokio::task::spawn_blocking(move || {
+            let result = active_stream.push_frame(tile_index, frame);
+            (active_stream, result)
+        })
+        .await
         .map_err(|error| error.to_string())?;
+        stream = Some(returned_stream);
+        let row_completed = row_completed.map_err(|error| error.to_string())?;
+
+        scan.captured_tiles += 1;
+        scan.updated_at = Utc::now();
+        if row_completed
+            || scan.captured_tiles % WORKSPACE_PROGRESS_TILE_INTERVAL == 0
+            || scan.captured_tiles == scan.planned_tiles
+        {
+            state
+                .store
+                .put_workspace_scan(scan)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    drop(session.take());
+    let stream = stream
+        .take()
+        .ok_or_else(|| "workspace mosaic stream is unavailable".to_string())?;
+    let mosaic = tokio::task::spawn_blocking(move || stream.finish())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    complete_workspace_mosaic(state, scan, mosaic)
+}
+
+async fn capture_persistent_workspace_frame(
+    session: &mut Option<Arc<PersistentGrayCapture>>,
+    config: &V4l2CaptureConfig,
+    control_updates: &[CameraControlUpdate],
+    settle_frames: u32,
+    reopen_settle_frames: u32,
+) -> Result<GrayFrame, String> {
+    let mut last_error = String::new();
+    for attempt in 1..=MAX_CAMERA_CAPTURE_ATTEMPTS {
+        if session.is_none() {
+            match open_persistent_workspace_camera(config, control_updates).await {
+                Ok(reopened) => *session = Some(reopened),
+                Err(error) => {
+                    last_error = error;
+                    if attempt < MAX_CAMERA_CAPTURE_ATTEMPTS {
+                        tokio::time::sleep(CAMERA_CAPTURE_RETRY_DELAY).await;
+                    }
+                    continue;
+                }
+            }
+        }
+        let active = Arc::clone(
+            session
+                .as_ref()
+                .ok_or_else(|| "persistent camera session is unavailable".to_string())?,
+        );
+        let requested_settle_frames = if attempt == 1 {
+            settle_frames
+        } else {
+            reopen_settle_frames
+        };
+        match tokio::task::spawn_blocking(move || {
+            active
+                .capture(requested_settle_frames)
+                .map(|capture| capture.frame)
+        })
+        .await
+        {
+            Ok(Ok(frame)) => return Ok(frame),
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(error) => last_error = error.to_string(),
+        }
+        if attempt == MAX_CAMERA_CAPTURE_ATTEMPTS {
+            break;
+        }
+        drop(session.take());
+        tokio::time::sleep(CAMERA_CAPTURE_RETRY_DELAY).await;
+    }
+    Err(format!(
+        "persistent workspace capture failed after {MAX_CAMERA_CAPTURE_ATTEMPTS} attempts: {last_error}"
+    ))
+}
+
+async fn open_persistent_workspace_camera(
+    config: &V4l2CaptureConfig,
+    control_updates: &[CameraControlUpdate],
+) -> Result<Arc<PersistentGrayCapture>, String> {
+    if !control_updates.is_empty() {
+        let control_device = config.device.clone();
+        let updates = control_updates.to_vec();
+        tokio::task::spawn_blocking(move || apply_camera_controls(control_device, &updates))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+    }
+    let open_config = config.clone();
+    let session = tokio::task::spawn_blocking(move || PersistentGrayCapture::open(open_config))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    Ok(Arc::new(session))
+}
+
+async fn open_persistent_workspace_camera_with_retry(
+    config: &V4l2CaptureConfig,
+    control_updates: &[CameraControlUpdate],
+) -> Result<Arc<PersistentGrayCapture>, String> {
+    let mut last_error = String::new();
+    for attempt in 1..=MAX_CAMERA_CAPTURE_ATTEMPTS {
+        match open_persistent_workspace_camera(config, control_updates).await {
+            Ok(session) => return Ok(session),
+            Err(error) => last_error = error,
+        }
+        if attempt < MAX_CAMERA_CAPTURE_ATTEMPTS {
+            tokio::time::sleep(CAMERA_CAPTURE_RETRY_DELAY).await;
+        }
+    }
+    Err(format!(
+        "persistent workspace camera open failed after {MAX_CAMERA_CAPTURE_ATTEMPTS} attempts: {last_error}"
+    ))
+}
+
+fn complete_workspace_mosaic(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+    mosaic: WorkspaceMosaic,
+) -> Result<String, String> {
+    let mosaic_png = encode_gray_png(&mosaic.frame).map_err(|error| error.to_string())?;
+    persist_workspace_artifact(state, scan, "mosaic.png", "image/png", &mosaic_png)?;
     scan.mosaic_width_px = Some(mosaic.frame.width);
     scan.mosaic_height_px = Some(mosaic.frame.height);
     scan.covered_fraction = Some(mosaic.covered_fraction);
@@ -988,6 +1740,88 @@ async fn capture_and_build_workspace_scan(
         scan.accepted_registrations,
         scan.attempted_registrations,
     ))
+}
+
+fn persist_workspace_tile_artifact(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+    tile: &velocitypnp_domain::WorkspaceScanTile,
+    frame: &GrayFrame,
+) -> Result<(), String> {
+    let encoded = match scan.artifact_retention {
+        WorkspaceArtifactRetention::MosaicOnly => return Ok(()),
+        WorkspaceArtifactRetention::FullSources => {
+            encode_gray_png(frame).map_err(|error| error.to_string())?
+        }
+        WorkspaceArtifactRetention::Thumbnails => {
+            let thumbnail =
+                resize_gray_frame(frame, WORKSPACE_THUMBNAIL_WIDTH, WORKSPACE_THUMBNAIL_HEIGHT)
+                    .map_err(|error| error.to_string())?;
+            encode_gray_png(&thumbnail).map_err(|error| error.to_string())?
+        }
+    };
+    persist_workspace_artifact(state, scan, &tile.artifact_name, "image/png", &encoded)
+}
+
+fn persist_workspace_artifact(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+    name: &str,
+    media_type: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    let retained = scan
+        .retained_artifact_bytes
+        .checked_add(data.len() as u64)
+        .ok_or_else(|| "workspace retained artifact size overflowed".to_string())?;
+    if retained > scan.artifact_quota_bytes {
+        return Err(format!(
+            "workspace artifacts need {retained} bytes, above the quota of {}",
+            scan.artifact_quota_bytes
+        ));
+    }
+    state
+        .store
+        .put_workspace_scan_artifact(scan.id, name, media_type, data)
+        .map_err(|error| error.to_string())?;
+    scan.retained_artifact_bytes = retained;
+    Ok(())
+}
+
+fn persist_workspace_manifest(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+) -> Result<(), String> {
+    let artifact_bytes = scan.retained_artifact_bytes;
+    let mut total_bytes = artifact_bytes;
+    let manifest = 'manifest: {
+        for _ in 0..8 {
+            scan.retained_artifact_bytes = total_bytes;
+            let manifest = serde_json::to_vec_pretty(scan).map_err(|error| error.to_string())?;
+            let next_total = artifact_bytes
+                .checked_add(manifest.len() as u64)
+                .ok_or_else(|| "workspace retained artifact size overflowed".to_string())?;
+            if next_total == total_bytes {
+                break 'manifest manifest;
+            }
+            total_bytes = next_total;
+        }
+        return Err("workspace manifest size did not converge".into());
+    };
+    if total_bytes > scan.artifact_quota_bytes {
+        return Err(format!(
+            "workspace artifacts need {total_bytes} bytes, above the quota of {}",
+            scan.artifact_quota_bytes
+        ));
+    }
+    state
+        .store
+        .put_workspace_scan_artifact(scan.id, "manifest.json", "application/json", &manifest)
+        .map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_workspace_scan(scan)
+        .map_err(|error| error.to_string())
 }
 
 async fn list_workspace_scans(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -10916,6 +11750,64 @@ mod tests {
         AppState::new(machine, profile, Store::memory().unwrap())
     }
 
+    fn test_workspace_scan(operation_id: Uuid) -> WorkspaceScanReport {
+        let now = Utc::now();
+        WorkspaceScanReport {
+            id: Uuid::new_v4(),
+            operation_id,
+            calibration_id: Uuid::new_v4(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: now,
+            updated_at: now,
+            status: WorkspaceScanStatus::Pending,
+            mode: WorkspaceScanMode::Survey,
+            artifact_retention: WorkspaceArtifactRetention::MosaicOnly,
+            surface_model: WorkspaceSurfaceModel::TopCameraWorkingPlane,
+            region: WorkspaceScanRegion {
+                x_min_mm: 180.0,
+                x_max_mm: 260.0,
+                y_min_mm: 165.0,
+                y_max_mm: 201.0,
+            },
+            raster_transform: Some(WorkspaceRasterTransform {
+                top_left_x_mm: 180.0,
+                top_left_y_mm: 201.0,
+                x_mm_per_pixel: DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL,
+                y_mm_per_pixel: -DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL,
+            }),
+            overlap_fraction: DEFAULT_SURVEY_OVERLAP,
+            output_mm_per_pixel: DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL,
+            frame_width_px: 1280,
+            frame_height_px: 720,
+            usable_pixel_bounds: velocitypnp_domain::WorkspacePixelBounds {
+                left: 300,
+                top: 180,
+                right: 980,
+                bottom: 540,
+            },
+            rows: 8,
+            columns: 9,
+            planned_tiles: 72,
+            captured_tiles: 0,
+            mosaic_width_px: None,
+            mosaic_height_px: None,
+            covered_fraction: None,
+            nominal_fallback_fraction: 0.0,
+            estimated_duration_seconds: 180,
+            estimated_retained_bytes: 1_000_000,
+            artifact_quota_bytes: DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES,
+            retained_artifact_bytes: 0,
+            persistent_capture: true,
+            accepted_registrations: 0,
+            attempted_registrations: 0,
+            tiles: vec![],
+            registrations: vec![],
+            mosaic_artifact_name: None,
+            warnings: vec![],
+            failure: None,
+        }
+    }
+
     fn test_calibration_run(operation_id: Uuid) -> AutomatedCalibrationRun {
         let now = Utc::now();
         AutomatedCalibrationRun {
@@ -11382,6 +12274,122 @@ mod tests {
                 .status,
             OperationStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn startup_marks_interrupted_workspace_scan_and_operation_failed() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let store = Store::memory().unwrap();
+        let operation = Operation::pending("vision.workspace_scan");
+        let scan = test_workspace_scan(operation.id);
+        store.put_operation(&operation).unwrap();
+        store.put_workspace_scan(&scan).unwrap();
+        let machine = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile.clone(),
+        );
+
+        let state = AppState::new(machine, profile, store);
+
+        assert_eq!(
+            state
+                .store
+                .get_workspace_scan(scan.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            WorkspaceScanStatus::Failed
+        );
+        assert_eq!(
+            state
+                .store
+                .get_operation(operation.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            OperationStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn installed_plate_region_covers_both_profile_plates_with_half_pitch_margin() {
+        let state = test_state();
+
+        let region = installed_plates_scan_region(&state.profile, None).unwrap();
+
+        assert_eq!(region.x_min_mm, 0.0);
+        assert_eq!(region.x_max_mm, 433.0);
+        assert!((region.y_min_mm - 95.771).abs() < 1e-9);
+        assert!((region.y_max_mm - 290.771).abs() < 1e-9);
+    }
+
+    #[test]
+    fn workspace_surface_rescale_matches_the_requested_center_mapping() {
+        let source_mapping = [[-0.013, 0.0004], [0.0002, 0.0135]];
+        let target_mapping = [[-0.018, 0.0001], [0.0002, 0.0181]];
+        let model = PlanarCameraModel {
+            role: CameraRole::TopCamera,
+            center_x_px: 640.0,
+            center_y_px: 360.0,
+            normalization_x_px: 640.0,
+            normalization_y_px: 360.0,
+            correction_x_coefficients_mm: [
+                source_mapping[0][0] * 640.0,
+                source_mapping[0][1] * 360.0,
+                0.01,
+                -0.02,
+                0.03,
+                0.0,
+                0.0,
+            ],
+            correction_y_coefficients_mm: [
+                source_mapping[1][0] * 640.0,
+                source_mapping[1][1] * 360.0,
+                -0.01,
+                0.02,
+                -0.03,
+                0.0,
+                0.0,
+            ],
+            supported_min_x_px: 0.0,
+            supported_max_x_px: 1279.0,
+            supported_min_y_px: 0.0,
+            supported_max_y_px: 719.0,
+            kind: velocitypnp_domain::PlanarCameraModelKind::DistortionPolynomial,
+        };
+
+        let scaled = rescale_planar_camera_model(&model, target_mapping).unwrap();
+        let center = scaled.correction_at(640.0, 360.0).unwrap();
+        let x = scaled.correction_at(641.0, 360.0).unwrap();
+        let y = scaled.correction_at(640.0, 361.0).unwrap();
+
+        for (actual, expected) in [
+            (x[0] - center[0], target_mapping[0][0]),
+            (y[0] - center[0], target_mapping[0][1]),
+            (x[1] - center[1], target_mapping[1][0]),
+            (y[1] - center[1], target_mapping[1][1]),
+        ] {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+        assert_eq!(scaled.kind, model.kind);
+    }
+
+    #[tokio::test]
+    async fn workspace_manifest_accounts_for_its_own_bytes() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        scan.status = WorkspaceScanStatus::Succeeded;
+
+        persist_workspace_manifest(&state, &mut scan).unwrap();
+
+        let (_, manifest) = state
+            .store
+            .get_workspace_scan_artifact(scan.id, "manifest.json")
+            .unwrap()
+            .unwrap();
+        assert_eq!(scan.retained_artifact_bytes, manifest.len() as u64);
+        assert_eq!(state.store.get_workspace_scan(scan.id).unwrap(), Some(scan));
     }
 
     #[tokio::test]

@@ -93,8 +93,12 @@ The project is organized by measurable gates rather than calendar estimates.
 
 - [x] Adopt OpenCV frame statistics and connected components behind the
   validated calibration policy, with attached-fixture conformance tests
-- [x] Build calibrated top-camera workspace mosaics with persisted source
-  tiles and bounded OpenCV overlap registration
+- [x] Build calibrated top-camera workspace mosaics with precision source-tile
+  retention and bounded OpenCV overlap registration
+- [x] Add persistent-capture, bounded-memory coarse surveys with preflight
+  duration/storage estimates, artifact quotas, and mosaic-only retention
+- [x] Georeference survey rasters and use installed plate-plane geometry for
+  full-workspace scan planning
 - [ ] Add board-region discovery and package-template pose comparison
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures

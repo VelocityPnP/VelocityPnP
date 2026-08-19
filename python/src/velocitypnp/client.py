@@ -87,6 +87,118 @@ class Client:
             {"lease_id": str(lease_id), "sample_count": sample_count},
         )
 
+    def estimate_workspace_scan(
+        self,
+        calibration_id: str | uuid.UUID,
+        *,
+        region: dict[str, float] | None = None,
+        region_preset: str | None = None,
+        mode: str = "survey",
+        artifact_retention: str = "mosaic_only",
+        overlap_fraction: float | None = None,
+        output_mm_per_pixel: float | None = None,
+        artifact_quota_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        specification = self._workspace_scan_specification(
+            calibration_id,
+            region=region,
+            region_preset=region_preset,
+            mode=mode,
+            artifact_retention=artifact_retention,
+            overlap_fraction=overlap_fraction,
+            output_mm_per_pixel=output_mm_per_pixel,
+            artifact_quota_bytes=artifact_quota_bytes,
+        )
+        return self._request("POST", "/workspace-scans/estimate", specification)
+
+    def start_workspace_scan(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        region: dict[str, float] | None = None,
+        region_preset: str | None = None,
+        mode: str = "survey",
+        artifact_retention: str = "mosaic_only",
+        overlap_fraction: float | None = None,
+        output_mm_per_pixel: float | None = None,
+        artifact_quota_bytes: int | None = None,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "workspace scanning requires explicit confirmation that both nozzles "
+                "are level, the region and envelope are clear, and power isolation "
+                "is reachable"
+            )
+        specification = self._workspace_scan_specification(
+            calibration_id,
+            region=region,
+            region_preset=region_preset,
+            mode=mode,
+            artifact_retention=artifact_retention,
+            overlap_fraction=overlap_fraction,
+            output_mm_per_pixel=output_mm_per_pixel,
+            artifact_quota_bytes=artifact_quota_bytes,
+        )
+        return self._request("POST", "/workspace-scans", {
+            "lease_id": str(lease_id),
+            "confirmed_external_safety_checks": True,
+            **specification,
+        })
+
+    def workspace_scans(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/workspace-scans")["scans"]
+
+    def workspace_scan(self, scan_id: str | uuid.UUID) -> dict[str, Any]:
+        return self._request("GET", f"/workspace-scans/{scan_id}")
+
+    def workspace_scan_mosaic(self, scan_id: str | uuid.UUID) -> bytes:
+        return self._request_bytes(
+            "GET", f"/workspace-scans/{scan_id}/artifacts/mosaic.png", "image/png",
+        )
+
+    @staticmethod
+    def _workspace_scan_specification(
+        calibration_id: str | uuid.UUID,
+        *,
+        region: dict[str, float] | None,
+        region_preset: str | None,
+        mode: str,
+        artifact_retention: str,
+        overlap_fraction: float | None,
+        output_mm_per_pixel: float | None,
+        artifact_quota_bytes: int | None,
+    ) -> dict[str, Any]:
+        if (region is None) == (region_preset is None):
+            raise ValueError("workspace scan requires exactly one region or region_preset")
+        if region_preset is not None and region_preset != "installed_plates":
+            raise ValueError("workspace region_preset must be installed_plates")
+        if mode not in {"precision", "survey"}:
+            raise ValueError("workspace scan mode must be precision or survey")
+        if artifact_retention not in {"full_sources", "thumbnails", "mosaic_only"}:
+            raise ValueError(
+                "workspace artifact retention must be full_sources, thumbnails, "
+                "or mosaic_only"
+            )
+        specification: dict[str, Any] = {
+            "calibration_id": str(calibration_id),
+            "mode": mode,
+            "artifact_retention": artifact_retention,
+        }
+        if region is not None:
+            specification["region"] = region
+        if region_preset is not None:
+            specification["region_preset"] = region_preset
+        for name, value in {
+            "overlap_fraction": overlap_fraction,
+            "output_mm_per_pixel": output_mm_per_pixel,
+            "artifact_quota_bytes": artifact_quota_bytes,
+        }.items():
+            if value is not None:
+                specification[name] = value
+        return specification
+
     @staticmethod
     def _validate_camera_role(role: str) -> None:
         if role not in {"top_camera", "bottom_camera"}:

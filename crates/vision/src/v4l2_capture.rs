@@ -3,6 +3,8 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 use v4l::buffer::Type;
 use v4l::control::{Control, Description, Flags, Type as ControlType, Value};
@@ -55,6 +57,73 @@ pub struct CaptureMetadata {
 pub struct CapturedGrayFrame {
     pub frame: GrayFrame,
     pub metadata: CaptureMetadata,
+}
+
+enum PersistentCaptureRequest {
+    Capture {
+        settle_frames: u32,
+        response: mpsc::SyncSender<Result<CapturedGrayFrame, String>>,
+    },
+    Stop,
+}
+
+/// A V4L2 stream that stays open across machine moves.
+pub struct PersistentGrayCapture {
+    requests: mpsc::Sender<PersistentCaptureRequest>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl PersistentGrayCapture {
+    pub fn open(config: V4l2CaptureConfig) -> Result<Self> {
+        validate_capture_config(&config)?;
+        let (request_tx, request_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("velocitypnp-v4l2-capture".into())
+            .spawn(move || persistent_capture_worker(config, request_rx, ready_tx))
+            .context("starting persistent camera capture thread")?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                requests: request_tx,
+                worker: Some(worker),
+            }),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(anyhow::anyhow!(error))
+            }
+            Err(_) => {
+                let _ = worker.join();
+                bail!("persistent camera thread stopped during setup")
+            }
+        }
+    }
+
+    pub fn capture(&self, settle_frames: u32) -> Result<CapturedGrayFrame> {
+        ensure!(
+            settle_frames <= 120,
+            "camera settling frame count is excessive"
+        );
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.requests
+            .send(PersistentCaptureRequest::Capture {
+                settle_frames,
+                response: response_tx,
+            })
+            .context("requesting a persistent camera frame")?;
+        response_rx
+            .recv()
+            .context("persistent camera thread stopped during capture")?
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+impl Drop for PersistentGrayCapture {
+    fn drop(&mut self) {
+        let _ = self.requests.send(PersistentCaptureRequest::Stop);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,17 +317,7 @@ fn control_value(value: Value) -> Option<CameraControlValue> {
     }
 }
 
-pub fn capture_gray_frame(config: &V4l2CaptureConfig) -> Result<CapturedGrayFrame> {
-    capture_gray_frames(config, 1)?
-        .pop()
-        .context("camera returned no frames")
-}
-
-pub fn capture_gray_frames(
-    config: &V4l2CaptureConfig,
-    sample_count: u32,
-) -> Result<Vec<CapturedGrayFrame>> {
-    ensure!(sample_count > 0, "camera sample count must be non-zero");
+fn validate_capture_config(config: &V4l2CaptureConfig) -> Result<()> {
     ensure!(
         config.width > 0 && config.height > 0,
         "camera dimensions must be non-zero"
@@ -272,6 +331,117 @@ pub fn capture_gray_frames(
         config.settle_frames <= 120,
         "camera settling frame count is excessive"
     );
+    Ok(())
+}
+
+fn persistent_capture_worker(
+    config: V4l2CaptureConfig,
+    requests: mpsc::Receiver<PersistentCaptureRequest>,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) {
+    let setup = (|| -> Result<_> {
+        let device = Device::with_path(&config.device)
+            .with_context(|| format!("opening camera {}", config.device.display()))?;
+        let format = device
+            .set_format(&Format::new(config.width, config.height, yuyv()))
+            .context("setting camera capture format")?;
+        if format.fourcc != yuyv() || format.width != config.width || format.height != config.height
+        {
+            bail!(
+                "camera negotiated {} {}x{} instead of YUYV {}x{}",
+                format.fourcc,
+                format.width,
+                format.height,
+                config.width,
+                config.height
+            );
+        }
+        let mut parameters = device.params().context("reading camera frame rate")?;
+        parameters.interval = Fraction::new(1, config.frames_per_second);
+        let parameters = device
+            .set_params(&parameters)
+            .context("setting camera frame rate")?;
+        if parameters.interval.numerator == 0 || parameters.interval.denominator == 0 {
+            bail!("camera returned an invalid frame interval");
+        }
+        Ok((device, format, parameters))
+    })();
+    let (device, format, parameters) = match setup {
+        Ok(setup) => setup,
+        Err(error) => {
+            let _ = ready.send(Err(format!("{error:#}")));
+            return;
+        }
+    };
+    let mut stream = match MmapStream::with_buffers(&device, Type::VideoCapture, 4)
+        .context("allocating camera capture buffers")
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            let _ = ready.send(Err(format!("{error:#}")));
+            return;
+        }
+    };
+    stream.set_timeout(config.timeout);
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
+
+    while let Ok(request) = requests.recv() {
+        let PersistentCaptureRequest::Capture {
+            settle_frames,
+            response,
+        } = request
+        else {
+            break;
+        };
+        let capture = (|| -> Result<CapturedGrayFrame> {
+            let mut captured = None;
+            for index in 0..=settle_frames {
+                let (buffer, metadata) = stream.next().context("capturing camera frame")?;
+                if index < settle_frames {
+                    continue;
+                }
+                let used = (metadata.bytesused as usize).min(buffer.len());
+                captured = Some(CapturedGrayFrame {
+                    frame: yuyv_to_gray(
+                        &buffer[..used],
+                        format.width,
+                        format.height,
+                        format.stride,
+                    )?,
+                    metadata: CaptureMetadata {
+                        device: config.device.clone(),
+                        width: format.width,
+                        height: format.height,
+                        fourcc: format.fourcc.to_string(),
+                        stride: format.stride,
+                        interval_numerator: parameters.interval.numerator,
+                        interval_denominator: parameters.interval.denominator,
+                        sequence: metadata.sequence,
+                        settle_frames,
+                    },
+                });
+            }
+            captured.context("persistent camera returned no frame")
+        })()
+        .map_err(|error| format!("{error:#}"));
+        let _ = response.send(capture);
+    }
+}
+
+pub fn capture_gray_frame(config: &V4l2CaptureConfig) -> Result<CapturedGrayFrame> {
+    capture_gray_frames(config, 1)?
+        .pop()
+        .context("camera returned no frames")
+}
+
+pub fn capture_gray_frames(
+    config: &V4l2CaptureConfig,
+    sample_count: u32,
+) -> Result<Vec<CapturedGrayFrame>> {
+    ensure!(sample_count > 0, "camera sample count must be non-zero");
+    validate_capture_config(config)?;
 
     let device = Device::with_path(&config.device)
         .with_context(|| format!("opening camera {}", config.device.display()))?;
@@ -406,6 +576,13 @@ mod tests {
     fn rejects_an_empty_capture_series_before_opening_the_device() {
         let config = V4l2CaptureConfig::lumenpnp("/dev/null");
         assert!(capture_gray_frames(&config, 0).is_err());
+    }
+
+    #[test]
+    fn persistent_capture_rejects_invalid_settings_before_opening_the_device() {
+        let mut config = V4l2CaptureConfig::lumenpnp("/dev/null");
+        config.width = 1279;
+        assert!(PersistentGrayCapture::open(config).is_err());
     }
 
     #[test]

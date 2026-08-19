@@ -90,9 +90,35 @@ The test passes only when the top-camera stability gates pass, each bottom
 capture produces image metrics, and each configured nozzle tip is identified.
 
 After a passing top-camera planar calibration, a caller can scan a bounded XY
-region. The daemon plans a serpentine path from the calibrated camera footprint,
-stores every source tile, renders a grayscale mosaic in machine coordinates,
-and returns to the visual datum with the lights off:
+region. Ask the daemon for a preflight estimate before motion. This request
+estimates the path, tile and registration counts, duration, mosaic dimensions,
+and retained bytes:
+
+```bash
+wget -qO- --method=POST \
+  --header='Content-Type: application/json' \
+  --body-data='{
+    "calibration_id":"CALIBRATION_UUID",
+    "mode":"survey",
+    "artifact_retention":"mosaic_only",
+    "region_preset":"installed_plates"
+  }' \
+  http://127.0.0.1:4080/api/v1/workspace-scans/estimate
+```
+
+`precision` mode keeps the original calibrated-resolution behavior. It stores
+full source tiles by default and has a 64-tile limit. `survey` mode defaults to
+0.10 mm/pixel, 20 percent overlap, a 4,096-tile limit, and `mosaic_only`
+retention. It holds one V4L2 stream open across moves and retains only two full
+camera rows while it registers and renders the mosaic. Thus, memory use is
+bounded by mosaic size and row width instead of total tile count.
+
+Artifact retention can be `full_sources`, `thumbnails`, or `mosaic_only`.
+Every request has a retained-byte estimate and quota. A request that exceeds
+its quota fails before motion. The runtime checks actual encoded bytes before
+each artifact is stored. The default survey quota is 64 MiB.
+
+Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
 
 ```bash
 wget -qO- --method=POST \
@@ -101,11 +127,13 @@ wget -qO- --method=POST \
     "lease_id":"LEASE_UUID",
     "calibration_id":"CALIBRATION_UUID",
     "confirmed_external_safety_checks":true,
+    "mode":"survey",
+    "artifact_retention":"mosaic_only",
     "region":{
-      "x_min_mm":211.0,
-      "x_max_mm":229.0,
-      "y_min_mm":186.0,
-      "y_max_mm":194.0
+      "x_min_mm":180.131,
+      "x_max_mm":260.131,
+      "y_min_mm":165.271,
+      "y_max_mm":200.271
     }
   }' \
   http://127.0.0.1:4080/api/v1/workspace-scans
@@ -119,6 +147,20 @@ textureless overlaps retain calibrated machine placement and add a warning.
 If an accepted correction moves an outer tile inward, only the newly exposed
 edge pixels use nominal machine placement. The manifest reports this value as
 `nominal_fallback_fraction`.
+
+The mosaic is an overhead map. Image X points toward positive machine X, and
+image Y points toward negative machine Y. Thus, the top row is the region's
+maximum machine Y. The estimate and report make this convention explicit in
+`raster_transform`.
+
+For the complete configured staging and build plates, replace `region` with
+`"region_preset":"installed_plates"`. The preset requires a current, passing
+installed-plate geometry artifact. It uses the measured affine plate extents,
+the local plate-height pixel-to-machine maps, and half-pitch margins. It then
+clamps the region to machine bounds. An explicit region uses the top-camera
+working-plane model. The estimate and report identify this choice as
+`surface_model`. A daemon restart marks a pending or running scan and its
+operation failed. It does not leave an interrupted scan reported as active.
 
 CLI jog commands preserve the controller-reported primary-nozzle angle when
 `--rotation` is omitted. Physical rotation requests are rejected while the

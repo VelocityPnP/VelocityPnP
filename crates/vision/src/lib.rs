@@ -14,9 +14,10 @@ mod v4l2_capture;
 #[cfg(all(feature = "native-v4l2", target_os = "linux"))]
 pub use v4l2_capture::*;
 
-pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat};
+pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use workspace_mosaic::{
-    build_workspace_mosaic, plan_workspace_scan, WorkspaceMosaic, WorkspaceScanPlan,
+    build_workspace_mosaic, plan_workspace_scan, WorkspaceMosaic, WorkspaceMosaicStream,
+    WorkspaceScanPlan,
 };
 
 use serde::{Deserialize, Serialize};
