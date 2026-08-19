@@ -177,6 +177,15 @@ class Client:
             "image/png",
         )
 
+    def workspace_scan_surface_heights(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            "surface-height-observations.json",
+        )
+
     @staticmethod
     def _workspace_scan_specification(
         calibration_id: str | uuid.UUID,

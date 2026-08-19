@@ -1244,6 +1244,10 @@ components:
         mosaic_layers:
           type: array
           items: { $ref: "#/components/schemas/WorkspaceMosaicLayerReport" }
+        parallax:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceParallaxSummary"
+            - type: "null"
         warnings: { type: array, items: { type: string } }
         failure: { type: [string, "null"] }
     WorkspaceMosaicLayerReport:
@@ -1266,6 +1270,28 @@ components:
         accepted_registrations: { type: integer, minimum: 0 }
         attempted_registrations: { type: integer, minimum: 0 }
         applied_corrections: { type: integer, minimum: 0 }
+    WorkspaceParallaxSummary:
+      type: object
+      required:
+        - artifact_name
+        - working_plane_fraction
+        - installed_plate_fraction
+        - attempted_pairs
+        - pairs_with_overlap
+        - descriptor_matches
+        - accepted_observations
+      description: >-
+        Sparse local surface-height evidence from camera parallax. Fraction
+        zero is the calibrated working plane; fraction one is the installed
+        bare-plate plane. Negative values are above the working plane.
+      properties:
+        artifact_name: { type: string }
+        working_plane_fraction: { type: number }
+        installed_plate_fraction: { type: number }
+        attempted_pairs: { type: integer, minimum: 0 }
+        pairs_with_overlap: { type: integer, minimum: 0 }
+        descriptor_matches: { type: integer, minimum: 0 }
+        accepted_observations: { type: integer, minimum: 0 }
     WorkspaceRasterTransform:
       type: object
       required:

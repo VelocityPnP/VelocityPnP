@@ -112,8 +112,9 @@ full source tiles by default and has a 64-tile limit. `survey` mode defaults to
 feed, a 4,096-tile limit, and `mosaic_only` retention. It discards four queued
 frames after each completed move before it accepts a capture. It holds one
 V4L2 stream open across moves and retains only two full camera rows while it
-registers and renders each requested height layer. Thus, memory use is bounded
-by mosaic layers and row width instead of total tile count.
+registers and renders each requested height layer and measures parallax. Thus,
+memory use is bounded by height layers and row width instead of total tile
+count.
 `feed_mm_per_min` can request a slower feed, but cannot exceed the profile
 limit.
 
@@ -167,13 +168,26 @@ calibration snapshot that the scan names, then run:
 ```bash
 cargo run -p velocitypnp-vision --example replay_workspace_scan -- \
   SCAN_DIRECTORY CALIBRATION_JSON OUTPUT.png OUTPUT.json \
-  [recorded|working_plane|installed_plate_planes] \
+  [recorded|working_plane|installed_plate_planes|surface_fraction:F] \
   [registration|no_registration]
 ```
 
 `SCAN_DIRECTORY` must contain `manifest.json` and the retained tile PNG files.
 The replay report records the registration method, evidence, and applied tile
 corrections.
+
+To measure sparse local height evidence from retained source frames, run:
+
+```bash
+cargo run -p velocitypnp-vision --example analyze_workspace_parallax -- \
+  SCAN_DIRECTORY CALIBRATION_JSON OUTPUT.json
+```
+
+Each accepted observation matches one feature from two camera positions and
+solves its relative surface fraction. Fraction zero is the calibrated
+top-camera working plane. Fraction one is the installed bare-plate plane.
+Negative fractions are above the working plane. Every observation includes
+its machine XY position, fit residual, parallax signal, and source tile pair.
 
 Coarse rendering averages the source area represented by each output sample.
 Tile weights feather across the full configured overlap on each axis. This
@@ -196,9 +210,11 @@ both under `mosaic_layers`.
 This separation is required because one projection cannot align a scene that
 contains bare plates, PCBs, and feeders at different heights. Consumers should
 run detection against each layer and use the layer with the stronger local
-evidence. Automatic local height segmentation and a unified composite remain
-future work; the service does not hide that uncertainty by averaging depth
-layers together.
+evidence. The same pass writes sparse, automatically measured evidence to
+`surface-height-observations.json`; its summary is in the scan's `parallax`
+field. Low-texture areas remain unmeasured. Automatic surface segmentation and
+a unified height-selected composite remain future work; the service does not
+hide that uncertainty by averaging depth layers together.
 
 The V3.0.4 plates are 600 by 120 mm, with 39 columns and seven rows; their
 outline is one 15 mm pitch outside the outer feature centers. The region is

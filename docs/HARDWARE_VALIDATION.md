@@ -1174,6 +1174,25 @@ other height. This confirms that the source frames contain useful parallax and
 that separate calibrated projections preserve it. The machine returned homed,
 ready, and fault-free to X=220.131, Y=190.271, Z=31.5, with the lights off.
 
+Source-retaining scan `2c744a92-b430-47e9-8bb6-f96d8c67cd73` repeated the same
+mixed-height region for parallax validation. All 20 frames and both mosaics
+completed, with 100 percent coverage and no nominal fallback. Feature matches
+from all 31 adjacent tile pairs produced 206 accepted local height
+observations. The raised datum-board edge had median surface fraction 0.045.
+The engraved staging-plate numbers had median 0.964. The calibrated endpoints
+are zero for the working plane and one for the installed plate plane. The
+plate-number interquartile range was 0.929 to 0.993. This confirms that camera
+translation can separate the two observed heights without vacuum contact or
+manual labeling. The machine again returned homed, ready, and fault-free to
+X=220.131, Y=190.271, Z=31.5, with the lights off.
+
+Production-path survey `2d014024-3fe9-4f07-9a2a-b3b1fb9ff9b5` then ran with
+`mosaic_only` retention. The streaming implementation measured 186
+observations without saved source frames. The raised-region median was 0.039,
+and the plate-number median was 0.961. Both mosaics again had 100 percent
+coverage without nominal fallback. The machine returned homed, ready, and
+fault-free to X=220.131, Y=190.271, Z=31.5, with the lights off.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

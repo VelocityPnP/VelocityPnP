@@ -128,6 +128,17 @@ pub struct WorkspaceMosaicLayerReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceParallaxSummary {
+    pub artifact_name: String,
+    pub working_plane_fraction: f64,
+    pub installed_plate_fraction: f64,
+    pub attempted_pairs: u32,
+    pub pairs_with_overlap: u32,
+    pub descriptor_matches: u32,
+    pub accepted_observations: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceScanTile {
     pub index: u32,
     pub row: u32,
@@ -228,6 +239,8 @@ pub struct WorkspaceScanReport {
     pub mosaic_artifact_name: Option<String>,
     #[serde(default)]
     pub mosaic_layers: Vec<WorkspaceMosaicLayerReport>,
+    #[serde(default)]
+    pub parallax: Option<WorkspaceParallaxSummary>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
 }

@@ -4,6 +4,7 @@
 
 mod opencv_backend;
 mod workspace_mosaic;
+mod workspace_parallax;
 
 #[cfg(test)]
 mod legacy_conformance;
@@ -18,6 +19,10 @@ pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_fra
 pub use workspace_mosaic::{
     build_workspace_mosaic, plan_workspace_scan, workspace_camera_reachable_region,
     WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
+};
+pub use workspace_parallax::{
+    measure_workspace_parallax, WorkspaceParallaxObservation, WorkspaceParallaxReport,
+    WorkspaceParallaxStream,
 };
 
 use serde::{Deserialize, Serialize};
@@ -126,6 +131,39 @@ pub fn rescale_planar_camera_model(
         scaled.correction_y_coefficients_mm[index] = transform[1][0] * x + transform[1][1] * y;
     }
     Ok(scaled)
+}
+
+/// Interpolates parallel image planes that use the same calibrated camera
+/// basis. Zero selects `first`; one selects `second`.
+pub fn interpolate_planar_camera_model(
+    first: &PlanarCameraModel,
+    second: &PlanarCameraModel,
+    fraction: f64,
+) -> Result<PlanarCameraModel, String> {
+    if !fraction.is_finite()
+        || first.role != second.role
+        || first.center_x_px != second.center_x_px
+        || first.center_y_px != second.center_y_px
+        || first.normalization_x_px != second.normalization_x_px
+        || first.normalization_y_px != second.normalization_y_px
+        || first.supported_min_x_px != second.supported_min_x_px
+        || first.supported_max_x_px != second.supported_max_x_px
+        || first.supported_min_y_px != second.supported_min_y_px
+        || first.supported_max_y_px != second.supported_max_y_px
+        || first.kind != second.kind
+    {
+        return Err("camera planes do not share one calibrated image basis".into());
+    }
+    let mut interpolated = first.clone();
+    for index in 0..7 {
+        interpolated.correction_x_coefficients_mm[index] += fraction
+            * (second.correction_x_coefficients_mm[index]
+                - first.correction_x_coefficients_mm[index]);
+        interpolated.correction_y_coefficients_mm[index] += fraction
+            * (second.correction_y_coefficients_mm[index]
+                - first.correction_y_coefficients_mm[index]);
+    }
+    Ok(interpolated)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

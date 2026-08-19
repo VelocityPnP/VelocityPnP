@@ -1046,7 +1046,7 @@ fn guided_template_candidates(
     Ok(candidates)
 }
 
-fn expected_overlap_rois(
+pub(crate) fn expected_overlap_rois(
     fixed_tile: &WorkspaceScanTile,
     moving_tile: &WorkspaceScanTile,
     model: &PlanarCameraModel,

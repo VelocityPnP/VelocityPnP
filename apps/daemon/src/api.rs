@@ -35,8 +35,9 @@ use velocitypnp_domain::{
     PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
-    WorkspaceMosaicLayerReport, WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode,
-    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceSurfaceModel,
+    WorkspaceMosaicLayerReport, WorkspaceParallaxSummary, WorkspaceRasterTransform,
+    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
+    WorkspaceScanStatus, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -51,14 +52,15 @@ use velocitypnp_vision::{
     detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
     detect_installed_plate_hole, encode_gray_png, fit_installed_plate_geometry,
     fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model, mean_nozzle_detection,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, rescale_planar_camera_model, resize_gray_frame,
-    summarize_camera_reproducibility, summarize_head_camera_feature,
+    measure_workspace_parallax, plan_bottom_camera_correction, plan_pixel_correction,
+    plan_visual_homing, plan_workspace_scan, query_camera_controls, rescale_planar_camera_model,
+    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
     summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
     CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
     GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
-    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream,
+    WorkspaceScanPlan,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -814,6 +816,7 @@ async fn start_workspace_scan(
         registrations: Vec::new(),
         mosaic_artifact_name: None,
         mosaic_layers: Vec::new(),
+        parallax: None,
         warnings: estimate.warnings.clone(),
         failure: None,
     };
@@ -1285,9 +1288,15 @@ fn workspace_scan_estimate(
         WorkspaceArtifactRetention::Thumbnails => thumbnail_bytes,
         WorkspaceArtifactRetention::MosaicOnly => 0,
     };
+    let parallax_bytes = if surface_models.len() > 1 {
+        u64::from(planned_registrations) * 4_096 + 4_096
+    } else {
+        0
+    };
     let estimated_retained_bytes = mosaic_pixels * 11 / 10 * surface_models.len() as u64
         + metadata_bytes
-        + retained_image_bytes;
+        + retained_image_bytes
+        + parallax_bytes;
     let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
     let estimated_duration_seconds = if mode == WorkspaceScanMode::Survey {
         let first_frames = top_profile.settle_frames + 1;
@@ -1296,7 +1305,9 @@ fn workspace_scan_estimate(
             + u64::from(planned_tiles.saturating_sub(1)) * u64::from(later_frames);
         (movement_seconds
             + capture_frames as f64 / f64::from(top_profile.frames_per_second)
-            + f64::from(planned_registrations) * ESTIMATED_REGISTRATION_SECONDS
+            + f64::from(planned_registrations)
+                * ESTIMATED_REGISTRATION_SECONDS
+                * (surface_models.len() + usize::from(surface_models.len() > 1)) as f64
             + 20.0)
             .ceil() as u64
     } else {
@@ -1571,6 +1582,8 @@ async fn capture_and_build_precision_workspace_scan(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| "workspace scan did not capture every planned tile".to_string())?;
     let build_plan = plan.clone();
+    let parallax_working_model = camera_model.clone();
+    let parallax_installed_model = installed_camera_model.cloned();
     let mut build_models = vec![(
         WorkspaceSurfaceModel::TopCameraWorkingPlane,
         camera_model.clone(),
@@ -1581,19 +1594,31 @@ async fn capture_and_build_precision_workspace_scan(
             installed_camera_model.clone(),
         ));
     }
-    let mosaics = tokio::task::spawn_blocking(move || {
-        build_models
+    let (mosaics, parallax) = tokio::task::spawn_blocking(move || {
+        let parallax = parallax_installed_model
+            .as_ref()
+            .map(|installed_model| {
+                measure_workspace_parallax(
+                    &build_plan,
+                    &parallax_working_model,
+                    installed_model,
+                    &frames,
+                )
+            })
+            .transpose()?;
+        let mosaics = build_models
             .into_iter()
             .map(|(surface_model, model)| {
                 build_workspace_mosaic(&build_plan, &model, &frames)
                     .map(|mosaic| (surface_model, mosaic))
             })
-            .collect::<anyhow::Result<Vec<_>>>()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        anyhow::Ok((mosaics, parallax))
     })
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    complete_workspace_mosaics(state, scan, mosaics)
+    complete_workspace_mosaics(state, scan, mosaics, parallax)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1632,6 +1657,16 @@ async fn capture_and_build_workspace_survey(
         ));
     }
     let mut streams = Some(layer_streams);
+    let mut parallax_stream = installed_camera_model
+        .map(|installed_camera_model| {
+            WorkspaceParallaxStream::new(
+                plan.clone(),
+                camera_model.clone(),
+                installed_camera_model.clone(),
+            )
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     let feed_mm_per_min = scan.feed_mm_per_min;
@@ -1669,21 +1704,30 @@ async fn capture_and_build_workspace_survey(
         let mut active_streams = streams
             .take()
             .ok_or_else(|| "workspace mosaic streams are unavailable".to_string())?;
+        let active_parallax_stream = parallax_stream.take();
         let tile_index = tile.index;
-        let (returned_streams, row_completed) = tokio::task::spawn_blocking(move || {
-            let mut row_completed = false;
-            for (layer_index, (_, stream)) in active_streams.iter_mut().enumerate() {
-                let completed = stream.push_frame(tile_index, frame.clone())?;
-                if layer_index == 0 {
-                    row_completed = completed;
+        let (returned_streams, returned_parallax_stream, row_completed) =
+            tokio::task::spawn_blocking(move || {
+                let mut row_completed = false;
+                for (layer_index, (_, stream)) in active_streams.iter_mut().enumerate() {
+                    let completed = stream.push_frame(tile_index, frame.clone())?;
+                    if layer_index == 0 {
+                        row_completed = completed;
+                    }
                 }
-            }
-            anyhow::Ok((active_streams, row_completed))
-        })
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
+                let returned_parallax_stream = if let Some(mut stream) = active_parallax_stream {
+                    stream.push_frame(tile_index, frame)?;
+                    Some(stream)
+                } else {
+                    None
+                };
+                anyhow::Ok((active_streams, returned_parallax_stream, row_completed))
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
         streams = Some(returned_streams);
+        parallax_stream = returned_parallax_stream;
 
         scan.captured_tiles += 1;
         scan.updated_at = Utc::now();
@@ -1701,16 +1745,20 @@ async fn capture_and_build_workspace_survey(
     let streams = streams
         .take()
         .ok_or_else(|| "workspace mosaic streams are unavailable".to_string())?;
-    let mosaics = tokio::task::spawn_blocking(move || {
-        streams
+    let (mosaics, parallax) = tokio::task::spawn_blocking(move || {
+        let mosaics = streams
             .into_iter()
             .map(|(surface_model, stream)| stream.finish().map(|mosaic| (surface_model, mosaic)))
-            .collect::<anyhow::Result<Vec<_>>>()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let parallax = parallax_stream
+            .map(WorkspaceParallaxStream::finish)
+            .transpose()?;
+        anyhow::Ok((mosaics, parallax))
     })
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    complete_workspace_mosaics(state, scan, mosaics)
+    complete_workspace_mosaics(state, scan, mosaics, parallax)
 }
 
 async fn capture_persistent_workspace_frame(
@@ -1809,6 +1857,7 @@ fn complete_workspace_mosaics(
     state: &AppState,
     scan: &mut WorkspaceScanReport,
     mosaics: Vec<(WorkspaceSurfaceModel, WorkspaceMosaic)>,
+    parallax: Option<WorkspaceParallaxReport>,
 ) -> Result<String, String> {
     if mosaics.is_empty() {
         return Err("workspace scan produced no surface mosaics".into());
@@ -1869,6 +1918,25 @@ fn complete_workspace_mosaics(
             scan.tiles = mosaic.tiles;
             scan.registrations = mosaic.registrations;
             scan.mosaic_artifact_name = Some(artifact_name);
+        }
+    }
+    scan.parallax = None;
+    if let Some(parallax) = parallax {
+        let artifact_name = "surface-height-observations.json";
+        let encoded = serde_json::to_vec_pretty(&parallax).map_err(|error| error.to_string())?;
+        persist_workspace_artifact(state, scan, artifact_name, "application/json", &encoded)?;
+        scan.parallax = Some(WorkspaceParallaxSummary {
+            artifact_name: artifact_name.into(),
+            working_plane_fraction: parallax.working_plane_fraction,
+            installed_plate_fraction: parallax.installed_plate_fraction,
+            attempted_pairs: parallax.attempted_pairs,
+            pairs_with_overlap: parallax.pairs_with_overlap,
+            descriptor_matches: parallax.descriptor_matches,
+            accepted_observations: parallax.accepted_observations,
+        });
+        if parallax.accepted_observations == 0 {
+            scan.warnings
+                .push("parallax analysis found no supported local height observations".into());
         }
     }
     scan.updated_at = Utc::now();
@@ -11957,6 +12025,7 @@ mod tests {
             registrations: vec![],
             mosaic_artifact_name: None,
             mosaic_layers: Vec::new(),
+            parallax: None,
             warnings: vec![],
             failure: None,
         }
@@ -12592,6 +12661,24 @@ mod tests {
             tiles: tiles.clone(),
             registrations: Vec::new(),
         };
+        let parallax = WorkspaceParallaxReport {
+            working_plane_fraction: 0.0,
+            installed_plate_fraction: 1.0,
+            attempted_pairs: 1,
+            pairs_with_overlap: 1,
+            raw_matches: 12,
+            descriptor_matches: 8,
+            accepted_observations: 1,
+            observations: vec![velocitypnp_vision::WorkspaceParallaxObservation {
+                x_mm: 220.0,
+                y_mm: 200.0,
+                surface_fraction: 0.25,
+                residual_mm: 0.01,
+                parallax_signal_mm: 2.0,
+                fixed_tile_index: 0,
+                moving_tile_index: 1,
+            }],
+        };
 
         complete_workspace_mosaics(
             &state,
@@ -12600,6 +12687,7 @@ mod tests {
                 (WorkspaceSurfaceModel::TopCameraWorkingPlane, mosaic(64)),
                 (WorkspaceSurfaceModel::InstalledPlatePlanes, mosaic(192)),
             ],
+            Some(parallax),
         )
         .unwrap();
 
@@ -12616,6 +12704,13 @@ mod tests {
                 .unwrap()
                 .is_some());
         }
+        let parallax = scan.parallax.as_ref().unwrap();
+        assert_eq!(parallax.accepted_observations, 1);
+        assert!(state
+            .store
+            .get_workspace_scan_artifact(scan.id, &parallax.artifact_name)
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

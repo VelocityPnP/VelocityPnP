@@ -178,6 +178,15 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "surface_model"):
             client.workspace_scan_mosaic("scan", surface_model="unknown")
 
+        heights = {"accepted_observations": 42, "observations": []}
+        with patch.object(client, "_request", return_value=heights) as send:
+            self.assertEqual(client.workspace_scan_surface_heights("scan"), heights)
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/scan/artifacts/"
+            "surface-height-observations.json",
+        )
+
     def test_home_requires_explicit_physical_confirmation(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:

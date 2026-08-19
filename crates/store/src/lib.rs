@@ -522,6 +522,7 @@ mod tests {
             registrations: vec![],
             mosaic_artifact_name: None,
             mosaic_layers: Vec::new(),
+            parallax: None,
             warnings: vec![],
             failure: None,
         };
