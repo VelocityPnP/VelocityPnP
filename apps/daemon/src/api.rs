@@ -52,12 +52,13 @@ use velocitypnp_vision::{
     detect_installed_plate_hole, encode_gray_png, fit_installed_plate_geometry,
     fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model, mean_nozzle_detection,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, resize_gray_frame, summarize_camera_reproducibility,
-    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
-    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
-    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig,
-    VisualHomingPlan, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
+    query_camera_controls, rescale_planar_camera_model, resize_gray_frame,
+    summarize_camera_reproducibility, summarize_head_camera_feature,
+    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
+    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
+    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
+    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -1076,51 +1077,6 @@ fn select_workspace_surface_model(
         WorkspaceSurfaceModel::InstalledPlatePlanes,
         Some(geometry),
     ))
-}
-
-fn rescale_planar_camera_model(
-    model: &PlanarCameraModel,
-    target_mapping: [[f64; 2]; 2],
-) -> Result<PlanarCameraModel, String> {
-    let center = model
-        .correction_at(model.center_x_px, model.center_y_px)
-        .ok_or_else(|| "top-camera center is outside calibrated support".to_string())?;
-    let x = model
-        .correction_at(model.center_x_px + 1.0, model.center_y_px)
-        .ok_or_else(|| "top-camera X derivative is outside calibrated support".to_string())?;
-    let y = model
-        .correction_at(model.center_x_px, model.center_y_px + 1.0)
-        .ok_or_else(|| "top-camera Y derivative is outside calibrated support".to_string())?;
-    let source = [
-        [x[0] - center[0], y[0] - center[0]],
-        [x[1] - center[1], y[1] - center[1]],
-    ];
-    let determinant = source[0][0] * source[1][1] - source[0][1] * source[1][0];
-    if !determinant.is_finite() || determinant.abs() <= f64::EPSILON {
-        return Err("top-camera center mapping is singular".into());
-    }
-    let inverse = [
-        [source[1][1] / determinant, -source[0][1] / determinant],
-        [-source[1][0] / determinant, source[0][0] / determinant],
-    ];
-    let transform = [
-        [
-            target_mapping[0][0] * inverse[0][0] + target_mapping[0][1] * inverse[1][0],
-            target_mapping[0][0] * inverse[0][1] + target_mapping[0][1] * inverse[1][1],
-        ],
-        [
-            target_mapping[1][0] * inverse[0][0] + target_mapping[1][1] * inverse[1][0],
-            target_mapping[1][0] * inverse[0][1] + target_mapping[1][1] * inverse[1][1],
-        ],
-    ];
-    let mut scaled = model.clone();
-    for index in 0..7 {
-        let x = model.correction_x_coefficients_mm[index];
-        let y = model.correction_y_coefficients_mm[index];
-        scaled.correction_x_coefficients_mm[index] = transform[0][0] * x + transform[0][1] * y;
-        scaled.correction_y_coefficients_mm[index] = transform[1][0] * x + transform[1][1] * y;
-    }
-    Ok(scaled)
 }
 
 fn installed_plates_scan_region(

@@ -1,21 +1,35 @@
 use crate::{gray_frame_to_mat, GrayFrame};
 use anyhow::{ensure, Context, Result};
-use opencv::calib3d;
-use opencv::core::{self, Mat, MatTraitConst, Point2f, Vector, NORM_HAMMING};
+use opencv::core::{self, Mat, MatTraitConst, Point2f, Rect, Size, Vector, NORM_HAMMING};
 use opencv::features2d;
+use opencv::imgproc;
 use opencv::prelude::*;
 use velocitypnp_domain::{
-    Bounds, PlanarCameraModel, Pose, WorkspacePixelBounds, WorkspaceScanRegion, WorkspaceScanTile,
-    WorkspaceTileRegistration,
+    Bounds, PlanarCameraModel, Pose, WorkspacePixelBounds, WorkspaceRegistrationMethod,
+    WorkspaceScanRegion, WorkspaceScanTile, WorkspaceTileRegistration,
 };
 
 const MAX_PAIR_CORRECTION_MM: f64 = 1.0;
 const MAX_APPLIED_CORRECTION_MM: f64 = 0.75;
-const MAX_REGISTRATION_ROTATION_DEG: f64 = 1.0;
-const MAX_REGISTRATION_SCALE_ERROR: f64 = 0.02;
 const MAX_REGISTRATION_RESIDUAL_P95_MM: f64 = 0.20;
 const MAX_CORROBORATING_CORRECTION_GAP_MM: f64 = 0.25;
 const MIN_REGISTRATION_MATCHES: usize = 8;
+const REGISTRATION_INLIER_RADIUS_MM: f64 = 0.15;
+const OVERLAP_ROI_MARGIN_MM: f64 = 0.5;
+const OVERLAP_ROI_SAMPLE_STEP_PX: u32 = 8;
+const ORB_NEIGHBOR_DISTANCE_RATIO: f32 = 0.8;
+const MIN_GUIDED_CORRELATION_SCORE: f64 = 0.3;
+const MIN_GUIDED_CORRELATION_UNIQUENESS: f64 = 0.1;
+const MAX_GUIDED_CORRECTION_GAP_MM: f64 = 0.15;
+const MIN_GUIDED_SEGMENTS: usize = 2;
+
+#[derive(Debug, Clone, Copy)]
+struct GuidedCorrelationCandidate {
+    correction_x_mm: f64,
+    correction_y_mm: f64,
+    score: f64,
+    uniqueness: f64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceScanPlan {
@@ -213,12 +227,23 @@ impl WorkspaceMosaicStream {
             }
             // A repetitive plate grid can produce a locally plausible but
             // isolated match. Require agreement from two already-processed
-            // neighbors before a streaming survey changes machine placement.
+            // ORB neighbors before a streaming survey changes machine
+            // placement. A guided correlation already requires agreement
+            // from two independent overlap segments.
+            let minimum_support = if self.registrations.iter().any(|registration| {
+                registration.moving_tile_index as usize == index
+                    && registration.accepted
+                    && registration.method == WorkspaceRegistrationMethod::GuidedCorrelation
+            }) {
+                1
+            } else {
+                2
+            };
             apply_registration_correction_with_support(
                 index,
                 &self.registrations,
                 &mut self.tiles,
-                2,
+                minimum_support,
             );
             splat_workspace_tile(
                 &self.plan,
@@ -593,6 +618,33 @@ fn register_pair(
 ) -> Result<WorkspaceTileRegistration> {
     let fixed_mat = gray_frame_to_mat(fixed_frame)?;
     let moving_mat = gray_frame_to_mat(moving_frame)?;
+    let Some((fixed_roi, moving_roi)) = expected_overlap_rois(
+        fixed_tile,
+        moving_tile,
+        model,
+        fixed_frame.width,
+        fixed_frame.height,
+    )?
+    else {
+        return Ok(rejected_registration(
+            fixed_tile.index,
+            moving_tile.index,
+            0,
+            0,
+            "neighboring tiles have no predicted image overlap",
+        ));
+    };
+    let fixed_overlap = fixed_mat.roi(fixed_roi)?.try_clone()?;
+    let moving_overlap = moving_mat.roi(moving_roi)?.try_clone()?;
+    let guided_registration = guided_registration(
+        &fixed_overlap,
+        &moving_overlap,
+        fixed_roi,
+        moving_roi,
+        fixed_tile,
+        moving_tile,
+        model,
+    )?;
     let mut orb = features2d::ORB::create(
         1_500,
         1.2,
@@ -607,7 +659,7 @@ fn register_pair(
     let mut fixed_keypoints = Vector::new();
     let mut fixed_descriptors = Mat::default();
     orb.detect_and_compute_def(
-        &fixed_mat,
+        &fixed_overlap,
         &Mat::default(),
         &mut fixed_keypoints,
         &mut fixed_descriptors,
@@ -615,37 +667,56 @@ fn register_pair(
     let mut moving_keypoints = Vector::new();
     let mut moving_descriptors = Mat::default();
     orb.detect_and_compute_def(
-        &moving_mat,
+        &moving_overlap,
         &Mat::default(),
         &mut moving_keypoints,
         &mut moving_descriptors,
     )?;
     if fixed_descriptors.empty() || moving_descriptors.empty() {
-        return Ok(rejected_registration(
-            fixed_tile.index,
-            moving_tile.index,
-            0,
-            0,
-            "one or both overlap images have no ORB descriptors",
-        ));
+        return Ok(guided_registration.unwrap_or_else(|| {
+            rejected_registration(
+                fixed_tile.index,
+                moving_tile.index,
+                0,
+                0,
+                "one or both overlap images have no ORB descriptors",
+            )
+        }));
     }
-    let matcher = features2d::BFMatcher::create(NORM_HAMMING, true)?;
-    let mut matches = Vector::new();
-    matcher.train_match(
+    let matcher = features2d::BFMatcher::create(NORM_HAMMING, false)?;
+    let mut matches = Vector::<Vector<core::DMatch>>::new();
+    matcher.knn_train_match(
         &fixed_descriptors,
         &moving_descriptors,
         &mut matches,
+        2,
         &core::no_array(),
+        false,
     )?;
     let raw_match_count = matches.len();
     let mut fixed_points = Vector::<Point2f>::new();
     let mut moving_points = Vector::<Point2f>::new();
-    for matched in matches {
-        if matched.distance > 64.0 {
+    for neighbors in matches {
+        if neighbors.len() < 2 {
             continue;
         }
-        let fixed_pixel = fixed_keypoints.get(matched.query_idx as usize)?.pt();
-        let moving_pixel = moving_keypoints.get(matched.train_idx as usize)?.pt();
+        let matched = neighbors.get(0)?;
+        let alternative = neighbors.get(1)?;
+        if matched.distance > 64.0
+            || matched.distance >= alternative.distance * ORB_NEIGHBOR_DISTANCE_RATIO
+        {
+            continue;
+        }
+        let fixed_local = fixed_keypoints.get(matched.query_idx as usize)?.pt();
+        let moving_local = moving_keypoints.get(matched.train_idx as usize)?.pt();
+        let fixed_pixel = Point2f::new(
+            fixed_local.x + fixed_roi.x as f32,
+            fixed_local.y + fixed_roi.y as f32,
+        );
+        let moving_pixel = Point2f::new(
+            moving_local.x + moving_roi.x as f32,
+            moving_local.y + moving_roi.y as f32,
+        );
         let Some(fixed_correction) =
             model.correction_at(f64::from(fixed_pixel.x), f64::from(fixed_pixel.y))
         else {
@@ -674,91 +745,438 @@ fn register_pair(
     }
     let geometric_match_count = fixed_points.len();
     if geometric_match_count < MIN_REGISTRATION_MATCHES {
-        return Ok(rejected_registration(
-            fixed_tile.index,
-            moving_tile.index,
-            raw_match_count,
-            geometric_match_count,
-            "overlap has too few geometrically plausible ORB matches",
-        ));
+        return Ok(guided_registration.unwrap_or_else(|| {
+            rejected_registration(
+                fixed_tile.index,
+                moving_tile.index,
+                raw_match_count,
+                geometric_match_count,
+                "overlap has too few geometrically plausible ORB matches",
+            )
+        }));
     }
 
-    let mut inlier_mask = Mat::default();
-    let transform = calib3d::estimate_affine_partial_2d(
-        &moving_points,
-        &fixed_points,
-        &mut inlier_mask,
-        calib3d::RANSAC,
-        0.15,
-        2_000,
-        0.99,
-        10,
-    )?;
-    if transform.empty() {
-        return Ok(rejected_registration(
-            fixed_tile.index,
-            moving_tile.index,
-            raw_match_count,
-            geometric_match_count,
-            "OpenCV could not estimate an overlap transform",
-        ));
-    }
-    let a00 = *transform.at_2d::<f64>(0, 0)?;
-    let a01 = *transform.at_2d::<f64>(0, 1)?;
-    let tx = *transform.at_2d::<f64>(0, 2)?;
-    let a10 = *transform.at_2d::<f64>(1, 0)?;
-    let a11 = *transform.at_2d::<f64>(1, 1)?;
-    let ty = *transform.at_2d::<f64>(1, 2)?;
-    let scale = a00.hypot(a10);
-    let rotation_deg = a10.atan2(a00).to_degrees();
-    let correction_x_mm =
-        a00 * moving_tile.nominal_pose.x_mm + a01 * moving_tile.nominal_pose.y_mm + tx
-            - moving_tile.nominal_pose.x_mm;
-    let correction_y_mm =
-        a10 * moving_tile.nominal_pose.x_mm + a11 * moving_tile.nominal_pose.y_mm + ty
-            - moving_tile.nominal_pose.y_mm;
-    let mask = inlier_mask
-        .data_typed::<u8>()
-        .context("reading OpenCV workspace inlier mask")?;
-    let inlier_count = mask.iter().filter(|value| **value != 0).count();
-    let mut residuals = Vec::with_capacity(inlier_count);
-    for index in 0..geometric_match_count {
-        if mask.get(index).copied().unwrap_or(0) == 0 {
-            continue;
-        }
-        let moving = moving_points.get(index)?;
-        let fixed = fixed_points.get(index)?;
-        let predicted_x = a00 * f64::from(moving.x) + a01 * f64::from(moving.y) + tx;
-        let predicted_y = a10 * f64::from(moving.x) + a11 * f64::from(moving.y) + ty;
-        residuals.push((predicted_x - f64::from(fixed.x)).hypot(predicted_y - f64::from(fixed.y)));
-    }
+    let displacements = (0..geometric_match_count)
+        .map(|index| {
+            let moving = moving_points.get(index)?;
+            let fixed = fixed_points.get(index)?;
+            anyhow::Ok([f64::from(fixed.x - moving.x), f64::from(fixed.y - moving.y)])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (correction_x_mm, correction_y_mm, mut residuals) =
+        robust_translation(&displacements, REGISTRATION_INLIER_RADIUS_MM)
+            .context("workspace overlap has no translation consensus")?;
+    let inlier_count = residuals.len();
     residuals.sort_by(f64::total_cmp);
     let residual_p95_mm = percentile_95(&residuals).unwrap_or(f64::INFINITY);
     let inlier_ratio = inlier_count as f64 / geometric_match_count as f64;
     let correction_distance = correction_x_mm.hypot(correction_y_mm);
     let accepted = inlier_count >= MIN_REGISTRATION_MATCHES
         && inlier_ratio >= 0.4
-        && (scale - 1.0).abs() <= MAX_REGISTRATION_SCALE_ERROR
-        && rotation_deg.abs() <= MAX_REGISTRATION_ROTATION_DEG
         && residual_p95_mm <= MAX_REGISTRATION_RESIDUAL_P95_MM
         && correction_distance <= MAX_APPLIED_CORRECTION_MM;
-    Ok(WorkspaceTileRegistration {
+    let orb_registration = WorkspaceTileRegistration {
         fixed_tile_index: fixed_tile.index,
         moving_tile_index: moving_tile.index,
+        method: WorkspaceRegistrationMethod::OrbTranslation,
         raw_match_count: raw_match_count as u32,
         geometric_match_count: geometric_match_count as u32,
         inlier_count: inlier_count as u32,
         inlier_ratio,
         correction_x_mm: Some(correction_x_mm),
         correction_y_mm: Some(correction_y_mm),
-        scale: Some(scale),
-        rotation_deg: Some(rotation_deg),
+        scale: Some(1.0),
+        rotation_deg: Some(0.0),
         residual_p95_mm: Some(residual_p95_mm),
+        correlation_score: None,
+        correlation_uniqueness: None,
         accepted,
-        rejection_reason: (!accepted).then(|| {
-            "overlap transform exceeded match, scale, rotation, residual, or correction limits"
-                .into()
-        }),
+        rejection_reason: (!accepted)
+            .then(|| "overlap translation exceeded match, residual, or correction limits".into()),
+    };
+    Ok(if orb_registration.accepted {
+        orb_registration
+    } else {
+        guided_registration.unwrap_or(orb_registration)
+    })
+}
+
+fn guided_registration(
+    fixed_overlap: &Mat,
+    moving_overlap: &Mat,
+    fixed_roi: Rect,
+    moving_roi: Rect,
+    fixed_tile: &WorkspaceScanTile,
+    moving_tile: &WorkspaceScanTile,
+    model: &PlanarCameraModel,
+) -> Result<Option<WorkspaceTileRegistration>> {
+    let candidates = guided_template_candidates(
+        fixed_overlap,
+        moving_overlap,
+        fixed_roi,
+        moving_roi,
+        fixed_tile,
+        moving_tile,
+        model,
+    )?;
+    let eligible = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.score >= MIN_GUIDED_CORRELATION_SCORE
+                && candidate.uniqueness >= MIN_GUIDED_CORRELATION_UNIQUENESS
+                && candidate.correction_x_mm.hypot(candidate.correction_y_mm)
+                    <= MAX_APPLIED_CORRECTION_MM
+        })
+        .collect::<Vec<_>>();
+    let mut best = Vec::new();
+    let mut best_quality = f64::NEG_INFINITY;
+    for mask in 1_usize..(1_usize << eligible.len()) {
+        let subset = eligible
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .map(|(_, candidate)| **candidate)
+            .collect::<Vec<_>>();
+        if subset.len() < MIN_GUIDED_SEGMENTS
+            || subset.iter().enumerate().any(|(index, first)| {
+                subset[index + 1..].iter().any(|second| {
+                    (first.correction_x_mm - second.correction_x_mm)
+                        .hypot(first.correction_y_mm - second.correction_y_mm)
+                        > MAX_GUIDED_CORRECTION_GAP_MM
+                })
+            })
+        {
+            continue;
+        }
+        let quality = subset
+            .iter()
+            .map(|candidate| candidate.score * candidate.uniqueness)
+            .sum::<f64>();
+        if subset.len() > best.len() || (subset.len() == best.len() && quality > best_quality) {
+            best = subset;
+            best_quality = quality;
+        }
+    }
+    if best.len() < MIN_GUIDED_SEGMENTS {
+        return Ok(None);
+    }
+    let total_weight = best
+        .iter()
+        .map(|candidate| candidate.score * candidate.uniqueness)
+        .sum::<f64>();
+    let correction_x_mm = best
+        .iter()
+        .map(|candidate| candidate.correction_x_mm * candidate.score * candidate.uniqueness)
+        .sum::<f64>()
+        / total_weight;
+    let correction_y_mm = best
+        .iter()
+        .map(|candidate| candidate.correction_y_mm * candidate.score * candidate.uniqueness)
+        .sum::<f64>()
+        / total_weight;
+    let mut residuals = best
+        .iter()
+        .map(|candidate| {
+            (candidate.correction_x_mm - correction_x_mm)
+                .hypot(candidate.correction_y_mm - correction_y_mm)
+        })
+        .collect::<Vec<_>>();
+    residuals.sort_by(f64::total_cmp);
+    let residual_p95_mm = percentile_95(&residuals).unwrap_or(f64::INFINITY);
+    Ok(Some(WorkspaceTileRegistration {
+        fixed_tile_index: fixed_tile.index,
+        moving_tile_index: moving_tile.index,
+        method: WorkspaceRegistrationMethod::GuidedCorrelation,
+        raw_match_count: candidates.len() as u32,
+        geometric_match_count: eligible.len() as u32,
+        inlier_count: best.len() as u32,
+        inlier_ratio: best.len() as f64 / candidates.len().max(1) as f64,
+        correction_x_mm: Some(correction_x_mm),
+        correction_y_mm: Some(correction_y_mm),
+        scale: Some(1.0),
+        rotation_deg: Some(0.0),
+        residual_p95_mm: Some(residual_p95_mm),
+        correlation_score: best
+            .iter()
+            .map(|candidate| candidate.score)
+            .min_by(f64::total_cmp),
+        correlation_uniqueness: best
+            .iter()
+            .map(|candidate| candidate.uniqueness)
+            .min_by(f64::total_cmp),
+        accepted: true,
+        rejection_reason: None,
+    }))
+}
+
+fn guided_template_candidates(
+    fixed_overlap: &Mat,
+    moving_overlap: &Mat,
+    fixed_roi: Rect,
+    moving_roi: Rect,
+    fixed_tile: &WorkspaceScanTile,
+    moving_tile: &WorkspaceScanTile,
+    model: &PlanarCameraModel,
+) -> Result<Vec<GuidedCorrelationCandidate>> {
+    if fixed_roi.width < 96
+        || fixed_roi.height < 96
+        || moving_roi.width < 96
+        || moving_roi.height < 96
+    {
+        return Ok(Vec::new());
+    }
+    let target_size = Size::new(fixed_roi.width, fixed_roi.height);
+    let mut moving_resized = Mat::default();
+    imgproc::resize(
+        moving_overlap,
+        &mut moving_resized,
+        target_size,
+        0.0,
+        0.0,
+        imgproc::INTER_AREA,
+    )?;
+    let scale = model
+        .local_mm_per_pixel(model.center_x_px, model.center_y_px)
+        .context("top-camera center scale is unavailable")?;
+    let search_margin = (MAX_APPLIED_CORRECTION_MM / scale).ceil() as i32;
+    let horizontal_neighbors = (moving_tile.nominal_pose.x_mm - fixed_tile.nominal_pose.x_mm).abs()
+        > (moving_tile.nominal_pose.y_mm - fixed_tile.nominal_pose.y_mm).abs();
+    // Keep the motion-axis dimension fixed. The narrow overlap did not give
+    // unique peaks on that axis in attached-machine captures. Three bands
+    // independently measure only the observable cross-axis shift.
+    let mut candidates = Vec::new();
+    for segment_index in 0..3 {
+        let segment = if horizontal_neighbors {
+            let top = segment_index * fixed_roi.height / 3;
+            let bottom = (segment_index + 1) * fixed_roi.height / 3;
+            Rect::new(0, top, fixed_roi.width, bottom - top)
+        } else {
+            let left = segment_index * fixed_roi.width / 3;
+            let right = (segment_index + 1) * fixed_roi.width / 3;
+            Rect::new(left, 0, right - left, fixed_roi.height)
+        };
+        let search_left = (segment.x - search_margin).max(0);
+        let search_top = (segment.y - search_margin).max(0);
+        let search_right = (segment.x + segment.width + search_margin).min(fixed_roi.width);
+        let search_bottom = (segment.y + segment.height + search_margin).min(fixed_roi.height);
+        let search = Rect::new(
+            search_left,
+            search_top,
+            search_right - search_left,
+            search_bottom - search_top,
+        );
+        let template = fixed_overlap.roi(segment)?;
+        let search_image = moving_resized.roi(search)?;
+        let mut scores = Mat::default();
+        imgproc::match_template_def(
+            &search_image,
+            &template,
+            &mut scores,
+            imgproc::TM_CCOEFF_NORMED,
+        )?;
+        let score_width = scores.cols() as usize;
+        let values = scores
+            .data_typed::<f32>()
+            .context("reading guided workspace template scores")?;
+        let mut ranked = values
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, score)| score.is_finite())
+            .collect::<Vec<_>>();
+        ranked.sort_by(|first, second| second.1.total_cmp(&first.1));
+        let Some((best_index, best_score)) = ranked.first().copied() else {
+            continue;
+        };
+        let best_x = best_index % score_width;
+        let best_y = best_index / score_width;
+        let peak_exclusion = (search_margin / 3).max(5) as usize;
+        let second_score = ranked
+            .iter()
+            .find(|(index, _)| {
+                let x = *index % score_width;
+                let y = *index / score_width;
+                x.abs_diff(best_x) > peak_exclusion || y.abs_diff(best_y) > peak_exclusion
+            })
+            .map(|(_, score)| *score)
+            .unwrap_or(-1.0);
+        let shift_x = best_x as f64 + f64::from(search.x - segment.x);
+        let shift_y = best_y as f64 + f64::from(search.y - segment.y);
+        let fixed_local_x = f64::from(segment.x) + f64::from(segment.width) / 2.0;
+        let fixed_local_y = f64::from(segment.y) + f64::from(segment.height) / 2.0;
+        let moving_scale_x = f64::from(moving_roi.width) / f64::from(fixed_roi.width);
+        let moving_scale_y = f64::from(moving_roi.height) / f64::from(fixed_roi.height);
+        let moving_pixel_x = f64::from(moving_roi.x) + (fixed_local_x + shift_x) * moving_scale_x;
+        let moving_pixel_y = f64::from(moving_roi.y) + (fixed_local_y + shift_y) * moving_scale_y;
+        let moving_baseline_x = f64::from(moving_roi.x) + fixed_local_x * moving_scale_x;
+        let moving_baseline_y = f64::from(moving_roi.y) + fixed_local_y * moving_scale_y;
+        let Some(moving_correction) = model.correction_at(moving_pixel_x, moving_pixel_y) else {
+            continue;
+        };
+        let Some(moving_baseline) = model.correction_at(moving_baseline_x, moving_baseline_y)
+        else {
+            continue;
+        };
+        candidates.push(GuidedCorrelationCandidate {
+            correction_x_mm: moving_baseline[0] - moving_correction[0],
+            correction_y_mm: moving_baseline[1] - moving_correction[1],
+            score: f64::from(best_score),
+            uniqueness: f64::from(best_score - second_score),
+        });
+    }
+    Ok(candidates)
+}
+
+fn expected_overlap_rois(
+    fixed_tile: &WorkspaceScanTile,
+    moving_tile: &WorkspaceScanTile,
+    model: &PlanarCameraModel,
+    frame_width: u32,
+    frame_height: u32,
+) -> Result<Option<(Rect, Rect)>> {
+    let bounds = supported_pixel_bounds(model, frame_width, frame_height)?;
+    let footprint = conservative_camera_footprint(model, bounds)?;
+    let fixed_world = [
+        fixed_tile.nominal_pose.x_mm + footprint[0],
+        fixed_tile.nominal_pose.x_mm + footprint[1],
+        fixed_tile.nominal_pose.y_mm + footprint[2],
+        fixed_tile.nominal_pose.y_mm + footprint[3],
+    ];
+    let moving_world = [
+        moving_tile.nominal_pose.x_mm + footprint[0],
+        moving_tile.nominal_pose.x_mm + footprint[1],
+        moving_tile.nominal_pose.y_mm + footprint[2],
+        moving_tile.nominal_pose.y_mm + footprint[3],
+    ];
+    let overlap = [
+        fixed_world[0].max(moving_world[0]),
+        fixed_world[1].min(moving_world[1]),
+        fixed_world[2].max(moving_world[2]),
+        fixed_world[3].min(moving_world[3]),
+    ];
+    if overlap[0] >= overlap[1] || overlap[2] >= overlap[3] {
+        return Ok(None);
+    }
+    let fixed_roi = pixel_roi_for_world_region(model, bounds, fixed_tile.nominal_pose, overlap);
+    let moving_roi = pixel_roi_for_world_region(model, bounds, moving_tile.nominal_pose, overlap);
+    Ok(fixed_roi.zip(moving_roi))
+}
+
+fn pixel_roi_for_world_region(
+    model: &PlanarCameraModel,
+    bounds: WorkspacePixelBounds,
+    pose: Pose,
+    region: [f64; 4],
+) -> Option<Rect> {
+    let mut min_x = bounds.right;
+    let mut max_x = bounds.left;
+    let mut min_y = bounds.bottom;
+    let mut max_y = bounds.top;
+    let mut found = false;
+    let mut sample_y = bounds.top;
+    loop {
+        let mut sample_x = bounds.left;
+        loop {
+            if let Some(correction) = model.correction_at(f64::from(sample_x), f64::from(sample_y))
+            {
+                let world_x = pose.x_mm + correction[0];
+                let world_y = pose.y_mm + correction[1];
+                if world_x >= region[0] - OVERLAP_ROI_MARGIN_MM
+                    && world_x <= region[1] + OVERLAP_ROI_MARGIN_MM
+                    && world_y >= region[2] - OVERLAP_ROI_MARGIN_MM
+                    && world_y <= region[3] + OVERLAP_ROI_MARGIN_MM
+                {
+                    min_x = min_x.min(sample_x);
+                    max_x = max_x.max(sample_x);
+                    min_y = min_y.min(sample_y);
+                    max_y = max_y.max(sample_y);
+                    found = true;
+                }
+            }
+            if sample_x == bounds.right - 1 {
+                break;
+            }
+            sample_x = (sample_x + OVERLAP_ROI_SAMPLE_STEP_PX).min(bounds.right - 1);
+        }
+        if sample_y == bounds.bottom - 1 {
+            break;
+        }
+        sample_y = (sample_y + OVERLAP_ROI_SAMPLE_STEP_PX).min(bounds.bottom - 1);
+    }
+    found.then(|| {
+        let margin = OVERLAP_ROI_SAMPLE_STEP_PX;
+        let left = min_x.saturating_sub(margin).max(bounds.left);
+        let top = min_y.saturating_sub(margin).max(bounds.top);
+        let right = max_x.saturating_add(margin + 1).min(bounds.right);
+        let bottom = max_y.saturating_add(margin + 1).min(bounds.bottom);
+        Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as i32,
+            (bottom - top) as i32,
+        )
+    })
+}
+
+fn robust_translation(
+    displacements: &[[f64; 2]],
+    inlier_radius_mm: f64,
+) -> Option<(f64, f64, Vec<f64>)> {
+    if displacements.is_empty() || !inlier_radius_mm.is_finite() || inlier_radius_mm <= 0.0 {
+        return None;
+    }
+    let seed = displacements
+        .iter()
+        .map(|candidate| {
+            let residuals = displacements
+                .iter()
+                .map(|value| (value[0] - candidate[0]).hypot(value[1] - candidate[1]))
+                .filter(|residual| *residual <= inlier_radius_mm)
+                .collect::<Vec<_>>();
+            let residual_sum = residuals.iter().sum::<f64>();
+            (candidate, residuals.len(), residual_sum)
+        })
+        .max_by(|first, second| {
+            first
+                .1
+                .cmp(&second.1)
+                .then_with(|| second.2.total_cmp(&first.2))
+        })?
+        .0;
+    let mut center = *seed;
+    for _ in 0..2 {
+        let inliers = displacements
+            .iter()
+            .filter(|value| (value[0] - center[0]).hypot(value[1] - center[1]) <= inlier_radius_mm)
+            .copied()
+            .collect::<Vec<_>>();
+        if inliers.is_empty() {
+            return None;
+        }
+        let mut inlier_x = inliers.iter().map(|value| value[0]).collect::<Vec<_>>();
+        let mut inlier_y = inliers.iter().map(|value| value[1]).collect::<Vec<_>>();
+        center = [median(&mut inlier_x)?, median(&mut inlier_y)?];
+    }
+    let residuals = displacements
+        .iter()
+        .filter_map(|value| {
+            let residual = (value[0] - center[0]).hypot(value[1] - center[1]);
+            (residual <= inlier_radius_mm).then_some(residual)
+        })
+        .collect::<Vec<_>>();
+    Some((center[0], center[1], residuals))
+}
+
+fn median(sorted: &mut [f64]) -> Option<f64> {
+    if sorted.is_empty() || sorted.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    sorted.sort_by(f64::total_cmp);
+    let middle = sorted.len() / 2;
+    Some(if sorted.len() % 2 == 0 {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    } else {
+        sorted[middle]
     })
 }
 
@@ -772,6 +1190,7 @@ fn rejected_registration(
     WorkspaceTileRegistration {
         fixed_tile_index,
         moving_tile_index,
+        method: WorkspaceRegistrationMethod::OrbTranslation,
         raw_match_count: raw_match_count as u32,
         geometric_match_count: geometric_match_count as u32,
         inlier_count: 0,
@@ -781,6 +1200,8 @@ fn rejected_registration(
         scale: None,
         rotation_deg: None,
         residual_p95_mm: None,
+        correlation_score: None,
+        correlation_uniqueness: None,
         accepted: false,
         rejection_reason: Some(reason.into()),
     }
@@ -1195,6 +1616,7 @@ mod tests {
         let registration = |fixed_tile_index, correction_x_mm| WorkspaceTileRegistration {
             fixed_tile_index,
             moving_tile_index: 2,
+            method: WorkspaceRegistrationMethod::OrbTranslation,
             raw_match_count: 20,
             geometric_match_count: 12,
             inlier_count: 10,
@@ -1204,6 +1626,8 @@ mod tests {
             scale: Some(1.0),
             rotation_deg: Some(0.0),
             residual_p95_mm: Some(0.05),
+            correlation_score: None,
+            correlation_uniqueness: None,
             accepted: true,
             rejection_reason: None,
         };
@@ -1312,6 +1736,139 @@ mod tests {
         assert!(registration.inlier_count >= 8);
         assert!((registration.correction_x_mm.unwrap() + 0.03).abs() < 0.005);
         assert!(registration.correction_y_mm.unwrap().abs() < 0.005);
+    }
+
+    #[test]
+    fn overlap_rois_exclude_non_shared_image_areas() {
+        let width = 256;
+        let height = 192;
+        let model = affine_model(width, height, 0.01);
+        let tile = |index, x_mm| WorkspaceScanTile {
+            index,
+            row: 0,
+            column: index,
+            capture_order: index,
+            nominal_pose: Pose {
+                x_mm,
+                y_mm: 0.96,
+                z_mm: 31.5,
+                rotation_deg: 0.0,
+            },
+            placement_correction_x_mm: 0.0,
+            placement_correction_y_mm: 0.0,
+            artifact_name: String::new(),
+        };
+
+        let (fixed, moving) =
+            expected_overlap_rois(&tile(0, 1.28), &tile(1, 2.56), &model, width, height)
+                .unwrap()
+                .unwrap();
+
+        assert!(fixed.x > 0);
+        assert!(fixed.width < width as i32);
+        assert_eq!(moving.x, 0);
+        assert!(moving.width < width as i32);
+    }
+
+    #[test]
+    fn translation_consensus_does_not_require_an_inlier_majority() {
+        let mut displacements = (0..8)
+            .map(|index| {
+                [
+                    0.12 + f64::from(index) * 0.001,
+                    -0.08 - f64::from(index) * 0.001,
+                ]
+            })
+            .collect::<Vec<_>>();
+        displacements.extend([
+            [-0.8, -0.8],
+            [-0.6, 0.7],
+            [-0.4, 0.5],
+            [0.3, 0.6],
+            [0.5, -0.5],
+            [0.7, 0.2],
+            [0.9, -0.1],
+            [-0.9, 0.1],
+            [-0.7, -0.3],
+        ]);
+
+        let (x, y, residuals) = robust_translation(&displacements, 0.03).unwrap();
+
+        assert!((x - 0.1235).abs() < 1e-12);
+        assert!((y + 0.0835).abs() < 1e-12);
+        assert_eq!(residuals.len(), 8);
+    }
+
+    #[test]
+    fn guided_correlation_recovers_a_locally_bounded_shift() {
+        let width = 256;
+        let height = 192;
+        let model = affine_model(width, height, 0.01);
+        let mut state = 0x4ab1_93d7_62f8_0ce5_u64;
+        let mut fixed_pixels = vec![0_u8; width as usize * height as usize];
+        for pixel in &mut fixed_pixels {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            *pixel = (state >> 56) as u8;
+        }
+        let mut moving_pixels = vec![0_u8; fixed_pixels.len()];
+        for y in 0..height as usize {
+            for x in 3..width as usize {
+                moving_pixels[y * width as usize + x] = fixed_pixels[y * width as usize + x - 3];
+            }
+        }
+        let fixed_frame = GrayFrame {
+            width,
+            height,
+            pixels: fixed_pixels,
+        };
+        let moving_frame = GrayFrame {
+            width,
+            height,
+            pixels: moving_pixels,
+        };
+        let tile = |index, row, y_mm| WorkspaceScanTile {
+            index,
+            row,
+            column: 0,
+            capture_order: index,
+            nominal_pose: Pose {
+                x_mm: 2.0,
+                y_mm,
+                z_mm: 31.5,
+                rotation_deg: 0.0,
+            },
+            placement_correction_x_mm: 0.0,
+            placement_correction_y_mm: 0.0,
+            artifact_name: String::new(),
+        };
+        let fixed_tile = tile(0, 0, 1.0);
+        let moving_tile = tile(1, 1, 2.0);
+        let fixed_mat = gray_frame_to_mat(&fixed_frame).unwrap();
+        let moving_mat = gray_frame_to_mat(&moving_frame).unwrap();
+        let roi = Rect::new(0, 0, width as i32, height as i32);
+
+        let registration = guided_registration(
+            &fixed_mat,
+            &moving_mat,
+            roi,
+            roi,
+            &fixed_tile,
+            &moving_tile,
+            &model,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            registration.method,
+            WorkspaceRegistrationMethod::GuidedCorrelation
+        );
+        assert!(registration.accepted);
+        assert!(registration.inlier_count >= 2);
+        assert!((registration.correction_x_mm.unwrap() + 0.03).abs() < 0.002);
+        assert!(registration.correction_y_mm.unwrap().abs() < 0.002);
     }
 
     #[test]

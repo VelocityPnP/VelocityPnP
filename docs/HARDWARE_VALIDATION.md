@@ -1106,6 +1106,38 @@ SHA-256 is
 The machine returned homed, ready, and fault-free to X=220.131, Y=190.271,
 Z=31.5, with the lights off.
 
+### Datum-PCB alignment tuning
+
+Source-retaining scan `38ec929d-1676-45ae-a6d7-f63b493ae781` isolated a
+90-by-45 mm datum-PCB region in 64 tiles. All 112 old whole-frame ORB
+registrations were rejected, so its mosaic used only controller placement.
+The scan retained 36,280,401 bytes. Offline replay reproduced the stored
+mosaic byte for byte before tuning. Its SHA-256 was
+`2e205220cc909bd4a3621d6bf7567fe6955b5b20502b30e4a940b56e5aef13a2`.
+
+Inspection of the retained overlaps showed that the visible row seams were
+0.04-to-0.13 mm X shifts, not Y shifts. Registration now limits ORB features
+to the predicted overlap and fits translation only. If ORB is not sufficient,
+a guided local correlation searches the cross-axis direction in three
+independent overlap segments. The motion axis stays at calibrated placement
+because its narrow overlap did not give a unique peak. At least two unique
+segment peaks must agree within 0.15 mm.
+
+Physical repeat `8ae2c25e-7b79-4a5c-ad1a-e3e024ba7694` used the same region,
+30 percent overlap, 1,200 mm/min feed, and four queued-frame discards. Ten of
+112 registrations passed: seven guided correlations and three ORB
+translations. The seven internally corroborated results applied corrections
+to seven tiles. The largest applied correction was 0.109 mm. These results
+agreed with an offline replay of the first capture within 0.03 mm.
+
+The repeat retained 36,290,686 bytes and produced 100 percent coverage with no
+nominal fallback. The mosaic SHA-256 was
+`b0625f41ee14aeaa2fd4af4b0a162ec0f885758ed07d1cc6c9b68fd8436d9843`.
+Visual inspection showed straighter and sharper vertical grid strokes through
+the corrected row overlaps. Some horizontal tone banding remains; this pass
+only tuned geometric alignment. The machine returned homed, ready, and
+fault-free to X=220.131, Y=190.271, Z=31.5, with the lights off.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

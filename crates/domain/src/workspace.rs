@@ -127,9 +127,24 @@ pub struct WorkspaceScanTile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceRegistrationMethod {
+    OrbTranslation,
+    GuidedCorrelation,
+}
+
+impl Default for WorkspaceRegistrationMethod {
+    fn default() -> Self {
+        Self::OrbTranslation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceTileRegistration {
     pub fixed_tile_index: u32,
     pub moving_tile_index: u32,
+    #[serde(default)]
+    pub method: WorkspaceRegistrationMethod,
     pub raw_match_count: u32,
     pub geometric_match_count: u32,
     pub inlier_count: u32,
@@ -139,6 +154,10 @@ pub struct WorkspaceTileRegistration {
     pub scale: Option<f64>,
     pub rotation_deg: Option<f64>,
     pub residual_p95_mm: Option<f64>,
+    #[serde(default)]
+    pub correlation_score: Option<f64>,
+    #[serde(default)]
+    pub correlation_uniqueness: Option<f64>,
     pub accepted: bool,
     pub rejection_reason: Option<String>,
 }

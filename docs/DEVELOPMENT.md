@@ -144,15 +144,31 @@ wget -qO- --method=POST \
 
 Poll `GET /api/v1/workspace-scans/SCAN_UUID`. Fetch the final image from
 `GET /api/v1/workspace-scans/SCAN_UUID/artifacts/mosaic.png` and the complete
-report from `artifacts/manifest.json`. OpenCV ORB/RANSAC overlap registration
-can apply only a small, validated placement correction. Rejected or
-textureless overlaps retain calibrated machine placement and add a warning.
-Streaming surveys also require two consistent neighboring registrations before
-they apply a correction. An isolated match stays diagnostic and does not move
-a tile away from calibrated machine placement.
+report from `artifacts/manifest.json`. OpenCV overlap registration can apply
+only a small, validated translation. It first uses ORB features inside the
+predicted overlap. A bounded correlation fallback divides the overlap into
+three independent segments and requires two unique, consistent cross-axis
+peaks. The motion axis remains at calibrated machine placement because the
+narrow overlap does not make that axis observable. Registration does not fit
+scale or rotation. Rejected or textureless overlaps retain calibrated machine
+placement and add a warning. Streaming surveys require two consistent
+neighboring ORB registrations. One guided-correlation registration can apply
+because it already has independent segment support.
 If an accepted correction moves an outer tile inward, only the newly exposed
 edge pixels use nominal machine placement. The manifest reports this value as
 `nominal_fallback_fraction`.
+
+Retained full-source scans can be replayed without machine motion. Save the
+calibration snapshot that the scan names, then run:
+
+```bash
+cargo run -p velocitypnp-vision --example replay_workspace_scan -- \
+  SCAN_DIRECTORY CALIBRATION_JSON OUTPUT.png OUTPUT.json
+```
+
+`SCAN_DIRECTORY` must contain `manifest.json` and the retained tile PNG files.
+The replay report records the registration method, evidence, and applied tile
+corrections.
 
 Coarse rendering averages the source area represented by each output sample.
 Tile weights feather across the full configured overlap on each axis. This
