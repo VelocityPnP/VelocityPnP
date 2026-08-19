@@ -508,6 +508,9 @@ export interface PlanarCameraCalibrationReport {
 export interface InstalledPlateGeometryReport {
   registrations: Array<{
     plate_id: string;
+    role: "unspecified" | "staging" | "build";
+    workspace_position: "unspecified" | "bottom" | "top";
+    seeded_from_plate_id: string | null;
     attempted_positions: number;
     detected_positions: number;
     offset_x_mm: number | null;

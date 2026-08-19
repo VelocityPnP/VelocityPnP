@@ -290,11 +290,15 @@ Every camera and plate observation uses the same bounded negative-X/negative-Y
 approach. Direction response is therefore a separate artifact, not a hidden
 mathematical input to the optical fit.
 
-The runner then scans documented staging- and build-plate hole positions. It
-first observes one hole from three known camera poses. This gives each plate a
-local pixel-to-machine map at its installed height. A second hole must confirm
-the shared plate offset before the wider scan starts. Thus, the runner does not
-assume that the raised datum PCB and the lower plates have the same image
+The runner then scans documented staging- and build-plate hole positions. The
+plate with the datum PCB is the bottom, or south, staging plate. The adjacent
+north plate is the top build plate. The machine profile stores these roles and
+their shared grid-edge relationship explicitly. It registers the staging plate
+first and uses that measured offset as the initial estimate for the build
+plate. It first observes one hole from three known camera poses. This gives each
+plate a local pixel-to-machine map at its installed height. A second hole must
+confirm the plate offset before the wider scan starts. Thus, the runner does
+not assume that the raised datum PCB and the lower plates have the same image
 scale. Plate drawings provide candidate coordinates, not an assertion that
 each feature is visible. A target with no stable concentric hole and pad
 observation is recorded as rejected and skipped. The detector searches only
@@ -314,8 +318,8 @@ The run requalifies and reuses compatible camera sweeps from an interrupted
 run. It stores `top_camera_planar_model`, `bottom_camera_planar_model`, and
 `installed_plate_geometry` artifacts with the raw samples, missing-target
 reasons, holdout residuals, coverage results, and image evidence. Failure to
-qualify one plate is a reported limitation. The complete run passes when both
-camera models and at least one installed plate qualify.
+qualify one plate is a reported limitation. The complete run passes only when
+both camera models and both configured plates qualify.
 
 ## Automated calibration runs
 

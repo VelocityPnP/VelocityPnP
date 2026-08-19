@@ -67,7 +67,8 @@ const REUSED_BOTTOM_PLANAR_REPORT: &str = "reused_bottom_camera_planar_report";
 const REUSED_INSTALLED_GEOMETRY_SOURCE_RUN: &str = "reused_installed_geometry_source_run";
 const REUSED_INSTALLED_PLATE_PROGRESS: &str = "reused_installed_plate_progress";
 const INSTALLED_PLATE_PROGRESS: &str = "installed_plate_progress";
-const INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v1";
+const LEGACY_INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v1";
+const INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v2";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -4125,9 +4126,13 @@ fn reusable_installed_plate_progress(
         let Some(progress) = run.camera_reports.get(INSTALLED_PLATE_PROGRESS) else {
             continue;
         };
-        if progress.get("algorithm").and_then(Value::as_str)
-            != Some(INSTALLED_PLATE_PROGRESS_ALGORITHM)
-            || progress.get("profile") != Some(&json!(profile))
+        let algorithm = progress.get("algorithm").and_then(Value::as_str);
+        if algorithm.is_some()
+            && !matches!(
+                algorithm,
+                Some(LEGACY_INSTALLED_PLATE_PROGRESS_ALGORITHM)
+                    | Some(INSTALLED_PLATE_PROGRESS_ALGORITHM)
+            )
         {
             continue;
         }
@@ -4150,9 +4155,87 @@ fn reusable_installed_plate_progress(
         {
             continue;
         }
-        return Ok(Some((run.id, progress.clone())));
+        let prior_profile = progress.get("profile").cloned().and_then(|value| {
+            serde_json::from_value::<velocitypnp_domain::InstalledGeometryCalibrationProfile>(value)
+                .ok()
+        });
+        let reusable_plate_ids = if let Some(prior_profile) = prior_profile {
+            profile
+                .plates
+                .iter()
+                .filter(|plate| {
+                    prior_profile
+                        .plates
+                        .iter()
+                        .any(|prior| plate.measurement_geometry_matches(prior))
+                })
+                .map(|plate| plate.id.as_str())
+                .collect::<BTreeSet<_>>()
+        } else if algorithm.is_none() {
+            profile
+                .plates
+                .iter()
+                .filter(|plate| {
+                    registrations.iter().any(|registration| {
+                        registration.plate_id == plate.id && registration.passed
+                    }) && legacy_plate_samples_match_current_profile(state, plate, &samples)
+                        && fit_installed_plate_geometry(plate, &samples)
+                            .is_some_and(|fit| fit.passed)
+                })
+                .map(|plate| plate.id.as_str())
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
+        if reusable_plate_ids.is_empty() {
+            continue;
+        }
+        let registrations = registrations
+            .into_iter()
+            .filter(|registration| reusable_plate_ids.contains(registration.plate_id.as_str()))
+            .collect::<Vec<_>>();
+        let samples = samples
+            .into_iter()
+            .filter(|sample| reusable_plate_ids.contains(sample.plate_id.as_str()))
+            .collect::<Vec<_>>();
+        if registrations.is_empty() || samples.is_empty() {
+            continue;
+        }
+        return Ok(Some((
+            run.id,
+            json!({
+                "algorithm": INSTALLED_PLATE_PROGRESS_ALGORITHM,
+                "active_plate_id": progress.get("active_plate_id"),
+                "profile": profile,
+                "registrations": registrations,
+                "samples": samples,
+            }),
+        )));
     }
     Ok(None)
+}
+
+fn legacy_plate_samples_match_current_profile(
+    state: &AppState,
+    plate: &velocitypnp_domain::InstalledPlateGridProfile,
+    samples: &[InstalledPlateHoleSample],
+) -> bool {
+    let Some(visual) = state.profile.visual_homing.as_ref() else {
+        return false;
+    };
+    let plate_samples = samples
+        .iter()
+        .filter(|sample| sample.plate_id == plate.id)
+        .collect::<Vec<_>>();
+    !plate_samples.is_empty()
+        && plate_samples.iter().all(|sample| {
+            plate
+                .target_offset(sample.column, sample.row)
+                .is_some_and(|offset| {
+                    (sample.nominal_x_mm - visual.fiducial_x_mm - offset[0]).abs() <= 1e-9
+                        && (sample.nominal_y_mm - visual.fiducial_y_mm - offset[1]).abs() <= 1e-9
+                })
+        })
 }
 
 async fn start_installed_geometry_run(
@@ -6062,7 +6145,7 @@ async fn measure_installed_plate_geometry(
             .map_or(0.0, |pose| pose.rotation_deg),
     };
     let mut plate_fits = Vec::new();
-    let mut registrations = Vec::new();
+    let mut registrations: Vec<InstalledPlateRegistrationReport> = Vec::new();
     let reused_progress = run
         .camera_reports
         .get(REUSED_INSTALLED_PLATE_PROGRESS)
@@ -6082,10 +6165,29 @@ async fn measure_installed_plate_geometry(
 
     for plate in &profile.plates {
         let candidates = ordered_plate_targets(plate, base_pose, state.profile.bounds);
+        let registration_seed_offset = plate
+            .adjacent_to
+            .as_ref()
+            .and_then(|adjacency| {
+                registrations.iter().find(|registration| {
+                    registration.plate_id == adjacency.reference_plate_id && registration.passed
+                })
+            })
+            .and_then(|registration| registration.offset_x_mm.zip(registration.offset_y_mm))
+            .map_or([0.0, 0.0], |(x, y)| [x, y]);
         let resumed_registration = reused_registrations
             .iter()
             .find(|registration| registration.plate_id == plate.id && registration.passed)
-            .cloned();
+            .cloned()
+            .map(|mut registration| {
+                registration.role = plate.role;
+                registration.workspace_position = plate.workspace_position;
+                registration.seeded_from_plate_id = plate
+                    .adjacent_to
+                    .as_ref()
+                    .map(|adjacency| adjacency.reference_plate_id.clone());
+                registration
+            });
         let mut resumed_samples = reused_samples
             .iter()
             .filter(|sample| sample.plate_id == plate.id)
@@ -6109,6 +6211,7 @@ async fn measure_installed_plate_geometry(
                 camera_model,
                 base_pose,
                 &candidates,
+                registration_seed_offset,
                 hole_diameter_px,
                 pad_diameter_px,
                 hole_diameter_tolerance_px,
@@ -6386,7 +6489,7 @@ async fn measure_installed_plate_geometry(
         rejected_targets: attempted_targets - detected_targets,
         qualified_plate_count,
         limitations,
-        passed: qualified_plate_count > 0,
+        passed: qualified_plate_count as usize == profile.plates.len(),
         observed_at: Utc::now(),
     })
 }
@@ -6688,6 +6791,7 @@ async fn register_installed_plate(
     camera_model: &PlanarCameraModel,
     base_pose: Pose,
     candidates: &[(u32, u32, f64, f64)],
+    registration_seed_offset: [f64; 2],
     hole_diameter_px: f64,
     pad_diameter_px: f64,
     hole_diameter_tolerance_px: f64,
@@ -6710,11 +6814,11 @@ async fn register_installed_plate(
     for (hypothesis_index, offset) in plate_registration_offsets(plate).into_iter().enumerate() {
         let mut support = Vec::new();
         for &(column, row, nominal_x_mm, nominal_y_mm) in
-            candidates.iter().take(TARGETS_PER_HYPOTHESIS)
+            distributed_registration_targets(candidates, TARGETS_PER_HYPOTHESIS)
         {
             let target_pose = Pose {
-                x_mm: nominal_x_mm + offset[0],
-                y_mm: nominal_y_mm + offset[1],
+                x_mm: nominal_x_mm + registration_seed_offset[0] + offset[0],
+                y_mm: nominal_y_mm + registration_seed_offset[1] + offset[1],
                 ..base_pose
             };
             if !state.profile.bounds.contains(target_pose) {
@@ -6859,6 +6963,12 @@ async fn register_installed_plate(
                         return Ok((
                             InstalledPlateRegistrationReport {
                                 plate_id: plate.id.clone(),
+                                role: plate.role,
+                                workspace_position: plate.workspace_position,
+                                seeded_from_plate_id: plate
+                                    .adjacent_to
+                                    .as_ref()
+                                    .map(|adjacency| adjacency.reference_plate_id.clone()),
                                 attempted_positions,
                                 detected_positions,
                                 offset_x_mm: Some(offset[0]),
@@ -6877,19 +6987,22 @@ async fn register_installed_plate(
             "installed_plate_geometry",
             CalibrationCheckStatus::Pending,
             &format!(
-                "Tested {} registration poses for {}; {} candidate holes detected",
-                attempted_positions, plate.id, detected_positions
+                "Tested {} registration poses for {}; {} plausible and {} mapped holes detected",
+                attempted_positions, plate.id, plausible_positions, detected_positions
             ),
             Value::Null,
         );
         persist_calibration_run(state, run).map_err(CalibrationStop::Failed)?;
-        if hypothesis_index == 0 && plausible_positions == 0 {
-            break;
-        }
     }
     Ok((
         InstalledPlateRegistrationReport {
             plate_id: plate.id.clone(),
+            role: plate.role,
+            workspace_position: plate.workspace_position,
+            seeded_from_plate_id: plate
+                .adjacent_to
+                .as_ref()
+                .map(|adjacency| adjacency.reference_plate_id.clone()),
             attempted_positions,
             detected_positions,
             offset_x_mm: None,
@@ -6942,6 +7055,18 @@ fn ordered_plate_targets(
         }
     }
     order
+}
+
+fn distributed_registration_targets<T>(candidates: &[T], count: usize) -> Vec<&T> {
+    if candidates.len() <= count {
+        return candidates.iter().collect();
+    }
+    if count <= 1 {
+        return candidates.first().into_iter().collect();
+    }
+    (0..count)
+        .map(|index| &candidates[index * (candidates.len() - 1) / (count - 1)])
+        .collect()
 }
 
 fn plate_grid_holdout(column: u32, row: u32) -> bool {
@@ -11020,6 +11145,113 @@ mod tests {
             sample(9, [130.0, 20.0], [132.0, 18.0]),
         ];
         assert!(consistent_registration_offset(&inconsistent, 0.25).is_none());
+    }
+
+    #[test]
+    fn plate_registration_targets_span_the_available_candidates() {
+        let candidates = (0..21).collect::<Vec<_>>();
+
+        assert_eq!(
+            distributed_registration_targets(&candidates, 5)
+                .into_iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0, 5, 10, 15, 20]
+        );
+        assert_eq!(
+            distributed_registration_targets(&candidates[..3], 5)
+                .into_iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn installed_plate_resume_keeps_matching_staging_and_rejects_old_build_origin() {
+        let state = test_state();
+        let calibration_id = Uuid::new_v4();
+        let current = state
+            .profile
+            .installed_geometry_calibration
+            .as_ref()
+            .unwrap()
+            .clone();
+        let mut prior = current.clone();
+        for plate in &mut prior.plates {
+            plate.role = Default::default();
+            plate.workspace_position = Default::default();
+            plate.adjacent_to = None;
+        }
+        prior
+            .plates
+            .iter_mut()
+            .find(|plate| plate.id == "build_plate")
+            .unwrap()
+            .origin_offset_y_mm = -72.0;
+        let registration = |plate_id: &str, passed: bool| InstalledPlateRegistrationReport {
+            plate_id: plate_id.into(),
+            role: Default::default(),
+            workspace_position: Default::default(),
+            seeded_from_plate_id: None,
+            attempted_positions: 2,
+            detected_positions: u32::from(passed) * 2,
+            offset_x_mm: passed.then_some(0.2),
+            offset_y_mm: passed.then_some(-0.3),
+            pixel_error_to_machine_mm: passed.then_some([[0.01, 0.0], [0.0, 0.01]]),
+            passed,
+        };
+        let sample = |plate_id: &str| InstalledPlateHoleSample {
+            plate_id: plate_id.into(),
+            column: 6,
+            row: 0,
+            nominal_x_mm: 25.0,
+            nominal_y_mm: 100.0,
+            commanded_x_mm: 25.0,
+            commanded_y_mm: 100.0,
+            expected_x_px: 640.0,
+            expected_y_px: 360.0,
+            target: None,
+            observed_center_x_mm: Some(25.2),
+            observed_center_y_mm: Some(99.7),
+            holdout: false,
+            rejection_reason: None,
+        };
+        let mut run = test_calibration_run(Uuid::new_v4());
+        run.calibration_id = calibration_id;
+        run.status = CalibrationRunStatus::Failed;
+        run.camera_reports.insert(
+            INSTALLED_PLATE_PROGRESS.into(),
+            json!({
+                "algorithm": LEGACY_INSTALLED_PLATE_PROGRESS_ALGORITHM,
+                "profile": prior,
+                "registrations": [
+                    registration("staging_plate", true),
+                    registration("build_plate", false),
+                ],
+                "samples": [sample("staging_plate"), sample("build_plate")],
+            }),
+        );
+        state.store.put_calibration_run(&run).unwrap();
+
+        let (_, progress) = reusable_installed_plate_progress(&state, calibration_id, &current)
+            .unwrap()
+            .unwrap();
+        let registrations = serde_json::from_value::<Vec<InstalledPlateRegistrationReport>>(
+            progress["registrations"].clone(),
+        )
+        .unwrap();
+        let samples =
+            serde_json::from_value::<Vec<InstalledPlateHoleSample>>(progress["samples"].clone())
+                .unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].plate_id, "staging_plate");
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].plate_id, "staging_plate");
+        assert_eq!(
+            progress["algorithm"],
+            json!(INSTALLED_PLATE_PROGRESS_ALGORITHM)
+        );
     }
 
     #[test]

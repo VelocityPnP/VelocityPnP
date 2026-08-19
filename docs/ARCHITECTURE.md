@@ -106,16 +106,19 @@ targets. It moves the primary datum through the top-camera image and N1 through
 the bottom-camera image. Independent holdouts select an affine inverse camera
 map unless the distortion-polynomial map predicts unseen positions better.
 The top-camera map then finds candidate mounting holes from the documented
-staging- and build-plate grids. A three-pose probe measures the local camera
-map at each plate height, and a second hole confirms plate registration. Each
-candidate can be absent, occupied, clipped, or ambiguous. The bounded detector
-rejects an implausible first frame immediately and confirms plausible holes
-with the configured extra frames. Plate fits use only accepted concentric
-hole/pad observations and must cover enough distinct rows, columns, and
-physical span. Spatially distributed holdouts select an affine correction only
-when it predicts better than the nominal grid; otherwise the nominal map is
-retained. Each checkpoint stores partial samples and separate training/holdout
-counts.
+staging- and build-plate grids. The profile identifies the datum-PCB plate as
+the bottom, or south, staging plate. It identifies the adjacent north plate as
+the top build plate. Their shared grid-edge relationship seeds build-plate
+registration from the measured staging-plate offset. A three-pose probe
+measures the local camera map at each plate height, and a second hole confirms
+plate registration. Each candidate can be absent, occupied, clipped, or
+ambiguous. The bounded detector rejects an implausible first frame immediately
+and confirms plausible holes with the configured extra frames. Plate fits use
+only accepted concentric hole/pad observations and must cover enough distinct
+rows, columns, and physical span. Spatially distributed holdouts select an
+affine correction only when it predicts better than the nominal grid;
+otherwise the nominal map is retained. Each checkpoint stores partial samples
+and separate training/holdout counts. Both configured plates must qualify.
 This produces an empirical planar map for the installed working geometry. It
 does not claim an unconstrained camera matrix for arbitrary depths or angles.
 

@@ -757,6 +757,12 @@ pub struct InstalledPlateFitReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstalledPlateRegistrationReport {
     pub plate_id: String,
+    #[serde(default)]
+    pub role: crate::InstalledPlateRole,
+    #[serde(default)]
+    pub workspace_position: crate::InstalledPlateWorkspacePosition,
+    #[serde(default)]
+    pub seeded_from_plate_id: Option<String>,
     pub attempted_positions: u32,
     pub detected_positions: u32,
     pub offset_x_mm: Option<f64>,

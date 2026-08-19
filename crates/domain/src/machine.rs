@@ -397,9 +397,53 @@ pub struct PlanarCameraSweepProfile {
 /// One installed plate whose nominal hole grid is known from its PCB source.
 /// The origin is relative to the visual-homing fiducial. Column and row steps
 /// permit either installed plate orientation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstalledPlateRole {
+    #[default]
+    Unspecified,
+    Staging,
+    Build,
+}
+
+/// Physical position in the machine when viewed from its operator side.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstalledPlateWorkspacePosition {
+    #[default]
+    Unspecified,
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstalledPlateGridEdge {
+    FirstRow,
+    LastRow,
+}
+
+/// A flush grid relationship to a plate that is registered first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledPlateAdjacencyProfile {
+    pub reference_plate_id: String,
+    pub reference_edge: InstalledPlateGridEdge,
+    pub plate_edge: InstalledPlateGridEdge,
+    /// Reference column that aligns with column zero on this plate.
+    pub reference_column_offset: i32,
+    /// Number of row pitches between the two edge-row centers.
+    pub center_gap_rows: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstalledPlateGridProfile {
     pub id: String,
+    #[serde(default)]
+    pub role: InstalledPlateRole,
+    #[serde(default)]
+    pub workspace_position: InstalledPlateWorkspacePosition,
+    #[serde(default)]
+    pub adjacent_to: Option<InstalledPlateAdjacencyProfile>,
     pub origin_offset_x_mm: f64,
     pub origin_offset_y_mm: f64,
     pub column_step_x_mm: f64,
@@ -635,9 +679,62 @@ impl InstalledPlateGridProfile {
                 + f64::from(row) * self.row_step_y_mm,
         ])
     }
+
+    pub fn measurement_geometry_matches(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.origin_offset_x_mm == other.origin_offset_x_mm
+            && self.origin_offset_y_mm == other.origin_offset_y_mm
+            && self.column_step_x_mm == other.column_step_x_mm
+            && self.column_step_y_mm == other.column_step_y_mm
+            && self.row_step_x_mm == other.row_step_x_mm
+            && self.row_step_y_mm == other.row_step_y_mm
+            && self.column_count == other.column_count
+            && self.row_count == other.row_count
+            && self.target_parity == other.target_parity
+            && self.preferred_column_stride == other.preferred_column_stride
+            && self.minimum_detected_targets == other.minimum_detected_targets
+            && self.minimum_distinct_columns == other.minimum_distinct_columns
+            && self.minimum_distinct_rows == other.minimum_distinct_rows
+            && self.minimum_x_span_mm == other.minimum_x_span_mm
+            && self.minimum_y_span_mm == other.minimum_y_span_mm
+            && self.maximum_attempts == other.maximum_attempts
+    }
 }
 
 impl InstalledGeometryCalibrationProfile {
+    pub fn adjacent_plate_origin(&self, plate_id: &str) -> Option<[f64; 2]> {
+        let plate = self.plates.iter().find(|plate| plate.id == plate_id)?;
+        let adjacency = plate.adjacent_to.as_ref()?;
+        let reference = self
+            .plates
+            .iter()
+            .find(|candidate| candidate.id == adjacency.reference_plate_id)?;
+        let reference_row = match adjacency.reference_edge {
+            InstalledPlateGridEdge::FirstRow => 0.0,
+            InstalledPlateGridEdge::LastRow => f64::from(reference.row_count - 1),
+        };
+        let outward = match adjacency.reference_edge {
+            InstalledPlateGridEdge::FirstRow => -1.0,
+            InstalledPlateGridEdge::LastRow => 1.0,
+        };
+        let plate_row = match adjacency.plate_edge {
+            InstalledPlateGridEdge::FirstRow => 0.0,
+            InstalledPlateGridEdge::LastRow => f64::from(plate.row_count - 1),
+        };
+        let reference_column = f64::from(adjacency.reference_column_offset);
+        let gap = outward * f64::from(adjacency.center_gap_rows);
+        Some([
+            reference.origin_offset_x_mm
+                + reference_column * reference.column_step_x_mm
+                + (reference_row + gap) * reference.row_step_x_mm
+                - plate_row * plate.row_step_x_mm,
+            reference.origin_offset_y_mm
+                + reference_column * reference.column_step_y_mm
+                + (reference_row + gap) * reference.row_step_y_mm
+                - plate_row * plate.row_step_y_mm,
+        ])
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         let values = [
             self.plate_hole_diameter_mm,
@@ -647,6 +744,36 @@ impl InstalledGeometryCalibrationProfile {
             self.feed_mm_per_min,
         ];
         let mut ids = BTreeMap::new();
+        let staging = self
+            .plates
+            .iter()
+            .filter(|plate| plate.role == InstalledPlateRole::Staging)
+            .collect::<Vec<_>>();
+        let build = self
+            .plates
+            .iter()
+            .filter(|plate| plate.role == InstalledPlateRole::Build)
+            .collect::<Vec<_>>();
+        let semantic_layout_invalid = staging.len() != 1
+            || build.len() != 1
+            || staging[0].workspace_position != InstalledPlateWorkspacePosition::Bottom
+            || build[0].workspace_position != InstalledPlateWorkspacePosition::Top
+            || staging[0].adjacent_to.is_some()
+            || build[0].adjacent_to.as_ref().is_none_or(|adjacency| {
+                adjacency.reference_plate_id != staging[0].id
+                    || adjacency.reference_edge == adjacency.plate_edge
+                    || adjacency.center_gap_rows > 4
+                    || build[0].column_step_x_mm != staging[0].column_step_x_mm
+                    || build[0].column_step_y_mm != staging[0].column_step_y_mm
+                    || build[0].row_step_x_mm != staging[0].row_step_x_mm
+                    || build[0].row_step_y_mm != staging[0].row_step_y_mm
+            })
+            || self
+                .adjacent_plate_origin(&build[0].id)
+                .is_none_or(|origin| {
+                    (origin[0] - build[0].origin_offset_x_mm).abs() > 1e-9
+                        || (origin[1] - build[0].origin_offset_y_mm).abs() > 1e-9
+                });
         if self.top_camera_sweep.validate().is_err()
             || self.bottom_camera_sweep.validate().is_err()
             || self.plates.is_empty()
@@ -661,6 +788,7 @@ impl InstalledGeometryCalibrationProfile {
             || self.plate_diameter_tolerance_mm >= self.plate_hole_diameter_mm
             || !(0.5..=5.0).contains(&self.plate_search_radius_mm)
             || self.feed_mm_per_min <= 0.0
+            || semantic_layout_invalid
         {
             return Err("installed geometry calibration profile is invalid");
         }
@@ -935,6 +1063,34 @@ mod tests {
     }
 
     #[test]
+    fn installed_plate_layout_derives_build_origin_and_scopes_resume_geometry() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let installed = profile.installed_geometry_calibration.unwrap();
+        let staging = &installed.plates[0];
+        let build = &installed.plates[1];
+
+        assert_eq!(
+            installed.adjacent_plate_origin(&build.id),
+            Some([build.origin_offset_x_mm, build.origin_offset_y_mm])
+        );
+
+        let mut prior_staging = staging.clone();
+        prior_staging.role = InstalledPlateRole::Unspecified;
+        prior_staging.workspace_position = InstalledPlateWorkspacePosition::Unspecified;
+        assert!(staging.measurement_geometry_matches(&prior_staging));
+
+        let mut prior_build = build.clone();
+        prior_build.origin_offset_y_mm = -72.0;
+        assert!(!build.measurement_geometry_matches(&prior_build));
+
+        let mut swapped = installed;
+        swapped.plates[0].workspace_position = InstalledPlateWorkspacePosition::Top;
+        swapped.plates[1].workspace_position = InstalledPlateWorkspacePosition::Bottom;
+        assert!(swapped.validate().is_err());
+    }
+
+    #[test]
     fn attached_v3_maps_each_nozzle_working_z_to_the_shared_controller_axis() {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
@@ -982,11 +1138,25 @@ mod tests {
         assert_eq!(direction_response.minimum_sample_pairs, 3);
         assert_eq!(direction_response.maximum_sample_pairs, 7);
         assert_eq!(installed.plates.len(), 2);
+        assert_eq!(installed.plates[0].role, InstalledPlateRole::Staging);
+        assert_eq!(installed.plates[1].role, InstalledPlateRole::Build);
+        assert_eq!(
+            installed.plates[0].workspace_position,
+            InstalledPlateWorkspacePosition::Bottom
+        );
+        assert_eq!(
+            installed.plates[1].workspace_position,
+            InstalledPlateWorkspacePosition::Top
+        );
+        assert_eq!(
+            installed.adjacent_plate_origin("build_plate"),
+            Some([-285.0, 93.0])
+        );
         assert_eq!(installed.plates[0].target_offset(19, 1), Some([0.0, -12.0]));
         assert_eq!(installed.plates[0].target_offset(18, 1), None);
         assert_eq!(
             installed.plates[1].target_offset(18, 0),
-            Some([-15.0, -72.0])
+            Some([-15.0, 93.0])
         );
         assert!(
             vacuum.target_offset_x_mm.hypot(vacuum.target_offset_y_mm)

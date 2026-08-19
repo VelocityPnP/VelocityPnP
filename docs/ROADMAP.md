@@ -56,7 +56,8 @@ The project is organized by measurable gates rather than calendar estimates.
   with independent holdouts selecting affine or distortion-polynomial models
 - [x] Add an occlusion-tolerant machine runner for installed staging/build-plate
   scale, skew, and affine geometry
-- [x] Pass installed-camera and plate-geometry calibration on attached hardware
+- [x] Pass installed-camera and both installed-plate geometry calibrations on
+  attached hardware
 - [ ] Evaluate whether residual full-bed error justifies a dedicated
   multi-fiducial PCB or a higher-order spatial model
 - [x] Measure the top-camera working-plane map from bounded homing-fiducial moves

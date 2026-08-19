@@ -579,12 +579,15 @@ paths:
       description: >-
         Sweeps the installed datum through the top-camera image, sweeps the
         identified N1 tip through the bottom-camera image, and scans candidate
-        holes from the installed staging and build plates. The daemon first
-        registers each plate from two consistent visible holes. Occupied, clipped,
-        or ambiguous holes are recorded and skipped. Compatible camera sweeps
-        from an interrupted run are requalified and reused. Distortion-polynomial and
-        affine plate corrections are selected only when they improve
-        independent holdout observations.
+        holes from the installed staging and build plates. The profile identifies
+        the datum-PCB plate as the bottom staging plate and the adjacent north
+        plate as the top build plate. The daemon registers the staging plate first,
+        seeds build registration from it, and confirms each plate from two
+        consistent visible holes. Occupied, clipped, or ambiguous holes are
+        recorded and skipped. Compatible camera sweeps and plate samples from an
+        interrupted run are requalified per plate and reused. Distortion-polynomial
+        and affine plate corrections are selected only when they improve
+        independent holdout observations. Both configured plates must qualify.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:

@@ -2371,6 +2371,9 @@ mod tests {
     fn plate_fit_ignores_occupied_targets_and_qualifies_visible_coverage() {
         let profile = InstalledPlateGridProfile {
             id: "build_plate".into(),
+            role: Default::default(),
+            workspace_position: Default::default(),
+            adjacent_to: None,
             origin_offset_x_mm: 0.0,
             origin_offset_y_mm: 0.0,
             column_step_x_mm: 15.0,
@@ -2432,6 +2435,9 @@ mod tests {
     fn plate_fit_retains_nominal_geometry_when_affine_does_not_predict_better() {
         let profile = InstalledPlateGridProfile {
             id: "build_plate".into(),
+            role: Default::default(),
+            workspace_position: Default::default(),
+            adjacent_to: None,
             origin_offset_x_mm: 0.0,
             origin_offset_y_mm: 0.0,
             column_step_x_mm: 15.0,

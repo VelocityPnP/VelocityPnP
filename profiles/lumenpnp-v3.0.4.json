@@ -199,6 +199,8 @@
     "plates": [
       {
         "id": "staging_plate",
+        "role": "staging",
+        "workspace_position": "bottom",
         "origin_offset_x_mm": -285.0,
         "origin_offset_y_mm": 3.0,
         "column_step_x_mm": 15.0,
@@ -218,8 +220,17 @@
       },
       {
         "id": "build_plate",
+        "role": "build",
+        "workspace_position": "top",
+        "adjacent_to": {
+          "reference_plate_id": "staging_plate",
+          "reference_edge": "first_row",
+          "plate_edge": "last_row",
+          "reference_column_offset": 0,
+          "center_gap_rows": 0
+        },
         "origin_offset_x_mm": -285.0,
-        "origin_offset_y_mm": -72.0,
+        "origin_offset_y_mm": 93.0,
         "column_step_x_mm": 15.0,
         "column_step_y_mm": 0.0,
         "row_step_x_mm": 0.0,
