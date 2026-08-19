@@ -91,6 +91,8 @@ The project is organized by measurable gates rather than calendar estimates.
 
 ## Gate 5 — Inspection and newer machines
 
+- [x] Adopt OpenCV frame statistics and connected components behind the
+  validated calibration policy, with attached-fixture conformance tests
 - [ ] Build top-camera board mosaics and package-template pose comparison
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures

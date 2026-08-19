@@ -4,6 +4,11 @@ These are unmodified 1280x720 grayscale PNG frames captured from the attached
 machine on 2026-08-14, 2026-08-15, and 2026-08-17. They keep the initial target
 detectors tied to actual optics instead of synthetic circles.
 
+The same fixtures qualify the OpenCV boundary. Tests compare OpenCV frame
+statistics with the earlier validated calculation and require OpenCV-backed
+component extraction to retain the expected datum, nozzle, and camera-outline
+detections.
+
 The initial datum and nozzle captures used YUYV at 10 frames per second, five
 settling frames, manual exposure value 200, and disabled dynamic frame rate.
 The ring lights were on. The remaining controls were at their then-current

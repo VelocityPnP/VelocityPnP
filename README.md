@@ -36,6 +36,10 @@ machine runners pass hardware-in-loop acceptance. See
 
 ## Quick start
 
+The Rust vision crate requires the native OpenCV development library and its
+Clang binding toolchain. See [Development prerequisites](docs/DEVELOPMENT.md)
+for the Debian/Ubuntu installation command.
+
 ```bash
 cargo run -p velocitypnpd -- --simulate --database velocitypnp.db
 cd web && npm install && npm run dev

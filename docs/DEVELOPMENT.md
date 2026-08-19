@@ -5,17 +5,41 @@
 - Rust 1.88 or newer (the repository pins 1.88.0)
 - Node.js 20.19.x, or 22.12 or newer (the repository pins Node 22.23.2)
 - Python 3.10 or newer
-- Clang/libclang for the Linux V4L2 bindings
-- Optional: OpenCV development libraries for `--features native-opencv`
+- OpenCV 4.6 or newer, `pkg-config`, and CMake
+- Clang and libclang for the OpenCV and Linux V4L2 Rust bindings
+
+On Debian or Ubuntu, install the native vision toolchain with:
+
+```bash
+sudo apt install clang cmake libclang-dev libopencv-dev pkg-config
+```
+
+The workspace pins Rust crate `opencv` 0.99.1. OpenCV is a required build and
+runtime dependency, not a Python package or an optional Cargo feature.
 
 The SQLite library is statically bundled, so a system SQLite development
 package is not required.
 
+## Vision implementation boundary
+
+V4L2 remains the camera capture backend. Captured grayscale frames convert to
+owned OpenCV matrices at the vision boundary. OpenCV supplies frame statistics,
+Laplacian focus measurements, threshold masks, and four-connected component
+labels. VelocityPnP retains the machine-specific physical-size checks,
+concentricity rules, candidate scoring, calibration models, residual gates,
+and independent holdouts.
+
+Fixture conformance tests compare the OpenCV statistics with the earlier
+validated calculation and keep datum, nozzle, camera-outline, and plate-hole
+detections tied to attached V3.0.4 captures. This boundary also makes OpenCV
+feature matching and geometric estimation available to the workspace mosaic
+runner without routing camera capture through OpenCV.
+
 ## Build and test
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 
 cd web

@@ -122,6 +122,15 @@ and separate training/holdout counts. Both configured plates must qualify.
 This produces an empirical planar map for the installed working geometry. It
 does not claim an unconstrained camera matrix for arbitrary depths or angles.
 
+The vision crate owns the OpenCV boundary. It converts V4L2 grayscale frames
+to owned OpenCV matrices and uses OpenCV for frame statistics, Laplacian focus
+measurements, threshold masks, and connected-component labels. Domain-specific
+detectors still own physical dimensions, concentricity, ambiguity rejection,
+candidate scoring, and calibration acceptance. Attached-camera fixtures check
+that this boundary preserves the validated detector outputs. Workspace mosaics
+can add OpenCV feature matching and geometric estimation without changing the
+capture or calibration policy layers.
+
 ## Crates and applications
 
 - `velocitypnp-domain`: geometry, machine state, manufacturing entities, and calibration graph
@@ -129,7 +138,7 @@ does not claim an unconstrained camera matrix for arbitrary depths or angles.
 - `velocitypnp-kicad`: direct `.kicad_pcb` parser and optional BOM merge
 - `velocitypnp-openpnp`: one-way migration of user-owned OpenPnP XML into untrusted calibration/configuration seeds
 - `velocitypnp-planner`: job validation plus logical-to-controller motion planning
-- `velocitypnp-vision`: deterministic image/geometry primitives, native Linux V4L2 capture, and optional OpenCV calibration
+- `velocitypnp-vision`: OpenCV image primitives, deterministic calibration policy, and native Linux V4L2 capture
 - `velocitypnp-store`: SQLite migrations, entities, operations, and event journal
 - `velocitypnpd`: REST/SSE API and static web hosting
 - `velocitypnp`: command-line API client

@@ -1,6 +1,8 @@
-//! Deterministic vision/calibration primitives. Linux camera capture and full
-//! OpenCV calibration are separate features so the simulator and import
-//! pipeline remain portable.
+//! Deterministic vision and calibration policy over OpenCV image primitives.
+//! Linux camera capture remains separate so non-hardware tools do not need a
+//! V4L2 device.
+
+mod opencv_backend;
 
 #[cfg(all(feature = "native-v4l2", target_os = "linux"))]
 mod v4l2_capture;
@@ -8,8 +10,10 @@ mod v4l2_capture;
 #[cfg(all(feature = "native-v4l2", target_os = "linux"))]
 pub use v4l2_capture::*;
 
+pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat};
+
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use velocitypnp_domain::{
     AffineGeometryModel, BottomCameraMappingReport, BottomVisionProfile, CameraRayTransferReport,
     CameraReproducibilityThresholds, CameraRole, HeadFeatureCenterReport, InstalledPlateFitReport,
@@ -150,43 +154,12 @@ pub fn camera_sample_metrics(frame: &GrayFrame, role: CameraRole) -> Option<Came
     {
         return None;
     }
-    let count = frame.pixels.len() as f64;
-    let mean_luma = frame
-        .pixels
-        .iter()
-        .map(|value| f64::from(*value))
-        .sum::<f64>()
-        / count;
-    let luma_variance = frame
-        .pixels
-        .iter()
-        .map(|value| (f64::from(*value) - mean_luma).powi(2))
-        .sum::<f64>()
-        / count;
-    let mut laplacian_sum = 0.0;
-    let mut laplacian_squared_sum = 0.0;
-    let mut laplacian_count = 0.0;
-    for y in 1..frame.height - 1 {
-        for x in 1..frame.width - 1 {
-            let index = (y * frame.width + x) as usize;
-            let laplacian = 4.0 * f64::from(frame.pixels[index])
-                - f64::from(frame.pixels[index - 1])
-                - f64::from(frame.pixels[index + 1])
-                - f64::from(frame.pixels[index - frame.width as usize])
-                - f64::from(frame.pixels[index + frame.width as usize]);
-            laplacian_sum += laplacian;
-            laplacian_squared_sum += laplacian * laplacian;
-            laplacian_count += 1.0;
-        }
-    }
-    let laplacian_mean = laplacian_sum / laplacian_count;
-    let laplacian_variance =
-        laplacian_squared_sum / laplacian_count - laplacian_mean * laplacian_mean;
+    let statistics = opencv_backend::frame_statistics(frame).ok()?;
     let target = detect_camera_target(frame, role);
     Some(CameraSampleMetrics {
-        mean_luma,
-        luma_standard_deviation: luma_variance.sqrt(),
-        laplacian_variance,
+        mean_luma: statistics.mean_luma,
+        luma_standard_deviation: statistics.luma_standard_deviation,
+        laplacian_variance: statistics.laplacian_variance,
         target,
     })
 }
@@ -1728,9 +1701,9 @@ fn percentile_95(sorted: &[f64]) -> Option<f64> {
     })
 }
 
-/// Finds dark, approximately circular connected components. This is the
-/// deterministic first-stage detector; calibrated production pipelines add
-/// undistortion, adaptive thresholding, and sub-pixel refinement.
+/// Finds dark, approximately circular connected components. OpenCV supplies
+/// threshold labeling and component statistics. The physical size, shape,
+/// and confidence rules remain explicit domain policy here.
 pub fn detect_dark_fiducials(
     frame: &GrayFrame,
     threshold: u8,
@@ -1739,7 +1712,8 @@ pub fn detect_dark_fiducials(
 ) -> Vec<FiducialDetection> {
     detect_circular_components(
         frame,
-        |value| value <= threshold,
+        threshold,
+        opencv_backend::ThresholdPolarity::Dark,
         min_diameter_px,
         max_diameter_px,
         CircularComponentKind::Filled,
@@ -1754,7 +1728,8 @@ fn detect_dark_annular_fiducials(
 ) -> Vec<FiducialDetection> {
     detect_circular_components(
         frame,
-        |value| value <= threshold,
+        threshold,
+        opencv_backend::ThresholdPolarity::Dark,
         min_diameter_px,
         max_diameter_px,
         CircularComponentKind::Annular,
@@ -1771,7 +1746,8 @@ pub fn detect_bright_fiducials(
 ) -> Vec<FiducialDetection> {
     detect_circular_components(
         frame,
-        |value| value >= threshold,
+        threshold,
+        opencv_backend::ThresholdPolarity::Bright,
         min_diameter_px,
         max_diameter_px,
         CircularComponentKind::Filled,
@@ -1975,7 +1951,8 @@ fn detect_bright_annular_fiducials(
 ) -> Vec<FiducialDetection> {
     detect_circular_components(
         frame,
-        |value| value >= threshold,
+        threshold,
+        opencv_backend::ThresholdPolarity::Bright,
         min_diameter_px,
         max_diameter_px,
         CircularComponentKind::Annular,
@@ -2058,7 +2035,8 @@ enum CircularComponentKind {
 
 fn detect_circular_components(
     frame: &GrayFrame,
-    selected: impl Fn(u8) -> bool,
+    threshold: u8,
+    polarity: opencv_backend::ThresholdPolarity,
     min_diameter_px: f64,
     max_diameter_px: f64,
     kind: CircularComponentKind,
@@ -2066,45 +2044,20 @@ fn detect_circular_components(
     if frame.pixels.len() != frame.width as usize * frame.height as usize {
         return Vec::new();
     }
-    let mut visited = vec![false; frame.pixels.len()];
+    let Ok(connected) = opencv_backend::connected_components(frame, threshold, polarity) else {
+        return Vec::new();
+    };
     let mut detections = Vec::new();
-    for seed in 0..frame.pixels.len() {
-        if visited[seed] || !selected(frame.pixels[seed]) {
-            continue;
-        }
-        let mut queue = VecDeque::from([seed]);
-        visited[seed] = true;
-        let mut annular_points = Vec::new();
-        let (mut count, mut sum_x, mut sum_y) = (0usize, 0usize, 0usize);
-        let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0u32, u32::MAX, 0u32);
-        while let Some(index) = queue.pop_front() {
-            let x = index as u32 % frame.width;
-            let y = index as u32 / frame.width;
-            count += 1;
-            sum_x += x as usize;
-            sum_y += y as usize;
-            if matches!(kind, CircularComponentKind::Annular) {
-                annular_points.push([f64::from(x), f64::from(y)]);
-            }
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
-            for (nx, ny) in neighbours(x, y, frame.width, frame.height) {
-                let neighbour = (ny * frame.width + nx) as usize;
-                if !visited[neighbour] && selected(frame.pixels[neighbour]) {
-                    visited[neighbour] = true;
-                    queue.push_back(neighbour);
-                }
-            }
-        }
-        let width = f64::from(max_x - min_x + 1);
-        let height = f64::from(max_y - min_y + 1);
+    for component in connected.components.iter().copied() {
+        let width = f64::from(component.width);
+        let height = f64::from(component.height);
         let diameter = (width + height) / 2.0;
         let aspect = width.min(height) / width.max(height);
-        let fill = count as f64 / (width * height);
-        let touches_border =
-            min_x == 0 || min_y == 0 || max_x + 1 == frame.width || max_y + 1 == frame.height;
+        let fill = component.area as f64 / (width * height);
+        let touches_border = component.left == 0
+            || component.top == 0
+            || component.left + component.width == frame.width
+            || component.top + component.height == frame.height;
         let fill_accepted = match kind {
             CircularComponentKind::Filled => (0.45..=0.95).contains(&fill),
             CircularComponentKind::Annular => (0.05..=0.45).contains(&fill),
@@ -2127,20 +2080,23 @@ fn detect_circular_components(
             };
             let circular_fill_score = 1.0 - ((fill - expected_fill).abs() / fill_span).min(1.0);
             let (x_px, y_px) = match kind {
-                CircularComponentKind::Filled => {
-                    (sum_x as f64 / count as f64, sum_y as f64 / count as f64)
-                }
-                CircularComponentKind::Annular => fit_circle_center(&annular_points)
+                CircularComponentKind::Filled => (component.centroid_x, component.centroid_y),
+                CircularComponentKind::Annular => connected
+                    .points(component)
+                    .ok()
+                    .and_then(|points| fit_circle_center(&points))
                     .filter(|center| {
-                        let box_center_x = f64::from(min_x + max_x) / 2.0;
-                        let box_center_y = f64::from(min_y + max_y) / 2.0;
+                        let box_center_x =
+                            f64::from(component.left * 2 + component.width - 1) / 2.0;
+                        let box_center_y =
+                            f64::from(component.top * 2 + component.height - 1) / 2.0;
                         (center[0] - box_center_x).hypot(center[1] - box_center_y) <= diameter * 0.1
                     })
                     .map_or_else(
                         || {
                             (
-                                f64::from(min_x + max_x) / 2.0,
-                                f64::from(min_y + max_y) / 2.0,
+                                f64::from(component.left * 2 + component.width - 1) / 2.0,
+                                f64::from(component.top * 2 + component.height - 1) / 2.0,
                             )
                         },
                         |center| (center[0], center[1]),
@@ -2186,17 +2142,6 @@ fn fit_circle(points: &[[f64; 2]]) -> Option<([f64; 2], f64)> {
         && radius_squared.is_finite()
         && radius_squared > 0.0)
         .then_some((center, radius))
-}
-
-fn neighbours(x: u32, y: u32, width: u32, height: u32) -> impl Iterator<Item = (u32, u32)> {
-    [
-        x.checked_sub(1).map(|nx| (nx, y)),
-        (x + 1 < width).then_some((x + 1, y)),
-        y.checked_sub(1).map(|ny| (x, ny)),
-        (y + 1 < height).then_some((x, y + 1)),
-    ]
-    .into_iter()
-    .flatten()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2286,6 +2231,114 @@ pub fn placement_within_tolerance(
 mod tests {
     use super::*;
     use velocitypnp_domain::{FiducialObservation, PlanarCameraCalibrationSample};
+
+    fn legacy_frame_statistics(frame: &GrayFrame) -> (f64, f64, f64) {
+        let count = frame.pixels.len() as f64;
+        let mean_luma = frame
+            .pixels
+            .iter()
+            .map(|value| f64::from(*value))
+            .sum::<f64>()
+            / count;
+        let luma_variance = frame
+            .pixels
+            .iter()
+            .map(|value| (f64::from(*value) - mean_luma).powi(2))
+            .sum::<f64>()
+            / count;
+        let mut laplacian_sum = 0.0;
+        let mut laplacian_squared_sum = 0.0;
+        let mut laplacian_count = 0.0;
+        for y in 1..frame.height - 1 {
+            for x in 1..frame.width - 1 {
+                let index = (y * frame.width + x) as usize;
+                let laplacian = 4.0 * f64::from(frame.pixels[index])
+                    - f64::from(frame.pixels[index - 1])
+                    - f64::from(frame.pixels[index + 1])
+                    - f64::from(frame.pixels[index - frame.width as usize])
+                    - f64::from(frame.pixels[index + frame.width as usize]);
+                laplacian_sum += laplacian;
+                laplacian_squared_sum += laplacian * laplacian;
+                laplacian_count += 1.0;
+            }
+        }
+        let laplacian_mean = laplacian_sum / laplacian_count;
+        (
+            mean_luma,
+            luma_variance.sqrt(),
+            laplacian_squared_sum / laplacian_count - laplacian_mean * laplacian_mean,
+        )
+    }
+
+    #[test]
+    fn opencv_gray_frame_conversion_is_lossless() {
+        let frame = GrayFrame {
+            width: 4,
+            height: 3,
+            pixels: (0..12).collect(),
+        };
+
+        let mat = gray_frame_to_mat(&frame).unwrap();
+        let restored = gray_frame_from_mat(&mat).unwrap();
+
+        assert_eq!(restored, frame);
+    }
+
+    #[test]
+    fn opencv_statistics_match_the_validated_legacy_calculation() {
+        let frames = [
+            decode_gray_png(include_bytes!(
+                "../tests/fixtures/lumenpnp-v3.0.4-top-datum-exp200.png"
+            ))
+            .unwrap(),
+            decode_gray_png(include_bytes!(
+                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n045-exp200.png"
+            ))
+            .unwrap(),
+        ];
+
+        for frame in frames {
+            let expected = legacy_frame_statistics(&frame);
+            let observed = opencv_backend::frame_statistics(&frame).unwrap();
+            assert!((observed.mean_luma - expected.0).abs() < 1e-9);
+            assert!((observed.luma_standard_deviation - expected.1).abs() < 1e-9);
+            assert!((observed.laplacian_variance - expected.2).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn opencv_components_keep_four_connected_calibration_semantics() {
+        let mut frame = GrayFrame {
+            width: 6,
+            height: 6,
+            pixels: vec![255; 36],
+        };
+        for (x, y) in [
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (2, 2),
+            (3, 3),
+            (3, 4),
+            (4, 3),
+            (4, 4),
+        ] {
+            frame.pixels[y * 6 + x] = 0;
+        }
+
+        let components = opencv_backend::connected_components(
+            &frame,
+            0,
+            opencv_backend::ThresholdPolarity::Dark,
+        )
+        .unwrap();
+
+        assert_eq!(components.components.len(), 2);
+        assert!(components
+            .components
+            .iter()
+            .all(|component| component.area == 4));
+    }
 
     #[test]
     fn detects_synthetic_circular_fiducial() {
