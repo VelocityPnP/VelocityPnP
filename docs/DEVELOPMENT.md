@@ -108,10 +108,13 @@ wget -qO- --method=POST \
 
 `precision` mode keeps the original calibrated-resolution behavior. It stores
 full source tiles by default and has a 64-tile limit. `survey` mode defaults to
-0.10 mm/pixel, 20 percent overlap, a 4,096-tile limit, and `mosaic_only`
-retention. It holds one V4L2 stream open across moves and retains only two full
-camera rows while it registers and renders the mosaic. Thus, memory use is
-bounded by mosaic size and row width instead of total tile count.
+0.10 mm/pixel, 30 percent overlap, the machine profile's validated default XY
+feed, a 4,096-tile limit, and `mosaic_only` retention. It discards four queued
+frames after each completed move before it accepts a capture. It holds one
+V4L2 stream open across moves and retains only two full camera rows while it
+registers and renders the mosaic. Thus, memory use is bounded by mosaic size
+and row width instead of total tile count. `feed_mm_per_min` can request a
+slower feed, but cannot exceed the profile limit.
 
 Artifact retention can be `full_sources`, `thumbnails`, or `mosaic_only`.
 Every request has a retained-byte estimate and quota. A request that exceeds
@@ -144,9 +147,16 @@ Poll `GET /api/v1/workspace-scans/SCAN_UUID`. Fetch the final image from
 report from `artifacts/manifest.json`. OpenCV ORB/RANSAC overlap registration
 can apply only a small, validated placement correction. Rejected or
 textureless overlaps retain calibrated machine placement and add a warning.
+Streaming surveys also require two consistent neighboring registrations before
+they apply a correction. An isolated match stays diagnostic and does not move
+a tile away from calibrated machine placement.
 If an accepted correction moves an outer tile inward, only the newly exposed
 edge pixels use nominal machine placement. The manifest reports this value as
 `nominal_fallback_fraction`.
+
+Coarse rendering averages the source area represented by each output sample.
+Tile weights feather across the full configured overlap on each axis. This
+suppresses source-pixel aliasing and repeated camera shading at tile edges.
 
 The mosaic is an overhead map. Image X points toward positive machine X, and
 image Y points toward negative machine Y. Thus, the top row is the region's
@@ -156,9 +166,16 @@ maximum machine Y. The estimate and report make this convention explicit in
 For the complete configured staging and build plates, replace `region` with
 `"region_preset":"installed_plates"`. The preset requires a current, passing
 installed-plate geometry artifact. It uses the measured affine plate extents,
-the local plate-height pixel-to-machine maps, and half-pitch margins. It then
-clamps the region to machine bounds. An explicit region uses the top-camera
-working-plane model. The estimate and report identify this choice as
+the local plate-height pixel-to-machine maps, and the source-derived plate
+outline. The V3.0.4 plates are 600 by 120 mm, with 39 columns and seven rows;
+their outline is one 15 mm pitch outside the outer feature centers. The region
+is clipped to what the camera can observe from legal head poses, not to the
+head-center travel rectangle. Thus, the V3 top camera can see column 5 beyond
+the X=0 head-center limit, but it cannot see columns 1 through 4. An explicit
+region uses the top-camera working-plane model. The preflight estimate and
+final report warn which source-outline edges were clipped by optical reach.
+Supply both `region_preset` and `region` to crop a scan while retaining the
+installed-plate height model. The estimate and report identify this choice as
 `surface_model`. A daemon restart marks a pending or running scan and its
 operation failed. It does not leave an interrupted scan reported as active.
 

@@ -14,6 +14,7 @@ const MAX_APPLIED_CORRECTION_MM: f64 = 0.75;
 const MAX_REGISTRATION_ROTATION_DEG: f64 = 1.0;
 const MAX_REGISTRATION_SCALE_ERROR: f64 = 0.02;
 const MAX_REGISTRATION_RESIDUAL_P95_MM: f64 = 0.20;
+const MAX_CORROBORATING_CORRECTION_GAP_MM: f64 = 0.25;
 const MIN_REGISTRATION_MATCHES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,7 +211,15 @@ impl WorkspaceMosaicStream {
                     &self.model,
                 )?);
             }
-            apply_registration_correction(index, &self.registrations, &mut self.tiles);
+            // A repetitive plate grid can produce a locally plausible but
+            // isolated match. Require agreement from two already-processed
+            // neighbors before a streaming survey changes machine placement.
+            apply_registration_correction_with_support(
+                index,
+                &self.registrations,
+                &mut self.tiles,
+                2,
+            );
             splat_workspace_tile(
                 &self.plan,
                 &self.model,
@@ -267,19 +276,20 @@ pub fn plan_workspace_scan(
     );
     ensure!(max_tiles > 0, "workspace max_tiles must be non-zero");
     ensure!(
-        region.x_min_mm >= machine_bounds.x_min_mm
-            && region.x_max_mm <= machine_bounds.x_max_mm
-            && region.y_min_mm >= machine_bounds.y_min_mm
-            && region.y_max_mm <= machine_bounds.y_max_mm,
-        "workspace scan region is outside machine bounds"
-    );
-    ensure!(
         frame_width_px > 0 && frame_height_px > 0,
         "workspace frame dimensions must be non-zero"
     );
     let usable_pixel_bounds =
         supported_pixel_bounds(camera_model, frame_width_px, frame_height_px)?;
     let footprint = conservative_camera_footprint(camera_model, usable_pixel_bounds)?;
+    let reachable_region = reachable_region_from_footprint(machine_bounds, footprint)?;
+    ensure!(
+        region.x_min_mm >= reachable_region.x_min_mm
+            && region.x_max_mm <= reachable_region.x_max_mm
+            && region.y_min_mm >= reachable_region.y_min_mm
+            && region.y_max_mm <= reachable_region.y_max_mm,
+        "workspace scan region is outside reachable top-camera coverage"
+    );
     let footprint_width = footprint[1] - footprint[0];
     let footprint_height = footprint[3] - footprint[2];
     ensure!(
@@ -373,6 +383,37 @@ pub fn plan_workspace_scan(
         columns,
         tiles,
     })
+}
+
+/// Returns the union of workspace points that the top camera can observe while
+/// its center stays inside the legal machine travel bounds.
+pub fn workspace_camera_reachable_region(
+    camera_model: &PlanarCameraModel,
+    machine_bounds: Bounds,
+    frame_width_px: u32,
+    frame_height_px: u32,
+) -> Result<WorkspaceScanRegion> {
+    ensure!(
+        camera_model.role == velocitypnp_domain::CameraRole::TopCamera,
+        "workspace scan requires a top-camera planar model"
+    );
+    let pixel_bounds = supported_pixel_bounds(camera_model, frame_width_px, frame_height_px)?;
+    let footprint = conservative_camera_footprint(camera_model, pixel_bounds)?;
+    reachable_region_from_footprint(machine_bounds, footprint)
+}
+
+fn reachable_region_from_footprint(
+    machine_bounds: Bounds,
+    footprint: [f64; 4],
+) -> Result<WorkspaceScanRegion> {
+    let region = WorkspaceScanRegion {
+        x_min_mm: machine_bounds.x_min_mm + footprint[0],
+        x_max_mm: machine_bounds.x_max_mm + footprint[1],
+        y_min_mm: machine_bounds.y_min_mm + footprint[2],
+        y_max_mm: machine_bounds.y_max_mm + footprint[3],
+    };
+    region.validate().map_err(anyhow::Error::msg)?;
+    Ok(region)
 }
 
 pub fn build_workspace_mosaic(
@@ -761,14 +802,44 @@ fn apply_registration_correction(
     registrations: &[WorkspaceTileRegistration],
     tiles: &mut [WorkspaceScanTile],
 ) {
+    apply_registration_correction_with_support(index, registrations, tiles, 1);
+}
+
+fn apply_registration_correction_with_support(
+    index: usize,
+    registrations: &[WorkspaceTileRegistration],
+    tiles: &mut [WorkspaceScanTile],
+    minimum_support: usize,
+) {
     let mut weighted_x = 0.0;
     let mut weighted_y = 0.0;
     let mut total_weight = 0.0;
-    for registration in registrations
+    let support = registrations
         .iter()
         .filter(|registration| registration.moving_tile_index as usize == index)
         .filter(|registration| registration.accepted)
-    {
+        .collect::<Vec<_>>();
+    if support.len() < minimum_support {
+        return;
+    }
+    let candidates = support
+        .iter()
+        .map(|registration| {
+            let fixed = &tiles[registration.fixed_tile_index as usize];
+            [
+                fixed.placement_correction_x_mm + registration.correction_x_mm.unwrap_or(0.0),
+                fixed.placement_correction_y_mm + registration.correction_y_mm.unwrap_or(0.0),
+            ]
+        })
+        .collect::<Vec<_>>();
+    if candidates.iter().enumerate().any(|(index, first)| {
+        candidates[index + 1..].iter().any(|second| {
+            (first[0] - second[0]).hypot(first[1] - second[1]) > MAX_CORROBORATING_CORRECTION_GAP_MM
+        })
+    }) {
+        return;
+    }
+    for registration in support {
         let fixed = &tiles[registration.fixed_tile_index as usize];
         let weight = f64::from(registration.inlier_count.max(1));
         weighted_x += weight
@@ -909,6 +980,12 @@ fn splat_workspace_tile(
     } else {
         0.0
     };
+    let feather_x_px = (f64::from(bounds.width()) * plan.overlap_fraction)
+        .round()
+        .max(1.0) as u32;
+    let feather_y_px = (f64::from(bounds.height()) * plan.overlap_fraction)
+        .round()
+        .max(1.0) as u32;
     for y in (bounds.top..bounds.bottom).step_by(sample_step_px) {
         for x in (bounds.left..bounds.right).step_by(sample_step_px) {
             let Some(camera_offset) = model.correction_at(f64::from(x), f64::from(y)) else {
@@ -925,16 +1002,16 @@ fn splat_workspace_tile(
             {
                 continue;
             }
-            let edge_distance = (x - bounds.left)
-                .min(bounds.right - 1 - x)
-                .min(y - bounds.top)
-                .min(bounds.bottom - 1 - y);
-            let feather = (edge_distance + 1).min(32) as f32 / 32.0;
+            let x_edge_distance = (x - bounds.left).min(bounds.right - 1 - x);
+            let y_edge_distance = (y - bounds.top).min(bounds.bottom - 1 - y);
+            let x_feather = (x_edge_distance + 1).min(feather_x_px) as f32 / feather_x_px as f32;
+            let y_feather = (y_edge_distance + 1).min(feather_y_px) as f32 / feather_y_px as f32;
+            let feather = x_feather * y_feather;
             let x0 = output_x.floor() as u32;
             let y0 = output_y.floor() as u32;
             let fraction_x = (output_x - f64::from(x0)) as f32;
             let fraction_y = (output_y - f64::from(y0)) as f32;
-            let luma = f32::from(frame.pixels[(y * frame.width + x) as usize]);
+            let luma = area_sample_luma(frame, x, y, sample_step_px);
             for (target_x, x_weight) in [(x0, 1.0 - fraction_x), (x0 + 1, fraction_x)] {
                 if target_x >= width || x_weight <= 0.0 {
                     continue;
@@ -954,6 +1031,26 @@ fn splat_workspace_tile(
             }
         }
     }
+}
+
+fn area_sample_luma(frame: &GrayFrame, x: u32, y: u32, sample_step_px: usize) -> f32 {
+    let sample_size = sample_step_px as u32;
+    let before = sample_size / 2;
+    let after = sample_size - before;
+    let x_start = x.saturating_sub(before);
+    let y_start = y.saturating_sub(before);
+    let x_end = x.saturating_add(after).min(frame.width);
+    let y_end = y.saturating_add(after).min(frame.height);
+    let mut sum = 0_u64;
+    let mut count = 0_u64;
+    for sample_y in y_start..y_end {
+        let row = sample_y as usize * frame.width as usize;
+        for sample_x in x_start..x_end {
+            sum += u64::from(frame.pixels[row + sample_x as usize]);
+            count += 1;
+        }
+    }
+    sum as f32 / count.max(1) as f32
 }
 
 fn percentile_95(sorted: &[f64]) -> Option<f64> {
@@ -1028,6 +1125,109 @@ mod tests {
         assert_eq!(plan.tiles[1].capture_order, 1);
         assert_eq!(plan.tiles[2].capture_order, 3);
         assert_eq!(plan.tiles[3].capture_order, 2);
+    }
+
+    #[test]
+    fn scan_plan_allows_camera_coverage_beyond_head_travel() {
+        let model = affine_model(200, 100, 0.01);
+        let reachable = workspace_camera_reachable_region(&model, bounds(), 200, 100).unwrap();
+
+        assert!(reachable.x_min_mm < 0.0);
+        assert!(reachable.x_max_mm > 100.0);
+        assert!(reachable.y_min_mm < 0.0);
+        assert!(reachable.y_max_mm > 100.0);
+
+        let plan = plan_workspace_scan(
+            WorkspaceScanRegion {
+                x_min_mm: -0.9,
+                x_max_mm: 0.9,
+                y_min_mm: -0.4,
+                y_max_mm: 0.4,
+            },
+            &model,
+            bounds(),
+            31.5,
+            0.0,
+            200,
+            100,
+            0.35,
+            None,
+            16,
+            1_000_000,
+        )
+        .unwrap();
+
+        assert!(plan
+            .tiles
+            .iter()
+            .all(|tile| bounds().contains(tile.nominal_pose)));
+    }
+
+    #[test]
+    fn coarse_sampling_uses_the_source_pixel_area() {
+        let frame = GrayFrame {
+            width: 4,
+            height: 4,
+            pixels: (0..16).collect(),
+        };
+
+        assert!((area_sample_luma(&frame, 2, 2, 4) - 7.5).abs() < f32::EPSILON);
+        assert_eq!(area_sample_luma(&frame, 1, 1, 1), 5.0);
+    }
+
+    #[test]
+    fn streaming_correction_requires_two_consistent_neighbors() {
+        let tile = |index| WorkspaceScanTile {
+            index,
+            row: 0,
+            column: index,
+            capture_order: index,
+            nominal_pose: Pose {
+                x_mm: f64::from(index),
+                y_mm: 0.0,
+                z_mm: 31.5,
+                rotation_deg: 0.0,
+            },
+            placement_correction_x_mm: 0.0,
+            placement_correction_y_mm: 0.0,
+            artifact_name: String::new(),
+        };
+        let registration = |fixed_tile_index, correction_x_mm| WorkspaceTileRegistration {
+            fixed_tile_index,
+            moving_tile_index: 2,
+            raw_match_count: 20,
+            geometric_match_count: 12,
+            inlier_count: 10,
+            inlier_ratio: 0.8,
+            correction_x_mm: Some(correction_x_mm),
+            correction_y_mm: Some(0.0),
+            scale: Some(1.0),
+            rotation_deg: Some(0.0),
+            residual_p95_mm: Some(0.05),
+            accepted: true,
+            rejection_reason: None,
+        };
+        let mut tiles = vec![tile(0), tile(1), tile(2)];
+
+        apply_registration_correction_with_support(2, &[registration(0, 0.12)], &mut tiles, 2);
+        assert_eq!(tiles[2].placement_correction_x_mm, 0.0);
+
+        apply_registration_correction_with_support(
+            2,
+            &[registration(0, 0.12), registration(1, 0.08)],
+            &mut tiles,
+            2,
+        );
+        assert!((tiles[2].placement_correction_x_mm - 0.10).abs() < 1e-12);
+
+        tiles[2].placement_correction_x_mm = 0.0;
+        apply_registration_correction_with_support(
+            2,
+            &[registration(0, 0.30), registration(1, -0.10)],
+            &mut tiles,
+            2,
+        );
+        assert_eq!(tiles[2].placement_correction_x_mm, 0.0);
     }
 
     #[test]

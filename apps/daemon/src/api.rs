@@ -54,10 +54,10 @@ use velocitypnp_vision::{
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
     query_camera_controls, resize_gray_frame, summarize_camera_reproducibility,
     summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
-    summarize_opposed_camera_feature, summarize_residuals, BottomCameraCorrection,
-    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
-    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
-    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
+    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
+    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig,
+    VisualHomingPlan, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -76,10 +76,13 @@ const MAX_WORKSPACE_SCAN_TILES: u32 = 64;
 const MAX_WORKSPACE_SURVEY_TILES: u32 = 4_096;
 const MAX_WORKSPACE_MOSAIC_PIXELS: usize = 25_000_000;
 const MAX_WORKSPACE_SURVEY_PIXELS: usize = 12_000_000;
-const WORKSPACE_SCAN_SETTLE_FRAMES: u32 = 5;
+const WORKSPACE_PRECISION_SETTLE_FRAMES: u32 = 5;
+// Persistent capture allocates four V4L2 buffers. Discard all four after each
+// move so that the accepted frame was exposed at the completed pose.
+const WORKSPACE_SURVEY_SETTLE_FRAMES: u32 = 4;
 const MIN_WORKSPACE_COVERAGE: f64 = 0.99;
 const DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL: f64 = 0.10;
-const DEFAULT_SURVEY_OVERLAP: f64 = 0.20;
+const DEFAULT_SURVEY_OVERLAP: f64 = 0.30;
 const DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_PRECISION_ARTIFACT_QUOTA_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
@@ -661,6 +664,8 @@ struct WorkspaceScanSpecification {
     #[serde(default)]
     output_mm_per_pixel: Option<f64>,
     #[serde(default)]
+    feed_mm_per_min: Option<f64>,
+    #[serde(default)]
     max_tiles: Option<u32>,
     #[serde(default)]
     artifact_quota_bytes: Option<u64>,
@@ -780,6 +785,8 @@ async fn start_workspace_scan(
         raster_transform: Some(estimate.raster_transform),
         overlap_fraction: plan.overlap_fraction,
         output_mm_per_pixel: plan.output_mm_per_pixel,
+        feed_mm_per_min: estimate.feed_mm_per_min,
+        capture_settle_frames: estimate.capture_settle_frames,
         frame_width_px: plan.frame_width_px,
         frame_height_px: plan.frame_height_px,
         usable_pixel_bounds: plan.usable_pixel_bounds,
@@ -801,7 +808,7 @@ async fn start_workspace_scan(
         tiles: plan.tiles.clone(),
         registrations: Vec::new(),
         mosaic_artifact_name: None,
-        warnings: Vec::new(),
+        warnings: estimate.warnings.clone(),
         failure: None,
     };
     state
@@ -844,22 +851,34 @@ fn prepare_workspace_scan(
     installed_geometry: Option<&InstalledPlateGeometryReport>,
     start_pose: Pose,
 ) -> ApiResult<(WorkspaceScanPlan, WorkspaceScanEstimate)> {
-    if specification.region.is_some() && specification.region_preset.is_some() {
-        return Err(ApiError::bad_request(
-            "workspace scan cannot specify both region and region_preset",
-        ));
-    }
-    let region = match (specification.region, specification.region_preset) {
-        (Some(region), None) => region,
-        (None, Some(WorkspaceRegionPreset::InstalledPlates)) => {
-            installed_plates_scan_region(&state.profile, installed_geometry)?
+    let mut warnings = Vec::new();
+    let preset_region = match specification.region_preset {
+        Some(WorkspaceRegionPreset::InstalledPlates) => {
+            let plate_region = installed_plates_scan_region(&state.profile, installed_geometry)?;
+            let reachable_region = workspace_camera_reachable_region(
+                camera_model,
+                state.profile.bounds,
+                top_profile.width,
+                top_profile.height,
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            let clipped_region = intersect_workspace_regions(plate_region, reachable_region)?;
+            if let Some(warning) = workspace_camera_clip_warning(plate_region, clipped_region) {
+                warnings.push(warning);
+            }
+            Some(clipped_region)
         }
+        None => None,
+    };
+    let region = match (specification.region, preset_region) {
+        (Some(region), None) => region,
+        (None, Some(region)) => region,
+        (Some(region), Some(preset_region)) => intersect_workspace_regions(region, preset_region)?,
         (None, None) => {
             return Err(ApiError::bad_request(
                 "workspace scan requires region or region_preset",
             ));
         }
-        (Some(_), Some(_)) => unreachable!(),
     };
     let survey = specification.mode == WorkspaceScanMode::Survey;
     let overlap_fraction = specification.overlap_fraction.unwrap_or(if survey {
@@ -907,6 +926,11 @@ fn prepare_workspace_scan(
         .visual_homing
         .as_ref()
         .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let feed_mm_per_min = workspace_scan_feed(
+        &state.profile,
+        specification.mode,
+        specification.feed_mm_per_min,
+    )?;
     let mut plan = plan_workspace_scan(
         region,
         camera_model,
@@ -934,7 +958,7 @@ fn prepare_workspace_scan(
             WorkspaceArtifactRetention::MosaicOnly => String::new(),
         };
     }
-    let estimate = workspace_scan_estimate(
+    let mut estimate = workspace_scan_estimate(
         &plan,
         WorkspaceScanEstimateContext {
             mode: specification.mode,
@@ -949,9 +973,10 @@ fn prepare_workspace_scan(
                 rotation_deg: start_pose.rotation_deg,
             },
             start_pose,
-            feed_mm_per_min: workspace_scan_feed(&state.profile),
+            feed_mm_per_min,
         },
     );
+    estimate.warnings = warnings;
     if estimate.estimated_retained_bytes > artifact_quota_bytes {
         return Err(ApiError::bad_request(format!(
             "workspace scan estimates {} retained bytes, above the quota of {artifact_quota_bytes}; choose mosaic_only, increase output scale, reduce the region, or raise the quota",
@@ -1127,8 +1152,11 @@ fn installed_plates_scan_region(
                 .find(|fit| fit.plate_id == plate.id && fit.passed)
                 .map(|fit| fit.model)
         });
-        for column in [-0.5, f64::from(plate.column_count) - 0.5] {
-            for row in [-0.5, f64::from(plate.row_count) - 0.5] {
+        // The V3 plate source puts its outline one grid pitch outside the
+        // first and last feature centers. Use those source-derived corners
+        // so the preset includes the complete installed PCB surface.
+        for column in [-1.0, f64::from(plate.column_count)] {
+            for row in [-1.0, f64::from(plate.row_count)] {
                 let nominal_x = visual.fiducial_x_mm
                     + plate.origin_offset_x_mm
                     + column * plate.column_step_x_mm
@@ -1148,21 +1176,79 @@ fn installed_plates_scan_region(
         }
     }
     let region = WorkspaceScanRegion {
-        x_min_mm: min_x.max(profile.bounds.x_min_mm),
-        x_max_mm: max_x.min(profile.bounds.x_max_mm),
-        y_min_mm: min_y.max(profile.bounds.y_min_mm),
-        y_max_mm: max_y.min(profile.bounds.y_max_mm),
+        x_min_mm: min_x,
+        x_max_mm: max_x,
+        y_min_mm: min_y,
+        y_max_mm: max_y,
     };
     region.validate().map_err(ApiError::bad_request)?;
     Ok(region)
 }
 
-fn workspace_scan_feed(profile: &MachineProfile) -> f64 {
-    profile
-        .installed_geometry_calibration
-        .as_ref()
-        .map(|installed| installed.feed_mm_per_min)
-        .unwrap_or(profile.default_feed_mm_per_min)
+fn intersect_workspace_regions(
+    requested: WorkspaceScanRegion,
+    reachable: WorkspaceScanRegion,
+) -> ApiResult<WorkspaceScanRegion> {
+    let intersection = WorkspaceScanRegion {
+        x_min_mm: requested.x_min_mm.max(reachable.x_min_mm),
+        x_max_mm: requested.x_max_mm.min(reachable.x_max_mm),
+        y_min_mm: requested.y_min_mm.max(reachable.y_min_mm),
+        y_max_mm: requested.y_max_mm.min(reachable.y_max_mm),
+    };
+    intersection.validate().map_err(|_| {
+        ApiError::bad_request("installed plates are outside reachable top-camera coverage")
+    })?;
+    Ok(intersection)
+}
+
+fn workspace_camera_clip_warning(
+    requested: WorkspaceScanRegion,
+    clipped: WorkspaceScanRegion,
+) -> Option<String> {
+    const EPSILON_MM: f64 = 1e-6;
+    let mut edges = Vec::new();
+    if clipped.x_min_mm > requested.x_min_mm + EPSILON_MM {
+        edges.push("X-min");
+    }
+    if clipped.x_max_mm < requested.x_max_mm - EPSILON_MM {
+        edges.push("X-max");
+    }
+    if clipped.y_min_mm > requested.y_min_mm + EPSILON_MM {
+        edges.push("Y-min");
+    }
+    if clipped.y_max_mm < requested.y_max_mm - EPSILON_MM {
+        edges.push("Y-max");
+    }
+    (!edges.is_empty()).then(|| {
+        format!(
+            "installed plate outline exceeds top-camera coverage at {}; scan region is clipped to reachable optical coverage",
+            edges.join(", ")
+        )
+    })
+}
+
+fn workspace_scan_feed(
+    profile: &MachineProfile,
+    mode: WorkspaceScanMode,
+    requested: Option<f64>,
+) -> ApiResult<f64> {
+    let default = if mode == WorkspaceScanMode::Survey {
+        profile.default_feed_mm_per_min
+    } else {
+        profile
+            .installed_geometry_calibration
+            .as_ref()
+            .map(|installed| installed.feed_mm_per_min)
+            .unwrap_or(profile.default_feed_mm_per_min)
+    };
+    let feed = requested.unwrap_or(default);
+    if !feed.is_finite() || feed <= 0.0 || feed > profile.default_feed_mm_per_min {
+        return Err(ApiError::bad_request(format!(
+            "workspace feed must be above zero and no greater than {} mm/min",
+            profile.default_feed_mm_per_min
+        )));
+    }
+    Ok(feed)
 }
 
 struct WorkspaceScanEstimateContext<'a> {
@@ -1231,7 +1317,7 @@ fn workspace_scan_estimate(
     let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
     let estimated_duration_seconds = if mode == WorkspaceScanMode::Survey {
         let first_frames = top_profile.settle_frames + 1;
-        let later_frames = WORKSPACE_SCAN_SETTLE_FRAMES + 1;
+        let later_frames = WORKSPACE_SURVEY_SETTLE_FRAMES + 1;
         let capture_frames = u64::from(first_frames)
             + u64::from(planned_tiles.saturating_sub(1)) * u64::from(later_frames);
         (movement_seconds
@@ -1255,6 +1341,12 @@ fn workspace_scan_estimate(
         },
         overlap_fraction: plan.overlap_fraction,
         output_mm_per_pixel: plan.output_mm_per_pixel,
+        feed_mm_per_min,
+        capture_settle_frames: if mode == WorkspaceScanMode::Survey {
+            WORKSPACE_SURVEY_SETTLE_FRAMES
+        } else {
+            WORKSPACE_PRECISION_SETTLE_FRAMES
+        },
         rows: plan.rows,
         columns: plan.columns,
         planned_tiles,
@@ -1265,6 +1357,7 @@ fn workspace_scan_estimate(
         estimated_retained_bytes,
         artifact_quota_bytes,
         persistent_capture: mode == WorkspaceScanMode::Survey,
+        warnings: Vec::new(),
     }
 }
 
@@ -1463,7 +1556,7 @@ async fn capture_and_build_precision_workspace_scan(
             .map_err(|error| error.to_string())?;
     }
     let mut frames = vec![None; plan.tiles.len()];
-    let feed_mm_per_min = workspace_scan_feed(&state.profile);
+    let feed_mm_per_min = scan.feed_mm_per_min;
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     for (capture_index, tile) in capture_sequence.into_iter().enumerate() {
@@ -1476,7 +1569,7 @@ async fn capture_and_build_precision_workspace_scan(
         if capture_index > 0 {
             capture_profile.settle_frames = capture_profile
                 .settle_frames
-                .min(WORKSPACE_SCAN_SETTLE_FRAMES);
+                .min(WORKSPACE_PRECISION_SETTLE_FRAMES);
         }
         let frame = capture_profiled_frames(state, &capture_profile, top_path, 1)
             .await
@@ -1535,7 +1628,7 @@ async fn capture_and_build_workspace_survey(
     );
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
-    let feed_mm_per_min = workspace_scan_feed(&state.profile);
+    let feed_mm_per_min = scan.feed_mm_per_min;
 
     for (capture_index, tile) in capture_sequence.into_iter().enumerate() {
         if capture_index > 0 && capture_index as u32 % 100 == 0 {
@@ -1553,7 +1646,9 @@ async fn capture_and_build_workspace_survey(
         let settle_frames = if capture_index == 0 {
             top_profile.settle_frames
         } else {
-            top_profile.settle_frames.min(WORKSPACE_SCAN_SETTLE_FRAMES)
+            top_profile
+                .settle_frames
+                .min(WORKSPACE_SURVEY_SETTLE_FRAMES)
         };
         let frame = capture_persistent_workspace_frame(
             &mut session,
@@ -11777,6 +11872,8 @@ mod tests {
             }),
             overlap_fraction: DEFAULT_SURVEY_OVERLAP,
             output_mm_per_pixel: DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL,
+            feed_mm_per_min: 1_200.0,
+            capture_settle_frames: WORKSPACE_SURVEY_SETTLE_FRAMES,
             frame_width_px: 1280,
             frame_height_px: 720,
             usable_pixel_bounds: velocitypnp_domain::WorkspacePixelBounds {
@@ -12313,15 +12410,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn installed_plate_region_covers_both_profile_plates_with_half_pitch_margin() {
+    async fn installed_plate_region_follows_the_v3_plate_outlines() {
         let state = test_state();
 
         let region = installed_plates_scan_region(&state.profile, None).unwrap();
 
-        assert_eq!(region.x_min_mm, 0.0);
-        assert_eq!(region.x_max_mm, 433.0);
-        assert!((region.y_min_mm - 95.771).abs() < 1e-9);
-        assert!((region.y_max_mm - 290.771).abs() < 1e-9);
+        assert!((region.x_min_mm + 79.869).abs() < 1e-9);
+        assert!((region.x_max_mm - 520.131).abs() < 1e-9);
+        assert!((region.y_min_mm - 88.271).abs() < 1e-9);
+        assert!((region.y_max_mm - 328.271).abs() < 1e-9);
+
+        let clipped = WorkspaceScanRegion {
+            x_min_mm: -8.0,
+            x_max_mm: 441.0,
+            ..region
+        };
+        let warning = workspace_camera_clip_warning(region, clipped).unwrap();
+        assert!(warning.contains("X-min, X-max"));
+        assert!(workspace_camera_clip_warning(clipped, clipped).is_none());
+    }
+
+    #[tokio::test]
+    async fn survey_feed_defaults_to_the_validated_machine_limit() {
+        let state = test_state();
+
+        assert_eq!(
+            workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, None).unwrap(),
+            1_200.0
+        );
+        assert_eq!(
+            workspace_scan_feed(&state.profile, WorkspaceScanMode::Precision, None).unwrap(),
+            600.0
+        );
+        assert_eq!(
+            workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, Some(900.0)).unwrap(),
+            900.0
+        );
+        assert!(
+            workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, Some(1_201.0)).is_err()
+        );
     }
 
     #[test]

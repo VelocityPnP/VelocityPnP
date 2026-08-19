@@ -1150,13 +1150,13 @@ mod tests {
         );
         assert_eq!(
             installed.adjacent_plate_origin("build_plate"),
-            Some([-285.0, 93.0])
+            Some([-285.0, 123.0])
         );
         assert_eq!(installed.plates[0].target_offset(19, 1), Some([0.0, -12.0]));
         assert_eq!(installed.plates[0].target_offset(18, 1), None);
         assert_eq!(
             installed.plates[1].target_offset(18, 0),
-            Some([-15.0, 93.0])
+            Some([-15.0, 123.0])
         );
         assert!(
             vacuum.target_offset_x_mm.hypot(vacuum.target_offset_y_mm)

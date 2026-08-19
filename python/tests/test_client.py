@@ -94,6 +94,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(
                 client.estimate_workspace_scan(
                     "calibration", region_preset="installed_plates",
+                    feed_mm_per_min=900.0,
                 ),
                 estimate,
             )
@@ -102,6 +103,7 @@ class ClientTests(unittest.TestCase):
                     "calibration",
                     "lease",
                     region_preset="installed_plates",
+                    feed_mm_per_min=900.0,
                     safety_checks_confirmed=True,
                 ),
                 started,
@@ -111,6 +113,7 @@ class ClientTests(unittest.TestCase):
             "mode": "survey",
             "artifact_retention": "mosaic_only",
             "region_preset": "installed_plates",
+            "feed_mm_per_min": 900.0,
         }
         self.assertEqual(
             send.call_args_list[0].args,
@@ -126,13 +129,35 @@ class ClientTests(unittest.TestCase):
             },
         ))
 
+        crop = {"x_min_mm": 0.0, "x_max_mm": 80.0,
+                "y_min_mm": 80.0, "y_max_mm": 300.0}
+        with patch.object(client, "_request", return_value=estimate) as send:
+            client.estimate_workspace_scan(
+                "calibration",
+                region=crop,
+                region_preset="installed_plates",
+            )
+        send.assert_called_once_with("POST", "/workspace-scans/estimate", {
+            "calibration_id": "calibration",
+            "mode": "survey",
+            "artifact_retention": "mosaic_only",
+            "region": crop,
+            "region_preset": "installed_plates",
+        })
+
         with patch.object(client, "_request") as send:
             with self.assertRaisesRegex(ValueError, "explicit confirmation"):
                 client.start_workspace_scan(
                     "calibration", "lease", region_preset="installed_plates",
                 )
-            with self.assertRaisesRegex(ValueError, "exactly one"):
+            with self.assertRaisesRegex(ValueError, "region or region_preset"):
                 client.estimate_workspace_scan("calibration")
+            with self.assertRaisesRegex(ValueError, "above zero"):
+                client.estimate_workspace_scan(
+                    "calibration",
+                    region_preset="installed_plates",
+                    feed_mm_per_min=0.0,
+                )
         send.assert_not_called()
 
     def test_home_requires_explicit_physical_confirmation(self):

@@ -1068,9 +1068,12 @@ components:
     WorkspaceScanSpecification:
       type: object
       required: [calibration_id]
-      oneOf:
+      anyOf:
         - required: [region]
         - required: [region_preset]
+      description: >-
+        A region can accompany installed_plates to request a cropped plate-plane
+        scan. The service intersects it with reachable installed-plate coverage.
       properties:
         calibration_id: { type: string, format: uuid }
         mode:
@@ -1088,7 +1091,14 @@ components:
           type: number
           minimum: 0.2
           maximum: 0.75
+          description: Survey mode defaults to 0.30.
         output_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
+        feed_mm_per_min:
+          type: number
+          exclusiveMinimum: 0
+          description: >-
+            Optional XY feed. It cannot exceed the active machine profile's
+            validated default feed.
         max_tiles: { type: integer, minimum: 1, maximum: 4096 }
         artifact_quota_bytes:
           type: integer
@@ -1112,6 +1122,8 @@ components:
         - raster_transform
         - overlap_fraction
         - output_mm_per_pixel
+        - feed_mm_per_min
+        - capture_settle_frames
         - rows
         - columns
         - planned_tiles
@@ -1122,6 +1134,7 @@ components:
         - estimated_retained_bytes
         - artifact_quota_bytes
         - persistent_capture
+        - warnings
       properties:
         mode: { type: string, enum: [precision, survey] }
         artifact_retention:
@@ -1134,6 +1147,8 @@ components:
         raster_transform: { $ref: "#/components/schemas/WorkspaceRasterTransform" }
         overlap_fraction: { type: number }
         output_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
+        feed_mm_per_min: { type: number, exclusiveMinimum: 0 }
+        capture_settle_frames: { type: integer, minimum: 0 }
         rows: { type: integer, minimum: 1 }
         columns: { type: integer, minimum: 1 }
         planned_tiles: { type: integer, minimum: 1 }
@@ -1144,6 +1159,12 @@ components:
         estimated_retained_bytes: { type: integer, minimum: 0 }
         artifact_quota_bytes: { type: integer, minimum: 1 }
         persistent_capture: { type: boolean }
+        warnings:
+          type: array
+          items: { type: string }
+          description: >-
+            Preflight notices, including installed plate edges that are outside
+            reachable top-camera coverage.
     WorkspaceScanReport:
       type: object
       required:
@@ -1158,6 +1179,8 @@ components:
         - artifact_retention
         - surface_model
         - region
+        - feed_mm_per_min
+        - capture_settle_frames
         - planned_tiles
         - captured_tiles
         - estimated_duration_seconds
@@ -1190,6 +1213,8 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceRasterTransform"
             - type: "null"
+        feed_mm_per_min: { type: number, minimum: 0 }
+        capture_settle_frames: { type: integer, minimum: 0 }
         planned_tiles: { type: integer, minimum: 1 }
         captured_tiles: { type: integer, minimum: 0 }
         mosaic_width_px: { type: [integer, "null"], minimum: 2 }

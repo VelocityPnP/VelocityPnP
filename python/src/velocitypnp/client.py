@@ -97,6 +97,7 @@ class Client:
         artifact_retention: str = "mosaic_only",
         overlap_fraction: float | None = None,
         output_mm_per_pixel: float | None = None,
+        feed_mm_per_min: float | None = None,
         artifact_quota_bytes: int | None = None,
     ) -> dict[str, Any]:
         specification = self._workspace_scan_specification(
@@ -107,6 +108,7 @@ class Client:
             artifact_retention=artifact_retention,
             overlap_fraction=overlap_fraction,
             output_mm_per_pixel=output_mm_per_pixel,
+            feed_mm_per_min=feed_mm_per_min,
             artifact_quota_bytes=artifact_quota_bytes,
         )
         return self._request("POST", "/workspace-scans/estimate", specification)
@@ -122,6 +124,7 @@ class Client:
         artifact_retention: str = "mosaic_only",
         overlap_fraction: float | None = None,
         output_mm_per_pixel: float | None = None,
+        feed_mm_per_min: float | None = None,
         artifact_quota_bytes: int | None = None,
         safety_checks_confirmed: bool = False,
     ) -> dict[str, Any]:
@@ -139,6 +142,7 @@ class Client:
             artifact_retention=artifact_retention,
             overlap_fraction=overlap_fraction,
             output_mm_per_pixel=output_mm_per_pixel,
+            feed_mm_per_min=feed_mm_per_min,
             artifact_quota_bytes=artifact_quota_bytes,
         )
         return self._request("POST", "/workspace-scans", {
@@ -168,10 +172,11 @@ class Client:
         artifact_retention: str,
         overlap_fraction: float | None,
         output_mm_per_pixel: float | None,
+        feed_mm_per_min: float | None,
         artifact_quota_bytes: int | None,
     ) -> dict[str, Any]:
-        if (region is None) == (region_preset is None):
-            raise ValueError("workspace scan requires exactly one region or region_preset")
+        if region is None and region_preset is None:
+            raise ValueError("workspace scan requires region or region_preset")
         if region_preset is not None and region_preset != "installed_plates":
             raise ValueError("workspace region_preset must be installed_plates")
         if mode not in {"precision", "survey"}:
@@ -181,6 +186,8 @@ class Client:
                 "workspace artifact retention must be full_sources, thumbnails, "
                 "or mosaic_only"
             )
+        if feed_mm_per_min is not None and feed_mm_per_min <= 0:
+            raise ValueError("workspace feed_mm_per_min must be above zero")
         specification: dict[str, Any] = {
             "calibration_id": str(calibration_id),
             "mode": mode,
@@ -193,6 +200,7 @@ class Client:
         for name, value in {
             "overlap_fraction": overlap_fraction,
             "output_mm_per_pixel": output_mm_per_pixel,
+            "feed_mm_per_min": feed_mm_per_min,
             "artifact_quota_bytes": artifact_quota_bytes,
         }.items():
             if value is not None:

@@ -64,3 +64,5 @@ Workspace scans are asynchronous because a full survey can take close to an
 hour. Use `workspace_scan(survey["scan"]["id"])` to poll progress, then use
 `workspace_scan_mosaic` to retrieve the final PNG. The survey defaults retain
 only the coarse mosaic and manifest, not every full-resolution camera frame.
+They use 30 percent overlap and the active profile's validated default XY feed.
+Pass `feed_mm_per_min` only to request a slower scan.

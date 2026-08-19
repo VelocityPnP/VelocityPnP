@@ -98,6 +98,8 @@ pub struct WorkspaceScanEstimate {
     pub raster_transform: WorkspaceRasterTransform,
     pub overlap_fraction: f64,
     pub output_mm_per_pixel: f64,
+    pub feed_mm_per_min: f64,
+    pub capture_settle_frames: u32,
     pub rows: u32,
     pub columns: u32,
     pub planned_tiles: u32,
@@ -108,6 +110,8 @@ pub struct WorkspaceScanEstimate {
     pub estimated_retained_bytes: u64,
     pub artifact_quota_bytes: u64,
     pub persistent_capture: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -159,6 +163,10 @@ pub struct WorkspaceScanReport {
     pub raster_transform: Option<WorkspaceRasterTransform>,
     pub overlap_fraction: f64,
     pub output_mm_per_pixel: f64,
+    #[serde(default)]
+    pub feed_mm_per_min: f64,
+    #[serde(default)]
+    pub capture_settle_frames: u32,
     pub frame_width_px: u32,
     pub frame_height_px: u32,
     pub usable_pixel_bounds: WorkspacePixelBounds,

@@ -133,6 +133,9 @@ pixels directly into machine coordinates. OpenCV ORB feature matching and
 RANSAC similarity estimation refine overlapping tile placement only inside
 strict translation, rotation, scale, and residual limits. Machine geometry
 remains the fallback when an overlap is blank, occupied, or rejected.
+Streaming surveys also require two consistent neighboring registrations before
+they apply a correction. This prevents an isolated match on a repetitive plate
+grid from moving one tile away from its calibrated pose.
 
 Large survey scans keep one V4L2 stream open across the motion path. The
 streaming mosaic builder keeps only the current and prior full-resolution tile
@@ -142,12 +145,20 @@ mosaic-only retention and enforce estimated and actual artifact-byte quotas.
 This avoids total-tile memory and storage growth while retaining calibrated
 machine placement for low-texture overlaps.
 
+Coarse samples use a source-area mean instead of one source pixel. Blending
+uses separate X and Y feather weights across the full overlap. This reduces
+aliasing and periodic camera-shading bands without retaining more rows.
+
 Workspace rasters use an overhead machine-coordinate convention. Pixel X
 increases with machine X. Pixel Y increases as machine Y decreases, so the
 upper-left pixel maps to `(x_min, y_max)`. Each scan report contains this
 signed pixel-to-machine transform. Installed-plate presets also replace the
-datum working-plane scale with the measured local plate-plane mappings and use
-the fitted plate geometry to define the scan region.
+datum working-plane scale with the measured local plate-plane mappings. The
+fitted grid and the source-defined 39-by-7 feature count define each V3 plate's
+600 by 120 mm outline. The preset intersects that outline with the union of
+camera coverage from legal head poses. The image can therefore extend past a
+head-center travel limit when the camera can safely see that area. It cannot
+include a physical plate edge that lies outside that optical union.
 
 ## Crates and applications
 

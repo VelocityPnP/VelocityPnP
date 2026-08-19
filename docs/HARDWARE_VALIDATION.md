@@ -920,9 +920,9 @@ new staging scan. A run passes only when both configured plates qualify.
 
 Run `e8ea8048-15a9-4160-8fc0-4760ab8f6f0e` first qualified both plates. Its
 build correction differed from the staging correction by 14.87329 mm in Y.
-This exposed one extra 15 mm row pitch in the nominal build origin. The source
-profile now places the adjacent edge rows at the same Y and changes the build
-origin from 108 mm to 93 mm relative to the visual datum.
+This appeared to expose one extra 15 mm row pitch in the nominal build origin.
+At that time, the profile placed the adjacent edge rows at the same Y and
+changed the build origin from 108 mm to 93 mm relative to the visual datum.
 
 Corrected run `58d959ee-33a4-4b62-b9fb-2c6722c392dc` passed on 2026-08-18.
 It reused both camera sweeps and all 20 staging samples. The build plate
@@ -937,6 +937,24 @@ maximum residual. Build covered nine columns, six rows, 330 mm in X, and 90 mm
 in Y. Its four holdouts had a 0.05384 mm RMS and a 0.06689 mm maximum residual.
 Both affine models improved their nominal holdouts. There were no plate
 limitations.
+
+The later workspace survey showed that this conclusion selected the wrong
+alias of the repetitive 15 mm grid. The tagged V3.0.4 KiCad source defines a
+600 by 120 mm plate with 39 numbered columns, seven lettered rows, and one
+pitch from each outer feature center to the PCB outline. The old profile
+declared 40 columns and made the two plate grids overlap by 30 mm. It therefore
+cut the two north rows from the build-plate survey while its observed holes
+still fit the periodic grid. The corrected profile uses 39 columns, a two-row
+center gap at the touching plate edges, and a build Y origin of 123 mm. This
+profile correction made the previous installed-geometry artifact stale.
+
+Run `74d82ef6-74cb-43aa-859d-0edcab891e37` requalified the corrected geometry
+on 2026-08-18 local time. It reused both current planar camera sweeps and the
+compatible staging measurements. The build plate registered from two holes at
+X=-0.26437 and Y=-3.80493 mm. Twelve build samples covered eight columns, four
+rows, 270 mm in X, and 90 mm in Y. Its three holdouts had a 0.06088 mm RMS and
+a 0.09275 mm maximum residual. Both plates passed with no limitation. The
+machine returned homed, ready, and fault-free to the visual datum.
 
 Two corrected-profile attempts were stopped during diagnosis because the
 initial 290 mm safe-Z move from coarse home to the visual datum was mistaken
@@ -1049,6 +1067,27 @@ top-camera distortion model to the mean measured plate-plane mapping and uses
 the fitted plate affine models for its region. This reduced the live plan from
 1,886 to 1,054 tiles. No emergency stop was used.
 
+Tuned edge pilot `cf8cce92-eefc-4b13-9062-af8d0ed618c2` used 30 percent
+overlap, 1,200 mm/min motion, four queued-frame discards, source-area coarse
+sampling, and full-overlap feathering. It captured 296 tiles in 356.2 seconds,
+or 1.20 seconds per tile, and retained a 1,019,517-byte PNG. The prior full
+survey used 20 percent overlap at 600 mm/min and took 1.97 seconds per tile.
+The pilot had 100 percent coverage and no nominal fallback. Visual inspection
+showed materially smoother seams. It also made the old profile's 30 mm north
+crop visible; this led to the source-geometry correction above.
+
+Corrected full-height pilot `cbe7f0b8-c66f-4886-ada5-85713f3f8fa0` then
+covered X=-8.021 to 80.000 mm and Y=83.502 to 326.067 mm. It captured 336
+tiles in 412.3 seconds, produced an 882-by-2,427 image, and retained 1,159,261
+bytes. Coverage was 100 percent with no nominal fallback. Visual inspection
+showed all seven rows on both plates, both north and south PCB edges, and no
+broken tile seam. Only two of 622 repetitive-grid registrations passed; the
+other tiles retained calibrated machine placement. The report explicitly
+warns that X-min and X-max are clipped by top-camera reach. The source-defined
+plate extends to about X=-80 and X=520 mm, while the calibrated camera union is
+only X=-8.021 to X=441.020 mm. The scan therefore starts at visible column 5;
+columns 1 through 4 cannot be captured on this machine without more X travel.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
@@ -1057,3 +1096,4 @@ the fitted plate affine models for its region. This reduced the live plan from
 - [Opulo actuator check](https://docs.opulo.io/byop/testing/actuator-check/)
 - [Opulo LumenPnP V3.0.4 OpenPnP machine profile](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml)
 - [Opulo LumenPnP V3.0.4 datum PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/datum/datum.kicad_pcb)
+- [Opulo LumenPnP V3.0.4 staging plate](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/staging-plate/staging-plate.kicad_pcb)

@@ -16,8 +16,8 @@ pub use v4l2_capture::*;
 
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use workspace_mosaic::{
-    build_workspace_mosaic, plan_workspace_scan, WorkspaceMosaic, WorkspaceMosaicStream,
-    WorkspaceScanPlan,
+    build_workspace_mosaic, plan_workspace_scan, workspace_camera_reachable_region,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
 };
 
 use serde::{Deserialize, Serialize};

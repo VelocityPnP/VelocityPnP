@@ -493,6 +493,8 @@ mod tests {
             }),
             overlap_fraction: 0.35,
             output_mm_per_pixel: 0.02,
+            feed_mm_per_min: 600.0,
+            capture_settle_frames: 5,
             frame_width_px: 1280,
             frame_height_px: 720,
             usable_pixel_bounds: WorkspacePixelBounds {
