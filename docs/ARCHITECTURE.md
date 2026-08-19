@@ -127,9 +127,12 @@ to owned OpenCV matrices and uses OpenCV for frame statistics, Laplacian focus
 measurements, threshold masks, and connected-component labels. Domain-specific
 detectors still own physical dimensions, concentricity, ambiguity rejection,
 candidate scoring, and calibration acceptance. Attached-camera fixtures check
-that this boundary preserves the validated detector outputs. Workspace mosaics
-can add OpenCV feature matching and geometric estimation without changing the
-capture or calibration policy layers.
+that this boundary preserves the validated detector outputs. Workspace scans
+use the calibrated inverse planar model to plan a serpentine path and render
+pixels directly into machine coordinates. OpenCV ORB feature matching and
+RANSAC similarity estimation refine overlapping tile placement only inside
+strict translation, rotation, scale, and residual limits. Machine geometry
+remains the fallback when an overlap is blank, occupied, or rejected.
 
 ## Crates and applications
 

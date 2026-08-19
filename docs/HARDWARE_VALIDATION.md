@@ -962,6 +962,33 @@ N2 center jitter p95 was 0.111 pixels. Both tooling reports passed. The machine
 returned ready and fault-free to X=220.131, Y=190.271, Z=31.5, and the lights
 were switched off.
 
+## Workspace scan and stitching
+
+The final attached-machine scan ran on 2026-08-18 as scan
+`7f55f58a-ac6f-47a0-9f3a-e289ddf959e0`. It covered X=211–229 mm and
+Y=186–194 mm around the datum PCB with four tiles in a 2-by-2 serpentine path.
+The calibrated output scale was 0.013248 mm/pixel, which produced a
+1360-by-605 grayscale mosaic.
+
+All four horizontal and vertical overlap registrations passed. Their inlier
+ratios were 0.969–0.995. The p95 residual range was 0.0493–0.0554 mm. Scale
+estimates were within 0.42 percent of unity, and absolute rotation estimates
+were at most 0.207 degrees. The renderer covered 99.996 percent of the region.
+Only 0.313 percent of pixels used nominal machine placement to fill outer-edge
+space exposed by accepted registration corrections. The mosaic SHA-256 was
+`75d0f5f1447a765038e5872bead4d6f2a32459d4db533bce80104e0ef145afb4`.
+
+The first live plan used the distortion model's outer bounding box and covered
+97.6 percent. Visual inspection found narrow black edge wedges. Planning now
+uses a sampled, inscribed camera footprint with a two-pixel margin. A second
+scan covered 99.5 percent before nominal edge fallback was added. The final
+mosaic had no visible seam or edge gap. The acceptance gate is now 99 percent.
+
+Each raw tile, the mosaic, and the JSON manifest remain in SQLite. The scan
+does not change calibration data. It parks at the visual datum and switches
+the lights off after report finalization. The final machine state was homed,
+ready, and fault-free at X=220.131, Y=190.271, Z=31.5.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

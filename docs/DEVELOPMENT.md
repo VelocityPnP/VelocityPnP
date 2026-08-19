@@ -89,6 +89,37 @@ wget -qO- --method=POST \
 The test passes only when the top-camera stability gates pass, each bottom
 capture produces image metrics, and each configured nozzle tip is identified.
 
+After a passing top-camera planar calibration, a caller can scan a bounded XY
+region. The daemon plans a serpentine path from the calibrated camera footprint,
+stores every source tile, renders a grayscale mosaic in machine coordinates,
+and returns to the visual datum with the lights off:
+
+```bash
+wget -qO- --method=POST \
+  --header='Content-Type: application/json' \
+  --body-data='{
+    "lease_id":"LEASE_UUID",
+    "calibration_id":"CALIBRATION_UUID",
+    "confirmed_external_safety_checks":true,
+    "region":{
+      "x_min_mm":211.0,
+      "x_max_mm":229.0,
+      "y_min_mm":186.0,
+      "y_max_mm":194.0
+    }
+  }' \
+  http://127.0.0.1:4080/api/v1/workspace-scans
+```
+
+Poll `GET /api/v1/workspace-scans/SCAN_UUID`. Fetch the final image from
+`GET /api/v1/workspace-scans/SCAN_UUID/artifacts/mosaic.png` and the complete
+report from `artifacts/manifest.json`. OpenCV ORB/RANSAC overlap registration
+can apply only a small, validated placement correction. Rejected or
+textureless overlaps retain calibrated machine placement and add a warning.
+If an accepted correction moves an outer tile inward, only the newly exposed
+edge pixels use nominal machine placement. The manifest reports this value as
+`nominal_fallback_fraction`.
+
 CLI jog commands preserve the controller-reported primary-nozzle angle when
 `--rotation` is omitted. Physical rotation requests are rejected while the
 active profile's `rotation_motion` capability is false.

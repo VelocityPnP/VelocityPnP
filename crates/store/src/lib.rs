@@ -7,7 +7,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CameraProfile, CameraRole, Feeder,
-    InspectionReport, Job, MachineEvent, Operation,
+    InspectionReport, Job, MachineEvent, Operation, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -69,6 +69,16 @@ impl Store {
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(run_id, name)
             );
+            CREATE TABLE IF NOT EXISTS workspace_scan_artifacts (
+                scan_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(scan_id, name)
+            );
+            INSERT OR IGNORE INTO schema_version(version, applied_at)
+                VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             "#,
         )?;
         Ok(())
@@ -152,6 +162,58 @@ impl Store {
             .query_row(
                 "SELECT media_type, data FROM calibration_artifacts WHERE run_id = ?1 AND name = ?2",
                 params![run_id.to_string(), name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn put_workspace_scan(&self, scan: &WorkspaceScanReport) -> Result<()> {
+        self.put("workspace_scan", scan.id, scan)
+    }
+
+    pub fn list_workspace_scans(&self) -> Result<Vec<WorkspaceScanReport>> {
+        self.list("workspace_scan")
+    }
+
+    pub fn get_workspace_scan(&self, id: Uuid) -> Result<Option<WorkspaceScanReport>> {
+        self.get("workspace_scan", id)
+    }
+
+    pub fn put_workspace_scan_artifact(
+        &self,
+        scan_id: Uuid,
+        name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(!name.is_empty(), "workspace scan artifact name is empty");
+        anyhow::ensure!(
+            !media_type.is_empty(),
+            "workspace scan artifact media type is empty"
+        );
+        self.connection.lock().execute(
+            r#"INSERT INTO workspace_scan_artifacts(scan_id, name, media_type, data, created_at)
+               VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ON CONFLICT(scan_id, name) DO UPDATE SET
+                 media_type = excluded.media_type,
+                 data = excluded.data,
+                 created_at = excluded.created_at"#,
+            params![scan_id.to_string(), name, media_type, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_workspace_scan_artifact(
+        &self,
+        scan_id: Uuid,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT media_type, data FROM workspace_scan_artifacts WHERE scan_id = ?1 AND name = ?2",
+                params![scan_id.to_string(), name],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
@@ -315,6 +377,7 @@ mod tests {
     use std::collections::BTreeMap;
     use velocitypnp_domain::{
         AutomatedCalibrationConfig, BoardDesign, CalibrationRunPhase, CalibrationRunStatus,
+        WorkspacePixelBounds, WorkspaceScanRegion, WorkspaceScanStatus,
     };
 
     #[test]
@@ -396,6 +459,68 @@ mod tests {
 
         assert_eq!(
             store.get_calibration_artifact(run_id, "view.png").unwrap(),
+            Some(("image/png".into(), data.to_vec()))
+        );
+    }
+
+    #[test]
+    fn workspace_scan_and_artifact_round_trip() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let scan = WorkspaceScanReport {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            calibration_id: Uuid::new_v4(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            created_at: now,
+            updated_at: now,
+            status: WorkspaceScanStatus::Pending,
+            region: WorkspaceScanRegion {
+                x_min_mm: 10.0,
+                x_max_mm: 20.0,
+                y_min_mm: 30.0,
+                y_max_mm: 40.0,
+            },
+            overlap_fraction: 0.35,
+            output_mm_per_pixel: 0.02,
+            frame_width_px: 1280,
+            frame_height_px: 720,
+            usable_pixel_bounds: WorkspacePixelBounds {
+                left: 300,
+                top: 180,
+                right: 980,
+                bottom: 540,
+            },
+            rows: 2,
+            columns: 2,
+            planned_tiles: 4,
+            captured_tiles: 0,
+            mosaic_width_px: None,
+            mosaic_height_px: None,
+            covered_fraction: None,
+            nominal_fallback_fraction: 0.0,
+            accepted_registrations: 0,
+            attempted_registrations: 0,
+            tiles: vec![],
+            registrations: vec![],
+            mosaic_artifact_name: None,
+            warnings: vec![],
+            failure: None,
+        };
+        store.put_workspace_scan(&scan).unwrap();
+        assert_eq!(
+            store.get_workspace_scan(scan.id).unwrap(),
+            Some(scan.clone())
+        );
+
+        let data = [7, 8, 9];
+        store
+            .put_workspace_scan_artifact(scan.id, "mosaic.png", "image/png", &data)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_workspace_scan_artifact(scan.id, "mosaic.png")
+                .unwrap(),
             Some(("image/png".into(), data.to_vec()))
         );
     }

@@ -24,6 +24,7 @@ This repository contains the first working platform slice:
 - persisted machine-executed calibration runs with progress and evidence
 - automatic reciprocal camera, N1/N2 offset, and nozzle-runout calibration
 - installed-target planar camera calibration and height-aware, occlusion-tolerant plate scans
+- calibrated top-camera workspace scanning with bounded OpenCV tile registration
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

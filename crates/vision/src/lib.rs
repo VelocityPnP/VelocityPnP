@@ -3,6 +3,7 @@
 //! V4L2 device.
 
 mod opencv_backend;
+mod workspace_mosaic;
 
 #[cfg(test)]
 mod legacy_conformance;
@@ -14,6 +15,9 @@ mod v4l2_capture;
 pub use v4l2_capture::*;
 
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat};
+pub use workspace_mosaic::{
+    build_workspace_mosaic, plan_workspace_scan, WorkspaceMosaic, WorkspaceScanPlan,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
