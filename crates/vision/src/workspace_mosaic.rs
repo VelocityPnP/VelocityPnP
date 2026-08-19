@@ -68,10 +68,26 @@ pub struct WorkspaceMosaicStream {
     corrected_weights: Vec<f32>,
     nominal_luma: Vec<f32>,
     nominal_weights: Vec<f32>,
+    registration_enabled: bool,
 }
 
 impl WorkspaceMosaicStream {
     pub fn new(plan: WorkspaceScanPlan, model: PlanarCameraModel) -> Result<Self> {
+        Self::new_with_registration(plan, model, true)
+    }
+
+    pub fn new_without_registration(
+        plan: WorkspaceScanPlan,
+        model: PlanarCameraModel,
+    ) -> Result<Self> {
+        Self::new_with_registration(plan, model, false)
+    }
+
+    fn new_with_registration(
+        plan: WorkspaceScanPlan,
+        model: PlanarCameraModel,
+        registration_enabled: bool,
+    ) -> Result<Self> {
         ensure!(
             plan.tiles.len() == (plan.rows * plan.columns) as usize,
             "workspace scan plan tile dimensions do not agree"
@@ -116,6 +132,7 @@ impl WorkspaceMosaicStream {
             corrected_weights: vec![0.0; pixel_count],
             nominal_luma: vec![0.0; pixel_count],
             nominal_weights: vec![0.0; pixel_count],
+            registration_enabled,
         })
     }
 
@@ -201,7 +218,7 @@ impl WorkspaceMosaicStream {
         let row = self.next_row;
         for column in 0..self.plan.columns {
             let index = (row * self.plan.columns + column) as usize;
-            if column > 0 {
+            if self.registration_enabled && column > 0 {
                 let fixed_index = index - 1;
                 self.registrations.push(register_pair(
                     &self.tiles[fixed_index],
@@ -211,7 +228,7 @@ impl WorkspaceMosaicStream {
                     &self.model,
                 )?);
             }
-            if row > 0 {
+            if self.registration_enabled && row > 0 {
                 let fixed_index = index - self.plan.columns as usize;
                 let previous = self
                     .previous_row
@@ -230,21 +247,23 @@ impl WorkspaceMosaicStream {
             // ORB neighbors before a streaming survey changes machine
             // placement. A guided correlation already requires agreement
             // from two independent overlap segments.
-            let minimum_support = if self.registrations.iter().any(|registration| {
-                registration.moving_tile_index as usize == index
-                    && registration.accepted
-                    && registration.method == WorkspaceRegistrationMethod::GuidedCorrelation
-            }) {
-                1
-            } else {
-                2
-            };
-            apply_registration_correction_with_support(
-                index,
-                &self.registrations,
-                &mut self.tiles,
-                minimum_support,
-            );
+            if self.registration_enabled {
+                let minimum_support = if self.registrations.iter().any(|registration| {
+                    registration.moving_tile_index as usize == index
+                        && registration.accepted
+                        && registration.method == WorkspaceRegistrationMethod::GuidedCorrelation
+                }) {
+                    1
+                } else {
+                    2
+                };
+                apply_registration_correction_with_support(
+                    index,
+                    &self.registrations,
+                    &mut self.tiles,
+                    minimum_support,
+                );
+            }
             splat_workspace_tile(
                 &self.plan,
                 &self.model,

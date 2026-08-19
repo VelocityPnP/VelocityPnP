@@ -160,6 +160,24 @@ class ClientTests(unittest.TestCase):
                 )
         send.assert_not_called()
 
+    def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request_bytes", return_value=b"png") as send:
+            self.assertEqual(
+                client.workspace_scan_mosaic(
+                    "scan", surface_model="installed_plate_planes",
+                ),
+                b"png",
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/scan/artifacts/"
+            "mosaic-installed-plate-planes.png",
+            "image/png",
+        )
+        with self.assertRaisesRegex(ValueError, "surface_model"):
+            client.workspace_scan_mosaic("scan", surface_model="unknown")
+
     def test_home_requires_explicit_physical_confirmation(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:

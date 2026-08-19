@@ -112,9 +112,10 @@ full source tiles by default and has a 64-tile limit. `survey` mode defaults to
 feed, a 4,096-tile limit, and `mosaic_only` retention. It discards four queued
 frames after each completed move before it accepts a capture. It holds one
 V4L2 stream open across moves and retains only two full camera rows while it
-registers and renders the mosaic. Thus, memory use is bounded by mosaic size
-and row width instead of total tile count. `feed_mm_per_min` can request a
-slower feed, but cannot exceed the profile limit.
+registers and renders each requested height layer. Thus, memory use is bounded
+by mosaic layers and row width instead of total tile count.
+`feed_mm_per_min` can request a slower feed, but cannot exceed the profile
+limit.
 
 Artifact retention can be `full_sources`, `thumbnails`, or `mosaic_only`.
 Every request has a retained-byte estimate and quota. A request that exceeds
@@ -144,7 +145,9 @@ wget -qO- --method=POST \
 
 Poll `GET /api/v1/workspace-scans/SCAN_UUID`. Fetch the final image from
 `GET /api/v1/workspace-scans/SCAN_UUID/artifacts/mosaic.png` and the complete
-report from `artifacts/manifest.json`. OpenCV overlap registration can apply
+report from `artifacts/manifest.json`. The `mosaic_layers` entries name every
+height-specific image made from the same captures. OpenCV overlap registration
+can apply
 only a small, validated translation. It first uses ORB features inside the
 predicted overlap. A bounded correlation fallback divides the overlap into
 three independent segments and requires two unique, consistent cross-axis
@@ -163,7 +166,9 @@ calibration snapshot that the scan names, then run:
 
 ```bash
 cargo run -p velocitypnp-vision --example replay_workspace_scan -- \
-  SCAN_DIRECTORY CALIBRATION_JSON OUTPUT.png OUTPUT.json
+  SCAN_DIRECTORY CALIBRATION_JSON OUTPUT.png OUTPUT.json \
+  [recorded|working_plane|installed_plate_planes] \
+  [registration|no_registration]
 ```
 
 `SCAN_DIRECTORY` must contain `manifest.json` and the retained tile PNG files.
@@ -181,19 +186,29 @@ maximum machine Y. The estimate and report make this convention explicit in
 
 For the complete configured staging and build plates, replace `region` with
 `"region_preset":"installed_plates"`. The preset requires a current, passing
-installed-plate geometry artifact. It uses the measured affine plate extents,
-the local plate-height pixel-to-machine maps, and the source-derived plate
-outline. The V3.0.4 plates are 600 by 120 mm, with 39 columns and seven rows;
-their outline is one 15 mm pitch outside the outer feature centers. The region
-is clipped to what the camera can observe from legal head poses, not to the
+installed-plate geometry artifact. It uses the measured affine plate extents
+and the source-derived plate outline. It plans motion with the smaller
+top-camera working-plane footprint so raised PCBs remain fully covered. The
+same captures produce `mosaic.png` at the raised working plane and
+`mosaic-installed-plate-planes.png` at the bare plate plane. The report records
+both under `mosaic_layers`.
+
+This separation is required because one projection cannot align a scene that
+contains bare plates, PCBs, and feeders at different heights. Consumers should
+run detection against each layer and use the layer with the stronger local
+evidence. Automatic local height segmentation and a unified composite remain
+future work; the service does not hide that uncertainty by averaging depth
+layers together.
+
+The V3.0.4 plates are 600 by 120 mm, with 39 columns and seven rows; their
+outline is one 15 mm pitch outside the outer feature centers. The region is
+clipped to what the camera can observe from legal head poses, not to the
 head-center travel rectangle. Thus, the V3 top camera can see column 5 beyond
-the X=0 head-center limit, but it cannot see columns 1 through 4. An explicit
-region uses the top-camera working-plane model. The preflight estimate and
-final report warn which source-outline edges were clipped by optical reach.
-Supply both `region_preset` and `region` to crop a scan while retaining the
-installed-plate height model. The estimate and report identify this choice as
-`surface_model`. A daemon restart marks a pending or running scan and its
-operation failed. It does not leave an interrupted scan reported as active.
+the X=0 head-center limit, but it cannot see columns 1 through 4. The preflight
+estimate and final report warn which source-outline edges were clipped by
+optical reach. Supply both `region_preset` and `region` to crop a layered scan.
+A daemon restart marks a pending or running scan and its operation failed. It
+does not leave an interrupted scan reported as active.
 
 CLI jog commands preserve the controller-reported primary-nozzle angle when
 `--rotation` is omitted. Physical rotation requests are rejected while the

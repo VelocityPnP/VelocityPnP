@@ -157,9 +157,24 @@ class Client:
     def workspace_scan(self, scan_id: str | uuid.UUID) -> dict[str, Any]:
         return self._request("GET", f"/workspace-scans/{scan_id}")
 
-    def workspace_scan_mosaic(self, scan_id: str | uuid.UUID) -> bytes:
+    def workspace_scan_mosaic(
+        self,
+        scan_id: str | uuid.UUID,
+        surface_model: str = "top_camera_working_plane",
+    ) -> bytes:
+        artifacts = {
+            "top_camera_working_plane": "mosaic.png",
+            "installed_plate_planes": "mosaic-installed-plate-planes.png",
+        }
+        if surface_model not in artifacts:
+            raise ValueError(
+                "surface_model must be top_camera_working_plane or "
+                "installed_plate_planes"
+            )
         return self._request_bytes(
-            "GET", f"/workspace-scans/{scan_id}/artifacts/mosaic.png", "image/png",
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/{artifacts[surface_model]}",
+            "image/png",
         )
 
     @staticmethod

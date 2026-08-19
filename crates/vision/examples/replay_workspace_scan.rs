@@ -14,8 +14,8 @@ use velocitypnp_vision::{
 fn main() -> Result<()> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     ensure!(
-        arguments.len() == 4,
-        "usage: replay_workspace_scan SCAN_DIR CALIBRATION_JSON OUTPUT_PNG OUTPUT_JSON"
+        (4..=6).contains(&arguments.len()),
+        "usage: replay_workspace_scan SCAN_DIR CALIBRATION_JSON OUTPUT_PNG OUTPUT_JSON [recorded|working_plane|installed_plate_planes] [registration|no_registration]"
     );
     let scan_directory = PathBuf::from(&arguments[0]);
     let calibration_path = PathBuf::from(&arguments[1]);
@@ -28,11 +28,39 @@ fn main() -> Result<()> {
         "workspace scan did not retain every planned tile"
     );
     let calibration: serde_json::Value = read_json(&calibration_path)?;
+    let surface_model_override = arguments
+        .get(4)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "recorded".into());
+    ensure!(
+        matches!(
+            surface_model_override.as_str(),
+            "recorded" | "working_plane" | "installed_plate_planes"
+        ),
+        "surface model must be recorded, working_plane, or installed_plate_planes"
+    );
+    let use_installed_plate_model = match surface_model_override.as_str() {
+        "recorded" => report.surface_model == WorkspaceSurfaceModel::InstalledPlatePlanes,
+        "working_plane" => false,
+        "installed_plate_planes" => true,
+        _ => unreachable!(),
+    };
+    let registration_mode = arguments
+        .get(5)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "registration".into());
+    ensure!(
+        matches!(
+            registration_mode.as_str(),
+            "registration" | "no_registration"
+        ),
+        "registration mode must be registration or no_registration"
+    );
     let mut model: PlanarCameraModel = serde_json::from_value(
         calibration["artifacts"]["top_camera_planar_model"]["value"]["model"].clone(),
     )
     .context("calibration has no top-camera planar model")?;
-    if report.surface_model == WorkspaceSurfaceModel::InstalledPlatePlanes {
+    if use_installed_plate_model {
         let geometry: InstalledPlateGeometryReport = serde_json::from_value(
             calibration["artifacts"]["installed_plate_geometry"]["value"].clone(),
         )
@@ -62,6 +90,11 @@ fn main() -> Result<()> {
         }
         model = rescale_planar_camera_model(&model, mean_mapping).map_err(anyhow::Error::msg)?;
     }
+    let mut tiles = report.tiles.clone();
+    for tile in &mut tiles {
+        tile.placement_correction_x_mm = 0.0;
+        tile.placement_correction_y_mm = 0.0;
+    }
     let plan = WorkspaceScanPlan {
         region: report.region,
         overlap_fraction: report.overlap_fraction,
@@ -71,7 +104,7 @@ fn main() -> Result<()> {
         usable_pixel_bounds: report.usable_pixel_bounds,
         rows: report.rows,
         columns: report.columns,
-        tiles: report.tiles.clone(),
+        tiles,
     };
     let frames = report
         .tiles
@@ -86,7 +119,11 @@ fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     let mut capture_sequence = report.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
-    let mut stream = WorkspaceMosaicStream::new(plan, model)?;
+    let mut stream = if registration_mode == "registration" {
+        WorkspaceMosaicStream::new(plan, model)?
+    } else {
+        WorkspaceMosaicStream::new_without_registration(plan, model)?
+    };
     for tile in capture_sequence {
         stream.push_frame(tile.index, frames[tile.index as usize].clone())?;
     }
@@ -108,6 +145,9 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to write {}", output_png_path.display()))?;
     let replay_report = json!({
         "source_scan_id": report.id,
+        "surface_model_override": surface_model_override,
+        "used_installed_plate_model": use_installed_plate_model,
+        "registration_mode": registration_mode,
         "covered_fraction": mosaic.covered_fraction,
         "nominal_fallback_fraction": mosaic.nominal_fallback_fraction,
         "attempted_registrations": mosaic.registrations.len(),
@@ -125,6 +165,9 @@ fn main() -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&json!({
             "source_scan_id": report.id,
+            "surface_model_override": surface_model_override,
+            "used_installed_plate_model": use_installed_plate_model,
+            "registration_mode": registration_mode,
             "covered_fraction": mosaic.covered_fraction,
             "nominal_fallback_fraction": mosaic.nominal_fallback_fraction,
             "attempted_registrations": mosaic.registrations.len(),

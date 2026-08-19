@@ -521,6 +521,7 @@ mod tests {
             tiles: vec![],
             registrations: vec![],
             mosaic_artifact_name: None,
+            mosaic_layers: Vec::new(),
             warnings: vec![],
             failure: None,
         };

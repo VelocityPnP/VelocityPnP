@@ -1118,6 +1118,7 @@ components:
         - mode
         - artifact_retention
         - surface_model
+        - surface_models
         - region
         - raster_transform
         - overlap_fraction
@@ -1143,6 +1144,15 @@ components:
         surface_model:
           type: string
           enum: [top_camera_working_plane, installed_plate_planes]
+        surface_models:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [top_camera_working_plane, installed_plate_planes]
+          description: >-
+            Mosaics that the scan will reconstruct from the same captures.
+            Installed-plate surveys include both calibrated height layers.
         region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
         raster_transform: { $ref: "#/components/schemas/WorkspaceRasterTransform" }
         overlap_fraction: { type: number }
@@ -1231,8 +1241,31 @@ components:
         tiles: { type: array, items: { type: object } }
         registrations: { type: array, items: { type: object } }
         mosaic_artifact_name: { type: [string, "null"] }
+        mosaic_layers:
+          type: array
+          items: { $ref: "#/components/schemas/WorkspaceMosaicLayerReport" }
         warnings: { type: array, items: { type: string } }
         failure: { type: [string, "null"] }
+    WorkspaceMosaicLayerReport:
+      type: object
+      required:
+        - surface_model
+        - artifact_name
+        - covered_fraction
+        - nominal_fallback_fraction
+        - accepted_registrations
+        - attempted_registrations
+        - applied_corrections
+      properties:
+        surface_model:
+          type: string
+          enum: [top_camera_working_plane, installed_plate_planes]
+        artifact_name: { type: string }
+        covered_fraction: { type: number, minimum: 0, maximum: 1 }
+        nominal_fallback_fraction: { type: number, minimum: 0, maximum: 1 }
+        accepted_registrations: { type: integer, minimum: 0 }
+        attempted_registrations: { type: integer, minimum: 0 }
+        applied_corrections: { type: integer, minimum: 0 }
     WorkspaceRasterTransform:
       type: object
       required:

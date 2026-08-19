@@ -35,8 +35,8 @@ use velocitypnp_domain::{
     PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
-    WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion,
-    WorkspaceScanReport, WorkspaceScanStatus, WorkspaceSurfaceModel,
+    WorkspaceMosaicLayerReport, WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -700,12 +700,13 @@ async fn estimate_workspace_scan(
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) =
         load_workspace_camera_model(&state, body.specification.calibration_id)?;
-    let (camera_model, surface_model, installed_geometry) = select_workspace_surface_model(
-        &state,
-        &snapshot,
-        top_camera_model,
-        body.specification.region_preset,
-    )?;
+    let (camera_model, installed_camera_model, installed_geometry) =
+        select_workspace_surface_models(
+            &state,
+            &snapshot,
+            top_camera_model,
+            body.specification.region_preset,
+        )?;
     let current_pose = state
         .machine
         .status()
@@ -716,7 +717,8 @@ async fn estimate_workspace_scan(
         &body.specification,
         &top_profile,
         &camera_model,
-        surface_model,
+        WorkspaceSurfaceModel::TopCameraWorkingPlane,
+        installed_camera_model.is_some(),
         installed_geometry.as_ref(),
         current_pose,
     )?;
@@ -748,18 +750,20 @@ async fn start_workspace_scan(
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) =
         load_workspace_camera_model(&state, body.specification.calibration_id)?;
-    let (camera_model, surface_model, installed_geometry) = select_workspace_surface_model(
-        &state,
-        &snapshot,
-        top_camera_model,
-        body.specification.region_preset,
-    )?;
+    let (camera_model, installed_camera_model, installed_geometry) =
+        select_workspace_surface_models(
+            &state,
+            &snapshot,
+            top_camera_model,
+            body.specification.region_preset,
+        )?;
     let (plan, estimate) = prepare_workspace_scan(
         &state,
         &body.specification,
         &top_profile,
         &camera_model,
-        surface_model,
+        WorkspaceSurfaceModel::TopCameraWorkingPlane,
+        installed_camera_model.is_some(),
         installed_geometry.as_ref(),
         current_pose,
     )?;
@@ -809,6 +813,7 @@ async fn start_workspace_scan(
         tiles: plan.tiles.clone(),
         registrations: Vec::new(),
         mosaic_artifact_name: None,
+        mosaic_layers: Vec::new(),
         warnings: estimate.warnings.clone(),
         failure: None,
     };
@@ -835,6 +840,7 @@ async fn start_workspace_scan(
             scan,
             plan,
             camera_model,
+            installed_camera_model,
             top_profile,
             top_path,
             body.lease_id,
@@ -843,16 +849,24 @@ async fn start_workspace_scan(
     Ok((StatusCode::ACCEPTED, Json(returned)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_workspace_scan(
     state: &AppState,
     specification: &WorkspaceScanSpecification,
     top_profile: &CameraProfile,
     camera_model: &PlanarCameraModel,
     surface_model: WorkspaceSurfaceModel,
+    include_installed_plate_layer: bool,
     installed_geometry: Option<&InstalledPlateGeometryReport>,
     start_pose: Pose,
 ) -> ApiResult<(WorkspaceScanPlan, WorkspaceScanEstimate)> {
     let mut warnings = Vec::new();
+    if include_installed_plate_layer {
+        warnings.push(
+            "mixed-height scan will produce separate working-plane and installed-plate mosaics"
+                .into(),
+        );
+    }
     let preset_region = match specification.region_preset {
         Some(WorkspaceRegionPreset::InstalledPlates) => {
             let plate_region = installed_plates_scan_region(&state.profile, installed_geometry)?;
@@ -965,6 +979,14 @@ fn prepare_workspace_scan(
             mode: specification.mode,
             artifact_retention,
             surface_model,
+            surface_models: if include_installed_plate_layer {
+                vec![
+                    WorkspaceSurfaceModel::TopCameraWorkingPlane,
+                    WorkspaceSurfaceModel::InstalledPlatePlanes,
+                ]
+            } else {
+                vec![WorkspaceSurfaceModel::TopCameraWorkingPlane]
+            },
             artifact_quota_bytes,
             top_profile,
             park_pose: Pose {
@@ -987,22 +1009,18 @@ fn prepare_workspace_scan(
     Ok((plan, estimate))
 }
 
-fn select_workspace_surface_model(
+fn select_workspace_surface_models(
     state: &AppState,
     snapshot: &CalibrationSnapshot,
     top_camera_model: PlanarCameraModel,
     region_preset: Option<WorkspaceRegionPreset>,
 ) -> ApiResult<(
     PlanarCameraModel,
-    WorkspaceSurfaceModel,
+    Option<PlanarCameraModel>,
     Option<InstalledPlateGeometryReport>,
 )> {
     if region_preset != Some(WorkspaceRegionPreset::InstalledPlates) {
-        return Ok((
-            top_camera_model,
-            WorkspaceSurfaceModel::TopCameraWorkingPlane,
-            None,
-        ));
+        return Ok((top_camera_model, None, None));
     }
     if !crate::calibration_artifacts::artifact_tree_is_current(
         state,
@@ -1072,11 +1090,7 @@ fn select_workspace_surface_model(
     }
     let model = rescale_planar_camera_model(&top_camera_model, mean_mapping)
         .map_err(ApiError::bad_request)?;
-    Ok((
-        model,
-        WorkspaceSurfaceModel::InstalledPlatePlanes,
-        Some(geometry),
-    ))
+    Ok((top_camera_model, Some(model), Some(geometry)))
 }
 
 fn installed_plates_scan_region(
@@ -1211,6 +1225,7 @@ struct WorkspaceScanEstimateContext<'a> {
     mode: WorkspaceScanMode,
     artifact_retention: WorkspaceArtifactRetention,
     surface_model: WorkspaceSurfaceModel,
+    surface_models: Vec<WorkspaceSurfaceModel>,
     artifact_quota_bytes: u64,
     top_profile: &'a CameraProfile,
     park_pose: Pose,
@@ -1226,6 +1241,7 @@ fn workspace_scan_estimate(
         mode,
         artifact_retention,
         surface_model,
+        surface_models,
         artifact_quota_bytes,
         top_profile,
         park_pose,
@@ -1269,7 +1285,9 @@ fn workspace_scan_estimate(
         WorkspaceArtifactRetention::Thumbnails => thumbnail_bytes,
         WorkspaceArtifactRetention::MosaicOnly => 0,
     };
-    let estimated_retained_bytes = mosaic_pixels * 11 / 10 + metadata_bytes + retained_image_bytes;
+    let estimated_retained_bytes = mosaic_pixels * 11 / 10 * surface_models.len() as u64
+        + metadata_bytes
+        + retained_image_bytes;
     let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
     let estimated_duration_seconds = if mode == WorkspaceScanMode::Survey {
         let first_frames = top_profile.settle_frames + 1;
@@ -1288,6 +1306,7 @@ fn workspace_scan_estimate(
         mode,
         artifact_retention,
         surface_model,
+        surface_models,
         region: plan.region,
         raster_transform: WorkspaceRasterTransform {
             top_left_x_mm: plan.region.x_min_mm,
@@ -1374,6 +1393,7 @@ async fn execute_workspace_scan(
     mut scan: WorkspaceScanReport,
     plan: WorkspaceScanPlan,
     camera_model: PlanarCameraModel,
+    installed_camera_model: Option<PlanarCameraModel>,
     top_profile: CameraProfile,
     top_path: String,
     lease_id: Uuid,
@@ -1397,6 +1417,7 @@ async fn execute_workspace_scan(
         &mut scan,
         &plan,
         &camera_model,
+        installed_camera_model.as_ref(),
         &top_profile,
         &top_path,
         lease_id,
@@ -1462,6 +1483,7 @@ async fn capture_and_build_workspace_scan(
     scan: &mut WorkspaceScanReport,
     plan: &WorkspaceScanPlan,
     camera_model: &PlanarCameraModel,
+    installed_camera_model: Option<&PlanarCameraModel>,
     top_profile: &CameraProfile,
     top_path: &str,
     lease_id: Uuid,
@@ -1473,6 +1495,7 @@ async fn capture_and_build_workspace_scan(
             scan,
             plan,
             camera_model,
+            installed_camera_model,
             top_profile,
             top_path,
             lease_id,
@@ -1485,6 +1508,7 @@ async fn capture_and_build_workspace_scan(
         scan,
         plan,
         camera_model,
+        installed_camera_model,
         top_profile,
         top_path,
         lease_id,
@@ -1499,6 +1523,7 @@ async fn capture_and_build_precision_workspace_scan(
     scan: &mut WorkspaceScanReport,
     plan: &WorkspaceScanPlan,
     camera_model: &PlanarCameraModel,
+    installed_camera_model: Option<&PlanarCameraModel>,
     top_profile: &CameraProfile,
     top_path: &str,
     lease_id: Uuid,
@@ -1546,14 +1571,29 @@ async fn capture_and_build_precision_workspace_scan(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| "workspace scan did not capture every planned tile".to_string())?;
     let build_plan = plan.clone();
-    let build_model = camera_model.clone();
-    let mosaic = tokio::task::spawn_blocking(move || {
-        build_workspace_mosaic(&build_plan, &build_model, &frames)
+    let mut build_models = vec![(
+        WorkspaceSurfaceModel::TopCameraWorkingPlane,
+        camera_model.clone(),
+    )];
+    if let Some(installed_camera_model) = installed_camera_model {
+        build_models.push((
+            WorkspaceSurfaceModel::InstalledPlatePlanes,
+            installed_camera_model.clone(),
+        ));
+    }
+    let mosaics = tokio::task::spawn_blocking(move || {
+        build_models
+            .into_iter()
+            .map(|(surface_model, model)| {
+                build_workspace_mosaic(&build_plan, &model, &frames)
+                    .map(|mosaic| (surface_model, mosaic))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
     })
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    complete_workspace_mosaic(state, scan, mosaic)
+    complete_workspace_mosaics(state, scan, mosaics)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1562,6 +1602,7 @@ async fn capture_and_build_workspace_survey(
     scan: &mut WorkspaceScanReport,
     plan: &WorkspaceScanPlan,
     camera_model: &PlanarCameraModel,
+    installed_camera_model: Option<&PlanarCameraModel>,
     top_profile: &CameraProfile,
     top_path: &str,
     lease_id: Uuid,
@@ -1578,10 +1619,19 @@ async fn capture_and_build_workspace_survey(
     let updates = profile_control_updates(top_profile);
     let config = camera_capture_config(top_profile, top_path.to_owned());
     let mut session = Some(open_persistent_workspace_camera_with_retry(&config, &updates).await?);
-    let mut stream = Some(
+    let mut layer_streams = vec![(
+        WorkspaceSurfaceModel::TopCameraWorkingPlane,
         WorkspaceMosaicStream::new(plan.clone(), camera_model.clone())
             .map_err(|error| error.to_string())?,
-    );
+    )];
+    if let Some(installed_camera_model) = installed_camera_model {
+        layer_streams.push((
+            WorkspaceSurfaceModel::InstalledPlatePlanes,
+            WorkspaceMosaicStream::new(plan.clone(), installed_camera_model.clone())
+                .map_err(|error| error.to_string())?,
+        ));
+    }
+    let mut streams = Some(layer_streams);
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     let feed_mm_per_min = scan.feed_mm_per_min;
@@ -1616,18 +1666,24 @@ async fn capture_and_build_workspace_survey(
         .await?;
         persist_workspace_tile_artifact(state, scan, tile, &frame)?;
 
-        let mut active_stream = stream
+        let mut active_streams = streams
             .take()
-            .ok_or_else(|| "workspace mosaic stream is unavailable".to_string())?;
+            .ok_or_else(|| "workspace mosaic streams are unavailable".to_string())?;
         let tile_index = tile.index;
-        let (returned_stream, row_completed) = tokio::task::spawn_blocking(move || {
-            let result = active_stream.push_frame(tile_index, frame);
-            (active_stream, result)
+        let (returned_streams, row_completed) = tokio::task::spawn_blocking(move || {
+            let mut row_completed = false;
+            for (layer_index, (_, stream)) in active_streams.iter_mut().enumerate() {
+                let completed = stream.push_frame(tile_index, frame.clone())?;
+                if layer_index == 0 {
+                    row_completed = completed;
+                }
+            }
+            anyhow::Ok((active_streams, row_completed))
         })
         .await
+        .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-        stream = Some(returned_stream);
-        let row_completed = row_completed.map_err(|error| error.to_string())?;
+        streams = Some(returned_streams);
 
         scan.captured_tiles += 1;
         scan.updated_at = Utc::now();
@@ -1642,14 +1698,19 @@ async fn capture_and_build_workspace_survey(
         }
     }
     drop(session.take());
-    let stream = stream
+    let streams = streams
         .take()
-        .ok_or_else(|| "workspace mosaic stream is unavailable".to_string())?;
-    let mosaic = tokio::task::spawn_blocking(move || stream.finish())
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-    complete_workspace_mosaic(state, scan, mosaic)
+        .ok_or_else(|| "workspace mosaic streams are unavailable".to_string())?;
+    let mosaics = tokio::task::spawn_blocking(move || {
+        streams
+            .into_iter()
+            .map(|(surface_model, stream)| stream.finish().map(|mosaic| (surface_model, mosaic)))
+            .collect::<anyhow::Result<Vec<_>>>()
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    complete_workspace_mosaics(state, scan, mosaics)
 }
 
 async fn capture_persistent_workspace_frame(
@@ -1744,38 +1805,71 @@ async fn open_persistent_workspace_camera_with_retry(
     ))
 }
 
-fn complete_workspace_mosaic(
+fn complete_workspace_mosaics(
     state: &AppState,
     scan: &mut WorkspaceScanReport,
-    mosaic: WorkspaceMosaic,
+    mosaics: Vec<(WorkspaceSurfaceModel, WorkspaceMosaic)>,
 ) -> Result<String, String> {
-    let mosaic_png = encode_gray_png(&mosaic.frame).map_err(|error| error.to_string())?;
-    persist_workspace_artifact(state, scan, "mosaic.png", "image/png", &mosaic_png)?;
-    scan.mosaic_width_px = Some(mosaic.frame.width);
-    scan.mosaic_height_px = Some(mosaic.frame.height);
-    scan.covered_fraction = Some(mosaic.covered_fraction);
-    scan.nominal_fallback_fraction = mosaic.nominal_fallback_fraction;
-    scan.accepted_registrations = mosaic
-        .registrations
-        .iter()
-        .filter(|registration| registration.accepted)
-        .count() as u32;
-    scan.attempted_registrations = mosaic.registrations.len() as u32;
-    scan.tiles = mosaic.tiles;
-    scan.registrations = mosaic.registrations;
-    scan.mosaic_artifact_name = Some("mosaic.png".into());
-    if scan.accepted_registrations < scan.attempted_registrations {
-        scan.warnings.push(format!(
-            "{} of {} overlap registrations used calibrated machine placement only",
-            scan.attempted_registrations - scan.accepted_registrations,
-            scan.attempted_registrations,
-        ));
+    if mosaics.is_empty() {
+        return Err("workspace scan produced no surface mosaics".into());
     }
-    if mosaic.covered_fraction < MIN_WORKSPACE_COVERAGE {
-        return Err(format!(
-            "workspace mosaic covered only {:.1}% of the requested region",
-            mosaic.covered_fraction * 100.0
-        ));
+    scan.mosaic_layers.clear();
+    for (layer_index, (surface_model, mosaic)) in mosaics.into_iter().enumerate() {
+        let artifact_name = if layer_index == 0 {
+            "mosaic.png".to_string()
+        } else {
+            format!("mosaic-{}.png", workspace_surface_model_name(surface_model))
+        };
+        let accepted_registrations = mosaic
+            .registrations
+            .iter()
+            .filter(|registration| registration.accepted)
+            .count() as u32;
+        let attempted_registrations = mosaic.registrations.len() as u32;
+        let applied_corrections = mosaic
+            .tiles
+            .iter()
+            .filter(|tile| {
+                tile.placement_correction_x_mm != 0.0 || tile.placement_correction_y_mm != 0.0
+            })
+            .count() as u32;
+        if mosaic.covered_fraction < MIN_WORKSPACE_COVERAGE {
+            return Err(format!(
+                "{} workspace mosaic covered only {:.1}% of the requested region",
+                workspace_surface_model_name(surface_model),
+                mosaic.covered_fraction * 100.0
+            ));
+        }
+        let mosaic_png = encode_gray_png(&mosaic.frame).map_err(|error| error.to_string())?;
+        persist_workspace_artifact(state, scan, &artifact_name, "image/png", &mosaic_png)?;
+        scan.mosaic_layers.push(WorkspaceMosaicLayerReport {
+            surface_model,
+            artifact_name: artifact_name.clone(),
+            covered_fraction: mosaic.covered_fraction,
+            nominal_fallback_fraction: mosaic.nominal_fallback_fraction,
+            accepted_registrations,
+            attempted_registrations,
+            applied_corrections,
+        });
+        if accepted_registrations < attempted_registrations {
+            scan.warnings.push(format!(
+                "{} layer used calibrated machine placement for {} of {} overlaps",
+                workspace_surface_model_name(surface_model),
+                attempted_registrations - accepted_registrations,
+                attempted_registrations,
+            ));
+        }
+        if layer_index == 0 {
+            scan.mosaic_width_px = Some(mosaic.frame.width);
+            scan.mosaic_height_px = Some(mosaic.frame.height);
+            scan.covered_fraction = Some(mosaic.covered_fraction);
+            scan.nominal_fallback_fraction = mosaic.nominal_fallback_fraction;
+            scan.accepted_registrations = accepted_registrations;
+            scan.attempted_registrations = attempted_registrations;
+            scan.tiles = mosaic.tiles;
+            scan.registrations = mosaic.registrations;
+            scan.mosaic_artifact_name = Some(artifact_name);
+        }
     }
     scan.updated_at = Utc::now();
     state
@@ -1783,14 +1877,20 @@ fn complete_workspace_mosaic(
         .put_workspace_scan(scan)
         .map_err(|error| error.to_string())?;
     Ok(format!(
-        "Captured {} tiles into a {}x{} mosaic with {:.1}% coverage; {}/{} overlap registrations accepted",
+        "Captured {} tiles into {} surface mosaics with {:.1}% primary coverage; {}/{} primary overlap registrations accepted",
         scan.captured_tiles,
-        mosaic.frame.width,
-        mosaic.frame.height,
-        mosaic.covered_fraction * 100.0,
+        scan.mosaic_layers.len(),
+        scan.covered_fraction.unwrap_or(0.0) * 100.0,
         scan.accepted_registrations,
         scan.attempted_registrations,
     ))
+}
+
+fn workspace_surface_model_name(surface_model: WorkspaceSurfaceModel) -> &'static str {
+    match surface_model {
+        WorkspaceSurfaceModel::TopCameraWorkingPlane => "top-camera-working-plane",
+        WorkspaceSurfaceModel::InstalledPlatePlanes => "installed-plate-planes",
+    }
 }
 
 fn persist_workspace_tile_artifact(
@@ -11856,6 +11956,7 @@ mod tests {
             tiles: vec![],
             registrations: vec![],
             mosaic_artifact_name: None,
+            mosaic_layers: Vec::new(),
             warnings: vec![],
             failure: None,
         }
@@ -12473,6 +12574,48 @@ mod tests {
             .unwrap();
         assert_eq!(scan.retained_artifact_bytes, manifest.len() as u64);
         assert_eq!(state.store.get_workspace_scan(scan.id).unwrap(), Some(scan));
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_persists_both_calibrated_height_layers() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        let tiles = scan.tiles.clone();
+        let mosaic = |value| WorkspaceMosaic {
+            frame: GrayFrame {
+                width: 2,
+                height: 2,
+                pixels: vec![value; 4],
+            },
+            covered_fraction: 1.0,
+            nominal_fallback_fraction: 0.0,
+            tiles: tiles.clone(),
+            registrations: Vec::new(),
+        };
+
+        complete_workspace_mosaics(
+            &state,
+            &mut scan,
+            vec![
+                (WorkspaceSurfaceModel::TopCameraWorkingPlane, mosaic(64)),
+                (WorkspaceSurfaceModel::InstalledPlatePlanes, mosaic(192)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(scan.mosaic_layers.len(), 2);
+        assert_eq!(scan.mosaic_layers[0].artifact_name, "mosaic.png");
+        assert_eq!(
+            scan.mosaic_layers[1].artifact_name,
+            "mosaic-installed-plate-planes.png"
+        );
+        for layer in &scan.mosaic_layers {
+            assert!(state
+                .store
+                .get_workspace_scan_artifact(scan.id, &layer.artifact_name)
+                .unwrap()
+                .is_some());
+        }
     }
 
     #[tokio::test]

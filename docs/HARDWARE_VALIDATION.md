@@ -1138,6 +1138,42 @@ the corrected row overlaps. Some horizontal tone banding remains; this pass
 only tuned geometric alignment. The machine returned homed, ready, and
 fault-free to X=220.131, Y=190.271, Z=31.5, with the lights off.
 
+### Workspace height-model ablation
+
+Visual review rejected the installed-plane datum mosaics despite their seam
+registration statistics. Their raised PCB features were doubled and blurred,
+while the earlier working-plane datum survey was clear. Retained scan
+`38ec929d-1676-45ae-a6d7-f63b493ae781` was replayed with one variable changed
+at a time. Registration was also disabled independently.
+
+The installed-plate projection remained badly ghosted with registration both
+enabled and disabled. The working-plane projection was clear in both cases.
+The installed plate maps measured about 0.0180 mm/pixel, while the raised datum
+PCB working plane measured 0.01325 mm/pixel. Applying the lower plate scale to
+the raised PCB caused the large reconstruction error. The prior sub-0.13 mm
+registration corrections were not its primary cause.
+
+Control scan `aabfb704-5a39-4c93-ac08-776c0d8e0cfe` restored the earlier datum
+settings: the explicit 80-by-35 mm region, working-plane projection, 20 percent
+overlap, 0.10 mm/pixel output, and 600 mm/min feed. It captured all 72 tiles,
+retained 42,663,315 bytes, and covered 100 percent of the region. Its mosaic
+SHA-256 was
+`09e44aebde660209820dc8d07a5c579402ead88f70b296a9aa13f63a2cb049f0`.
+Visual inspection showed the datum outline, grid, fiducial, holes, and scale
+without the prior doubling. Offline replay with registration disabled was also
+clear. The machine returned homed, ready, and fault-free to X=220.131,
+Y=190.271, Z=31.5, with the lights off.
+
+Layered scan `f62d094b-da99-4a81-a284-a9e84b763f6c` then used one 20-frame
+capture of the datum-board edge and staging plate. It reconstructed both the
+top-camera working plane and installed-plate plane. Both layers covered 100
+percent of the requested region without nominal fallback. The installed-plane
+layer kept the staging-plate numbers single, while the working-plane layer
+kept the raised datum-board edge aligned. Each layer blurred features at the
+other height. This confirms that the source frames contain useful parallax and
+that separate calibrated projections preserve it. The machine returned homed,
+ready, and fault-free to X=220.131, Y=190.271, Z=31.5, with the lights off.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

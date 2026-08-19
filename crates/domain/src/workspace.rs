@@ -94,6 +94,8 @@ pub struct WorkspaceScanEstimate {
     pub mode: WorkspaceScanMode,
     pub artifact_retention: WorkspaceArtifactRetention,
     pub surface_model: WorkspaceSurfaceModel,
+    #[serde(default)]
+    pub surface_models: Vec<WorkspaceSurfaceModel>,
     pub region: WorkspaceScanRegion,
     pub raster_transform: WorkspaceRasterTransform,
     pub overlap_fraction: f64,
@@ -112,6 +114,17 @@ pub struct WorkspaceScanEstimate {
     pub persistent_capture: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceMosaicLayerReport {
+    pub surface_model: WorkspaceSurfaceModel,
+    pub artifact_name: String,
+    pub covered_fraction: f64,
+    pub nominal_fallback_fraction: f64,
+    pub accepted_registrations: u32,
+    pub attempted_registrations: u32,
+    pub applied_corrections: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -213,6 +226,8 @@ pub struct WorkspaceScanReport {
     pub tiles: Vec<WorkspaceScanTile>,
     pub registrations: Vec<WorkspaceTileRegistration>,
     pub mosaic_artifact_name: Option<String>,
+    #[serde(default)]
+    pub mosaic_layers: Vec<WorkspaceMosaicLayerReport>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
 }
