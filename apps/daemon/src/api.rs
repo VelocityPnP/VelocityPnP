@@ -168,6 +168,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/cameras/{role}/reproducibility",
             post(camera_reproducibility),
         )
+        .route("/api/v1/vision/smoke-test", post(vision_smoke_test))
         .route("/api/v1/machine/profile", get(machine_profile))
         .route("/api/v1/machine/status", get(machine_status))
         .route("/api/v1/machine/connect", post(connect))
@@ -435,6 +436,135 @@ struct CameraReproducibilityRequest {
     lease_id: Uuid,
     #[serde(default = "default_camera_sample_count")]
     sample_count: u32,
+}
+
+#[derive(Deserialize)]
+struct VisionSmokeTestRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+    #[serde(default = "default_vision_smoke_sample_count")]
+    sample_count: u32,
+}
+
+fn default_vision_smoke_sample_count() -> u32 {
+    3
+}
+
+async fn vision_smoke_test(
+    State(state): State<AppState>,
+    Json(body): Json<VisionSmokeTestRequest>,
+) -> ApiResult<Json<Value>> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "vision smoke test requires confirmation that the travel envelope is clear, both nozzles are level, and power isolation is reachable",
+        ));
+    }
+    if !(3..=5).contains(&body.sample_count) {
+        return Err(ApiError::bad_request(
+            "vision smoke sample_count must be between 3 and 5",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed {
+        return Err(ApiError::bad_request(
+            "vision smoke test requires a homed ready machine",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?
+        .clone();
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?
+        .clone();
+    let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let bottom_profile = stored_camera_profile(&state, CameraRole::BottomCamera)?;
+    let bottom_path = camera_path_for_role(CameraRole::BottomCamera)?;
+    let use_lights = top_profile.lighting_enabled || bottom_profile.lighting_enabled;
+
+    if use_lights {
+        state
+            .machine
+            .actuate(body.lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    }
+
+    let result = async {
+        state
+            .machine
+            .jog(body.lease_id, visual.seed_pose, visual.feed_mm_per_min)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let (_, top_report) =
+            capture_camera_reproducibility_report(&state, CameraRole::TopCamera, body.sample_count)
+                .await?;
+
+        let mut tooling_reports = Vec::with_capacity(bottom.nozzles.len());
+        for nozzle in &bottom.nozzles {
+            state
+                .machine
+                .jog(
+                    body.lease_id,
+                    bottom.nozzle_target(nozzle),
+                    bottom.feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            let frames =
+                capture_profiled_frames(&state, &bottom_profile, &bottom_path, body.sample_count)
+                    .await?;
+            let metrics_available = frames
+                .iter()
+                .all(|frame| camera_sample_metrics(frame, CameraRole::BottomCamera).is_some());
+            let report = summarize_nozzle_tooling(&frames, &bottom, nozzle);
+            tooling_reports.push(json!({
+                "nozzle_id": nozzle.nozzle_id,
+                "metrics_available": metrics_available,
+                "report": report,
+            }));
+        }
+
+        let passed = top_report.passed
+            && tooling_reports.iter().all(|report| {
+                report["metrics_available"].as_bool() == Some(true)
+                    && report["report"]["passed"].as_bool() == Some(true)
+            });
+        Ok(json!({
+            "passed": passed,
+            "sample_count": body.sample_count,
+            "top_camera": top_report,
+            "tooling": tooling_reports,
+        }))
+    }
+    .await;
+
+    let park = state
+        .machine
+        .jog(body.lease_id, visual.seed_pose, visual.feed_mm_per_min)
+        .await;
+    let lights_off = if use_lights {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = lights_off {
+        return Err(ApiError::internal(error));
+    }
+    if let Err(error) = park {
+        return Err(ApiError::internal(format!(
+            "vision smoke test could not park at the datum: {error}"
+        )));
+    }
+    result.map(Json)
 }
 
 fn default_camera_sample_count() -> u32 {
@@ -10804,6 +10934,30 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn vision_smoke_requires_external_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/vision/smoke-test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                            "sample_count": 3,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 

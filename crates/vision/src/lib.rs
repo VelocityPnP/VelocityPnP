@@ -4,6 +4,9 @@
 
 mod opencv_backend;
 
+#[cfg(test)]
+mod legacy_conformance;
+
 #[cfg(all(feature = "native-v4l2", target_os = "linux"))]
 mod v4l2_capture;
 
@@ -2027,7 +2030,7 @@ fn reference_pad_score(
         + (1.0 - target.confidence)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum CircularComponentKind {
     Filled,
     Annular,
@@ -2232,7 +2235,7 @@ mod tests {
     use super::*;
     use velocitypnp_domain::{FiducialObservation, PlanarCameraCalibrationSample};
 
-    fn legacy_frame_statistics(frame: &GrayFrame) -> (f64, f64, f64) {
+    pub(super) fn legacy_frame_statistics(frame: &GrayFrame) -> (f64, f64, f64) {
         let count = frame.pixels.len() as f64;
         let mean_luma = frame
             .pixels

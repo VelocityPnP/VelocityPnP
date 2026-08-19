@@ -71,6 +71,24 @@ Homing is intentionally not implicit. After physically leveling both nozzles,
 clearing the complete travel envelope, and putting power isolation within
 reach, pass `home --lease <UUID> --confirm-safety-checks`.
 
+After homing, the bounded live vision smoke test captures three top-datum
+frames and three frames for each configured nozzle. It returns to the datum
+and switches the lights off without changing calibration data:
+
+```bash
+wget -qO- --method=POST \
+  --header='Content-Type: application/json' \
+  --body-data='{
+    "lease_id":"LEASE_UUID",
+    "confirmed_external_safety_checks":true,
+    "sample_count":3
+  }' \
+  http://127.0.0.1:4080/api/v1/vision/smoke-test
+```
+
+The test passes only when the top-camera stability gates pass, each bottom
+capture produces image metrics, and each configured nozzle tip is identified.
+
 CLI jog commands preserve the controller-reported primary-nozzle angle when
 `--rotation` is omitted. Physical rotation requests are rejected while the
 active profile's `rotation_motion` capability is false.

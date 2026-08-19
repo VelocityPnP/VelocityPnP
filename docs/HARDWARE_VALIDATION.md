@@ -945,6 +945,23 @@ direct one-frame stream test also passed for both cameras. No emergency stop
 or controller reset was used. The successful run returned homed, ready, and
 fault-free at X=220.131, Y=190.271, Z=31.5.
 
+## OpenCV adoption smoke test
+
+The test-only legacy oracle and the OpenCV detector produced equal candidate
+counts, diameters, and confidence values on all seven attached-camera
+fixtures. Candidate centers differed by no more than `1e-6` pixel. Raw
+four-connected components also matched on 64 deterministic generated frames
+at dark and bright threshold boundaries. OpenCV luma, deviation, and focus
+statistics matched the prior calculation on all seven fixtures.
+
+The physical smoke test ran on 2026-08-18 after one standard combined XYZ
+home. The new daemon captured three frames at each target. The top datum, N045
+on N1, and N24 on N2 were detected in all nine frames. Top-camera mean target
+position was (641.822, 355.903) pixels. N1 center jitter p95 was 0.042 pixels;
+N2 center jitter p95 was 0.111 pixels. Both tooling reports passed. The machine
+returned ready and fault-free to X=220.131, Y=190.271, Z=31.5, and the lights
+were switched off.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
