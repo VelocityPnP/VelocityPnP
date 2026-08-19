@@ -1088,6 +1088,24 @@ plate extends to about X=-80 and X=520 mm, while the calibrated camera union is
 only X=-8.021 to X=441.020 mm. The scan therefore starts at visible column 5;
 columns 1 through 4 cannot be captured on this machine without more X travel.
 
+Full corrected survey `dc69e4ea-ec38-472a-88f9-a38063805285` completed on
+2026-08-19. It captured all 1,680 tiles in a 40-by-42 serpentine raster with
+30 percent overlap, 1,200 mm/min motion, and four queued-frame discards. It
+finished in 1,997.9 seconds, compared with the 2,205-second estimate. This was
+75.3 seconds faster than the earlier cropped full scan despite using 59 percent
+more tiles, more overlap, and 45.2 mm more Y coverage.
+
+The final 4,492-by-2,427 mosaic covered 100 percent of the requested optical
+region with no nominal fallback. Its PNG is 4,452,522 bytes. The PNG and
+manifest retain 6,534,412 bytes in total. Twenty-nine of 3,278 registrations
+passed their local gates, but no tile received a correction because no result
+had the required two-neighbor support. Visual inspection showed both complete
+seven-row plates, both Y edges, and no black gap or broken seam. The mosaic
+SHA-256 is
+`7bd203407e9e1439899c0f5062f53799cd3c0d3a3543bf48b5a3ef01830d8745`.
+The machine returned homed, ready, and fault-free to X=220.131, Y=190.271,
+Z=31.5, with the lights off.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
