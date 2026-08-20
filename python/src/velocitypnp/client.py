@@ -262,10 +262,12 @@ class Client:
             raise ValueError("workspace region_preset must be installed_plates")
         if mode not in {"precision", "survey"}:
             raise ValueError("workspace scan mode must be precision or survey")
-        if artifact_retention not in {"full_sources", "thumbnails", "mosaic_only"}:
+        if artifact_retention not in {
+            "full_sources", "transient_sources", "thumbnails", "mosaic_only",
+        }:
             raise ValueError(
-                "workspace artifact retention must be full_sources, thumbnails, "
-                "or mosaic_only"
+                "workspace artifact retention must be full_sources, "
+                "transient_sources, thumbnails, or mosaic_only"
             )
         if feed_mm_per_min is not None and feed_mm_per_min <= 0:
             raise ValueError("workspace feed_mm_per_min must be above zero")

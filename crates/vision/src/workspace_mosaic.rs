@@ -22,6 +22,7 @@ const MIN_GUIDED_CORRELATION_SCORE: f64 = 0.3;
 const MIN_GUIDED_CORRELATION_UNIQUENESS: f64 = 0.1;
 const MAX_GUIDED_CORRECTION_GAP_MM: f64 = 0.15;
 const MIN_GUIDED_SEGMENTS: usize = 2;
+const OUTPUT_EDGE_EPSILON_PX: f64 = 1e-7;
 
 #[derive(Debug, Clone, Copy)]
 struct GuidedCorrelationCandidate {
@@ -1472,13 +1473,17 @@ fn splat_workspace_tile(
             let world_y = tile.nominal_pose.y_mm + correction_y + camera_offset[1];
             let output_x = (world_x - plan.region.x_min_mm) / plan.output_mm_per_pixel;
             let output_y = (plan.region.y_max_mm - world_y) / plan.output_mm_per_pixel;
-            if output_x < 0.0
-                || output_y < 0.0
-                || output_x > f64::from(width - 1)
-                || output_y > f64::from(height - 1)
+            let maximum_output_x = f64::from(width - 1);
+            let maximum_output_y = f64::from(height - 1);
+            if output_x < -OUTPUT_EDGE_EPSILON_PX
+                || output_y < -OUTPUT_EDGE_EPSILON_PX
+                || output_x > maximum_output_x + OUTPUT_EDGE_EPSILON_PX
+                || output_y > maximum_output_y + OUTPUT_EDGE_EPSILON_PX
             {
                 continue;
             }
+            let output_x = output_x.clamp(0.0, maximum_output_x);
+            let output_y = output_y.clamp(0.0, maximum_output_y);
             let x_edge_distance = (x - bounds.left).min(bounds.right - 1 - x);
             let y_edge_distance = (y - bounds.top).min(bounds.bottom - 1 - y);
             let x_feather = (x_edge_distance + 1).min(feather_x_px) as f32 / feather_x_px as f32;

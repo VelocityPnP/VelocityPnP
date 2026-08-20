@@ -1257,6 +1257,42 @@ keeping the coherent lens, circular aperture boundary, surrounding plate, and
 outer light-ring geometry. The final replay PNG SHA-256 is
 `5f639371664ec790d570cb676b8a46946e8ae16c3ffc180aecd5fa93a1986ec8`.
 
+### Full-workspace chunked reconstruction
+
+Full scan `d41979f7-c559-46f2-8878-6bea539d653e` validated transient source
+retention and chunked height reconstruction on 2026-08-20. It scanned the
+reachable installed-plate area from X=-5.947 to 438.950 mm and Y=83.502 to
+326.067 mm. The plan used 60 percent overlap, 0.10 mm/pixel output, and
+1,200 mm/min motion. It captured all 9,292 tiles in a 101-by-92 serpentine
+raster and completed in 8,872.6 seconds.
+
+Both endpoint mosaics covered 100 percent of the scan area without nominal
+fallback. The primary layer accepted 5,836 of 18,391 overlap registrations
+and applied 2,026 supported corrections. Parallax analysis accepted 846,635
+observations from 36,589 overlapping tile pairs. The 223-by-122 height map had
+7,763 measured cells, 5,224 inferred cells, and 14,219 unknown cells. It used
+25 candidate surface fractions from -1.0 through 2.0.
+
+Height-corrected reconstruction used five output-row chunks. It retained no
+source frames in SQLite. The transient source directory reached 4.72 GiB
+during reconstruction and was removed after the final artifacts were stored.
+The complete retained artifact set is 284,066,859 bytes. The corrected mosaic
+is a 4,450-by-2,427 grayscale PNG. Its SHA-256 is
+`d920437c4043fb6129e65d44550247146d7e78d60aa4010d8dda4ecb058fa4d4`.
+
+Visual inspection showed coherent plate holes, datum-PCB features, feeders,
+the FTP PCB, and the bottom-camera aperture. No chunk boundary was visible.
+The mean absolute intensity changes at output rows 512, 1,024, 1,536, and
+2,048 were 0.640, 0.696, 2.966, and 1.326. All four were below the local
+95th-percentile row change. The first, second, and fourth were also below the
+local median.
+
+Twelve source views fitted the bottom-camera aperture at X=220.250 mm and
+Y=144.859 mm with a 10.049 mm radius. The fitted projection was
+0.02287 mm/pixel with a 0.154 mm P95 residual. After artifact publication, the
+machine returned homed, ready, and fault-free to X=220.131, Y=190.271,
+Z=31.5.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

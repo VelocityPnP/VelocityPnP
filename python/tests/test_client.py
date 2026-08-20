@@ -136,11 +136,12 @@ class ClientTests(unittest.TestCase):
                 "calibration",
                 region=crop,
                 region_preset="installed_plates",
+                artifact_retention="transient_sources",
             )
         send.assert_called_once_with("POST", "/workspace-scans/estimate", {
             "calibration_id": "calibration",
             "mode": "survey",
-            "artifact_retention": "mosaic_only",
+            "artifact_retention": "transient_sources",
             "region": crop,
             "region_preset": "installed_plates",
         })

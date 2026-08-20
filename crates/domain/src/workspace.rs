@@ -65,6 +65,7 @@ pub enum WorkspaceScanMode {
 pub enum WorkspaceArtifactRetention {
     #[default]
     FullSources,
+    TransientSources,
     Thumbnails,
     MosaicOnly,
 }

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::{header, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -11,6 +12,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
+use std::fs;
+use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
@@ -62,11 +65,11 @@ use velocitypnp_vision::{
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
     summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
     CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
-    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
-    WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
-    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream,
-    WorkspaceScanPlan, MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
-    WORKSPACE_HEIGHT_CANDIDATE_STEP,
+    GrayFrame, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig,
+    VisualHomingPlan, WorkspaceCameraApertureComposite, WorkspaceHeightComposite,
+    WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxReport,
+    WorkspaceParallaxStream, WorkspaceScanPlan, MAX_WORKSPACE_SURFACE_FRACTION,
+    MIN_WORKSPACE_SURFACE_FRACTION, WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -83,6 +86,7 @@ const LEGACY_INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progres
 const INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v2";
 const MAX_WORKSPACE_SCAN_TILES: u32 = 64;
 const MAX_WORKSPACE_SURVEY_TILES: u32 = 4_096;
+const MAX_CHUNKED_WORKSPACE_SURVEY_TILES: u32 = 12_000;
 const MAX_WORKSPACE_MOSAIC_PIXELS: usize = 25_000_000;
 const MAX_WORKSPACE_SURVEY_PIXELS: usize = 12_000_000;
 const WORKSPACE_PRECISION_SETTLE_FRAMES: u32 = 5;
@@ -99,6 +103,8 @@ const MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 const WORKSPACE_THUMBNAIL_WIDTH: u32 = 192;
 const WORKSPACE_THUMBNAIL_HEIGHT: u32 = 108;
 const WORKSPACE_PROGRESS_TILE_INTERVAL: u32 = 25;
+const WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS: u32 = 512;
+const WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS: u32 = 2;
 const ESTIMATED_REGISTRATION_SECONDS: f64 = 0.12;
 const ESTIMATED_HEIGHT_RENDER_SECONDS_PER_TILE: f64 = 0.02;
 const WORKSPACE_HEIGHT_MAP_ARTIFACT: &str = "surface-height-map.json";
@@ -965,7 +971,21 @@ fn prepare_workspace_scan(
             "survey output_mm_per_pixel must be at least 0.05",
         ));
     }
-    let tile_limit = if survey {
+    let artifact_retention = specification.artifact_retention.unwrap_or(if survey {
+        WorkspaceArtifactRetention::MosaicOnly
+    } else {
+        WorkspaceArtifactRetention::FullSources
+    });
+    if artifact_retention == WorkspaceArtifactRetention::TransientSources
+        && (!survey || installed_camera_model.is_none())
+    {
+        return Err(ApiError::bad_request(
+            "transient_sources requires a layered installed-plate survey",
+        ));
+    }
+    let tile_limit = if artifact_retention == WorkspaceArtifactRetention::TransientSources {
+        MAX_CHUNKED_WORKSPACE_SURVEY_TILES
+    } else if survey {
         MAX_WORKSPACE_SURVEY_TILES
     } else {
         MAX_WORKSPACE_SCAN_TILES
@@ -976,18 +996,19 @@ fn prepare_workspace_scan(
             "workspace max_tiles must be between 1 and {tile_limit} for this mode"
         )));
     }
-    let artifact_retention = specification.artifact_retention.unwrap_or(if survey {
-        WorkspaceArtifactRetention::MosaicOnly
-    } else {
-        WorkspaceArtifactRetention::FullSources
-    });
     if installed_camera_model.is_some()
-        && artifact_retention == WorkspaceArtifactRetention::FullSources
+        && matches!(
+            artifact_retention,
+            WorkspaceArtifactRetention::FullSources | WorkspaceArtifactRetention::TransientSources
+        )
     {
-        warnings.push(
+        warnings.push(if artifact_retention == WorkspaceArtifactRetention::TransientSources {
+            "transient source chunks will produce a measured surface-height map and height-corrected mosaic without retaining source frames"
+                .into()
+        } else {
             "full source retention will also produce a measured surface-height map and height-corrected mosaic"
-                .into(),
-        );
+                .into()
+        });
     }
     let default_quota = if survey {
         DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES
@@ -1034,7 +1055,8 @@ fn prepare_workspace_scan(
             WorkspaceArtifactRetention::Thumbnails => {
                 format!("thumbnail-{:03}.png", tile.index)
             }
-            WorkspaceArtifactRetention::MosaicOnly => String::new(),
+            WorkspaceArtifactRetention::TransientSources
+            | WorkspaceArtifactRetention::MosaicOnly => String::new(),
         };
     }
     let mut estimate = workspace_scan_estimate(
@@ -1064,6 +1086,15 @@ fn prepare_workspace_scan(
         },
     );
     estimate.warnings = warnings;
+    if artifact_retention == WorkspaceArtifactRetention::TransientSources {
+        let source_bytes = estimated_workspace_source_bytes(&plan);
+        let chunks = estimate
+            .mosaic_height_px
+            .div_ceil(WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS);
+        estimate.warnings.push(format!(
+            "chunked reconstruction will use {chunks} output-row chunks and up to {source_bytes} transient source bytes; transient frames are deleted after reconstruction"
+        ));
+    }
     if estimate.estimated_retained_bytes > artifact_quota_bytes {
         return Err(ApiError::bad_request(format!(
             "workspace scan estimates {} retained bytes, above the quota of {artifact_quota_bytes}; choose mosaic_only, increase output scale, reduce the region, or raise the quota",
@@ -1071,6 +1102,11 @@ fn prepare_workspace_scan(
         )));
     }
     Ok((plan, estimate))
+}
+
+fn estimated_workspace_source_bytes(plan: &WorkspaceScanPlan) -> u64 {
+    u64::from(plan.frame_width_px) * u64::from(plan.frame_height_px) * plan.tiles.len() as u64 * 11
+        / 10
 }
 
 fn layered_workspace_overlap(geometric_minimum: f64) -> f64 {
@@ -1372,6 +1408,7 @@ fn workspace_scan_estimate(
         / 10;
     let retained_image_bytes = match artifact_retention {
         WorkspaceArtifactRetention::FullSources => source_bytes,
+        WorkspaceArtifactRetention::TransientSources => 0,
         WorkspaceArtifactRetention::Thumbnails => thumbnail_bytes,
         WorkspaceArtifactRetention::MosaicOnly => 0,
     };
@@ -1380,8 +1417,10 @@ fn workspace_scan_estimate(
     } else {
         0
     };
-    let height_products_enabled =
-        artifact_retention == WorkspaceArtifactRetention::FullSources && surface_models.len() > 1;
+    let height_products_enabled = matches!(
+        artifact_retention,
+        WorkspaceArtifactRetention::FullSources | WorkspaceArtifactRetention::TransientSources
+    ) && surface_models.len() > 1;
     let height_columns = ((plan.region.x_max_mm - plan.region.x_min_mm)
         / velocitypnp_vision::WORKSPACE_HEIGHT_CELL_SIZE_MM)
         .ceil() as u64;
@@ -1687,7 +1726,7 @@ async fn capture_and_build_precision_workspace_scan(
             .map_err(|error| error.message)?
             .pop()
             .ok_or_else(|| "top camera returned no workspace frame".to_string())?;
-        persist_workspace_tile_artifact(state, scan, tile, &frame)?;
+        persist_workspace_tile_artifact(state, scan, tile, &frame, None)?;
         frames[tile.index as usize] = Some(frame);
         scan.captured_tiles += 1;
         scan.updated_at = Utc::now();
@@ -1768,6 +1807,12 @@ async fn capture_and_build_workspace_survey(
             .await
             .map_err(|error| error.to_string())?;
     }
+    let transient_sources =
+        if scan.artifact_retention == WorkspaceArtifactRetention::TransientSources {
+            Some(TransientWorkspaceSources::create(scan.id)?)
+        } else {
+            None
+        };
     let _capture_guard = state.camera_capture_lock.lock().await;
     let updates = profile_control_updates(top_profile);
     let config = camera_capture_config(top_profile, top_path.to_owned());
@@ -1827,7 +1872,7 @@ async fn capture_and_build_workspace_survey(
             top_profile.settle_frames,
         )
         .await?;
-        persist_workspace_tile_artifact(state, scan, tile, &frame)?;
+        persist_workspace_tile_artifact(state, scan, tile, &frame, transient_sources.as_ref())?;
 
         let mut active_streams = streams
             .take()
@@ -1886,15 +1931,28 @@ async fn capture_and_build_workspace_survey(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    let height_artifacts = build_retained_workspace_height_artifacts(
-        state,
-        scan,
-        plan,
-        camera_model,
-        installed_camera_model,
-        parallax.as_ref(),
-    )
-    .await?;
+    let height_artifacts = if let Some(transient_sources) = transient_sources.as_ref() {
+        build_chunked_workspace_height_artifacts(
+            state,
+            scan,
+            plan,
+            camera_model,
+            installed_camera_model,
+            parallax.as_ref(),
+            transient_sources,
+        )
+        .await?
+    } else {
+        build_retained_workspace_height_artifacts(
+            state,
+            scan,
+            plan,
+            camera_model,
+            installed_camera_model,
+            parallax.as_ref(),
+        )
+        .await?
+    };
     complete_workspace_mosaics(state, scan, mosaics, parallax, height_artifacts)
 }
 
@@ -1961,6 +2019,365 @@ async fn build_retained_workspace_height_artifacts(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())
+}
+
+async fn build_chunked_workspace_height_artifacts(
+    state: &AppState,
+    _scan: &WorkspaceScanReport,
+    plan: &WorkspaceScanPlan,
+    working_model: &PlanarCameraModel,
+    installed_model: Option<&PlanarCameraModel>,
+    parallax: Option<&WorkspaceParallaxReport>,
+    transient_sources: &TransientWorkspaceSources,
+) -> Result<Option<WorkspaceHeightArtifacts>, String> {
+    let (Some(installed_model), Some(parallax)) = (installed_model, parallax) else {
+        return Ok(None);
+    };
+    let plan = plan.clone();
+    let working_model = working_model.clone();
+    let installed_model = installed_model.clone();
+    let parallax = parallax.clone();
+    let source_directory = transient_sources.directory.clone();
+    let camera_aperture_diameter_range = state.profile.bottom_vision.as_ref().map(|bottom| {
+        (
+            bottom.head_geometry.bottom_camera_reference_min_diameter_px,
+            bottom.head_geometry.bottom_camera_reference_max_diameter_px,
+        )
+    });
+    tokio::task::spawn_blocking(move || {
+        let map = build_workspace_height_map(plan.region, &parallax)?;
+        let chunks = workspace_height_chunk_plans(&plan, &map, &working_model, &installed_model)?;
+        let mut composites = Vec::with_capacity(chunks.len());
+        let mut camera_aperture = None;
+        for chunk in chunks {
+            let mut composite =
+                render_workspace_height_mosaic_with_consistency(&chunk.plan, &map, |fraction| {
+                    render_transient_workspace_height_layer(
+                        &source_directory,
+                        &chunk.plan,
+                        &working_model,
+                        &installed_model,
+                        fraction,
+                    )
+                })?;
+            if let Some((minimum_diameter_px, maximum_diameter_px)) = camera_aperture_diameter_range
+            {
+                if let Some(mut aperture) = composite_workspace_camera_aperture(
+                    &chunk.plan,
+                    &map,
+                    &installed_model,
+                    minimum_diameter_px,
+                    maximum_diameter_px,
+                    &mut composite,
+                    |tile| read_transient_workspace_source(&source_directory, tile),
+                )? {
+                    remap_workspace_camera_aperture(&mut aperture, &chunk.global_tile_indices)?;
+                    let replace = camera_aperture.as_ref().is_none_or(
+                        |current: &WorkspaceCameraApertureComposite| {
+                            aperture.supporting_detections > current.supporting_detections
+                                || (aperture.supporting_detections == current.supporting_detections
+                                    && aperture.source_center_error_px
+                                        < current.source_center_error_px)
+                        },
+                    );
+                    if replace {
+                        camera_aperture = Some(aperture);
+                    }
+                }
+            }
+            composites.push((chunk.core_start_row, chunk.core_row_count, composite));
+        }
+        Ok(Some(WorkspaceHeightArtifacts {
+            map,
+            composite: merge_workspace_height_chunks(&plan, composites)?,
+            camera_aperture,
+        }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error: anyhow::Error| error.to_string())
+}
+
+struct WorkspaceHeightChunk {
+    plan: WorkspaceScanPlan,
+    global_tile_indices: Vec<u32>,
+    core_start_row: u32,
+    core_row_count: u32,
+}
+
+fn workspace_height_chunk_plans(
+    plan: &WorkspaceScanPlan,
+    map: &WorkspaceHeightMap,
+    working_model: &PlanarCameraModel,
+    installed_model: &PlanarCameraModel,
+) -> anyhow::Result<Vec<WorkspaceHeightChunk>> {
+    let output_height = workspace_mosaic_axis_pixels(
+        plan.region.y_max_mm - plan.region.y_min_mm,
+        plan.output_mm_per_pixel,
+    )?;
+    let (footprint_min_y, footprint_max_y) =
+        workspace_height_footprint_y_range(plan, map, working_model, installed_model)?;
+    let mut chunks = Vec::new();
+    for first_pixel_row in (0..output_height).step_by(WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS as usize) {
+        let final_pixel_row =
+            (first_pixel_row + WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS - 1).min(output_height - 1);
+        let first_render_row =
+            first_pixel_row.saturating_sub(WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS);
+        let final_render_row =
+            (final_pixel_row + WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS).min(output_height - 1);
+        let region = WorkspaceScanRegion {
+            x_min_mm: plan.region.x_min_mm,
+            x_max_mm: plan.region.x_max_mm,
+            y_min_mm: if final_render_row == output_height - 1 {
+                plan.region.y_min_mm
+            } else {
+                plan.region.y_max_mm - f64::from(final_render_row) * plan.output_mm_per_pixel
+            },
+            y_max_mm: plan.region.y_max_mm - f64::from(first_render_row) * plan.output_mm_per_pixel,
+        };
+        let source_rows = (0..plan.rows)
+            .filter(|row| {
+                let tile = &plan.tiles[(row * plan.columns) as usize];
+                tile.nominal_pose.y_mm + footprint_max_y >= region.y_min_mm
+                    && tile.nominal_pose.y_mm + footprint_min_y <= region.y_max_mm
+            })
+            .collect::<Vec<_>>();
+        let first_source_row = source_rows
+            .first()
+            .copied()
+            .context("workspace height chunk has no source row")?
+            .saturating_sub(1);
+        let final_source_row = source_rows
+            .last()
+            .copied()
+            .context("workspace height chunk has no source row")?
+            .saturating_add(1)
+            .min(plan.rows - 1);
+        let rows = final_source_row - first_source_row + 1;
+        let mut tiles = Vec::with_capacity((rows * plan.columns) as usize);
+        let mut global_tile_indices = Vec::with_capacity(tiles.capacity());
+        for local_row in 0..rows {
+            let global_row = first_source_row + local_row;
+            for column in 0..plan.columns {
+                let global_index = global_row * plan.columns + column;
+                let mut tile = plan.tiles[global_index as usize].clone();
+                tile.index = local_row * plan.columns + column;
+                tile.row = local_row;
+                tile.artifact_name = transient_workspace_source_name(global_index);
+                global_tile_indices.push(global_index);
+                tiles.push(tile);
+            }
+        }
+        chunks.push(WorkspaceHeightChunk {
+            plan: WorkspaceScanPlan {
+                region,
+                overlap_fraction: plan.overlap_fraction,
+                output_mm_per_pixel: plan.output_mm_per_pixel,
+                frame_width_px: plan.frame_width_px,
+                frame_height_px: plan.frame_height_px,
+                usable_pixel_bounds: plan.usable_pixel_bounds,
+                rows,
+                columns: plan.columns,
+                tiles,
+            },
+            global_tile_indices,
+            core_start_row: first_pixel_row - first_render_row,
+            core_row_count: final_pixel_row - first_pixel_row + 1,
+        });
+    }
+    Ok(chunks)
+}
+
+fn workspace_height_footprint_y_range(
+    plan: &WorkspaceScanPlan,
+    map: &WorkspaceHeightMap,
+    working_model: &PlanarCameraModel,
+    installed_model: &PlanarCameraModel,
+) -> anyhow::Result<(f64, f64)> {
+    const EDGE_INTERVALS: u32 = 64;
+
+    let bounds = plan.usable_pixel_bounds;
+    let left = f64::from(bounds.left);
+    let right = f64::from(bounds.right - 1);
+    let top = f64::from(bounds.top);
+    let bottom = f64::from(bounds.bottom - 1);
+    let mut minimum_y = f64::INFINITY;
+    let mut maximum_y = f64::NEG_INFINITY;
+    for fraction in &map.candidate_fractions {
+        let model = interpolate_planar_camera_model(working_model, installed_model, *fraction)
+            .map_err(anyhow::Error::msg)?;
+        for index in 0..=EDGE_INTERVALS {
+            let position = f64::from(index) / f64::from(EDGE_INTERVALS);
+            let x = left + (right - left) * position;
+            let y = top + (bottom - top) * position;
+            for (sample_x, sample_y) in [(left, y), (right, y), (x, top), (x, bottom)] {
+                let correction = model
+                    .correction_at(sample_x, sample_y)
+                    .context("workspace height model exceeds calibrated support")?;
+                minimum_y = minimum_y.min(correction[1]);
+                maximum_y = maximum_y.max(correction[1]);
+            }
+        }
+    }
+    anyhow::ensure!(
+        minimum_y.is_finite() && maximum_y.is_finite() && maximum_y > minimum_y,
+        "workspace height camera footprint is invalid"
+    );
+    Ok((minimum_y, maximum_y))
+}
+
+fn render_transient_workspace_height_layer(
+    source_directory: &FilePath,
+    plan: &WorkspaceScanPlan,
+    working_model: &PlanarCameraModel,
+    installed_model: &PlanarCameraModel,
+    fraction: f64,
+) -> anyhow::Result<WorkspaceMosaic> {
+    let model = interpolate_planar_camera_model(working_model, installed_model, fraction)
+        .map_err(anyhow::Error::msg)?;
+    let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
+    let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
+    capture_sequence.sort_by_key(|tile| tile.capture_order);
+    for tile in capture_sequence {
+        let frame = read_transient_workspace_source(source_directory, tile)?;
+        stream.push_frame(tile.index, frame)?;
+    }
+    stream.finish()
+}
+
+fn remap_workspace_camera_aperture(
+    aperture: &mut WorkspaceCameraApertureComposite,
+    global_tile_indices: &[u32],
+) -> anyhow::Result<()> {
+    aperture.source_tile_index = *global_tile_indices
+        .get(aperture.source_tile_index as usize)
+        .context("camera aperture source tile is outside its chunk")?;
+    for tile_index in &mut aperture.source_tile_indices {
+        *tile_index = *global_tile_indices
+            .get(*tile_index as usize)
+            .context("camera aperture supporting tile is outside its chunk")?;
+    }
+    Ok(())
+}
+
+fn merge_workspace_height_chunks(
+    plan: &WorkspaceScanPlan,
+    chunks: Vec<(u32, u32, WorkspaceHeightComposite)>,
+) -> anyhow::Result<WorkspaceHeightComposite> {
+    let width = workspace_mosaic_axis_pixels(
+        plan.region.x_max_mm - plan.region.x_min_mm,
+        plan.output_mm_per_pixel,
+    )?;
+    let height = workspace_mosaic_axis_pixels(
+        plan.region.y_max_mm - plan.region.y_min_mm,
+        plan.output_mm_per_pixel,
+    )?;
+    let first = chunks
+        .first()
+        .context("workspace height render produced no chunks")?;
+    let mut frame = GrayFrame {
+        width,
+        height,
+        pixels: Vec::with_capacity(width as usize * height as usize),
+    };
+    let mut class_overlay = RgbaFrame {
+        width,
+        height,
+        pixels: Vec::with_capacity(width as usize * height as usize * 4),
+    };
+    let mut class_preview = RgbFrame {
+        width,
+        height,
+        pixels: Vec::with_capacity(width as usize * height as usize * 3),
+    };
+    let mut confidence_frame = GrayFrame {
+        width,
+        height,
+        pixels: Vec::with_capacity(width as usize * height as usize),
+    };
+    for (core_start_row, core_row_count, chunk) in &chunks {
+        anyhow::ensure!(
+            chunk.frame.width == width
+                && chunk.class_overlay.width == width
+                && chunk.class_preview.width == width
+                && chunk.confidence_frame.width == width,
+            "workspace height chunk widths differ"
+        );
+        append_workspace_chunk_rows(
+            &mut frame.pixels,
+            &chunk.frame.pixels,
+            width,
+            1,
+            *core_start_row,
+            *core_row_count,
+        )?;
+        append_workspace_chunk_rows(
+            &mut class_overlay.pixels,
+            &chunk.class_overlay.pixels,
+            width,
+            4,
+            *core_start_row,
+            *core_row_count,
+        )?;
+        append_workspace_chunk_rows(
+            &mut class_preview.pixels,
+            &chunk.class_preview.pixels,
+            width,
+            3,
+            *core_start_row,
+            *core_row_count,
+        )?;
+        append_workspace_chunk_rows(
+            &mut confidence_frame.pixels,
+            &chunk.confidence_frame.pixels,
+            width,
+            1,
+            *core_start_row,
+            *core_row_count,
+        )?;
+    }
+    anyhow::ensure!(
+        frame.pixels.len() == width as usize * height as usize
+            && class_overlay.pixels.len() == width as usize * height as usize * 4
+            && class_preview.pixels.len() == width as usize * height as usize * 3
+            && confidence_frame.pixels.len() == width as usize * height as usize,
+        "workspace height chunks do not cover the final mosaic"
+    );
+    Ok(WorkspaceHeightComposite {
+        frame,
+        class_overlay,
+        class_preview,
+        confidence_frame,
+        height_preview: first.2.height_preview.clone(),
+        candidate_fractions: first.2.candidate_fractions.clone(),
+    })
+}
+
+fn append_workspace_chunk_rows(
+    target: &mut Vec<u8>,
+    source: &[u8],
+    width: u32,
+    channels: usize,
+    first_row: u32,
+    row_count: u32,
+) -> anyhow::Result<()> {
+    let row_bytes = width as usize * channels;
+    let start = first_row as usize * row_bytes;
+    let end = (first_row + row_count) as usize * row_bytes;
+    let rows = source
+        .get(start..end)
+        .context("workspace height chunk crop is outside its frame")?;
+    target.extend_from_slice(rows);
+    Ok(())
+}
+
+fn workspace_mosaic_axis_pixels(span_mm: f64, mm_per_pixel: f64) -> anyhow::Result<u32> {
+    let pixels = (span_mm / mm_per_pixel).ceil() + 1.0;
+    anyhow::ensure!(
+        pixels.is_finite() && pixels >= 2.0 && pixels <= f64::from(u32::MAX),
+        "workspace mosaic dimensions are invalid"
+    );
+    Ok(pixels as u32)
 }
 
 fn render_retained_workspace_height_layer(
@@ -2332,14 +2749,77 @@ fn workspace_surface_model_name(surface_model: WorkspaceSurfaceModel) -> &'stati
     }
 }
 
+struct TransientWorkspaceSources {
+    directory: PathBuf,
+}
+
+impl TransientWorkspaceSources {
+    fn create(scan_id: Uuid) -> Result<Self, String> {
+        let directory =
+            std::env::temp_dir().join(format!("velocitypnp-workspace-sources-{scan_id}"));
+        fs::create_dir(&directory).map_err(|error| {
+            format!(
+                "could not create transient workspace directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        Ok(Self { directory })
+    }
+
+    fn write(&self, tile_index: u32, frame: &GrayFrame) -> Result<(), String> {
+        let encoded = encode_gray_png(frame).map_err(|error| error.to_string())?;
+        let path = self
+            .directory
+            .join(transient_workspace_source_name(tile_index));
+        fs::write(&path, encoded)
+            .map_err(|error| format!("could not write {}: {error}", path.display()))
+    }
+}
+
+impl Drop for TransientWorkspaceSources {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.directory) {
+            tracing::warn!(
+                %error,
+                directory = %self.directory.display(),
+                "could not remove transient workspace sources"
+            );
+        }
+    }
+}
+
+fn transient_workspace_source_name(tile_index: u32) -> String {
+    format!("tile-{tile_index:05}.png")
+}
+
+fn read_transient_workspace_source(
+    directory: &FilePath,
+    tile: &WorkspaceScanTile,
+) -> anyhow::Result<GrayFrame> {
+    let name = if tile.artifact_name.is_empty() {
+        transient_workspace_source_name(tile.index)
+    } else {
+        tile.artifact_name.clone()
+    };
+    let path = directory.join(name);
+    let encoded = fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
+    decode_gray_png(&encoded).with_context(|| format!("could not decode {}", path.display()))
+}
+
 fn persist_workspace_tile_artifact(
     state: &AppState,
     scan: &mut WorkspaceScanReport,
     tile: &velocitypnp_domain::WorkspaceScanTile,
     frame: &GrayFrame,
+    transient_sources: Option<&TransientWorkspaceSources>,
 ) -> Result<(), String> {
     let encoded = match scan.artifact_retention {
         WorkspaceArtifactRetention::MosaicOnly => return Ok(()),
+        WorkspaceArtifactRetention::TransientSources => {
+            return transient_sources
+                .ok_or_else(|| "transient workspace source store is unavailable".to_string())?
+                .write(tile.index, frame);
+        }
         WorkspaceArtifactRetention::FullSources => {
             encode_gray_png(frame).map_err(|error| error.to_string())?
         }
@@ -13273,6 +13753,234 @@ mod tests {
             ),
             (101, 101)
         );
+    }
+
+    #[test]
+    fn chunked_height_render_matches_the_single_mosaic() {
+        let model = |mm_per_pixel: f64| PlanarCameraModel {
+            role: CameraRole::TopCamera,
+            center_x_px: 50.0,
+            center_y_px: 50.0,
+            normalization_x_px: 50.0,
+            normalization_y_px: 50.0,
+            correction_x_coefficients_mm: [mm_per_pixel * 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            correction_y_coefficients_mm: [0.0, mm_per_pixel * 50.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            supported_min_x_px: 0.0,
+            supported_max_x_px: 99.0,
+            supported_min_y_px: 0.0,
+            supported_max_y_px: 99.0,
+            kind: velocitypnp_domain::PlanarCameraModelKind::Affine,
+        };
+        let region = WorkspaceScanRegion {
+            x_min_mm: 0.0,
+            x_max_mm: 2.0,
+            y_min_mm: 0.0,
+            y_max_mm: 12.0,
+        };
+        let rows = 7;
+        let tiles = (0..rows)
+            .map(|row| WorkspaceScanTile {
+                index: row,
+                row,
+                column: 0,
+                capture_order: row,
+                nominal_pose: Pose {
+                    x_mm: 1.0,
+                    y_mm: 1.0 + f64::from(row) * 2.0,
+                    z_mm: 31.5,
+                    rotation_deg: 0.0,
+                },
+                placement_correction_x_mm: 0.0,
+                placement_correction_y_mm: 0.0,
+                artifact_name: transient_workspace_source_name(row),
+            })
+            .collect::<Vec<_>>();
+        let plan = WorkspaceScanPlan {
+            region,
+            overlap_fraction: 0.3,
+            output_mm_per_pixel: 0.02,
+            frame_width_px: 100,
+            frame_height_px: 100,
+            usable_pixel_bounds: velocitypnp_domain::WorkspacePixelBounds {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 100,
+            },
+            rows,
+            columns: 1,
+            tiles,
+        };
+        let observations = (0..6)
+            .flat_map(|row| {
+                [0.49, 0.51].map(move |surface_fraction| {
+                    velocitypnp_vision::WorkspaceParallaxObservation {
+                        x_mm: 1.0,
+                        y_mm: 1.0 + f64::from(row) * 2.0,
+                        surface_fraction,
+                        residual_mm: 0.01,
+                        parallax_signal_mm: 1.0,
+                        fixed_tile_index: row,
+                        moving_tile_index: row + 1,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let parallax = WorkspaceParallaxReport {
+            working_plane_fraction: 0.0,
+            installed_plate_fraction: 1.0,
+            attempted_pairs: observations.len() as u32,
+            pairs_with_overlap: observations.len() as u32,
+            raw_matches: observations.len() as u32,
+            descriptor_matches: observations.len() as u32,
+            accepted_observations: observations.len() as u32,
+            observations,
+        };
+        let map = build_workspace_height_map(region, &parallax).unwrap();
+        let sources = TransientWorkspaceSources::create(Uuid::new_v4()).unwrap();
+        for tile in &plan.tiles {
+            let frame = GrayFrame {
+                width: 100,
+                height: 100,
+                pixels: (0..10_000)
+                    .map(|index| (index as u32 + tile.index * 17).rem_euclid(251) as u8)
+                    .collect(),
+            };
+            sources.write(tile.index, &frame).unwrap();
+        }
+        let working_model = model(0.02);
+        let installed_model = model(0.025);
+        let single = render_workspace_height_mosaic_with_consistency(&plan, &map, |fraction| {
+            render_transient_workspace_height_layer(
+                &sources.directory,
+                &plan,
+                &working_model,
+                &installed_model,
+                fraction,
+            )
+        })
+        .unwrap();
+        let chunks =
+            workspace_height_chunk_plans(&plan, &map, &working_model, &installed_model).unwrap();
+        assert_eq!(chunks.len(), 2);
+        let rendered = chunks
+            .iter()
+            .map(|chunk| {
+                let composite = render_workspace_height_mosaic_with_consistency(
+                    &chunk.plan,
+                    &map,
+                    |fraction| {
+                        render_transient_workspace_height_layer(
+                            &sources.directory,
+                            &chunk.plan,
+                            &working_model,
+                            &installed_model,
+                            fraction,
+                        )
+                    },
+                )
+                .unwrap();
+                (chunk.core_start_row, chunk.core_row_count, composite)
+            })
+            .collect::<Vec<_>>();
+        let chunked = merge_workspace_height_chunks(&plan, rendered).unwrap();
+
+        assert_eq!(chunked.frame.width, single.frame.width);
+        assert_eq!(chunked.frame.height, single.frame.height);
+        for (name, actual, expected) in [
+            ("mosaic", &chunked.frame.pixels, &single.frame.pixels),
+            (
+                "class overlay",
+                &chunked.class_overlay.pixels,
+                &single.class_overlay.pixels,
+            ),
+            (
+                "class preview",
+                &chunked.class_preview.pixels,
+                &single.class_preview.pixels,
+            ),
+            (
+                "confidence",
+                &chunked.confidence_frame.pixels,
+                &single.confidence_frame.pixels,
+            ),
+        ] {
+            if let Some(index) = actual
+                .iter()
+                .zip(expected)
+                .position(|(actual, expected)| actual != expected)
+            {
+                panic!(
+                    "{name} differs at byte {index}: chunked {}, single {}",
+                    actual[index], expected[index]
+                );
+            }
+            assert_eq!(actual.len(), expected.len(), "{name} lengths differ");
+        }
+        assert_eq!(chunked.height_preview, single.height_preview);
+        assert_eq!(chunked.candidate_fractions, single.candidate_fractions);
+
+        let mut unknown_parallax = parallax;
+        unknown_parallax.accepted_observations = 0;
+        unknown_parallax.observations.clear();
+        let unknown_map = build_workspace_height_map(region, &unknown_parallax).unwrap();
+        let unknown_single =
+            render_workspace_height_mosaic_with_consistency(&plan, &unknown_map, |fraction| {
+                render_transient_workspace_height_layer(
+                    &sources.directory,
+                    &plan,
+                    &working_model,
+                    &installed_model,
+                    fraction,
+                )
+            })
+            .unwrap();
+        let unknown_chunks =
+            workspace_height_chunk_plans(&plan, &unknown_map, &working_model, &installed_model)
+                .unwrap();
+        let unknown_rendered = unknown_chunks
+            .iter()
+            .map(|chunk| {
+                let composite = render_workspace_height_mosaic_with_consistency(
+                    &chunk.plan,
+                    &unknown_map,
+                    |fraction| {
+                        render_transient_workspace_height_layer(
+                            &sources.directory,
+                            &chunk.plan,
+                            &working_model,
+                            &installed_model,
+                            fraction,
+                        )
+                    },
+                )
+                .unwrap();
+                (chunk.core_start_row, chunk.core_row_count, composite)
+            })
+            .collect();
+        let unknown_chunked = merge_workspace_height_chunks(&plan, unknown_rendered).unwrap();
+        assert_eq!(unknown_chunked.frame, unknown_single.frame);
+    }
+
+    #[test]
+    fn transient_workspace_sources_are_removed_after_use() {
+        let sources = TransientWorkspaceSources::create(Uuid::new_v4()).unwrap();
+        let directory = sources.directory.clone();
+        sources
+            .write(
+                0,
+                &GrayFrame {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![1, 2, 3, 4],
+                },
+            )
+            .unwrap();
+        assert!(directory.join("tile-00000.png").is_file());
+
+        drop(sources);
+
+        assert!(!directory.exists());
     }
 
     #[tokio::test]

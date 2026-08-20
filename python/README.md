@@ -69,10 +69,12 @@ Installed-plate layered scans raise overlap to at least 60 percent for reliable
 multi-height reconstruction.
 Pass `feed_mm_per_min` only to request a slower scan.
 
-An installed-plate scan with `artifact_retention="full_sources"` also measures
-a confidence-aware surface map and makes a height-corrected mosaic. Retrieve
-them with `workspace_scan_height_map`, `workspace_scan_height_map_preview`,
-`workspace_scan_height_confidence`, and
+An installed-plate scan with `artifact_retention="full_sources"` or
+`artifact_retention="transient_sources"` also measures a confidence-aware
+surface map and makes a height-corrected mosaic. Transient retention deletes
+the source frames after chunked reconstruction and keeps the final products.
+Retrieve them with `workspace_scan_height_map`,
+`workspace_scan_height_map_preview`, `workspace_scan_height_confidence`, and
 `workspace_scan_height_corrected_mosaic`. Use `workspace_scan_height_overlay`
 for the transparent non-plate height classes or
 `workspace_scan_height_class_preview` for those classes composited onto the

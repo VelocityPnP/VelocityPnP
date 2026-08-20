@@ -97,6 +97,8 @@ The project is organized by measurable gates rather than calendar estimates.
   retention and bounded OpenCV overlap registration
 - [x] Add persistent-capture, bounded-memory coarse surveys with preflight
   duration/storage estimates, artifact quotas, and mosaic-only retention
+- [x] Add transient-source, chunked height reconstruction for full-workspace
+  layered scans without persistent per-tile storage
 - [x] Georeference survey rasters and use installed plate-plane geometry for
   full-workspace scan planning
 - [ ] Add board-region discovery and package-template pose comparison

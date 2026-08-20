@@ -1082,7 +1082,11 @@ components:
           default: precision
         artifact_retention:
           type: string
-          enum: [full_sources, thumbnails, mosaic_only]
+          enum: [full_sources, transient_sources, thumbnails, mosaic_only]
+          description: >-
+            transient_sources is available for layered surveys. It stores
+            captures temporarily, reconstructs final height products in
+            chunks, and deletes the source frames.
         region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
         region_preset:
           type: string
@@ -1101,7 +1105,7 @@ components:
           description: >-
             Optional XY feed. It cannot exceed the active machine profile's
             validated default feed.
-        max_tiles: { type: integer, minimum: 1, maximum: 4096 }
+        max_tiles: { type: integer, minimum: 1, maximum: 12000 }
         artifact_quota_bytes:
           type: integer
           minimum: 1
@@ -1142,7 +1146,7 @@ components:
         mode: { type: string, enum: [precision, survey] }
         artifact_retention:
           type: string
-          enum: [full_sources, thumbnails, mosaic_only]
+          enum: [full_sources, transient_sources, thumbnails, mosaic_only]
         surface_model:
           type: string
           enum: [top_camera_working_plane, installed_plate_planes]
@@ -1216,7 +1220,7 @@ components:
         mode: { type: string, enum: [precision, survey] }
         artifact_retention:
           type: string
-          enum: [full_sources, thumbnails, mosaic_only]
+          enum: [full_sources, transient_sources, thumbnails, mosaic_only]
         surface_model:
           type: string
           enum: [top_camera_working_plane, installed_plate_planes]

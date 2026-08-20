@@ -109,24 +109,31 @@ wget -qO- --method=POST \
 `precision` mode keeps the original calibrated-resolution behavior. It stores
 full source tiles by default and has a 64-tile limit. `survey` mode defaults to
 0.10 mm/pixel, 30 percent overlap, the machine profile's validated default XY
-feed, a 4,096-tile limit, and `mosaic_only` retention. An installed-plate scan
-uses at least 60 percent overlap so that each surface has enough shared image
-area for reliable reconstruction. It discards four queued frames after each
-completed move before it accepts a capture. It holds one V4L2 stream open
-across moves. Each mosaic layer retains two full camera rows. Height matching
-can retain up to three preceding rows for wider-baseline pairs. The system
-registers and renders each requested height layer and measures parallax. The
-height analysis also compares wider non-adjacent tile pairs that still have at
-least 20 percent overlap. This keeps a useful parallax baseline when capture
-overlap is high. Memory use is bounded by height layers and a small number of
-camera rows instead of total tile count.
+feed, a 4,096-tile limit, and `mosaic_only` retention. Layered surveys with
+`transient_sources` have a 12,000-tile limit. An installed-plate scan uses at
+least 60 percent overlap so that each surface has enough shared image area for
+reliable reconstruction. It discards four queued frames after each completed
+move before it accepts a capture. It holds one V4L2 stream open across moves.
+Each mosaic layer retains two full camera rows. Height matching can retain up
+to three preceding rows for wider-baseline pairs. The system registers and
+renders each requested height layer and measures parallax. The height analysis
+also compares wider non-adjacent tile pairs that still have at least 20 percent
+overlap. This keeps a useful parallax baseline when capture overlap is high.
+Memory use is bounded by height layers and a small number of camera rows
+instead of total tile count.
 `feed_mm_per_min` can request a slower feed, but cannot exceed the profile
 limit.
 
-Artifact retention can be `full_sources`, `thumbnails`, or `mosaic_only`.
-Every request has a retained-byte estimate and quota. A request that exceeds
-its quota fails before motion. The runtime checks actual encoded bytes before
-each artifact is stored. The default survey quota is 64 MiB.
+Artifact retention can be `full_sources`, `transient_sources`, `thumbnails`,
+or `mosaic_only`. `transient_sources` is for installed-plate surveys. It keeps
+encoded captures in one scan-specific temporary directory, renders the
+height-corrected image in 512-row bands with a boundary halo, and deletes the
+captures after reconstruction. The report and final products remain in the
+database. The preflight warning reports a conservative temporary-disk bound;
+temporary bytes do not count against the retained-artifact quota. Every
+request has a retained-byte estimate and quota. A request that exceeds its
+quota fails before motion. The runtime checks actual encoded bytes before each
+artifact is stored. The default survey quota is 64 MiB.
 
 Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
 
@@ -222,9 +229,10 @@ writes sparse, automatically measured evidence to
 `surface-height-observations.json`; its summary is in the scan's `parallax`
 field. Low-texture areas remain unmeasured.
 
-For `full_sources` retention, the service groups that evidence into 2 mm cells.
-It writes the quantitative map to `surface-height-map.json`, a compact preview
-to `surface-height-map.png`, a full-size confidence raster to
+For `full_sources` or `transient_sources` retention, the service groups that
+evidence into 2 mm cells. It writes the quantitative map to
+`surface-height-map.json`, a compact preview to `surface-height-map.png`, a
+full-size confidence raster to
 `surface-height-confidence.png`, and the selected-plane image to
 `mosaic-height-corrected.png`. It also writes a transparent height-class layer
 to `surface-height-overlay.png` and a ready-to-view composite to
@@ -252,8 +260,8 @@ object labels. Feeder, PCB, datum PCB, nozzle fixture, and bottom camera ring
 labels will come from later object detectors and can use the same transparent
 overlay format.
 
-The first implementation needs full-resolution source retention because the
-height map is known only after adjacent frames are compared. `thumbnails` and
+`full_sources` supports offline replay. `transient_sources` produces the same
+height products without keeping thousands of source frames. `thumbnails` and
 `mosaic_only` scans still produce the two endpoint mosaics and sparse parallax
 observations, but do not produce the unified map or corrected mosaic.
 

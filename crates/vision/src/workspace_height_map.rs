@@ -13,6 +13,7 @@ pub const WORKSPACE_HEIGHT_CANDIDATE_STEP: f64 = 0.125;
 const HEIGHT_CLUSTER_DIAMETER: f64 = 0.12;
 const MIN_CELL_OBSERVATIONS: usize = 2;
 const MAX_INFERENCE_DISTANCE_MM: f64 = 4.0;
+const HEIGHT_REGION_EPSILON_MM: f64 = 1e-9;
 const MEASURED_CLASS_OPACITY: f64 = 0.50;
 const INFERRED_CLASS_OPACITY: f64 = 0.30;
 const DISPLAY_PLANE_SMOOTHNESS_COST: f64 = 0.35;
@@ -659,8 +660,11 @@ where
     F: FnMut(f64) -> Result<RenderedHeightLayer>,
 {
     ensure!(
-        height_map.region == plan.region,
-        "height map and workspace plan regions differ"
+        plan.region.x_min_mm >= height_map.region.x_min_mm
+            && plan.region.x_max_mm <= height_map.region.x_max_mm
+            && plan.region.y_min_mm >= height_map.region.y_min_mm
+            && plan.region.y_max_mm <= height_map.region.y_max_mm,
+        "workspace plan region is outside the height map"
     );
     let width = mosaic_axis_pixels(
         plan.region.x_max_mm - plan.region.x_min_mm,
@@ -1171,13 +1175,15 @@ fn height_cell_index(
     x_mm: f64,
     y_mm: f64,
 ) -> Option<usize> {
-    if x_mm < region.x_min_mm
-        || x_mm > region.x_max_mm
-        || y_mm < region.y_min_mm
-        || y_mm > region.y_max_mm
+    if x_mm < region.x_min_mm - HEIGHT_REGION_EPSILON_MM
+        || x_mm > region.x_max_mm + HEIGHT_REGION_EPSILON_MM
+        || y_mm < region.y_min_mm - HEIGHT_REGION_EPSILON_MM
+        || y_mm > region.y_max_mm + HEIGHT_REGION_EPSILON_MM
     {
         return None;
     }
+    let x_mm = x_mm.clamp(region.x_min_mm, region.x_max_mm);
+    let y_mm = y_mm.clamp(region.y_min_mm, region.y_max_mm);
     let column = ((x_mm - region.x_min_mm) / WORKSPACE_HEIGHT_CELL_SIZE_MM)
         .floor()
         .min(f64::from(columns - 1)) as u32;
