@@ -139,6 +139,22 @@ pub struct WorkspaceParallaxSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceCameraApertureSummary {
+    pub center_x_mm: f64,
+    pub center_y_mm: f64,
+    pub radius_mm: f64,
+    pub projection_mm_per_pixel: f64,
+    pub projection_residual_p95_mm: Option<f64>,
+    #[serde(default)]
+    pub projection_fitted_from_detections: bool,
+    pub source_tile_index: u32,
+    #[serde(default)]
+    pub source_tile_indices: Vec<u32>,
+    pub source_center_error_px: f64,
+    pub supporting_detections: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceHeightMapSummary {
     pub map_artifact_name: String,
     pub preview_artifact_name: String,
@@ -155,6 +171,8 @@ pub struct WorkspaceHeightMapSummary {
     pub inferred_cells: u32,
     pub unknown_cells: u32,
     pub candidate_fractions: Vec<f64>,
+    #[serde(default)]
+    pub camera_aperture: Option<WorkspaceCameraApertureSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

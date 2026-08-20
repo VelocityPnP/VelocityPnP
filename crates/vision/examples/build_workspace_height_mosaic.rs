@@ -5,9 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use velocitypnp_domain::{InstalledPlateGeometryReport, PlanarCameraModel, WorkspaceScanReport};
 use velocitypnp_vision::{
-    build_workspace_height_map, decode_gray_png, encode_gray_png, encode_rgb_png, encode_rgba_png,
-    interpolate_planar_camera_model, render_workspace_height_mosaic_with_consistency,
-    rescale_planar_camera_model, WorkspaceMosaicStream, WorkspaceParallaxStream, WorkspaceScanPlan,
+    build_workspace_height_map, composite_workspace_camera_aperture, decode_gray_png,
+    encode_gray_png, encode_rgb_png, encode_rgba_png, interpolate_planar_camera_model,
+    render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
+    WorkspaceMosaicStream, WorkspaceParallaxStream, WorkspaceScanPlan,
 };
 
 fn main() -> Result<()> {
@@ -52,29 +53,45 @@ fn main() -> Result<()> {
         columns: report.columns,
         tiles,
     };
+    let mut source_frames = vec![None; plan.tiles.len()];
+    for tile in &plan.tiles {
+        source_frames[tile.index as usize] =
+            Some(read_source_frame(&scan_directory, &tile.artifact_name)?);
+    }
+    let source_frames = source_frames
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .context("workspace source cache has a missing tile")?;
     let mut parallax_stream =
         WorkspaceParallaxStream::new(plan.clone(), working_model.clone(), installed_model.clone())?;
     for tile in capture_sequence(&plan) {
-        parallax_stream.push_frame(
-            tile.index,
-            read_source_frame(&scan_directory, &tile.artifact_name)?,
-        )?;
+        parallax_stream.push_frame(tile.index, source_frames[tile.index as usize].clone())?;
     }
     let parallax = parallax_stream.finish()?;
     let height_map = build_workspace_height_map(plan.region, &parallax)?;
-    let composite =
+    let mut composite =
         render_workspace_height_mosaic_with_consistency(&plan, &height_map, |fraction| {
             let model = interpolate_planar_camera_model(&working_model, &installed_model, fraction)
                 .map_err(anyhow::Error::msg)?;
             let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
             for tile in capture_sequence(&plan) {
-                stream.push_frame(
-                    tile.index,
-                    read_source_frame(&scan_directory, &tile.artifact_name)?,
-                )?;
+                stream.push_frame(tile.index, source_frames[tile.index as usize].clone())?;
             }
             stream.finish()
         })?;
+    let reference_diameter_px = calibration["artifacts"]["camera_ray_transfer"]["value"]
+        ["bottom_camera_reference_diameter_px"]
+        .as_f64()
+        .context("calibration has no bottom-camera reference diameter")?;
+    let camera_aperture = composite_workspace_camera_aperture(
+        &plan,
+        &height_map,
+        &installed_model,
+        reference_diameter_px * 0.75,
+        reference_diameter_px * 1.25,
+        &mut composite,
+        |tile| Ok(source_frames[tile.index as usize].clone()),
+    )?;
     write_json(
         &output_directory.join("surface-height-map.json"),
         &height_map,
@@ -110,6 +127,7 @@ fn main() -> Result<()> {
             "inferred_cells": height_map.inferred_cells,
             "unknown_cells": height_map.unknown_cells,
             "candidate_fractions": height_map.candidate_fractions,
+            "camera_aperture": camera_aperture,
             "output_directory": output_directory,
         }))?
     );

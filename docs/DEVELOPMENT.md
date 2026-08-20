@@ -238,6 +238,14 @@ Unknown cells stay unknown in the data. For display, the corrected mosaic
 compares source-image disagreement at the calibrated working and installed
 plate endpoints, then selects the locally supported projection with spatial
 regularization. This does not turn display selection into measured height.
+If at least three retained source frames agree on the bottom-camera aperture,
+their detected center motion fits a local camera-depth projection. This avoids
+using the plate-height pixel scale for the lower camera surface. All views are
+aligned to one machine-space center and blended with more weight near the
+optical center. A narrow guard band replaces residual ringing at the aperture
+edge. The surrounding plate and light ring keep the normal height-corrected
+reconstruction. The structured detection is stored in
+`height_map.camera_aperture`.
 The scan report's `height_map` field records the artifacts, map coverage, and
 candidate planes. The height colors are geometric evidence, not semantic
 object labels. Feeder, PCB, datum PCB, nozzle fixture, and bottom camera ring

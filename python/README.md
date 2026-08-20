@@ -77,5 +77,8 @@ them with `workspace_scan_height_map`, `workspace_scan_height_map_preview`,
 for the transparent non-plate height classes or
 `workspace_scan_height_class_preview` for those classes composited onto the
 mosaic. Bare plate and unknown pixels have no overlay. Unknown map cells remain
-explicit; the corrected image uses the working-plane view as their display
-fallback.
+explicit; their display pixels use the endpoint projection with lower local
+source disagreement. When retained sources contain the bottom camera, repeated
+aperture detections fit its local depth projection. The agreeing views are
+self-aligned and center-weighted to remove camera-well ringing. The scan report
+records the result under `height_map.camera_aperture`.

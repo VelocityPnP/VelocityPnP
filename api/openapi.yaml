@@ -1342,6 +1342,44 @@ components:
         candidate_fractions:
           type: array
           items: { type: number }
+        camera_aperture:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceCameraApertureSummary"
+            - type: "null"
+    WorkspaceCameraApertureSummary:
+      type: object
+      required:
+        - center_x_mm
+        - center_y_mm
+        - radius_mm
+        - projection_mm_per_pixel
+        - projection_residual_p95_mm
+        - projection_fitted_from_detections
+        - source_tile_index
+        - source_tile_indices
+        - source_center_error_px
+        - supporting_detections
+      description: >-
+        Automatically detected non-planar bottom-camera aperture. Repeated
+        detections fit the camera depth and align all agreeing views to one
+        machine-space center. A center-weighted blend and narrow guard band
+        replace the aperture and its reconstruction artifacts. The surrounding
+        plate and light ring keep normal reconstruction.
+      properties:
+        center_x_mm: { type: number }
+        center_y_mm: { type: number }
+        radius_mm: { type: number, exclusiveMinimum: 0 }
+        projection_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
+        projection_residual_p95_mm:
+          type: [number, "null"]
+          minimum: 0
+        projection_fitted_from_detections: { type: boolean }
+        source_tile_index: { type: integer, minimum: 0 }
+        source_tile_indices:
+          type: array
+          items: { type: integer, minimum: 0 }
+        source_center_error_px: { type: number, minimum: 0 }
+        supporting_detections: { type: integer, minimum: 3 }
     WorkspaceRasterTransform:
       type: object
       required:

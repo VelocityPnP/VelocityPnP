@@ -1215,15 +1215,26 @@ calibrated endpoint projections. It keeps unknown cells unknown in the height
 data, but selects the locally supported endpoint for their display pixels and
 regularizes neighboring selections. Replay kept the datum PCB coherent and
 removed most ringing from the staging plate, holes, edge numbers, and outer
-camera ring. The inner bottom-camera optics still show local depth blocks. That
-assembly is not planar, and the retained capture has only 41.3 percent overlap.
-The corrected PNG SHA-256 is
-`91c04211122e75a042eb41ea3331828bb94daf9dc58aeb3982f29437dae9fc8d`.
+camera ring.
+
+The bottom-camera aperture detector then found six agreeing views in tiles 58,
+59, 71, 72, 84, and 85. Their center motion fitted the local camera-depth
+projection instead of reusing a plate-height scale. The fitted aperture center
+was X=221.067 mm and Y=144.652 mm. Its scale was 0.02304 mm/pixel, its fit
+residual P95 was 0.052 mm, and its radius was 10.056 mm. The compositor aligned
+all six views to that center, used a center-weighted blend, and replaced a
+narrow guard band around the aperture. Visual inspection showed a coherent
+camera lens and a clean circular boundary without the former rectangular depth
+blocks. The surrounding plate, datum PCB, and light ring were unchanged. The
+replay still accepted 7,376 observations and kept the same 280 measured, 576
+inferred, and 1,169 unknown height cells. The corrected PNG SHA-256 is
+`d0f43f140e9e2e7196ac755e2a36217ce0b9cd0191059af60c7b8d12a02b9dfe`.
+This replay used retained images only and caused no machine motion.
 
 Future installed-plate layered scans now use at least 60 percent overlap. Their
 height analysis keeps a useful baseline by also comparing non-adjacent tiles
 that retain at least 20 percent overlap. A physical 60 percent repeat is still
-required to validate the inner camera region.
+required to validate the full path with a new capture.
 
 ## Procedure sources
 

@@ -35,9 +35,10 @@ use velocitypnp_domain::{
     PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
-    WorkspaceHeightMapSummary, WorkspaceMosaicLayerReport, WorkspaceParallaxSummary,
-    WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion,
-    WorkspaceScanReport, WorkspaceScanStatus, WorkspaceSurfaceModel,
+    WorkspaceCameraApertureSummary, WorkspaceHeightMapSummary, WorkspaceMosaicLayerReport,
+    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
+    WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -49,21 +50,22 @@ use velocitypnp_store::Store;
 use velocitypnp_vision::{
     apply_camera_controls, build_workspace_height_map, build_workspace_mosaic,
     calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer, camera_sample_metrics,
-    capture_gray_frame, capture_gray_frames, decode_gray_png, detect_bright_fiducial_near,
-    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
-    encode_gray_png, encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry,
-    fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model,
-    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, render_workspace_height_mosaic_with_consistency,
-    rescale_planar_camera_model, resize_gray_frame, summarize_camera_reproducibility,
-    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
-    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
-    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig,
-    VisualHomingPlan, WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic,
-    WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceScanPlan,
-    MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
+    capture_gray_frame, capture_gray_frames, composite_workspace_camera_aperture, decode_gray_png,
+    detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
+    detect_installed_plate_hole, encode_gray_png, encode_rgb_png, encode_rgba_png,
+    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
+    measure_workspace_parallax, plan_bottom_camera_correction, plan_pixel_correction,
+    plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
+    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
+    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
+    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
+    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
+    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
+    WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream,
+    WorkspaceScanPlan, MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
@@ -109,6 +111,7 @@ const WORKSPACE_HEIGHT_CLASS_PREVIEW_ARTIFACT: &str = "mosaic-height-classes.png
 struct WorkspaceHeightArtifacts {
     map: WorkspaceHeightMap,
     composite: WorkspaceHeightComposite,
+    camera_aperture: Option<WorkspaceCameraApertureComposite>,
 }
 
 #[derive(Clone)]
@@ -1915,9 +1918,15 @@ async fn build_retained_workspace_height_artifacts(
     let working_model = working_model.clone();
     let installed_model = installed_model.clone();
     let parallax = parallax.clone();
+    let camera_aperture_diameter_range = state.profile.bottom_vision.as_ref().map(|bottom| {
+        (
+            bottom.head_geometry.bottom_camera_reference_min_diameter_px,
+            bottom.head_geometry.bottom_camera_reference_max_diameter_px,
+        )
+    });
     tokio::task::spawn_blocking(move || {
         build_workspace_height_map(plan.region, &parallax).and_then(|map| {
-            let composite =
+            let mut composite =
                 render_workspace_height_mosaic_with_consistency(&plan, &map, |fraction| {
                     render_retained_workspace_height_layer(
                         &store,
@@ -1928,7 +1937,25 @@ async fn build_retained_workspace_height_artifacts(
                         fraction,
                     )
                 })?;
-            Ok(Some(WorkspaceHeightArtifacts { map, composite }))
+            let camera_aperture = camera_aperture_diameter_range
+                .map(|(minimum_diameter_px, maximum_diameter_px)| {
+                    composite_workspace_camera_aperture(
+                        &plan,
+                        &map,
+                        &installed_model,
+                        minimum_diameter_px,
+                        maximum_diameter_px,
+                        &mut composite,
+                        |tile| read_retained_workspace_source(&store, scan_id, tile),
+                    )
+                })
+                .transpose()?
+                .flatten();
+            Ok(Some(WorkspaceHeightArtifacts {
+                map,
+                composite,
+                camera_aperture,
+            }))
         })
     })
     .await
@@ -1950,28 +1977,36 @@ fn render_retained_workspace_height_layer(
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     for tile in capture_sequence {
-        let (media_type, encoded) = store
-            .get_workspace_scan_artifact(scan_id, &tile.artifact_name)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "workspace scan source artifact {} is absent",
-                    tile.artifact_name
-                )
-            })?;
-        anyhow::ensure!(
-            media_type == "image/png",
-            "workspace scan source artifact {} is not a PNG",
-            tile.artifact_name
-        );
-        let frame = decode_gray_png(&encoded).map_err(|error| {
-            anyhow::anyhow!(
-                "workspace scan source artifact {} is invalid: {error}",
-                tile.artifact_name
-            )
-        })?;
+        let frame = read_retained_workspace_source(store, scan_id, tile)?;
         stream.push_frame(tile.index, frame)?;
     }
     stream.finish()
+}
+
+fn read_retained_workspace_source(
+    store: &Store,
+    scan_id: Uuid,
+    tile: &WorkspaceScanTile,
+) -> anyhow::Result<GrayFrame> {
+    let (media_type, encoded) = store
+        .get_workspace_scan_artifact(scan_id, &tile.artifact_name)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "workspace scan source artifact {} is absent",
+                tile.artifact_name
+            )
+        })?;
+    anyhow::ensure!(
+        media_type == "image/png",
+        "workspace scan source artifact {} is not a PNG",
+        tile.artifact_name
+    );
+    decode_gray_png(&encoded).map_err(|error| {
+        anyhow::anyhow!(
+            "workspace scan source artifact {} is invalid: {error}",
+            tile.artifact_name
+        )
+    })
 }
 
 async fn capture_persistent_workspace_frame(
@@ -2242,6 +2277,22 @@ fn persist_workspace_height_artifacts(
             artifacts.map.unknown_cells,
         ));
     }
+    if let Some(aperture) = &artifacts.camera_aperture {
+        let projection_source = if aperture.projection_fitted_from_detections {
+            "a self-fitted depth projection"
+        } else {
+            "the calibrated projection fallback"
+        };
+        scan.warnings.push(format!(
+            "bottom-camera aperture at X={:.3}, Y={:.3} mm uses {} and {} aligned source tiles inside its {:.3} mm radius; tile {} is the most centered view",
+            aperture.center_x_mm,
+            aperture.center_y_mm,
+            projection_source,
+            aperture.source_tile_indices.len(),
+            aperture.radius_mm,
+            aperture.source_tile_index,
+        ));
+    }
     scan.height_map = Some(WorkspaceHeightMapSummary {
         map_artifact_name: WORKSPACE_HEIGHT_MAP_ARTIFACT.into(),
         preview_artifact_name: WORKSPACE_HEIGHT_PREVIEW_ARTIFACT.into(),
@@ -2256,6 +2307,20 @@ fn persist_workspace_height_artifacts(
         inferred_cells: artifacts.map.inferred_cells,
         unknown_cells: artifacts.map.unknown_cells,
         candidate_fractions: artifacts.composite.candidate_fractions,
+        camera_aperture: artifacts.camera_aperture.as_ref().map(|aperture| {
+            WorkspaceCameraApertureSummary {
+                center_x_mm: aperture.center_x_mm,
+                center_y_mm: aperture.center_y_mm,
+                radius_mm: aperture.radius_mm,
+                projection_mm_per_pixel: aperture.projection_mm_per_pixel,
+                projection_residual_p95_mm: aperture.projection_residual_p95_mm,
+                projection_fitted_from_detections: aperture.projection_fitted_from_detections,
+                source_tile_index: aperture.source_tile_index,
+                source_tile_indices: aperture.source_tile_indices.clone(),
+                source_center_error_px: aperture.source_center_error_px,
+                supporting_detections: aperture.supporting_detections,
+            }
+        }),
     });
     Ok(())
 }
@@ -13034,6 +13099,7 @@ mod tests {
                 height_preview,
                 candidate_fractions: vec![0.0],
             },
+            camera_aperture: None,
         };
 
         complete_workspace_mosaics(
