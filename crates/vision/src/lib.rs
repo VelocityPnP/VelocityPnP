@@ -3,6 +3,7 @@
 //! V4L2 device.
 
 mod opencv_backend;
+mod workspace_height_map;
 mod workspace_mosaic;
 mod workspace_parallax;
 
@@ -16,13 +17,18 @@ mod v4l2_capture;
 pub use v4l2_capture::*;
 
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
+pub use workspace_height_map::{
+    build_workspace_height_map, compose_workspace_height_mosaic, render_workspace_height_mosaic,
+    WorkspaceHeightCell, WorkspaceHeightCellSource, WorkspaceHeightComposite, WorkspaceHeightMap,
+    WORKSPACE_HEIGHT_CANDIDATE_STEP, WORKSPACE_HEIGHT_CELL_SIZE_MM,
+};
 pub use workspace_mosaic::{
     build_workspace_mosaic, plan_workspace_scan, workspace_camera_reachable_region,
     WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
 };
 pub use workspace_parallax::{
     measure_workspace_parallax, WorkspaceParallaxObservation, WorkspaceParallaxReport,
-    WorkspaceParallaxStream,
+    WorkspaceParallaxStream, MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
 };
 
 use serde::{Deserialize, Serialize};

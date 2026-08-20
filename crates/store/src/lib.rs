@@ -523,6 +523,7 @@ mod tests {
             mosaic_artifact_name: None,
             mosaic_layers: Vec::new(),
             parallax: None,
+            height_map: None,
             warnings: vec![],
             failure: None,
         };

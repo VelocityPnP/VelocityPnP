@@ -181,6 +181,9 @@ To measure sparse local height evidence from retained source frames, run:
 ```bash
 cargo run -p velocitypnp-vision --example analyze_workspace_parallax -- \
   SCAN_DIRECTORY CALIBRATION_JSON OUTPUT.json
+
+cargo run -p velocitypnp-vision --example build_workspace_height_mosaic -- \
+  SCAN_DIRECTORY CALIBRATION_JSON OUTPUT_DIRECTORY
 ```
 
 Each accepted observation matches one feature from two camera positions and
@@ -201,20 +204,33 @@ maximum machine Y. The estimate and report make this convention explicit in
 For the complete configured staging and build plates, replace `region` with
 `"region_preset":"installed_plates"`. The preset requires a current, passing
 installed-plate geometry artifact. It uses the measured affine plate extents
-and the source-derived plate outline. It plans motion with the smaller
-top-camera working-plane footprint so raised PCBs remain fully covered. The
-same captures produce `mosaic.png` at the raised working plane and
+and the source-derived plate outline. It derives a minimum tile overlap from
+the footprint at the highest supported surface fraction. This keeps that
+height range covered between tiles without removing reachable plate-only edge
+areas. The same captures produce `mosaic.png` at the working plane and
 `mosaic-installed-plate-planes.png` at the bare plate plane. The report records
 both under `mosaic_layers`.
 
 This separation is required because one projection cannot align a scene that
-contains bare plates, PCBs, and feeders at different heights. Consumers should
-run detection against each layer and use the layer with the stronger local
-evidence. The same pass writes sparse, automatically measured evidence to
+contains bare plates, PCBs, and feeders at different heights. The same pass
+writes sparse, automatically measured evidence to
 `surface-height-observations.json`; its summary is in the scan's `parallax`
-field. Low-texture areas remain unmeasured. Automatic surface segmentation and
-a unified height-selected composite remain future work; the service does not
-hide that uncertainty by averaging depth layers together.
+field. Low-texture areas remain unmeasured.
+
+For `full_sources` retention, the service groups that evidence into 2 mm cells.
+It writes the quantitative map to `surface-height-map.json`, a compact preview
+to `surface-height-map.png`, a full-size confidence raster to
+`surface-height-confidence.png`, and the selected-plane image to
+`mosaic-height-corrected.png`. The reconstruction tests candidate planes at
+one-eighth of the calibrated working-plane-to-plate scale. It locally extends
+only consistent measurements. Unknown cells stay unknown in the data and use
+the working-plane image only as a display fallback. The scan report's
+`height_map` field records the artifacts, map coverage, and candidate planes.
+
+The first implementation needs full-resolution source retention because the
+height map is known only after adjacent frames are compared. `thumbnails` and
+`mosaic_only` scans still produce the two endpoint mosaics and sparse parallax
+observations, but do not produce the unified map or corrected mosaic.
 
 The V3.0.4 plates are 600 by 120 mm, with 39 columns and seven rows; their
 outline is one 15 mm pitch outside the outer feature centers. The region is

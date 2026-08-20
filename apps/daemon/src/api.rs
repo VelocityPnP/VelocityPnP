@@ -35,9 +35,9 @@ use velocitypnp_domain::{
     PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
-    WorkspaceMosaicLayerReport, WorkspaceParallaxSummary, WorkspaceRasterTransform,
-    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
-    WorkspaceScanStatus, WorkspaceSurfaceModel,
+    WorkspaceHeightMapSummary, WorkspaceMosaicLayerReport, WorkspaceParallaxSummary,
+    WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion,
+    WorkspaceScanReport, WorkspaceScanStatus, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -47,20 +47,23 @@ use velocitypnp_planner::{
 };
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    apply_camera_controls, build_workspace_mosaic, calibrate_bottom_camera_mapping,
-    calibrate_camera_ray_transfer, camera_sample_metrics, capture_gray_frame, capture_gray_frames,
-    detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
-    detect_installed_plate_hole, encode_gray_png, fit_installed_plate_geometry,
-    fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model, mean_nozzle_detection,
+    apply_camera_controls, build_workspace_height_map, build_workspace_mosaic,
+    calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer, camera_sample_metrics,
+    capture_gray_frame, capture_gray_frames, decode_gray_png, detect_bright_fiducial_near,
+    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
+    encode_gray_png, fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
     measure_workspace_parallax, plan_bottom_camera_correction, plan_pixel_correction,
-    plan_visual_homing, plan_workspace_scan, query_camera_controls, rescale_planar_camera_model,
-    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
-    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
-    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
-    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
-    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
-    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream,
-    WorkspaceScanPlan,
+    plan_visual_homing, plan_workspace_scan, query_camera_controls, render_workspace_height_mosaic,
+    rescale_planar_camera_model, resize_gray_frame, summarize_camera_reproducibility,
+    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
+    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
+    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig,
+    VisualHomingPlan, WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic,
+    WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceScanPlan,
+    MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
+    WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -93,6 +96,16 @@ const WORKSPACE_THUMBNAIL_WIDTH: u32 = 192;
 const WORKSPACE_THUMBNAIL_HEIGHT: u32 = 108;
 const WORKSPACE_PROGRESS_TILE_INTERVAL: u32 = 25;
 const ESTIMATED_REGISTRATION_SECONDS: f64 = 0.12;
+const ESTIMATED_HEIGHT_RENDER_SECONDS_PER_TILE: f64 = 0.02;
+const WORKSPACE_HEIGHT_MAP_ARTIFACT: &str = "surface-height-map.json";
+const WORKSPACE_HEIGHT_PREVIEW_ARTIFACT: &str = "surface-height-map.png";
+const WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT: &str = "surface-height-confidence.png";
+const WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT: &str = "mosaic-height-corrected.png";
+
+struct WorkspaceHeightArtifacts {
+    map: WorkspaceHeightMap,
+    composite: WorkspaceHeightComposite,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -720,7 +733,7 @@ async fn estimate_workspace_scan(
         &top_profile,
         &camera_model,
         WorkspaceSurfaceModel::TopCameraWorkingPlane,
-        installed_camera_model.is_some(),
+        installed_camera_model.as_ref(),
         installed_geometry.as_ref(),
         current_pose,
     )?;
@@ -765,7 +778,7 @@ async fn start_workspace_scan(
         &top_profile,
         &camera_model,
         WorkspaceSurfaceModel::TopCameraWorkingPlane,
-        installed_camera_model.is_some(),
+        installed_camera_model.as_ref(),
         installed_geometry.as_ref(),
         current_pose,
     )?;
@@ -817,6 +830,7 @@ async fn start_workspace_scan(
         mosaic_artifact_name: None,
         mosaic_layers: Vec::new(),
         parallax: None,
+        height_map: None,
         warnings: estimate.warnings.clone(),
         failure: None,
     };
@@ -859,17 +873,28 @@ fn prepare_workspace_scan(
     top_profile: &CameraProfile,
     camera_model: &PlanarCameraModel,
     surface_model: WorkspaceSurfaceModel,
-    include_installed_plate_layer: bool,
+    installed_camera_model: Option<&PlanarCameraModel>,
     installed_geometry: Option<&InstalledPlateGeometryReport>,
     start_pose: Pose,
 ) -> ApiResult<(WorkspaceScanPlan, WorkspaceScanEstimate)> {
     let mut warnings = Vec::new();
-    if include_installed_plate_layer {
+    if installed_camera_model.is_some() {
         warnings.push(
             "mixed-height scan will produce separate working-plane and installed-plate mosaics"
                 .into(),
         );
     }
+    let planning_camera_model = installed_camera_model
+        .map(|installed_model| {
+            interpolate_planar_camera_model(
+                camera_model,
+                installed_model,
+                MIN_WORKSPACE_SURFACE_FRACTION,
+            )
+            .map_err(ApiError::bad_request)
+        })
+        .transpose()?
+        .unwrap_or_else(|| camera_model.clone());
     let preset_region = match specification.region_preset {
         Some(WorkspaceRegionPreset::InstalledPlates) => {
             let plate_region = installed_plates_scan_region(&state.profile, installed_geometry)?;
@@ -899,11 +924,29 @@ fn prepare_workspace_scan(
         }
     };
     let survey = specification.mode == WorkspaceScanMode::Survey;
-    let overlap_fraction = specification.overlap_fraction.unwrap_or(if survey {
+    let requested_overlap = specification.overlap_fraction.unwrap_or(if survey {
         DEFAULT_SURVEY_OVERLAP
     } else {
         0.35
     });
+    if !(0.2..=0.75).contains(&requested_overlap) {
+        return Err(ApiError::bad_request(
+            "workspace overlap must be between 0.2 and 0.75",
+        ));
+    }
+    let minimum_layered_overlap = if installed_camera_model.is_some() {
+        minimum_layered_workspace_overlap(camera_model, &planning_camera_model)?
+    } else {
+        0.2
+    };
+    let overlap_fraction = requested_overlap.max(minimum_layered_overlap);
+    if overlap_fraction > requested_overlap {
+        warnings.push(format!(
+            "workspace overlap was raised from {:.1}% to {:.1}% to cover the highest supported surface between tiles",
+            requested_overlap * 100.0,
+            overlap_fraction * 100.0,
+        ));
+    }
     let output_mm_per_pixel = specification
         .output_mm_per_pixel
         .or_else(|| survey.then_some(DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL));
@@ -928,6 +971,14 @@ fn prepare_workspace_scan(
     } else {
         WorkspaceArtifactRetention::FullSources
     });
+    if installed_camera_model.is_some()
+        && artifact_retention == WorkspaceArtifactRetention::FullSources
+    {
+        warnings.push(
+            "full source retention will also produce a measured surface-height map and height-corrected mosaic"
+                .into(),
+        );
+    }
     let default_quota = if survey {
         DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES
     } else {
@@ -982,7 +1033,7 @@ fn prepare_workspace_scan(
             mode: specification.mode,
             artifact_retention,
             surface_model,
-            surface_models: if include_installed_plate_layer {
+            surface_models: if installed_camera_model.is_some() {
                 vec![
                     WorkspaceSurfaceModel::TopCameraWorkingPlane,
                     WorkspaceSurfaceModel::InstalledPlatePlanes,
@@ -1010,6 +1061,28 @@ fn prepare_workspace_scan(
         )));
     }
     Ok((plan, estimate))
+}
+
+fn minimum_layered_workspace_overlap(
+    working_model: &PlanarCameraModel,
+    highest_surface_model: &PlanarCameraModel,
+) -> ApiResult<f64> {
+    let working_scale = working_model
+        .local_mm_per_pixel(working_model.center_x_px, working_model.center_y_px)
+        .ok_or_else(|| ApiError::bad_request("working-plane camera scale is unavailable"))?;
+    let highest_scale = highest_surface_model
+        .local_mm_per_pixel(
+            highest_surface_model.center_x_px,
+            highest_surface_model.center_y_px,
+        )
+        .ok_or_else(|| ApiError::bad_request("high-surface camera scale is unavailable"))?;
+    let overlap = (1.0 - highest_scale / working_scale + 0.05).max(0.2);
+    if !overlap.is_finite() || overlap > 0.75 {
+        return Err(ApiError::bad_request(
+            "calibrated surface range needs more than 75% workspace overlap",
+        ));
+    }
+    Ok(overlap)
 }
 
 fn select_workspace_surface_models(
@@ -1293,12 +1366,26 @@ fn workspace_scan_estimate(
     } else {
         0
     };
+    let height_products_enabled =
+        artifact_retention == WorkspaceArtifactRetention::FullSources && surface_models.len() > 1;
+    let height_columns = ((plan.region.x_max_mm - plan.region.x_min_mm)
+        / velocitypnp_vision::WORKSPACE_HEIGHT_CELL_SIZE_MM)
+        .ceil() as u64;
+    let height_rows = ((plan.region.y_max_mm - plan.region.y_min_mm)
+        / velocitypnp_vision::WORKSPACE_HEIGHT_CELL_SIZE_MM)
+        .ceil() as u64;
+    let height_product_bytes = if height_products_enabled {
+        mosaic_pixels * 11 / 10 * 2 + height_rows * height_columns * 512 + 4_096
+    } else {
+        0
+    };
     let estimated_retained_bytes = mosaic_pixels * 11 / 10 * surface_models.len() as u64
         + metadata_bytes
         + retained_image_bytes
-        + parallax_bytes;
+        + parallax_bytes
+        + height_product_bytes;
     let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
-    let estimated_duration_seconds = if mode == WorkspaceScanMode::Survey {
+    let base_duration_seconds = if mode == WorkspaceScanMode::Survey {
         let first_frames = top_profile.settle_frames + 1;
         let later_frames = WORKSPACE_SURVEY_SETTLE_FRAMES + 1;
         let capture_frames = u64::from(first_frames)
@@ -1313,6 +1400,20 @@ fn workspace_scan_estimate(
     } else {
         (f64::from(planned_tiles) * 5.3).ceil() as u64
     };
+    let height_duration_seconds = if height_products_enabled {
+        let maximum_candidate_layers = ((MAX_WORKSPACE_SURFACE_FRACTION
+            - MIN_WORKSPACE_SURFACE_FRACTION)
+            / WORKSPACE_HEIGHT_CANDIDATE_STEP)
+            .round() as u64
+            + 1;
+        (f64::from(planned_tiles)
+            * ESTIMATED_HEIGHT_RENDER_SECONDS_PER_TILE
+            * maximum_candidate_layers as f64)
+            .ceil() as u64
+    } else {
+        0
+    };
+    let estimated_duration_seconds = base_duration_seconds + height_duration_seconds;
     WorkspaceScanEstimate {
         mode,
         artifact_retention,
@@ -1618,7 +1719,16 @@ async fn capture_and_build_precision_workspace_scan(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    complete_workspace_mosaics(state, scan, mosaics, parallax)
+    let height_artifacts = build_retained_workspace_height_artifacts(
+        state,
+        scan,
+        plan,
+        camera_model,
+        installed_camera_model,
+        parallax.as_ref(),
+    )
+    .await?;
+    complete_workspace_mosaics(state, scan, mosaics, parallax, height_artifacts)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1758,7 +1868,94 @@ async fn capture_and_build_workspace_survey(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    complete_workspace_mosaics(state, scan, mosaics, parallax)
+    let height_artifacts = build_retained_workspace_height_artifacts(
+        state,
+        scan,
+        plan,
+        camera_model,
+        installed_camera_model,
+        parallax.as_ref(),
+    )
+    .await?;
+    complete_workspace_mosaics(state, scan, mosaics, parallax, height_artifacts)
+}
+
+async fn build_retained_workspace_height_artifacts(
+    state: &AppState,
+    scan: &WorkspaceScanReport,
+    plan: &WorkspaceScanPlan,
+    working_model: &PlanarCameraModel,
+    installed_model: Option<&PlanarCameraModel>,
+    parallax: Option<&WorkspaceParallaxReport>,
+) -> Result<Option<WorkspaceHeightArtifacts>, String> {
+    if scan.artifact_retention != WorkspaceArtifactRetention::FullSources {
+        return Ok(None);
+    }
+    let (Some(installed_model), Some(parallax)) = (installed_model, parallax) else {
+        return Ok(None);
+    };
+    let store = state.store.clone();
+    let scan_id = scan.id;
+    let plan = plan.clone();
+    let working_model = working_model.clone();
+    let installed_model = installed_model.clone();
+    let parallax = parallax.clone();
+    tokio::task::spawn_blocking(move || {
+        build_workspace_height_map(plan.region, &parallax).and_then(|map| {
+            let composite = render_workspace_height_mosaic(&plan, &map, |fraction| {
+                render_retained_workspace_height_layer(
+                    &store,
+                    scan_id,
+                    &plan,
+                    &working_model,
+                    &installed_model,
+                    fraction,
+                )
+            })?;
+            Ok(Some(WorkspaceHeightArtifacts { map, composite }))
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+fn render_retained_workspace_height_layer(
+    store: &Store,
+    scan_id: Uuid,
+    plan: &WorkspaceScanPlan,
+    working_model: &PlanarCameraModel,
+    installed_model: &PlanarCameraModel,
+    fraction: f64,
+) -> anyhow::Result<GrayFrame> {
+    let model = interpolate_planar_camera_model(working_model, installed_model, fraction)
+        .map_err(anyhow::Error::msg)?;
+    let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
+    let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
+    capture_sequence.sort_by_key(|tile| tile.capture_order);
+    for tile in capture_sequence {
+        let (media_type, encoded) = store
+            .get_workspace_scan_artifact(scan_id, &tile.artifact_name)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace scan source artifact {} is absent",
+                    tile.artifact_name
+                )
+            })?;
+        anyhow::ensure!(
+            media_type == "image/png",
+            "workspace scan source artifact {} is not a PNG",
+            tile.artifact_name
+        );
+        let frame = decode_gray_png(&encoded).map_err(|error| {
+            anyhow::anyhow!(
+                "workspace scan source artifact {} is invalid: {error}",
+                tile.artifact_name
+            )
+        })?;
+        stream.push_frame(tile.index, frame)?;
+    }
+    Ok(stream.finish()?.frame)
 }
 
 async fn capture_persistent_workspace_frame(
@@ -1858,6 +2055,7 @@ fn complete_workspace_mosaics(
     scan: &mut WorkspaceScanReport,
     mosaics: Vec<(WorkspaceSurfaceModel, WorkspaceMosaic)>,
     parallax: Option<WorkspaceParallaxReport>,
+    height_artifacts: Option<WorkspaceHeightArtifacts>,
 ) -> Result<String, String> {
     if mosaics.is_empty() {
         return Err("workspace scan produced no surface mosaics".into());
@@ -1939,19 +2137,91 @@ fn complete_workspace_mosaics(
                 .push("parallax analysis found no supported local height observations".into());
         }
     }
+    scan.height_map = None;
+    if let Some(height_artifacts) = height_artifacts {
+        persist_workspace_height_artifacts(state, scan, height_artifacts)?;
+    }
     scan.updated_at = Utc::now();
     state
         .store
         .put_workspace_scan(scan)
         .map_err(|error| error.to_string())?;
     Ok(format!(
-        "Captured {} tiles into {} surface mosaics with {:.1}% primary coverage; {}/{} primary overlap registrations accepted",
+        "Captured {} tiles into {} surface mosaics with {:.1}% primary coverage; {}/{} primary overlap registrations accepted{}",
         scan.captured_tiles,
         scan.mosaic_layers.len(),
         scan.covered_fraction.unwrap_or(0.0) * 100.0,
         scan.accepted_registrations,
         scan.attempted_registrations,
+        if scan.height_map.is_some() {
+            "; generated a surface-height map and height-corrected mosaic"
+        } else {
+            ""
+        },
     ))
+}
+
+fn persist_workspace_height_artifacts(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+    artifacts: WorkspaceHeightArtifacts,
+) -> Result<(), String> {
+    let map_json = serde_json::to_vec_pretty(&artifacts.map).map_err(|error| error.to_string())?;
+    let preview_png =
+        encode_gray_png(&artifacts.composite.height_preview).map_err(|error| error.to_string())?;
+    let confidence_png = encode_gray_png(&artifacts.composite.confidence_frame)
+        .map_err(|error| error.to_string())?;
+    let corrected_png =
+        encode_gray_png(&artifacts.composite.frame).map_err(|error| error.to_string())?;
+    persist_workspace_artifact(
+        state,
+        scan,
+        WORKSPACE_HEIGHT_MAP_ARTIFACT,
+        "application/json",
+        &map_json,
+    )?;
+    persist_workspace_artifact(
+        state,
+        scan,
+        WORKSPACE_HEIGHT_PREVIEW_ARTIFACT,
+        "image/png",
+        &preview_png,
+    )?;
+    persist_workspace_artifact(
+        state,
+        scan,
+        WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT,
+        "image/png",
+        &confidence_png,
+    )?;
+    persist_workspace_artifact(
+        state,
+        scan,
+        WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT,
+        "image/png",
+        &corrected_png,
+    )?;
+    let total_cells = artifacts.map.rows * artifacts.map.columns;
+    if artifacts.map.unknown_cells > 0 {
+        scan.warnings.push(format!(
+            "height map left {} of {total_cells} cells unknown; the corrected mosaic uses the working-plane fallback in those cells",
+            artifacts.map.unknown_cells,
+        ));
+    }
+    scan.height_map = Some(WorkspaceHeightMapSummary {
+        map_artifact_name: WORKSPACE_HEIGHT_MAP_ARTIFACT.into(),
+        preview_artifact_name: WORKSPACE_HEIGHT_PREVIEW_ARTIFACT.into(),
+        confidence_artifact_name: WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT.into(),
+        corrected_mosaic_artifact_name: WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT.into(),
+        cell_size_mm: artifacts.map.cell_size_mm,
+        rows: artifacts.map.rows,
+        columns: artifacts.map.columns,
+        measured_cells: artifacts.map.measured_cells,
+        inferred_cells: artifacts.map.inferred_cells,
+        unknown_cells: artifacts.map.unknown_cells,
+        candidate_fractions: artifacts.composite.candidate_fractions,
+    });
+    Ok(())
 }
 
 fn workspace_surface_model_name(surface_model: WorkspaceSurfaceModel) -> &'static str {
@@ -12026,6 +12296,7 @@ mod tests {
             mosaic_artifact_name: None,
             mosaic_layers: Vec::new(),
             parallax: None,
+            height_map: None,
             warnings: vec![],
             failure: None,
         }
@@ -12626,6 +12897,11 @@ mod tests {
             assert!((actual - expected).abs() < 1e-12);
         }
         assert_eq!(scaled.kind, model.kind);
+        let highest =
+            interpolate_planar_camera_model(&model, &scaled, MIN_WORKSPACE_SURFACE_FRACTION)
+                .unwrap();
+        let minimum_overlap = minimum_layered_workspace_overlap(&model, &highest).unwrap();
+        assert!((0.35..0.50).contains(&minimum_overlap));
     }
 
     #[tokio::test]
@@ -12679,6 +12955,29 @@ mod tests {
                 moving_tile_index: 1,
             }],
         };
+        let height_map = build_workspace_height_map(scan.region, &parallax).unwrap();
+        let height_preview = GrayFrame {
+            width: height_map.columns,
+            height: height_map.rows,
+            pixels: vec![0; (height_map.rows * height_map.columns) as usize],
+        };
+        let height_artifacts = WorkspaceHeightArtifacts {
+            map: height_map,
+            composite: WorkspaceHeightComposite {
+                frame: GrayFrame {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![128; 4],
+                },
+                confidence_frame: GrayFrame {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0; 4],
+                },
+                height_preview,
+                candidate_fractions: vec![0.0],
+            },
+        };
 
         complete_workspace_mosaics(
             &state,
@@ -12688,6 +12987,7 @@ mod tests {
                 (WorkspaceSurfaceModel::InstalledPlatePlanes, mosaic(192)),
             ],
             Some(parallax),
+            Some(height_artifacts),
         )
         .unwrap();
 
@@ -12711,6 +13011,143 @@ mod tests {
             .get_workspace_scan_artifact(scan.id, &parallax.artifact_name)
             .unwrap()
             .is_some());
+        let height_map = scan.height_map.as_ref().unwrap();
+        assert_eq!(height_map.cell_size_mm, 2.0);
+        for artifact_name in [
+            &height_map.map_artifact_name,
+            &height_map.preview_artifact_name,
+            &height_map.confidence_artifact_name,
+            &height_map.corrected_mosaic_artifact_name,
+        ] {
+            assert!(state
+                .store
+                .get_workspace_scan_artifact(scan.id, artifact_name)
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_workspace_sources_build_height_selected_mosaic() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        scan.artifact_retention = WorkspaceArtifactRetention::FullSources;
+        scan.region = WorkspaceScanRegion {
+            x_min_mm: 0.0,
+            x_max_mm: 2.0,
+            y_min_mm: 0.0,
+            y_max_mm: 2.0,
+        };
+        let model = |mm_per_pixel: f64| PlanarCameraModel {
+            role: CameraRole::TopCamera,
+            center_x_px: 50.0,
+            center_y_px: 50.0,
+            normalization_x_px: 50.0,
+            normalization_y_px: 50.0,
+            correction_x_coefficients_mm: [mm_per_pixel * 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            correction_y_coefficients_mm: [0.0, mm_per_pixel * 50.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            supported_min_x_px: 0.0,
+            supported_max_x_px: 99.0,
+            supported_min_y_px: 0.0,
+            supported_max_y_px: 99.0,
+            kind: velocitypnp_domain::PlanarCameraModelKind::Affine,
+        };
+        let tile = velocitypnp_domain::WorkspaceScanTile {
+            index: 0,
+            row: 0,
+            column: 0,
+            capture_order: 0,
+            nominal_pose: Pose {
+                x_mm: 1.0,
+                y_mm: 1.0,
+                z_mm: 31.5,
+                rotation_deg: 0.0,
+            },
+            placement_correction_x_mm: 0.0,
+            placement_correction_y_mm: 0.0,
+            artifact_name: "tile-000.png".into(),
+        };
+        let plan = WorkspaceScanPlan {
+            region: scan.region,
+            overlap_fraction: 0.3,
+            output_mm_per_pixel: 0.02,
+            frame_width_px: 100,
+            frame_height_px: 100,
+            usable_pixel_bounds: velocitypnp_domain::WorkspacePixelBounds {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 100,
+            },
+            rows: 1,
+            columns: 1,
+            tiles: vec![tile],
+        };
+        let source = GrayFrame {
+            width: 100,
+            height: 100,
+            pixels: vec![127; 10_000],
+        };
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                "tile-000.png",
+                "image/png",
+                &encode_gray_png(&source).unwrap(),
+            )
+            .unwrap();
+        let parallax = WorkspaceParallaxReport {
+            working_plane_fraction: 0.0,
+            installed_plate_fraction: 1.0,
+            attempted_pairs: 1,
+            pairs_with_overlap: 1,
+            raw_matches: 2,
+            descriptor_matches: 2,
+            accepted_observations: 2,
+            observations: vec![
+                velocitypnp_vision::WorkspaceParallaxObservation {
+                    x_mm: 0.8,
+                    y_mm: 1.0,
+                    surface_fraction: 0.98,
+                    residual_mm: 0.01,
+                    parallax_signal_mm: 1.0,
+                    fixed_tile_index: 0,
+                    moving_tile_index: 0,
+                },
+                velocitypnp_vision::WorkspaceParallaxObservation {
+                    x_mm: 1.2,
+                    y_mm: 1.0,
+                    surface_fraction: 1.02,
+                    residual_mm: 0.01,
+                    parallax_signal_mm: 1.0,
+                    fixed_tile_index: 0,
+                    moving_tile_index: 0,
+                },
+            ],
+        };
+
+        let artifacts = build_retained_workspace_height_artifacts(
+            &state,
+            &scan,
+            &plan,
+            &model(0.02),
+            Some(&model(0.025)),
+            Some(&parallax),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(artifacts.map.measured_cells, 1);
+        assert_eq!(artifacts.composite.candidate_fractions, vec![0.0, 1.0]);
+        assert_eq!(
+            (
+                artifacts.composite.frame.width,
+                artifacts.composite.frame.height
+            ),
+            (101, 101)
+        );
     }
 
     #[tokio::test]

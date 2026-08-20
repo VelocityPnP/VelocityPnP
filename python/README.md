@@ -66,3 +66,10 @@ hour. Use `workspace_scan(survey["scan"]["id"])` to poll progress, then use
 only the coarse mosaic and manifest, not every full-resolution camera frame.
 They use 30 percent overlap and the active profile's validated default XY feed.
 Pass `feed_mm_per_min` only to request a slower scan.
+
+An installed-plate scan with `artifact_retention="full_sources"` also measures
+a confidence-aware surface map and makes a height-corrected mosaic. Retrieve
+them with `workspace_scan_height_map`, `workspace_scan_height_map_preview`,
+`workspace_scan_height_confidence`, and
+`workspace_scan_height_corrected_mosaic`. Unknown map cells remain explicit;
+the corrected image uses the working-plane view as their display fallback.

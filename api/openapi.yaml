@@ -198,7 +198,7 @@ paths:
         - { name: name, in: path, required: true, schema: { type: string } }
       responses:
         "200":
-          description: PNG image or JSON manifest
+          description: PNG image or JSON scan artifact
           content:
             image/png: { schema: { type: string, format: binary } }
             application/json: { schema: { type: object } }
@@ -1248,6 +1248,10 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceParallaxSummary"
             - type: "null"
+        height_map:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceHeightMapSummary"
+            - type: "null"
         warnings: { type: array, items: { type: string } }
         failure: { type: [string, "null"] }
     WorkspaceMosaicLayerReport:
@@ -1292,6 +1296,39 @@ components:
         pairs_with_overlap: { type: integer, minimum: 0 }
         descriptor_matches: { type: integer, minimum: 0 }
         accepted_observations: { type: integer, minimum: 0 }
+    WorkspaceHeightMapSummary:
+      type: object
+      required:
+        - map_artifact_name
+        - preview_artifact_name
+        - confidence_artifact_name
+        - corrected_mosaic_artifact_name
+        - cell_size_mm
+        - rows
+        - columns
+        - measured_cells
+        - inferred_cells
+        - unknown_cells
+        - candidate_fractions
+      description: >-
+        Confidence-aware surface map made from sparse parallax observations.
+        Surface fractions use the same relative scale as the parallax report.
+        Unknown cells stay unknown and use the working-plane image only as a
+        display fallback in the corrected mosaic.
+      properties:
+        map_artifact_name: { type: string }
+        preview_artifact_name: { type: string }
+        confidence_artifact_name: { type: string }
+        corrected_mosaic_artifact_name: { type: string }
+        cell_size_mm: { type: number, exclusiveMinimum: 0 }
+        rows: { type: integer, minimum: 1 }
+        columns: { type: integer, minimum: 1 }
+        measured_cells: { type: integer, minimum: 0 }
+        inferred_cells: { type: integer, minimum: 0 }
+        unknown_cells: { type: integer, minimum: 0 }
+        candidate_fractions:
+          type: array
+          items: { type: number }
     WorkspaceRasterTransform:
       type: object
       required:

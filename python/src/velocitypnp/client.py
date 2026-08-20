@@ -186,6 +186,43 @@ class Client:
             "surface-height-observations.json",
         )
 
+    def workspace_scan_height_map(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/surface-height-map.json",
+        )
+
+    def workspace_scan_height_map_preview(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/surface-height-map.png",
+            "image/png",
+        )
+
+    def workspace_scan_height_confidence(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            "surface-height-confidence.png",
+            "image/png",
+        )
+
+    def workspace_scan_height_corrected_mosaic(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            "mosaic-height-corrected.png",
+            "image/png",
+        )
+
     @staticmethod
     def _workspace_scan_specification(
         calibration_id: str | uuid.UUID,

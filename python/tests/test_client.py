@@ -187,6 +187,36 @@ class ClientTests(unittest.TestCase):
             "surface-height-observations.json",
         )
 
+        height_map = {"cell_size_mm": 2.0, "cells": []}
+        with patch.object(client, "_request", return_value=height_map) as send:
+            self.assertEqual(client.workspace_scan_height_map("scan"), height_map)
+        send.assert_called_once_with(
+            "GET", "/workspace-scans/scan/artifacts/surface-height-map.json",
+        )
+
+        image_methods = [
+            (
+                client.workspace_scan_height_map_preview,
+                "surface-height-map.png",
+            ),
+            (
+                client.workspace_scan_height_confidence,
+                "surface-height-confidence.png",
+            ),
+            (
+                client.workspace_scan_height_corrected_mosaic,
+                "mosaic-height-corrected.png",
+            ),
+        ]
+        for method, artifact_name in image_methods:
+            with patch.object(client, "_request_bytes", return_value=b"png") as send:
+                self.assertEqual(method("scan"), b"png")
+            send.assert_called_once_with(
+                "GET",
+                f"/workspace-scans/scan/artifacts/{artifact_name}",
+                "image/png",
+            )
+
     def test_home_requires_explicit_physical_confirmation(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:

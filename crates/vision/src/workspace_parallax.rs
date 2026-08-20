@@ -11,8 +11,8 @@ use crate::WorkspaceScanPlan;
 const ORB_NEIGHBOR_DISTANCE_RATIO: f32 = 0.8;
 const MIN_PARALLAX_SIGNAL_MM: f64 = 0.15;
 const MAX_PARALLAX_RESIDUAL_MM: f64 = 0.15;
-const MIN_SURFACE_FRACTION: f64 = -1.0;
-const MAX_SURFACE_FRACTION: f64 = 2.0;
+pub const MIN_WORKSPACE_SURFACE_FRACTION: f64 = -1.0;
+pub const MAX_WORKSPACE_SURFACE_FRACTION: f64 = 2.0;
 
 /// A sparse height observation. Zero is the calibrated top-camera working
 /// plane and one is the installed bare-plate plane. Negative values are above
@@ -402,7 +402,9 @@ fn solve_surface_fraction(
         return None;
     }
     let surface_fraction = -(offset[0] * parallax[0] + offset[1] * parallax[1]) / parallax_squared;
-    if !(MIN_SURFACE_FRACTION..=MAX_SURFACE_FRACTION).contains(&surface_fraction) {
+    if !(MIN_WORKSPACE_SURFACE_FRACTION..=MAX_WORKSPACE_SURFACE_FRACTION)
+        .contains(&surface_fraction)
+    {
         return None;
     }
     let residual = [

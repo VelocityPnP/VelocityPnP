@@ -139,6 +139,21 @@ pub struct WorkspaceParallaxSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceHeightMapSummary {
+    pub map_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub confidence_artifact_name: String,
+    pub corrected_mosaic_artifact_name: String,
+    pub cell_size_mm: f64,
+    pub rows: u32,
+    pub columns: u32,
+    pub measured_cells: u32,
+    pub inferred_cells: u32,
+    pub unknown_cells: u32,
+    pub candidate_fractions: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceScanTile {
     pub index: u32,
     pub row: u32,
@@ -241,6 +256,8 @@ pub struct WorkspaceScanReport {
     pub mosaic_layers: Vec<WorkspaceMosaicLayerReport>,
     #[serde(default)]
     pub parallax: Option<WorkspaceParallaxSummary>,
+    #[serde(default)]
+    pub height_map: Option<WorkspaceHeightMapSummary>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
 }
