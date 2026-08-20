@@ -207,6 +207,14 @@ class ClientTests(unittest.TestCase):
                 client.workspace_scan_height_corrected_mosaic,
                 "mosaic-height-corrected.png",
             ),
+            (
+                client.workspace_scan_height_overlay,
+                "surface-height-overlay.png",
+            ),
+            (
+                client.workspace_scan_height_class_preview,
+                "mosaic-height-classes.png",
+            ),
         ]
         for method, artifact_name in image_methods:
             with patch.object(client, "_request_bytes", return_value=b"png") as send:

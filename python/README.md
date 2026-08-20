@@ -71,5 +71,9 @@ An installed-plate scan with `artifact_retention="full_sources"` also measures
 a confidence-aware surface map and makes a height-corrected mosaic. Retrieve
 them with `workspace_scan_height_map`, `workspace_scan_height_map_preview`,
 `workspace_scan_height_confidence`, and
-`workspace_scan_height_corrected_mosaic`. Unknown map cells remain explicit;
-the corrected image uses the working-plane view as their display fallback.
+`workspace_scan_height_corrected_mosaic`. Use `workspace_scan_height_overlay`
+for the transparent non-plate height classes or
+`workspace_scan_height_class_preview` for those classes composited onto the
+mosaic. Bare plate and unknown pixels have no overlay. Unknown map cells remain
+explicit; the corrected image uses the working-plane view as their display
+fallback.

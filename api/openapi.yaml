@@ -1320,6 +1320,17 @@ components:
         preview_artifact_name: { type: string }
         confidence_artifact_name: { type: string }
         corrected_mosaic_artifact_name: { type: string }
+        class_overlay_artifact_name:
+          type: string
+          description: >-
+            Transparent PNG height-class overlay. Bare installed-plate and
+            unknown pixels have zero alpha. Measured non-plate pixels use
+            higher alpha than locally inferred pixels.
+        class_preview_artifact_name:
+          type: string
+          description: >-
+            Corrected mosaic with the transparent height-class overlay
+            composited onto it for inspection.
         cell_size_mm: { type: number, exclusiveMinimum: 0 }
         rows: { type: integer, minimum: 1 }
         columns: { type: integer, minimum: 1 }

@@ -223,6 +223,26 @@ class Client:
             "image/png",
         )
 
+    def workspace_scan_height_overlay(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            "surface-height-overlay.png",
+            "image/png",
+        )
+
+    def workspace_scan_height_class_preview(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            "mosaic-height-classes.png",
+            "image/png",
+        )
+
     @staticmethod
     def _workspace_scan_specification(
         calibration_id: str | uuid.UUID,

@@ -5,9 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use velocitypnp_domain::{InstalledPlateGeometryReport, PlanarCameraModel, WorkspaceScanReport};
 use velocitypnp_vision::{
-    build_workspace_height_map, decode_gray_png, encode_gray_png, interpolate_planar_camera_model,
-    render_workspace_height_mosaic, rescale_planar_camera_model, WorkspaceMosaicStream,
-    WorkspaceParallaxStream, WorkspaceScanPlan,
+    build_workspace_height_map, decode_gray_png, encode_gray_png, encode_rgb_png, encode_rgba_png,
+    interpolate_planar_camera_model, render_workspace_height_mosaic, rescale_planar_camera_model,
+    WorkspaceMosaicStream, WorkspaceParallaxStream, WorkspaceScanPlan,
 };
 
 fn main() -> Result<()> {
@@ -90,6 +90,14 @@ fn main() -> Result<()> {
         &output_directory.join("mosaic-height-corrected.png"),
         &composite.frame,
     )?;
+    write_rgb_png(
+        &output_directory.join("mosaic-height-classes.png"),
+        &composite.class_preview,
+    )?;
+    write_rgba_png(
+        &output_directory.join("surface-height-overlay.png"),
+        &composite.class_overlay,
+    )?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -158,6 +166,16 @@ fn installed_camera_model(
 
 fn write_png(path: &Path, frame: &velocitypnp_vision::GrayFrame) -> Result<()> {
     fs::write(path, encode_gray_png(frame)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_rgb_png(path: &Path, frame: &velocitypnp_vision::RgbFrame) -> Result<()> {
+    fs::write(path, encode_rgb_png(frame)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_rgba_png(path: &Path, frame: &velocitypnp_vision::RgbaFrame) -> Result<()> {
+    fs::write(path, encode_rgba_png(frame)?)
         .with_context(|| format!("failed to write {}", path.display()))
 }
 

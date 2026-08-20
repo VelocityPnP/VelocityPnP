@@ -1,6 +1,6 @@
 use crate::{
-    GrayFrame, WorkspaceParallaxReport, WorkspaceScanPlan, MAX_WORKSPACE_SURFACE_FRACTION,
-    MIN_WORKSPACE_SURFACE_FRACTION,
+    GrayFrame, RgbFrame, RgbaFrame, WorkspaceParallaxReport, WorkspaceScanPlan,
+    MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
 };
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,8 @@ pub const WORKSPACE_HEIGHT_CANDIDATE_STEP: f64 = 0.125;
 const HEIGHT_CLUSTER_DIAMETER: f64 = 0.12;
 const MIN_CELL_OBSERVATIONS: usize = 2;
 const MAX_INFERENCE_DISTANCE_MM: f64 = 4.0;
+const MEASURED_CLASS_OPACITY: f64 = 0.50;
+const INFERRED_CLASS_OPACITY: f64 = 0.30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +56,8 @@ pub struct WorkspaceHeightMap {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceHeightComposite {
     pub frame: GrayFrame,
+    pub class_overlay: RgbaFrame,
+    pub class_preview: RgbFrame,
     pub confidence_frame: GrayFrame,
     pub height_preview: GrayFrame,
     pub candidate_fractions: Vec<f64>,
@@ -195,12 +199,16 @@ where
             }
         }
     }
+    let frame = GrayFrame {
+        width,
+        height,
+        pixels,
+    };
+    let (class_overlay, class_preview) = height_class_artifacts(plan, height_map, &frame);
     Ok(WorkspaceHeightComposite {
-        frame: GrayFrame {
-            width,
-            height,
-            pixels,
-        },
+        frame,
+        class_overlay,
+        class_preview,
         confidence_frame: GrayFrame {
             width,
             height,
@@ -209,6 +217,97 @@ where
         height_preview: height_map_preview(height_map),
         candidate_fractions: height_map.candidate_fractions.clone(),
     })
+}
+
+fn height_class_artifacts(
+    plan: &WorkspaceScanPlan,
+    height_map: &WorkspaceHeightMap,
+    mosaic: &GrayFrame,
+) -> (RgbaFrame, RgbFrame) {
+    let mut overlay_pixels = Vec::with_capacity(mosaic.pixels.len() * 4);
+    let mut preview_pixels = Vec::with_capacity(mosaic.pixels.len() * 3);
+    for y in 0..mosaic.height {
+        let world_y = plan.region.y_max_mm - f64::from(y) * plan.output_mm_per_pixel;
+        for x in 0..mosaic.width {
+            let world_x = plan.region.x_min_mm + f64::from(x) * plan.output_mm_per_pixel;
+            let cell = height_cell_index(
+                height_map.region,
+                height_map.rows,
+                height_map.columns,
+                world_x,
+                world_y,
+            )
+            .and_then(|index| height_map.cells.get(index));
+            let luma = mosaic.pixels[(y * mosaic.width + x) as usize];
+            let Some(cell) = cell else {
+                overlay_pixels.extend_from_slice(&[0, 0, 0, 0]);
+                preview_pixels.extend_from_slice(&[luma; 3]);
+                continue;
+            };
+            let opacity = match cell.source {
+                WorkspaceHeightCellSource::Measured => MEASURED_CLASS_OPACITY,
+                WorkspaceHeightCellSource::Inferred => INFERRED_CLASS_OPACITY,
+                WorkspaceHeightCellSource::Unknown => 0.0,
+            };
+            let Some(fraction) = cell.surface_fraction else {
+                overlay_pixels.extend_from_slice(&[0, 0, 0, 0]);
+                preview_pixels.extend_from_slice(&[luma; 3]);
+                continue;
+            };
+            let fraction = quantize_surface_fraction(fraction);
+            if opacity == 0.0 || (fraction - 1.0).abs() < 1e-9 {
+                overlay_pixels.extend_from_slice(&[0, 0, 0, 0]);
+                preview_pixels.extend_from_slice(&[luma; 3]);
+                continue;
+            }
+            let color = height_class_color(fraction);
+            overlay_pixels.extend_from_slice(&[
+                color[0],
+                color[1],
+                color[2],
+                (opacity * 255.0).round() as u8,
+            ]);
+            for channel in color {
+                preview_pixels.push(blend_channel(luma, channel, opacity));
+            }
+        }
+    }
+    (
+        RgbaFrame {
+            width: mosaic.width,
+            height: mosaic.height,
+            pixels: overlay_pixels,
+        },
+        RgbFrame {
+            width: mosaic.width,
+            height: mosaic.height,
+            pixels: preview_pixels,
+        },
+    )
+}
+
+fn height_class_color(fraction: f64) -> [u8; 3] {
+    if fraction <= 0.0 {
+        interpolate_color([210, 70, 255], [0, 190, 255], fraction + 1.0)
+    } else if fraction <= 1.0 {
+        interpolate_color([0, 190, 255], [255, 175, 0], fraction)
+    } else {
+        interpolate_color([255, 175, 0], [255, 55, 55], fraction - 1.0)
+    }
+}
+
+fn interpolate_color(first: [u8; 3], second: [u8; 3], fraction: f64) -> [u8; 3] {
+    let fraction = fraction.clamp(0.0, 1.0);
+    std::array::from_fn(|index| {
+        (f64::from(first[index]) + fraction * (f64::from(second[index]) - f64::from(first[index])))
+            .round() as u8
+    })
+}
+
+fn blend_channel(luma: u8, color: u8, opacity: f64) -> u8 {
+    (f64::from(luma) * (1.0 - opacity) + f64::from(color) * opacity)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 fn measured_cell(
@@ -584,6 +683,13 @@ mod tests {
             .pixels
             .iter()
             .all(|value| *value > 0));
+        assert_eq!(&composite.class_overlay.pixels[0..4], &[0, 190, 255, 128]);
+        assert_eq!(&composite.class_overlay.pixels[2 * 4..3 * 4], &[0, 0, 0, 0]);
+        assert_eq!(&composite.class_preview.pixels[0..3], &[16, 111, 144]);
+        assert_eq!(
+            &composite.class_preview.pixels[2 * 3..3 * 3],
+            &[224, 224, 224]
+        );
     }
 
     #[test]

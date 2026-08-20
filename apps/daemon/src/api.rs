@@ -51,17 +51,18 @@ use velocitypnp_vision::{
     calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer, camera_sample_metrics,
     capture_gray_frame, capture_gray_frames, decode_gray_png, detect_bright_fiducial_near,
     detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
-    encode_gray_png, fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
-    fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
-    measure_workspace_parallax, plan_bottom_camera_correction, plan_pixel_correction,
-    plan_visual_homing, plan_workspace_scan, query_camera_controls, render_workspace_height_mosaic,
-    rescale_planar_camera_model, resize_gray_frame, summarize_camera_reproducibility,
-    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
-    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
-    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig,
-    VisualHomingPlan, WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic,
-    WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceScanPlan,
+    encode_gray_png, encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry,
+    fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
+    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
+    query_camera_controls, render_workspace_height_mosaic, rescale_planar_camera_model,
+    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
+    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
+    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
+    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
+    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
+    WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream,
+    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceScanPlan,
     MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
@@ -101,6 +102,8 @@ const WORKSPACE_HEIGHT_MAP_ARTIFACT: &str = "surface-height-map.json";
 const WORKSPACE_HEIGHT_PREVIEW_ARTIFACT: &str = "surface-height-map.png";
 const WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT: &str = "surface-height-confidence.png";
 const WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT: &str = "mosaic-height-corrected.png";
+const WORKSPACE_HEIGHT_CLASS_OVERLAY_ARTIFACT: &str = "surface-height-overlay.png";
+const WORKSPACE_HEIGHT_CLASS_PREVIEW_ARTIFACT: &str = "mosaic-height-classes.png";
 
 struct WorkspaceHeightArtifacts {
     map: WorkspaceHeightMap,
@@ -1375,7 +1378,11 @@ fn workspace_scan_estimate(
         / velocitypnp_vision::WORKSPACE_HEIGHT_CELL_SIZE_MM)
         .ceil() as u64;
     let height_product_bytes = if height_products_enabled {
-        mosaic_pixels * 11 / 10 * 2 + height_rows * height_columns * 512 + 4_096
+        mosaic_pixels * 11 / 10 * 2
+            + mosaic_pixels * 33 / 10
+            + mosaic_pixels * 44 / 10
+            + height_rows * height_columns * 512
+            + 4_096
     } else {
         0
     };
@@ -2173,6 +2180,10 @@ fn persist_workspace_height_artifacts(
         .map_err(|error| error.to_string())?;
     let corrected_png =
         encode_gray_png(&artifacts.composite.frame).map_err(|error| error.to_string())?;
+    let class_overlay_png =
+        encode_rgba_png(&artifacts.composite.class_overlay).map_err(|error| error.to_string())?;
+    let class_preview_png =
+        encode_rgb_png(&artifacts.composite.class_preview).map_err(|error| error.to_string())?;
     persist_workspace_artifact(
         state,
         scan,
@@ -2201,6 +2212,20 @@ fn persist_workspace_height_artifacts(
         "image/png",
         &corrected_png,
     )?;
+    persist_workspace_artifact(
+        state,
+        scan,
+        WORKSPACE_HEIGHT_CLASS_OVERLAY_ARTIFACT,
+        "image/png",
+        &class_overlay_png,
+    )?;
+    persist_workspace_artifact(
+        state,
+        scan,
+        WORKSPACE_HEIGHT_CLASS_PREVIEW_ARTIFACT,
+        "image/png",
+        &class_preview_png,
+    )?;
     let total_cells = artifacts.map.rows * artifacts.map.columns;
     if artifacts.map.unknown_cells > 0 {
         scan.warnings.push(format!(
@@ -2213,6 +2238,8 @@ fn persist_workspace_height_artifacts(
         preview_artifact_name: WORKSPACE_HEIGHT_PREVIEW_ARTIFACT.into(),
         confidence_artifact_name: WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT.into(),
         corrected_mosaic_artifact_name: WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT.into(),
+        class_overlay_artifact_name: WORKSPACE_HEIGHT_CLASS_OVERLAY_ARTIFACT.into(),
+        class_preview_artifact_name: WORKSPACE_HEIGHT_CLASS_PREVIEW_ARTIFACT.into(),
         cell_size_mm: artifacts.map.cell_size_mm,
         rows: artifacts.map.rows,
         columns: artifacts.map.columns,
@@ -12969,6 +12996,16 @@ mod tests {
                     height: 2,
                     pixels: vec![128; 4],
                 },
+                class_overlay: velocitypnp_vision::RgbaFrame {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![128; 16],
+                },
+                class_preview: velocitypnp_vision::RgbFrame {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![128; 12],
+                },
                 confidence_frame: GrayFrame {
                     width: 2,
                     height: 2,
@@ -13018,6 +13055,8 @@ mod tests {
             &height_map.preview_artifact_name,
             &height_map.confidence_artifact_name,
             &height_map.corrected_mosaic_artifact_name,
+            &height_map.class_overlay_artifact_name,
+            &height_map.class_preview_artifact_name,
         ] {
             assert!(state
                 .store

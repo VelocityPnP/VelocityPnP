@@ -221,11 +221,20 @@ For `full_sources` retention, the service groups that evidence into 2 mm cells.
 It writes the quantitative map to `surface-height-map.json`, a compact preview
 to `surface-height-map.png`, a full-size confidence raster to
 `surface-height-confidence.png`, and the selected-plane image to
-`mosaic-height-corrected.png`. The reconstruction tests candidate planes at
-one-eighth of the calibrated working-plane-to-plate scale. It locally extends
-only consistent measurements. Unknown cells stay unknown in the data and use
-the working-plane image only as a display fallback. The scan report's
-`height_map` field records the artifacts, map coverage, and candidate planes.
+`mosaic-height-corrected.png`. It also writes a transparent height-class layer
+to `surface-height-overlay.png` and a ready-to-view composite to
+`mosaic-height-classes.png`. Bare build and staging plate pixels have no color
+overlay. Unknown pixels are also transparent. Measured non-plate cells use a
+stronger tint than locally inferred cells.
+
+The reconstruction tests candidate planes at one-eighth of the calibrated
+working-plane-to-plate scale. It locally extends only consistent measurements.
+Unknown cells stay unknown in the data and use the working-plane image only as
+a display fallback. The scan report's `height_map` field records the artifacts,
+map coverage, and candidate planes. The height colors are geometric evidence,
+not semantic object labels. Feeder, PCB, datum PCB, nozzle fixture, and bottom
+camera ring labels will come from later object detectors and can use the same
+transparent overlay format.
 
 The first implementation needs full-resolution source retention because the
 height map is known only after adjacent frames are compared. `thumbnails` and

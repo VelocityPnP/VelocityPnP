@@ -60,6 +60,20 @@ pub struct GrayFrame {
     pub pixels: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RgbFrame {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RgbaFrame {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
 pub fn encode_gray_png(frame: &GrayFrame) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
         frame.pixels.len() == frame.width as usize * frame.height as usize,
@@ -69,6 +83,38 @@ pub fn encode_gray_png(frame: &GrayFrame) -> anyhow::Result<Vec<u8>> {
     {
         let mut encoder = png::Encoder::new(&mut encoded, frame.width, frame.height);
         encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&frame.pixels)?;
+    }
+    Ok(encoded)
+}
+
+pub fn encode_rgb_png(frame: &RgbFrame) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        frame.pixels.len() == frame.width as usize * frame.height as usize * 3,
+        "RGB frame buffer does not match its dimensions"
+    );
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, frame.width, frame.height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&frame.pixels)?;
+    }
+    Ok(encoded)
+}
+
+pub fn encode_rgba_png(frame: &RgbaFrame) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        frame.pixels.len() == frame.width as usize * frame.height as usize * 4,
+        "RGBA frame buffer does not match its dimensions"
+    );
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, frame.width, frame.height);
+        encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
         writer.write_image_data(&frame.pixels)?;

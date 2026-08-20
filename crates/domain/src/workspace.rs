@@ -144,6 +144,10 @@ pub struct WorkspaceHeightMapSummary {
     pub preview_artifact_name: String,
     pub confidence_artifact_name: String,
     pub corrected_mosaic_artifact_name: String,
+    #[serde(default)]
+    pub class_overlay_artifact_name: String,
+    #[serde(default)]
+    pub class_preview_artifact_name: String,
     pub cell_size_mm: f64,
     pub rows: u32,
     pub columns: u32,
