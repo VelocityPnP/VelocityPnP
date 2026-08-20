@@ -1233,8 +1233,29 @@ This replay used retained images only and caused no machine motion.
 
 Future installed-plate layered scans now use at least 60 percent overlap. Their
 height analysis keeps a useful baseline by also comparing non-adjacent tiles
-that retain at least 20 percent overlap. A physical 60 percent repeat is still
-required to validate the full path with a new capture.
+that retain at least 20 percent overlap. At this stage, a physical 60 percent
+repeat was still required to validate the full path with a new capture.
+
+Physical 60 percent scan `0d08896d-4d34-4f1b-8e98-a133bba4c061` then covered
+X=193–249 mm and Y=117–173 mm around the bottom camera. It captured all 242
+tiles in a 22-by-11 serpentine raster. Both calibrated endpoint mosaics had 100
+percent coverage and no nominal fallback. The full-source scan retained
+74,535,751 bytes and completed in 635.6 seconds in a debug daemon. The machine
+returned homed, ready, and fault-free to X=220.131, Y=190.271, Z=31.5.
+
+All 869 parallax pairs had overlap and produced 1,373 accepted observations.
+The 28-by-28 height map had 101 measured cells, 264 inferred cells, and 419
+unknown cells. Twelve source frames agreed on the bottom-camera aperture. The
+self-fitted projection measured 0.02297 mm/pixel with a 0.070 mm P95 residual.
+It located the center at X=220.241 mm and Y=144.827 mm and measured a 10.060 mm
+radius. This independently repeated the earlier six-view retained-data fit.
+
+The physical scan's first corrected image had a narrow plate-plane strip left
+of the bright camera ring. Offline replay increased the aperture artifact guard
+from 1.5 to 3.0 mm. Visual inspection showed that this removed the strip while
+keeping the coherent lens, circular aperture boundary, surrounding plate, and
+outer light-ring geometry. The final replay PNG SHA-256 is
+`5f639371664ec790d570cb676b8a46946e8ae16c3ffc180aecd5fa93a1986ec8`.
 
 ## Procedure sources
 
