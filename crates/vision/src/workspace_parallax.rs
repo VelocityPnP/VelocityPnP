@@ -4,6 +4,7 @@ use opencv::core::{self, Mat, MatTraitConst, Point2f, Vector, NORM_HAMMING};
 use opencv::features2d;
 use opencv::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use velocitypnp_domain::{CameraRole, PlanarCameraModel, WorkspaceScanRegion, WorkspaceScanTile};
 
 use crate::WorkspaceScanPlan;
@@ -11,6 +12,8 @@ use crate::WorkspaceScanPlan;
 const ORB_NEIGHBOR_DISTANCE_RATIO: f32 = 0.8;
 const MIN_PARALLAX_SIGNAL_MM: f64 = 0.15;
 const MAX_PARALLAX_RESIDUAL_MM: f64 = 0.15;
+const MIN_PARALLAX_PAIR_OVERLAP: f64 = 0.20;
+const MAX_PARALLAX_PAIR_SPAN: u32 = 3;
 pub const MIN_WORKSPACE_SURFACE_FRACTION: f64 = -1.0;
 pub const MAX_WORKSPACE_SURFACE_FRACTION: f64 = 2.0;
 
@@ -46,7 +49,8 @@ pub struct WorkspaceParallaxStream {
     installed_plate_model: PlanarCameraModel,
     next_row: u32,
     pending_row: Vec<Option<GrayFrame>>,
-    previous_row: Option<Vec<GrayFrame>>,
+    previous_rows: VecDeque<Vec<GrayFrame>>,
+    pair_span: u32,
     report: WorkspaceParallaxReport,
 }
 
@@ -69,13 +73,15 @@ impl WorkspaceParallaxStream {
                 && compatible_models(&working_model, &installed_plate_model),
             "workspace parallax models do not share one calibrated image basis"
         );
+        let pair_span = parallax_pair_span(plan.overlap_fraction);
         Ok(Self {
             pending_row: vec![None; plan.columns as usize],
             plan,
             working_model,
             installed_plate_model,
             next_row: 0,
-            previous_row: None,
+            previous_rows: VecDeque::new(),
+            pair_span,
             report: empty_report(),
         })
     }
@@ -111,7 +117,10 @@ impl WorkspaceParallaxStream {
         .collect::<Option<Vec<_>>>()
         .context("workspace row completion lost a captured frame")?;
         self.process_row(&completed_row)?;
-        self.previous_row = Some(completed_row);
+        self.previous_rows.push_back(completed_row);
+        while self.previous_rows.len() > self.pair_span as usize {
+            self.previous_rows.pop_front();
+        }
         self.next_row += 1;
         Ok(true)
     }
@@ -129,12 +138,12 @@ impl WorkspaceParallaxStream {
         let row = self.next_row;
         for column in 0..self.plan.columns {
             let index = (row * self.plan.columns + column) as usize;
-            if column > 0 {
+            for span in 1..=self.pair_span.min(column) {
                 accumulate_pair(
                     &mut self.report,
                     measure_pair_parallax(
-                        &self.plan.tiles[index - 1],
-                        &frames[column as usize - 1],
+                        &self.plan.tiles[index - span as usize],
+                        &frames[(column - span) as usize],
                         &self.plan.tiles[index],
                         &frames[column as usize],
                         &self.working_model,
@@ -142,12 +151,10 @@ impl WorkspaceParallaxStream {
                     )?,
                 );
             }
-            if row > 0 {
-                let fixed_index = index - self.plan.columns as usize;
-                let previous = self
-                    .previous_row
-                    .as_ref()
-                    .context("workspace parallax stream lost the preceding row")?;
+            for span in 1..=self.pair_span.min(row) {
+                let fixed_index = index - (span * self.plan.columns) as usize;
+                let history_index = self.previous_rows.len() - span as usize;
+                let previous = &self.previous_rows[history_index];
                 accumulate_pair(
                     &mut self.report,
                     measure_pair_parallax(
@@ -195,15 +202,16 @@ pub fn measure_workspace_parallax(
         );
     }
     let mut report = empty_report();
+    let pair_span = parallax_pair_span(plan.overlap_fraction);
     for row in 0..plan.rows {
         for column in 0..plan.columns {
             let moving_index = (row * plan.columns + column) as usize;
-            if column > 0 {
+            for span in 1..=pair_span.min(column) {
                 accumulate_pair(
                     &mut report,
                     measure_pair_parallax(
-                        &plan.tiles[moving_index - 1],
-                        &frames[moving_index - 1],
+                        &plan.tiles[moving_index - span as usize],
+                        &frames[moving_index - span as usize],
                         &plan.tiles[moving_index],
                         &frames[moving_index],
                         working_model,
@@ -211,8 +219,8 @@ pub fn measure_workspace_parallax(
                     )?,
                 );
             }
-            if row > 0 {
-                let fixed_index = moving_index - plan.columns as usize;
+            for span in 1..=pair_span.min(row) {
+                let fixed_index = moving_index - (span * plan.columns) as usize;
                 accumulate_pair(
                     &mut report,
                     measure_pair_parallax(
@@ -229,6 +237,12 @@ pub fn measure_workspace_parallax(
     }
     retain_region_observations(&mut report, plan.region);
     Ok(report)
+}
+
+fn parallax_pair_span(overlap_fraction: f64) -> u32 {
+    let step_fraction = 1.0 - overlap_fraction;
+    (((1.0 - MIN_PARALLAX_PAIR_OVERLAP) / step_fraction + 1e-9).floor() as u32)
+        .clamp(1, MAX_PARALLAX_PAIR_SPAN)
 }
 
 fn retain_region_observations(report: &mut WorkspaceParallaxReport, region: WorkspaceScanRegion) {
@@ -570,5 +584,12 @@ mod tests {
         assert_eq!(report.attempted_pairs, 4);
         assert_eq!(report.pairs_with_overlap, 4);
         assert_eq!(report.accepted_observations, 0);
+    }
+
+    #[test]
+    fn high_overlap_uses_wider_height_pairs() {
+        assert_eq!(parallax_pair_span(0.35), 1);
+        assert_eq!(parallax_pair_span(0.60), 2);
+        assert_eq!(parallax_pair_span(0.75), 3);
     }
 }

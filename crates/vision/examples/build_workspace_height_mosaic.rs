@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use velocitypnp_domain::{InstalledPlateGeometryReport, PlanarCameraModel, WorkspaceScanReport};
 use velocitypnp_vision::{
     build_workspace_height_map, decode_gray_png, encode_gray_png, encode_rgb_png, encode_rgba_png,
-    interpolate_planar_camera_model, render_workspace_height_mosaic, rescale_planar_camera_model,
-    WorkspaceMosaicStream, WorkspaceParallaxStream, WorkspaceScanPlan,
+    interpolate_planar_camera_model, render_workspace_height_mosaic_with_consistency,
+    rescale_planar_camera_model, WorkspaceMosaicStream, WorkspaceParallaxStream, WorkspaceScanPlan,
 };
 
 fn main() -> Result<()> {
@@ -62,18 +62,19 @@ fn main() -> Result<()> {
     }
     let parallax = parallax_stream.finish()?;
     let height_map = build_workspace_height_map(plan.region, &parallax)?;
-    let composite = render_workspace_height_mosaic(&plan, &height_map, |fraction| {
-        let model = interpolate_planar_camera_model(&working_model, &installed_model, fraction)
-            .map_err(anyhow::Error::msg)?;
-        let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
-        for tile in capture_sequence(&plan) {
-            stream.push_frame(
-                tile.index,
-                read_source_frame(&scan_directory, &tile.artifact_name)?,
-            )?;
-        }
-        Ok(stream.finish()?.frame)
-    })?;
+    let composite =
+        render_workspace_height_mosaic_with_consistency(&plan, &height_map, |fraction| {
+            let model = interpolate_planar_camera_model(&working_model, &installed_model, fraction)
+                .map_err(anyhow::Error::msg)?;
+            let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
+            for tile in capture_sequence(&plan) {
+                stream.push_frame(
+                    tile.index,
+                    read_source_frame(&scan_directory, &tile.artifact_name)?,
+                )?;
+            }
+            stream.finish()
+        })?;
     write_json(
         &output_directory.join("surface-height-map.json"),
         &height_map,

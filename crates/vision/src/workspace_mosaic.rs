@@ -47,6 +47,9 @@ pub struct WorkspaceScanPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceMosaic {
     pub frame: GrayFrame,
+    /// Per-pixel source disagreement after projection. Zero means that the
+    /// contributing samples agree or that only one sample covers the pixel.
+    pub disagreement: GrayFrame,
     pub covered_fraction: f64,
     pub nominal_fallback_fraction: f64,
     pub tiles: Vec<WorkspaceScanTile>,
@@ -65,8 +68,10 @@ pub struct WorkspaceMosaicStream {
     height: u32,
     sample_step_px: usize,
     corrected_luma: Vec<f32>,
+    corrected_squared_luma: Vec<f32>,
     corrected_weights: Vec<f32>,
     nominal_luma: Vec<f32>,
+    nominal_squared_luma: Vec<f32>,
     nominal_weights: Vec<f32>,
     registration_enabled: bool,
 }
@@ -129,8 +134,10 @@ impl WorkspaceMosaicStream {
             height,
             sample_step_px,
             corrected_luma: vec![0.0; pixel_count],
+            corrected_squared_luma: vec![0.0; pixel_count],
             corrected_weights: vec![0.0; pixel_count],
             nominal_luma: vec![0.0; pixel_count],
+            nominal_squared_luma: vec![0.0; pixel_count],
             nominal_weights: vec![0.0; pixel_count],
             registration_enabled,
         })
@@ -181,31 +188,44 @@ impl WorkspaceMosaicStream {
         let pixel_count = self.width as usize * self.height as usize;
         let mut corrected_covered = 0_usize;
         let mut covered = 0_usize;
-        let pixels = self
-            .corrected_luma
-            .into_iter()
-            .zip(self.corrected_weights)
-            .zip(self.nominal_luma.into_iter().zip(self.nominal_weights))
-            .map(
-                |((corrected_sum, corrected_weight), (nominal_sum, nominal_weight))| {
-                    if corrected_weight > 0.0 {
-                        corrected_covered += 1;
-                        covered += 1;
-                        (corrected_sum / corrected_weight).round().clamp(0.0, 255.0) as u8
-                    } else if nominal_weight > 0.0 {
-                        covered += 1;
-                        (nominal_sum / nominal_weight).round().clamp(0.0, 255.0) as u8
-                    } else {
-                        0
-                    }
-                },
-            )
-            .collect();
+        let mut pixels = Vec::with_capacity(pixel_count);
+        let mut disagreement = Vec::with_capacity(pixel_count);
+        for index in 0..pixel_count {
+            let (sum, squared_sum, weight) = if self.corrected_weights[index] > 0.0 {
+                corrected_covered += 1;
+                covered += 1;
+                (
+                    self.corrected_luma[index],
+                    self.corrected_squared_luma[index],
+                    self.corrected_weights[index],
+                )
+            } else if self.nominal_weights[index] > 0.0 {
+                covered += 1;
+                (
+                    self.nominal_luma[index],
+                    self.nominal_squared_luma[index],
+                    self.nominal_weights[index],
+                )
+            } else {
+                pixels.push(0);
+                disagreement.push(0);
+                continue;
+            };
+            let mean = sum / weight;
+            let variance = (squared_sum / weight - mean * mean).max(0.0);
+            pixels.push(mean.round().clamp(0.0, 255.0) as u8);
+            disagreement.push(variance.sqrt().round().clamp(0.0, 255.0) as u8);
+        }
         Ok(WorkspaceMosaic {
             frame: GrayFrame {
                 width: self.width,
                 height: self.height,
                 pixels,
+            },
+            disagreement: GrayFrame {
+                width: self.width,
+                height: self.height,
+                pixels: disagreement,
             },
             covered_fraction: covered as f64 / pixel_count as f64,
             nominal_fallback_fraction: (covered - corrected_covered) as f64 / pixel_count as f64,
@@ -275,6 +295,7 @@ impl WorkspaceMosaicStream {
                 true,
                 false,
                 &mut self.corrected_luma,
+                Some(&mut self.corrected_squared_luma),
                 &mut self.corrected_weights,
             );
             splat_workspace_tile(
@@ -288,6 +309,7 @@ impl WorkspaceMosaicStream {
                 false,
                 false,
                 &mut self.nominal_luma,
+                Some(&mut self.nominal_squared_luma),
                 &mut self.nominal_weights,
             );
         }
@@ -477,10 +499,11 @@ pub fn build_workspace_mosaic(
     }
     let (mut tiles, registrations) = register_tiles(plan, camera_model, frames)?;
     apply_registration_corrections(plan, &registrations, &mut tiles);
-    let (frame, covered_fraction, nominal_fallback_fraction) =
+    let (frame, disagreement, covered_fraction, nominal_fallback_fraction) =
         render_mosaic(plan, camera_model, frames, &tiles)?;
     Ok(WorkspaceMosaic {
         frame,
+        disagreement,
         covered_fraction,
         nominal_fallback_fraction,
         tiles,
@@ -1303,7 +1326,7 @@ fn render_mosaic(
     model: &PlanarCameraModel,
     frames: &[GrayFrame],
     tiles: &[WorkspaceScanTile],
-) -> Result<(GrayFrame, f64, f64)> {
+) -> Result<(GrayFrame, GrayFrame, f64, f64)> {
     let width = mosaic_axis_pixels(
         plan.region.x_max_mm - plan.region.x_min_mm,
         plan.output_mm_per_pixel,
@@ -1314,6 +1337,7 @@ fn render_mosaic(
     )?;
     let pixel_count = width as usize * height as usize;
     let mut weighted_luma = vec![0.0_f32; pixel_count];
+    let mut weighted_squared_luma = vec![0.0_f32; pixel_count];
     let mut weights = vec![0.0_f32; pixel_count];
     splat_mosaic_tiles(
         plan,
@@ -1325,6 +1349,7 @@ fn render_mosaic(
         true,
         false,
         &mut weighted_luma,
+        &mut weighted_squared_luma,
         &mut weights,
     );
     let corrected_covered = weights.iter().filter(|weight| **weight > 0.0).count();
@@ -1339,26 +1364,35 @@ fn render_mosaic(
             false,
             true,
             &mut weighted_luma,
+            &mut weighted_squared_luma,
             &mut weights,
         );
     }
     let covered = weights.iter().filter(|weight| **weight > 0.0).count();
-    let pixels = weighted_luma
-        .into_iter()
-        .zip(weights)
-        .map(|(sum, weight)| {
-            if weight > 0.0 {
-                (sum / weight).round().clamp(0.0, 255.0) as u8
-            } else {
-                0
-            }
-        })
-        .collect();
+    let mut pixels = Vec::with_capacity(pixel_count);
+    let mut disagreement = Vec::with_capacity(pixel_count);
+    for index in 0..pixel_count {
+        let weight = weights[index];
+        if weight <= 0.0 {
+            pixels.push(0);
+            disagreement.push(0);
+            continue;
+        }
+        let mean = weighted_luma[index] / weight;
+        let variance = (weighted_squared_luma[index] / weight - mean * mean).max(0.0);
+        pixels.push(mean.round().clamp(0.0, 255.0) as u8);
+        disagreement.push(variance.sqrt().round().clamp(0.0, 255.0) as u8);
+    }
     Ok((
         GrayFrame {
             width,
             height,
             pixels,
+        },
+        GrayFrame {
+            width,
+            height,
+            pixels: disagreement,
         },
         covered as f64 / pixel_count as f64,
         (covered - corrected_covered) as f64 / pixel_count as f64,
@@ -1376,6 +1410,7 @@ fn splat_mosaic_tiles(
     apply_registration_correction: bool,
     uncovered_only: bool,
     weighted_luma: &mut [f32],
+    weighted_squared_luma: &mut [f32],
     weights: &mut [f32],
 ) {
     for (tile, frame) in tiles.iter().zip(frames) {
@@ -1390,6 +1425,7 @@ fn splat_mosaic_tiles(
             apply_registration_correction,
             uncovered_only,
             weighted_luma,
+            Some(weighted_squared_luma),
             weights,
         );
     }
@@ -1407,6 +1443,7 @@ fn splat_workspace_tile(
     apply_registration_correction: bool,
     uncovered_only: bool,
     weighted_luma: &mut [f32],
+    mut weighted_squared_luma: Option<&mut [f32]>,
     weights: &mut [f32],
 ) {
     let bounds = plan.usable_pixel_bounds;
@@ -1466,6 +1503,9 @@ fn splat_workspace_tile(
                         continue;
                     }
                     weighted_luma[target] += luma * weight;
+                    if let Some(squared_luma) = weighted_squared_luma.as_deref_mut() {
+                        squared_luma[target] += luma * luma * weight;
+                    }
                     weights[target] += weight;
                 }
             }
@@ -1987,7 +2027,7 @@ mod tests {
 
         let mut shifted_tiles = mosaic.tiles;
         shifted_tiles[1].placement_correction_x_mm = -0.05;
-        let (_, covered_fraction, fallback_fraction) =
+        let (_, _, covered_fraction, fallback_fraction) =
             render_mosaic(&plan, &model, &frames, &shifted_tiles).unwrap();
         assert!(covered_fraction > 0.9999);
         assert!(fallback_fraction > 0.0);

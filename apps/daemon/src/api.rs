@@ -55,14 +55,14 @@ use velocitypnp_vision::{
     fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model,
     interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, render_workspace_height_mosaic, rescale_planar_camera_model,
-    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
-    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
-    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
-    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
-    GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig, VisualHomingPlan,
-    WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream,
-    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceScanPlan,
+    query_camera_controls, render_workspace_height_mosaic_with_consistency,
+    rescale_planar_camera_model, resize_gray_frame, summarize_camera_reproducibility,
+    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
+    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
+    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, V4l2CaptureConfig,
+    VisualHomingPlan, WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic,
+    WorkspaceMosaicStream, WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceScanPlan,
     MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
@@ -90,6 +90,7 @@ const WORKSPACE_SURVEY_SETTLE_FRAMES: u32 = 4;
 const MIN_WORKSPACE_COVERAGE: f64 = 0.99;
 const DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL: f64 = 0.10;
 const DEFAULT_SURVEY_OVERLAP: f64 = 0.30;
+const DEFAULT_LAYERED_WORKSPACE_OVERLAP: f64 = 0.60;
 const DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_PRECISION_ARTIFACT_QUOTA_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
@@ -938,14 +939,17 @@ fn prepare_workspace_scan(
         ));
     }
     let minimum_layered_overlap = if installed_camera_model.is_some() {
-        minimum_layered_workspace_overlap(camera_model, &planning_camera_model)?
+        layered_workspace_overlap(minimum_layered_workspace_overlap(
+            camera_model,
+            &planning_camera_model,
+        )?)
     } else {
         0.2
     };
     let overlap_fraction = requested_overlap.max(minimum_layered_overlap);
     if overlap_fraction > requested_overlap {
         warnings.push(format!(
-            "workspace overlap was raised from {:.1}% to {:.1}% to cover the highest supported surface between tiles",
+            "workspace overlap was raised from {:.1}% to {:.1}% for reliable layered reconstruction",
             requested_overlap * 100.0,
             overlap_fraction * 100.0,
         ));
@@ -1064,6 +1068,10 @@ fn prepare_workspace_scan(
         )));
     }
     Ok((plan, estimate))
+}
+
+fn layered_workspace_overlap(geometric_minimum: f64) -> f64 {
+    geometric_minimum.max(DEFAULT_LAYERED_WORKSPACE_OVERLAP)
 }
 
 fn minimum_layered_workspace_overlap(
@@ -1909,16 +1917,17 @@ async fn build_retained_workspace_height_artifacts(
     let parallax = parallax.clone();
     tokio::task::spawn_blocking(move || {
         build_workspace_height_map(plan.region, &parallax).and_then(|map| {
-            let composite = render_workspace_height_mosaic(&plan, &map, |fraction| {
-                render_retained_workspace_height_layer(
-                    &store,
-                    scan_id,
-                    &plan,
-                    &working_model,
-                    &installed_model,
-                    fraction,
-                )
-            })?;
+            let composite =
+                render_workspace_height_mosaic_with_consistency(&plan, &map, |fraction| {
+                    render_retained_workspace_height_layer(
+                        &store,
+                        scan_id,
+                        &plan,
+                        &working_model,
+                        &installed_model,
+                        fraction,
+                    )
+                })?;
             Ok(Some(WorkspaceHeightArtifacts { map, composite }))
         })
     })
@@ -1934,7 +1943,7 @@ fn render_retained_workspace_height_layer(
     working_model: &PlanarCameraModel,
     installed_model: &PlanarCameraModel,
     fraction: f64,
-) -> anyhow::Result<GrayFrame> {
+) -> anyhow::Result<WorkspaceMosaic> {
     let model = interpolate_planar_camera_model(working_model, installed_model, fraction)
         .map_err(anyhow::Error::msg)?;
     let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
@@ -1962,7 +1971,7 @@ fn render_retained_workspace_height_layer(
         })?;
         stream.push_frame(tile.index, frame)?;
     }
-    Ok(stream.finish()?.frame)
+    stream.finish()
 }
 
 async fn capture_persistent_workspace_frame(
@@ -2229,7 +2238,7 @@ fn persist_workspace_height_artifacts(
     let total_cells = artifacts.map.rows * artifacts.map.columns;
     if artifacts.map.unknown_cells > 0 {
         scan.warnings.push(format!(
-            "height map left {} of {total_cells} cells unknown; the corrected mosaic uses the working-plane fallback in those cells",
+            "height map left {} of {total_cells} cells unknown; the corrected mosaic selects the lower-disagreement endpoint projection in those cells",
             artifacts.map.unknown_cells,
         ));
     }
@@ -12931,6 +12940,12 @@ mod tests {
         assert!((0.35..0.50).contains(&minimum_overlap));
     }
 
+    #[test]
+    fn layered_workspace_overlap_prefers_quality_before_tile_count() {
+        assert_eq!(layered_workspace_overlap(0.41), 0.60);
+        assert_eq!(layered_workspace_overlap(0.70), 0.70);
+    }
+
     #[tokio::test]
     async fn workspace_manifest_accounts_for_its_own_bytes() {
         let state = test_state();
@@ -12958,6 +12973,11 @@ mod tests {
                 width: 2,
                 height: 2,
                 pixels: vec![value; 4],
+            },
+            disagreement: GrayFrame {
+                width: 2,
+                height: 2,
+                pixels: vec![0; 4],
             },
             covered_fraction: 1.0,
             nominal_fallback_fraction: 0.0,

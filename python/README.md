@@ -65,6 +65,8 @@ hour. Use `workspace_scan(survey["scan"]["id"])` to poll progress, then use
 `workspace_scan_mosaic` to retrieve the final PNG. The survey defaults retain
 only the coarse mosaic and manifest, not every full-resolution camera frame.
 They use 30 percent overlap and the active profile's validated default XY feed.
+Installed-plate layered scans raise overlap to at least 60 percent for reliable
+multi-height reconstruction.
 Pass `feed_mm_per_min` only to request a slower scan.
 
 An installed-plate scan with `artifact_retention="full_sources"` also measures

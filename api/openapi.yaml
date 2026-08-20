@@ -1091,7 +1091,9 @@ components:
           type: number
           minimum: 0.2
           maximum: 0.75
-          description: Survey mode defaults to 0.30.
+          description: >-
+            Survey mode defaults to 0.30. Installed-plate layered scans use at
+            least 0.60 for reliable multi-height reconstruction.
         output_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
         feed_mm_per_min:
           type: number
@@ -1313,8 +1315,8 @@ components:
       description: >-
         Confidence-aware surface map made from sparse parallax observations.
         Surface fractions use the same relative scale as the parallax report.
-        Unknown cells stay unknown and use the working-plane image only as a
-        display fallback in the corrected mosaic.
+        Unknown cells stay unknown. Their corrected-mosaic pixels use the
+        endpoint projection with lower local source-image disagreement.
       properties:
         map_artifact_name: { type: string }
         preview_artifact_name: { type: string }

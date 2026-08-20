@@ -19,7 +19,8 @@ pub use v4l2_capture::*;
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use workspace_height_map::{
     build_workspace_height_map, compose_workspace_height_mosaic, render_workspace_height_mosaic,
-    WorkspaceHeightCell, WorkspaceHeightCellSource, WorkspaceHeightComposite, WorkspaceHeightMap,
+    render_workspace_height_mosaic_with_consistency, WorkspaceHeightCell,
+    WorkspaceHeightCellSource, WorkspaceHeightComposite, WorkspaceHeightMap,
     WORKSPACE_HEIGHT_CANDIDATE_STEP, WORKSPACE_HEIGHT_CELL_SIZE_MM,
 };
 pub use workspace_mosaic::{

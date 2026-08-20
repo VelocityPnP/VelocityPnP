@@ -1193,6 +1193,38 @@ and the plate-number median was 0.961. Both mosaics again had 100 percent
 coverage without nominal fallback. The machine returned homed, ready, and
 fault-free to X=220.131, Y=190.271, Z=31.5, with the lights off.
 
+### Mixed-height local projection selection
+
+Layered ROI scan `5658f2d0-ed74-4ce6-9d8a-bbf3902c155c` targeted X=175 to
+265 mm and Y=125 to 225 mm with 41.3 percent overlap. A motion timeout stopped
+the scan after tile 326 of 364. No emergency stop was used. The first 25
+complete rows gave 325 retained frames through Y=214.5 mm. Software reconnect
+and standard XYZ homing returned the machine to a ready, homed, fault-free
+state.
+
+Offline reconstruction accepted 7,376 parallax observations. The 45-by-45
+height map had 280 measured cells, 576 inferred cells, and 1,169 unknown
+cells. A working-plane fallback kept the datum PCB clear but visibly doubled
+plate holes, edge numbers, the camera ring, and the camera body. A global
+installed-plate fallback aligned those plate features but broke unmeasured
+parts of the datum PCB. Normal ORB tile registration also made the mixed-height
+image worse because it tried to fit one translation across different planes.
+
+The accepted reconstruction measures source-image disagreement at both
+calibrated endpoint projections. It keeps unknown cells unknown in the height
+data, but selects the locally supported endpoint for their display pixels and
+regularizes neighboring selections. Replay kept the datum PCB coherent and
+removed most ringing from the staging plate, holes, edge numbers, and outer
+camera ring. The inner bottom-camera optics still show local depth blocks. That
+assembly is not planar, and the retained capture has only 41.3 percent overlap.
+The corrected PNG SHA-256 is
+`91c04211122e75a042eb41ea3331828bb94daf9dc58aeb3982f29437dae9fc8d`.
+
+Future installed-plate layered scans now use at least 60 percent overlap. Their
+height analysis keeps a useful baseline by also comparing non-adjacent tiles
+that retain at least 20 percent overlap. A physical 60 percent repeat is still
+required to validate the inner camera region.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
