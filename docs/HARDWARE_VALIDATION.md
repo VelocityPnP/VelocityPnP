@@ -1327,6 +1327,40 @@ Visual comparison found no material seam or identifiability regression at 10
 percent overlap. The machine ended homed, ready, and fault-free at X=220.131,
 Y=190.271, Z=31.5. This passes the under-20-minute workspace inventory target.
 
+### Reconnaissance seam diagnostics
+
+The first diagnostic scan,
+`7b9fb2e7-61fb-4b5f-93d0-9244f050085f`, exposed an invalid disagreement
+signal. The accumulator measured variation between source pixels from the
+same tile. It therefore treated normal edges, such as plate holes, as overlap
+error. This classification was rejected and was not used for machine motion.
+
+The corrected compositor first reduces each source tile to one projected mean
+at each output pixel. It then measures variance between distinct source tiles.
+Physical scan `8e5db6e2-c51c-4d4b-a62a-29c390126918` captured all 1,023 tiles
+in 1,180.9 seconds, or 19 minutes 40.9 seconds. Coverage was 100 percent. All
+1,022 post-first captures used monotonic timestamp selection. The capture path
+discarded 4,148 queued frames. The mosaic SHA-256 is
+`4b4a74a0a82d6c94b359fb6804c3a6b718665acc1b29df5af2555c1472a94ac0`.
+
+Retained-data replay applied the final component-support policy without
+machine motion. It classified 1,344 of 1,982 overlaps as healthy, 53 as
+elevated, and 585 as unresolved. It recommended targeted refinement and
+produced eight machine-coordinate regions. Visual inspection matched these
+regions to the feeder banks, FTP PCB, datum and bottom-camera area, and raised
+fixtures. Normal plate holes outside these regions did not receive a problem
+overlay. The report SHA-256 is
+`8c2890557ffec394594e11b6c390a97f7c4502cd558ae6d3c41f88ddf288479e`.
+The composited diagnostic image SHA-256 is
+`5e15abd3e44706d393caaf31d77628380af078c3e083c3ea7a50cd2377906151`.
+
+Seam analysis did not alter calibrated tile placement and did not start an
+automatic second pass. The machine returned homed, ready, and fault-free to
+X=220.131, Y=190.271, Z=31.5, with the lights off. Two repeat measurements of
+the new diagnostic path were 1,180.6 and 1,180.9 seconds. The preflight model
+now uses 0.20 seconds per post-first tile for measured control and dispatch
+overhead.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

@@ -1,3 +1,7 @@
+use crate::workspace_seam_health::{
+    build_workspace_seam_health, measure_workspace_seam, WorkspaceSeamHealthArtifacts,
+    WorkspaceSeamMeasurement,
+};
 use crate::{gray_frame_to_mat, GrayFrame};
 use anyhow::{ensure, Context, Result};
 use opencv::core::{self, Mat, MatTraitConst, Point2f, Rect, Size, Vector, NORM_HAMMING};
@@ -51,10 +55,61 @@ pub struct WorkspaceMosaic {
     /// Per-pixel source disagreement after projection. Zero means that the
     /// contributing samples agree or that only one sample covers the pixel.
     pub disagreement: GrayFrame,
+    /// Number of distinct source tiles that contributed to each output pixel.
+    pub source_count: GrayFrame,
+    /// Diagnostic-only overlap health. It never changes tile placement.
+    pub seam_health: Option<WorkspaceSeamHealthArtifacts>,
     pub covered_fraction: f64,
     pub nominal_fallback_fraction: f64,
     pub tiles: Vec<WorkspaceScanTile>,
     pub registrations: Vec<WorkspaceTileRegistration>,
+}
+
+struct TileMeanScratch {
+    weighted_luma: Vec<f32>,
+    weights: Vec<f32>,
+    marks: Vec<u32>,
+    touched: Vec<usize>,
+}
+
+impl TileMeanScratch {
+    fn new(pixel_count: usize) -> Self {
+        Self {
+            weighted_luma: vec![0.0; pixel_count],
+            weights: vec![0.0; pixel_count],
+            marks: vec![0; pixel_count],
+            touched: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, index: usize, marker: u32, luma: f32, weight: f32) {
+        if self.marks[index] != marker {
+            self.marks[index] = marker;
+            self.weighted_luma[index] = 0.0;
+            self.weights[index] = 0.0;
+            self.touched.push(index);
+        }
+        self.weighted_luma[index] += luma * weight;
+        self.weights[index] += weight;
+    }
+
+    fn finish_tile(
+        &mut self,
+        tile_means: &mut [f32],
+        tile_squared_means: &mut [f32],
+        source_counts: &mut [u8],
+    ) {
+        for index in self.touched.drain(..) {
+            let weight = self.weights[index];
+            if weight <= 0.0 {
+                continue;
+            }
+            let mean = self.weighted_luma[index] / weight;
+            tile_means[index] += mean;
+            tile_squared_means[index] += mean * mean;
+            source_counts[index] = source_counts[index].saturating_add(1);
+        }
+    }
 }
 
 pub struct WorkspaceMosaicStream {
@@ -69,30 +124,45 @@ pub struct WorkspaceMosaicStream {
     height: u32,
     sample_step_px: usize,
     corrected_luma: Vec<f32>,
-    corrected_squared_luma: Vec<f32>,
     corrected_weights: Vec<f32>,
+    corrected_tile_means: Vec<f32>,
+    corrected_tile_squared_means: Vec<f32>,
+    corrected_source_counts: Vec<u8>,
     nominal_luma: Vec<f32>,
-    nominal_squared_luma: Vec<f32>,
     nominal_weights: Vec<f32>,
+    nominal_tile_means: Vec<f32>,
+    nominal_tile_squared_means: Vec<f32>,
+    nominal_source_counts: Vec<u8>,
+    tile_mean_scratch: TileMeanScratch,
     registration_enabled: bool,
+    seam_diagnostics_enabled: bool,
+    seam_measurements: Vec<WorkspaceSeamMeasurement>,
 }
 
 impl WorkspaceMosaicStream {
     pub fn new(plan: WorkspaceScanPlan, model: PlanarCameraModel) -> Result<Self> {
-        Self::new_with_registration(plan, model, true)
+        Self::new_with_options(plan, model, true, false)
     }
 
     pub fn new_without_registration(
         plan: WorkspaceScanPlan,
         model: PlanarCameraModel,
     ) -> Result<Self> {
-        Self::new_with_registration(plan, model, false)
+        Self::new_with_options(plan, model, false, false)
     }
 
-    fn new_with_registration(
+    pub fn new_with_seam_diagnostics(
+        plan: WorkspaceScanPlan,
+        model: PlanarCameraModel,
+    ) -> Result<Self> {
+        Self::new_with_options(plan, model, false, true)
+    }
+
+    fn new_with_options(
         plan: WorkspaceScanPlan,
         model: PlanarCameraModel,
         registration_enabled: bool,
+        seam_diagnostics_enabled: bool,
     ) -> Result<Self> {
         ensure!(
             plan.tiles.len() == (plan.rows * plan.columns) as usize,
@@ -135,12 +205,19 @@ impl WorkspaceMosaicStream {
             height,
             sample_step_px,
             corrected_luma: vec![0.0; pixel_count],
-            corrected_squared_luma: vec![0.0; pixel_count],
             corrected_weights: vec![0.0; pixel_count],
+            corrected_tile_means: vec![0.0; pixel_count],
+            corrected_tile_squared_means: vec![0.0; pixel_count],
+            corrected_source_counts: vec![0; pixel_count],
             nominal_luma: vec![0.0; pixel_count],
-            nominal_squared_luma: vec![0.0; pixel_count],
             nominal_weights: vec![0.0; pixel_count],
+            nominal_tile_means: vec![0.0; pixel_count],
+            nominal_tile_squared_means: vec![0.0; pixel_count],
+            nominal_source_counts: vec![0; pixel_count],
+            tile_mean_scratch: TileMeanScratch::new(pixel_count),
             registration_enabled,
+            seam_diagnostics_enabled,
+            seam_measurements: Vec::new(),
         })
     }
 
@@ -191,43 +268,74 @@ impl WorkspaceMosaicStream {
         let mut covered = 0_usize;
         let mut pixels = Vec::with_capacity(pixel_count);
         let mut disagreement = Vec::with_capacity(pixel_count);
+        let mut source_counts = Vec::with_capacity(pixel_count);
         for index in 0..pixel_count {
-            let (sum, squared_sum, weight) = if self.corrected_weights[index] > 0.0 {
-                corrected_covered += 1;
-                covered += 1;
-                (
-                    self.corrected_luma[index],
-                    self.corrected_squared_luma[index],
-                    self.corrected_weights[index],
-                )
-            } else if self.nominal_weights[index] > 0.0 {
-                covered += 1;
-                (
-                    self.nominal_luma[index],
-                    self.nominal_squared_luma[index],
-                    self.nominal_weights[index],
-                )
-            } else {
-                pixels.push(0);
-                disagreement.push(0);
-                continue;
-            };
+            let (sum, weight, tile_mean_sum, tile_squared_mean_sum, source_count) =
+                if self.corrected_weights[index] > 0.0 {
+                    corrected_covered += 1;
+                    covered += 1;
+                    (
+                        self.corrected_luma[index],
+                        self.corrected_weights[index],
+                        self.corrected_tile_means[index],
+                        self.corrected_tile_squared_means[index],
+                        self.corrected_source_counts[index],
+                    )
+                } else if self.nominal_weights[index] > 0.0 {
+                    covered += 1;
+                    (
+                        self.nominal_luma[index],
+                        self.nominal_weights[index],
+                        self.nominal_tile_means[index],
+                        self.nominal_tile_squared_means[index],
+                        self.nominal_source_counts[index],
+                    )
+                } else {
+                    pixels.push(0);
+                    disagreement.push(0);
+                    source_counts.push(0);
+                    continue;
+                };
             let mean = sum / weight;
-            let variance = (squared_sum / weight - mean * mean).max(0.0);
+            let tile_count = f32::from(source_count.max(1));
+            let tile_mean = tile_mean_sum / tile_count;
+            let variance = (tile_squared_mean_sum / tile_count - tile_mean * tile_mean).max(0.0);
             pixels.push(mean.round().clamp(0.0, 255.0) as u8);
             disagreement.push(variance.sqrt().round().clamp(0.0, 255.0) as u8);
+            source_counts.push(source_count);
         }
+        let frame = GrayFrame {
+            width: self.width,
+            height: self.height,
+            pixels,
+        };
+        let disagreement = GrayFrame {
+            width: self.width,
+            height: self.height,
+            pixels: disagreement,
+        };
+        let source_count = GrayFrame {
+            width: self.width,
+            height: self.height,
+            pixels: source_counts,
+        };
+        let seam_health = self
+            .seam_diagnostics_enabled
+            .then(|| {
+                build_workspace_seam_health(
+                    &self.plan,
+                    &frame,
+                    &disagreement,
+                    &source_count,
+                    self.seam_measurements,
+                )
+            })
+            .transpose()?;
         Ok(WorkspaceMosaic {
-            frame: GrayFrame {
-                width: self.width,
-                height: self.height,
-                pixels,
-            },
-            disagreement: GrayFrame {
-                width: self.width,
-                height: self.height,
-                pixels: disagreement,
-            },
+            frame,
+            disagreement,
+            source_count,
+            seam_health,
             covered_fraction: covered as f64 / pixel_count as f64,
             nominal_fallback_fraction: (covered - corrected_covered) as f64 / pixel_count as f64,
             tiles: self.tiles,
@@ -239,6 +347,34 @@ impl WorkspaceMosaicStream {
         let row = self.next_row;
         for column in 0..self.plan.columns {
             let index = (row * self.plan.columns + column) as usize;
+            if self.seam_diagnostics_enabled && column > 0 {
+                let fixed_index = index - 1;
+                if let Some(measurement) = measure_workspace_seam(
+                    &self.tiles[fixed_index],
+                    &frames[column as usize - 1],
+                    &self.tiles[index],
+                    &frames[column as usize],
+                    &self.model,
+                )? {
+                    self.seam_measurements.push(measurement);
+                }
+            }
+            if self.seam_diagnostics_enabled && row > 0 {
+                let fixed_index = index - self.plan.columns as usize;
+                let previous = self
+                    .previous_row
+                    .as_ref()
+                    .context("workspace stream lost the preceding row")?;
+                if let Some(measurement) = measure_workspace_seam(
+                    &self.tiles[fixed_index],
+                    &previous[column as usize],
+                    &self.tiles[index],
+                    &frames[column as usize],
+                    &self.model,
+                )? {
+                    self.seam_measurements.push(measurement);
+                }
+            }
             if self.registration_enabled && column > 0 {
                 let fixed_index = index - 1;
                 self.registrations.push(register_pair(
@@ -296,8 +432,14 @@ impl WorkspaceMosaicStream {
                 true,
                 false,
                 &mut self.corrected_luma,
-                Some(&mut self.corrected_squared_luma),
                 &mut self.corrected_weights,
+                &mut self.tile_mean_scratch,
+                self.tiles[index].index.saturating_mul(2).saturating_add(1),
+            );
+            self.tile_mean_scratch.finish_tile(
+                &mut self.corrected_tile_means,
+                &mut self.corrected_tile_squared_means,
+                &mut self.corrected_source_counts,
             );
             splat_workspace_tile(
                 &self.plan,
@@ -310,8 +452,14 @@ impl WorkspaceMosaicStream {
                 false,
                 false,
                 &mut self.nominal_luma,
-                Some(&mut self.nominal_squared_luma),
                 &mut self.nominal_weights,
+                &mut self.tile_mean_scratch,
+                self.tiles[index].index.saturating_mul(2).saturating_add(2),
+            );
+            self.tile_mean_scratch.finish_tile(
+                &mut self.nominal_tile_means,
+                &mut self.nominal_tile_squared_means,
+                &mut self.nominal_source_counts,
             );
         }
         Ok(())
@@ -500,11 +648,13 @@ pub fn build_workspace_mosaic(
     }
     let (mut tiles, registrations) = register_tiles(plan, camera_model, frames)?;
     apply_registration_corrections(plan, &registrations, &mut tiles);
-    let (frame, disagreement, covered_fraction, nominal_fallback_fraction) =
+    let (frame, disagreement, source_count, covered_fraction, nominal_fallback_fraction) =
         render_mosaic(plan, camera_model, frames, &tiles)?;
     Ok(WorkspaceMosaic {
         frame,
         disagreement,
+        source_count,
+        seam_health: None,
         covered_fraction,
         nominal_fallback_fraction,
         tiles,
@@ -1077,7 +1227,26 @@ pub(crate) fn expected_overlap_rois(
     frame_width: u32,
     frame_height: u32,
 ) -> Result<Option<(Rect, Rect)>> {
+    let Some(overlap) = expected_overlap_world_region(fixed_tile, moving_tile, model)? else {
+        return Ok(None);
+    };
     let bounds = supported_pixel_bounds(model, frame_width, frame_height)?;
+    let fixed_roi = pixel_roi_for_world_region(model, bounds, fixed_tile.nominal_pose, overlap);
+    let moving_roi = pixel_roi_for_world_region(model, bounds, moving_tile.nominal_pose, overlap);
+    Ok(fixed_roi.zip(moving_roi))
+}
+
+pub(crate) fn expected_overlap_world_region(
+    fixed_tile: &WorkspaceScanTile,
+    moving_tile: &WorkspaceScanTile,
+    model: &PlanarCameraModel,
+) -> Result<Option<[f64; 4]>> {
+    let bounds = WorkspacePixelBounds {
+        left: model.supported_min_x_px.ceil().max(0.0) as u32,
+        top: model.supported_min_y_px.ceil().max(0.0) as u32,
+        right: model.supported_max_x_px.floor().max(0.0) as u32 + 1,
+        bottom: model.supported_max_y_px.floor().max(0.0) as u32 + 1,
+    };
     let footprint = conservative_camera_footprint(model, bounds)?;
     let fixed_world = [
         fixed_tile.nominal_pose.x_mm + footprint[0],
@@ -1100,9 +1269,7 @@ pub(crate) fn expected_overlap_rois(
     if overlap[0] >= overlap[1] || overlap[2] >= overlap[3] {
         return Ok(None);
     }
-    let fixed_roi = pixel_roi_for_world_region(model, bounds, fixed_tile.nominal_pose, overlap);
-    let moving_roi = pixel_roi_for_world_region(model, bounds, moving_tile.nominal_pose, overlap);
-    Ok(fixed_roi.zip(moving_roi))
+    Ok(Some(overlap))
 }
 
 fn pixel_roi_for_world_region(
@@ -1327,7 +1494,7 @@ fn render_mosaic(
     model: &PlanarCameraModel,
     frames: &[GrayFrame],
     tiles: &[WorkspaceScanTile],
-) -> Result<(GrayFrame, GrayFrame, f64, f64)> {
+) -> Result<(GrayFrame, GrayFrame, GrayFrame, f64, f64)> {
     let width = mosaic_axis_pixels(
         plan.region.x_max_mm - plan.region.x_min_mm,
         plan.output_mm_per_pixel,
@@ -1338,8 +1505,11 @@ fn render_mosaic(
     )?;
     let pixel_count = width as usize * height as usize;
     let mut weighted_luma = vec![0.0_f32; pixel_count];
-    let mut weighted_squared_luma = vec![0.0_f32; pixel_count];
     let mut weights = vec![0.0_f32; pixel_count];
+    let mut tile_means = vec![0.0_f32; pixel_count];
+    let mut tile_squared_means = vec![0.0_f32; pixel_count];
+    let mut source_counts = vec![0_u8; pixel_count];
+    let mut tile_mean_scratch = TileMeanScratch::new(pixel_count);
     splat_mosaic_tiles(
         plan,
         model,
@@ -1350,8 +1520,12 @@ fn render_mosaic(
         true,
         false,
         &mut weighted_luma,
-        &mut weighted_squared_luma,
         &mut weights,
+        &mut tile_means,
+        &mut tile_squared_means,
+        &mut source_counts,
+        &mut tile_mean_scratch,
+        0,
     );
     let corrected_covered = weights.iter().filter(|weight| **weight > 0.0).count();
     if corrected_covered < pixel_count {
@@ -1365,8 +1539,12 @@ fn render_mosaic(
             false,
             true,
             &mut weighted_luma,
-            &mut weighted_squared_luma,
             &mut weights,
+            &mut tile_means,
+            &mut tile_squared_means,
+            &mut source_counts,
+            &mut tile_mean_scratch,
+            tiles.len() as u32,
         );
     }
     let covered = weights.iter().filter(|weight| **weight > 0.0).count();
@@ -1380,7 +1558,9 @@ fn render_mosaic(
             continue;
         }
         let mean = weighted_luma[index] / weight;
-        let variance = (weighted_squared_luma[index] / weight - mean * mean).max(0.0);
+        let tile_count = f32::from(source_counts[index].max(1));
+        let tile_mean = tile_means[index] / tile_count;
+        let variance = (tile_squared_means[index] / tile_count - tile_mean * tile_mean).max(0.0);
         pixels.push(mean.round().clamp(0.0, 255.0) as u8);
         disagreement.push(variance.sqrt().round().clamp(0.0, 255.0) as u8);
     }
@@ -1394,6 +1574,11 @@ fn render_mosaic(
             width,
             height,
             pixels: disagreement,
+        },
+        GrayFrame {
+            width,
+            height,
+            pixels: source_counts,
         },
         covered as f64 / pixel_count as f64,
         (covered - corrected_covered) as f64 / pixel_count as f64,
@@ -1411,8 +1596,12 @@ fn splat_mosaic_tiles(
     apply_registration_correction: bool,
     uncovered_only: bool,
     weighted_luma: &mut [f32],
-    weighted_squared_luma: &mut [f32],
     weights: &mut [f32],
+    tile_means: &mut [f32],
+    tile_squared_means: &mut [f32],
+    source_counts: &mut [u8],
+    tile_mean_scratch: &mut TileMeanScratch,
+    source_marker_offset: u32,
 ) {
     for (tile, frame) in tiles.iter().zip(frames) {
         splat_workspace_tile(
@@ -1426,9 +1615,13 @@ fn splat_mosaic_tiles(
             apply_registration_correction,
             uncovered_only,
             weighted_luma,
-            Some(weighted_squared_luma),
             weights,
+            tile_mean_scratch,
+            source_marker_offset
+                .saturating_add(tile.index)
+                .saturating_add(1),
         );
+        tile_mean_scratch.finish_tile(tile_means, tile_squared_means, source_counts);
     }
 }
 
@@ -1444,8 +1637,9 @@ fn splat_workspace_tile(
     apply_registration_correction: bool,
     uncovered_only: bool,
     weighted_luma: &mut [f32],
-    mut weighted_squared_luma: Option<&mut [f32]>,
     weights: &mut [f32],
+    tile_mean_scratch: &mut TileMeanScratch,
+    source_marker: u32,
 ) {
     let bounds = plan.usable_pixel_bounds;
     let correction_x = if apply_registration_correction {
@@ -1508,10 +1702,8 @@ fn splat_workspace_tile(
                         continue;
                     }
                     weighted_luma[target] += luma * weight;
-                    if let Some(squared_luma) = weighted_squared_luma.as_deref_mut() {
-                        squared_luma[target] += luma * luma * weight;
-                    }
                     weights[target] += weight;
+                    tile_mean_scratch.record(target, source_marker, luma, weight);
                 }
             }
         }
@@ -2032,7 +2224,7 @@ mod tests {
 
         let mut shifted_tiles = mosaic.tiles;
         shifted_tiles[1].placement_correction_x_mm = -0.05;
-        let (_, _, covered_fraction, fallback_fraction) =
+        let (_, _, _, covered_fraction, fallback_fraction) =
             render_mosaic(&plan, &model, &frames, &shifted_tiles).unwrap();
         assert!(covered_fraction > 0.9999);
         assert!(fallback_fraction > 0.0);
@@ -2108,7 +2300,7 @@ mod tests {
             tiles,
         };
         let frames = [frame(0, 0), frame(128, 0), frame(0, 96), frame(128, 96)];
-        let mut stream = WorkspaceMosaicStream::new(plan, model).unwrap();
+        let mut stream = WorkspaceMosaicStream::new(plan.clone(), model.clone()).unwrap();
         for index in [0, 1, 3, 2] {
             stream
                 .push_frame(index, frames[index as usize].clone())
@@ -2121,5 +2313,34 @@ mod tests {
         assert!(mosaic.covered_fraction > 0.99);
         assert_eq!(mosaic.registrations.len(), 4);
         assert!(mosaic.registrations.iter().all(|item| item.accepted));
+
+        let mut diagnostic_stream =
+            WorkspaceMosaicStream::new_with_seam_diagnostics(plan, model).unwrap();
+        for index in [0, 1, 3, 2] {
+            diagnostic_stream
+                .push_frame(index, frames[index as usize].clone())
+                .unwrap();
+        }
+        let diagnostic_mosaic = diagnostic_stream.finish().unwrap();
+        assert!(diagnostic_mosaic.registrations.is_empty());
+        assert!(diagnostic_mosaic
+            .source_count
+            .pixels
+            .iter()
+            .any(|count| *count >= 2));
+        assert!(diagnostic_mosaic
+            .disagreement
+            .pixels
+            .iter()
+            .zip(&diagnostic_mosaic.source_count.pixels)
+            .all(|(disagreement, count)| *count >= 2 || *disagreement == 0));
+        let seam_health = diagnostic_mosaic.seam_health.unwrap();
+        assert_eq!(seam_health.report.total_seams, 4);
+        assert_eq!(
+            seam_health.report.recommended_action,
+            velocitypnp_domain::WorkspaceSeamHealthAction::Accept,
+            "{:#?}",
+            seam_health.report,
+        );
     }
 }

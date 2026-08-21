@@ -252,6 +252,50 @@ class Client:
             "image/png",
         )
 
+    def workspace_scan_seam_health(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/seam-health.json",
+        )
+
+    def workspace_scan_disagreement(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/mosaic-disagreement.png",
+            "image/png",
+        )
+
+    def workspace_scan_overlap_confidence(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/overlap-confidence.png",
+            "image/png",
+        )
+
+    def workspace_scan_seam_overlay(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/seam-health-overlay.png",
+            "image/png",
+        )
+
+    def workspace_scan_seam_preview(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/mosaic-seam-health.png",
+            "image/png",
+        )
+
     @staticmethod
     def _workspace_scan_specification(
         calibration_id: str | uuid.UUID,

@@ -1422,6 +1422,12 @@ mod tests {
                     height: 3,
                     pixels: disagreement,
                 },
+                source_count: GrayFrame {
+                    width: 5,
+                    height: 3,
+                    pixels: vec![2; 15],
+                },
+                seam_health: None,
                 covered_fraction: 1.0,
                 nominal_fallback_fraction: 0.0,
                 tiles: Vec::new(),

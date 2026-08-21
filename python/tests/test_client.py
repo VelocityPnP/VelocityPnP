@@ -267,6 +267,28 @@ class ClientTests(unittest.TestCase):
                 "image/png",
             )
 
+        seam_health = {"recommended_action": "targeted_refinement"}
+        with patch.object(client, "_request", return_value=seam_health) as send:
+            self.assertEqual(client.workspace_scan_seam_health("scan"), seam_health)
+        send.assert_called_once_with(
+            "GET", "/workspace-scans/scan/artifacts/seam-health.json",
+        )
+
+        seam_image_methods = [
+            (client.workspace_scan_disagreement, "mosaic-disagreement.png"),
+            (client.workspace_scan_overlap_confidence, "overlap-confidence.png"),
+            (client.workspace_scan_seam_overlay, "seam-health-overlay.png"),
+            (client.workspace_scan_seam_preview, "mosaic-seam-health.png"),
+        ]
+        for method, artifact_name in seam_image_methods:
+            with patch.object(client, "_request_bytes", return_value=b"png") as send:
+                self.assertEqual(method("scan"), b"png")
+            send.assert_called_once_with(
+                "GET",
+                f"/workspace-scans/scan/artifacts/{artifact_name}",
+                "image/png",
+            )
+
     def test_home_requires_explicit_physical_confirmation(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:

@@ -129,6 +129,34 @@ pub struct WorkspaceMosaicLayerReport {
     pub applied_corrections: u32,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceSeamHealthAction {
+    #[default]
+    Accept,
+    TargetedRefinement,
+    ReviewGeometry,
+    IncreaseOverlap,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceSeamHealthSummary {
+    pub report_artifact_name: String,
+    pub disagreement_artifact_name: String,
+    pub overlap_confidence_artifact_name: String,
+    pub overlay_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub total_seams: u32,
+    pub healthy_seams: u32,
+    pub elevated_seams: u32,
+    pub unresolved_seams: u32,
+    pub target_regions: u32,
+    pub overlap_pixel_fraction: f64,
+    pub disagreement_p50_luma: f64,
+    pub disagreement_p95_luma: f64,
+    pub recommended_action: WorkspaceSeamHealthAction,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceParallaxSummary {
     pub artifact_name: String,
@@ -286,6 +314,8 @@ pub struct WorkspaceScanReport {
     pub parallax: Option<WorkspaceParallaxSummary>,
     #[serde(default)]
     pub height_map: Option<WorkspaceHeightMapSummary>,
+    #[serde(default)]
+    pub seam_health: Option<WorkspaceSeamHealthSummary>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
 }

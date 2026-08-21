@@ -1266,6 +1266,10 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceHeightMapSummary"
             - type: "null"
+        seam_health:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceSeamHealthSummary"
+            - type: "null"
         warnings: { type: array, items: { type: string } }
         failure: { type: [string, "null"] }
     WorkspaceMosaicLayerReport:
@@ -1310,6 +1314,44 @@ components:
         pairs_with_overlap: { type: integer, minimum: 0 }
         descriptor_matches: { type: integer, minimum: 0 }
         accepted_observations: { type: integer, minimum: 0 }
+    WorkspaceSeamHealthSummary:
+      type: object
+      required:
+        - report_artifact_name
+        - disagreement_artifact_name
+        - overlap_confidence_artifact_name
+        - overlay_artifact_name
+        - preview_artifact_name
+        - total_seams
+        - healthy_seams
+        - elevated_seams
+        - unresolved_seams
+        - target_regions
+        - overlap_pixel_fraction
+        - disagreement_p50_luma
+        - disagreement_p95_luma
+        - recommended_action
+      description: >-
+        Diagnostic-only overlap health for a reconnaissance mosaic. It does
+        not change tile placement. The action selects acceptance, a local
+        refinement scan, a geometry review, or more overlap.
+      properties:
+        report_artifact_name: { type: string }
+        disagreement_artifact_name: { type: string }
+        overlap_confidence_artifact_name: { type: string }
+        overlay_artifact_name: { type: string }
+        preview_artifact_name: { type: string }
+        total_seams: { type: integer, minimum: 0 }
+        healthy_seams: { type: integer, minimum: 0 }
+        elevated_seams: { type: integer, minimum: 0 }
+        unresolved_seams: { type: integer, minimum: 0 }
+        target_regions: { type: integer, minimum: 0 }
+        overlap_pixel_fraction: { type: number, minimum: 0, maximum: 1 }
+        disagreement_p50_luma: { type: number, minimum: 0 }
+        disagreement_p95_luma: { type: number, minimum: 0 }
+        recommended_action:
+          type: string
+          enum: [accept, targeted_refinement, review_geometry, increase_overlap]
     WorkspaceHeightMapSummary:
       type: object
       required:

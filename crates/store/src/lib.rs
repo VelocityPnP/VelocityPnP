@@ -526,6 +526,7 @@ mod tests {
             mosaic_layers: Vec::new(),
             parallax: None,
             height_map: None,
+            seam_health: None,
             warnings: vec![],
             failure: None,
         };

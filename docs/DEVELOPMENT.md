@@ -146,6 +146,40 @@ four-frame fallback. The scan report records actual discarded frames in
 `timestamp_fresh_frames`. Its estimate includes the serialized motion-control
 and capture-dispatch cost measured on the attached V3.0.4 machine.
 
+Reconnaissance also measures every horizontal and vertical tile overlap. It
+combines projected-source luma disagreement with a bounded cross-axis
+correlation. This analysis does not change tile placement. It classifies the
+scan as `accept`, `targeted_refinement`, `review_geometry`, or
+`increase_overlap`. Local problem seams become merged machine-coordinate
+regions in `seam-health.json`. A coherent, material displacement across much
+of the scan requests geometry review. Textureless or ambiguous problem seams
+request more overlap instead of inventing a correction.
+
+The report field `seam_health` summarizes the result and names these retained
+artifacts:
+
+- `seam-health.json`: per-overlap measurements and target regions
+- `mosaic-disagreement.png`: projected source-image disagreement
+- `overlap-confidence.png`: distinct source-view coverage
+- `seam-health-overlay.png`: transparent problem overlay
+- `mosaic-seam-health.png`: overlay composited onto the mosaic
+
+These products are diagnostics. A later refinement request can use the target
+regions, but the reconnaissance scan does not automatically move again.
+
+Tune the classification policy against retained scan products without moving
+the machine or changing the original scan record:
+
+```bash
+cargo run -p velocitypnp-vision --example reanalyze_workspace_seams -- \
+  SCAN_ARTIFACT_DIRECTORY OUTPUT_DIRECTORY
+```
+
+The source directory must contain `manifest.json`, `mosaic.png`,
+`mosaic-disagreement.png`, `overlap-confidence.png`, and `seam-health.json`.
+The command reuses the recorded overlap correlations and writes a new report
+and inspection images to the output directory.
+
 Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
 
 ```bash

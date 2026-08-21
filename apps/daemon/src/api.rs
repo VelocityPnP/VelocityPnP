@@ -41,7 +41,7 @@ use velocitypnp_domain::{
     WorkspaceCameraApertureSummary, WorkspaceHeightMapSummary, WorkspaceMosaicLayerReport,
     WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode,
     WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
-    WorkspaceSurfaceModel,
+    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -68,8 +68,9 @@ use velocitypnp_vision::{
     GrayFrame, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig,
     VisualHomingPlan, WorkspaceCameraApertureComposite, WorkspaceHeightComposite,
     WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxReport,
-    WorkspaceParallaxStream, WorkspaceScanPlan, MAX_WORKSPACE_SURFACE_FRACTION,
-    MIN_WORKSPACE_SURFACE_FRACTION, WORKSPACE_HEIGHT_CANDIDATE_STEP,
+    WorkspaceParallaxStream, WorkspaceScanPlan, WorkspaceSeamHealthArtifacts,
+    MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
+    WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -101,7 +102,7 @@ const RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES: u32 = 1;
 const RECONNAISSANCE_MAX_FRESH_CAPTURE_FRAMES: u32 = 32;
 // Account for the serialized jog completion and fresh-capture dispatch that
 // are not part of ideal feed time. This was measured on a LumenPnP V3.0.4.
-const RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS: f64 = 0.18;
+const RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS: f64 = 0.20;
 const MIN_WORKSPACE_COVERAGE: f64 = 0.99;
 const DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL: f64 = 0.10;
 const DEFAULT_SURVEY_OVERLAP: f64 = 0.30;
@@ -122,6 +123,11 @@ const WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT: &str = "surface-height-confidence.pn
 const WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT: &str = "mosaic-height-corrected.png";
 const WORKSPACE_HEIGHT_CLASS_OVERLAY_ARTIFACT: &str = "surface-height-overlay.png";
 const WORKSPACE_HEIGHT_CLASS_PREVIEW_ARTIFACT: &str = "mosaic-height-classes.png";
+const WORKSPACE_SEAM_HEALTH_ARTIFACT: &str = "seam-health.json";
+const WORKSPACE_DISAGREEMENT_ARTIFACT: &str = "mosaic-disagreement.png";
+const WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT: &str = "overlap-confidence.png";
+const WORKSPACE_SEAM_OVERLAY_ARTIFACT: &str = "seam-health-overlay.png";
+const WORKSPACE_SEAM_PREVIEW_ARTIFACT: &str = "mosaic-seam-health.png";
 
 struct WorkspaceHeightArtifacts {
     map: WorkspaceHeightMap,
@@ -857,6 +863,7 @@ async fn start_workspace_scan(
         mosaic_layers: Vec::new(),
         parallax: None,
         height_map: None,
+        seam_health: None,
         warnings: estimate.warnings.clone(),
         failure: None,
     };
@@ -1444,6 +1451,11 @@ fn workspace_scan_estimate(
     } else {
         plan.rows * plan.columns.saturating_sub(1) + plan.rows.saturating_sub(1) * plan.columns
     };
+    let planned_seam_diagnostics = if mode == WorkspaceScanMode::Reconnaissance {
+        plan.rows * plan.columns.saturating_sub(1) + plan.rows.saturating_sub(1) * plan.columns
+    } else {
+        0
+    };
     let mosaic_width_px = ((plan.region.x_max_mm - plan.region.x_min_mm) / plan.output_mm_per_pixel)
         .ceil() as u32
         + 1;
@@ -1451,8 +1463,10 @@ fn workspace_scan_estimate(
         ((plan.region.y_max_mm - plan.region.y_min_mm) / plan.output_mm_per_pixel).ceil() as u32
             + 1;
     let mosaic_pixels = u64::from(mosaic_width_px) * u64::from(mosaic_height_px);
-    let metadata_bytes =
-        u64::from(planned_tiles) * 512 + u64::from(planned_registrations) * 384 + 16_384;
+    let metadata_bytes = u64::from(planned_tiles) * 512
+        + u64::from(planned_registrations) * 384
+        + u64::from(planned_seam_diagnostics) * 1_024
+        + 16_384;
     let source_bytes = u64::from(plan.frame_width_px)
         * u64::from(plan.frame_height_px)
         * u64::from(planned_tiles)
@@ -1493,11 +1507,19 @@ fn workspace_scan_estimate(
     } else {
         0
     };
+    let seam_product_bytes = if mode == WorkspaceScanMode::Reconnaissance {
+        // Disagreement, overlap confidence, RGBA overlay, and RGB preview.
+        // PNG normally compresses these images below this raw-byte estimate.
+        mosaic_pixels * 99 / 10 + 4_096
+    } else {
+        0
+    };
     let estimated_retained_bytes = mosaic_pixels * 11 / 10 * surface_models.len() as u64
         + metadata_bytes
         + retained_image_bytes
         + parallax_bytes
-        + height_product_bytes;
+        + height_product_bytes
+        + seam_product_bytes;
     let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
     let base_duration_seconds = if mode != WorkspaceScanMode::Precision {
         let first_frames = top_profile.settle_frames + 1;
@@ -1885,7 +1907,7 @@ async fn capture_and_build_workspace_survey(
     let config = camera_capture_config(top_profile, top_path.to_owned());
     let mut session = Some(open_persistent_workspace_camera_with_retry(&config, &updates).await?);
     let primary_stream = if scan.mode == WorkspaceScanMode::Reconnaissance {
-        WorkspaceMosaicStream::new_without_registration(plan.clone(), camera_model.clone())
+        WorkspaceMosaicStream::new_with_seam_diagnostics(plan.clone(), camera_model.clone())
     } else {
         WorkspaceMosaicStream::new(plan.clone(), camera_model.clone())
     }
@@ -2632,6 +2654,7 @@ fn complete_workspace_mosaics(
         return Err("workspace scan produced no surface mosaics".into());
     }
     scan.mosaic_layers.clear();
+    scan.seam_health = None;
     for (layer_index, (surface_model, mosaic)) in mosaics.into_iter().enumerate() {
         let artifact_name = if layer_index == 0 {
             "mosaic.png".to_string()
@@ -2678,6 +2701,9 @@ fn complete_workspace_mosaics(
             ));
         }
         if layer_index == 0 {
+            if let Some(seam_health) = mosaic.seam_health.as_ref() {
+                persist_workspace_seam_health(state, scan, &mosaic, seam_health)?;
+            }
             scan.mosaic_width_px = Some(mosaic.frame.width);
             scan.mosaic_height_px = Some(mosaic.frame.height);
             scan.covered_fraction = Some(mosaic.covered_fraction);
@@ -2718,7 +2744,7 @@ fn complete_workspace_mosaics(
         .put_workspace_scan(scan)
         .map_err(|error| error.to_string())?;
     Ok(format!(
-        "Captured {} tiles into {} surface mosaics with {:.1}% primary coverage; {}/{} primary overlap registrations accepted{}",
+        "Captured {} tiles into {} surface mosaics with {:.1}% primary coverage; {}/{} primary overlap registrations accepted{}{}",
         scan.captured_tiles,
         scan.mosaic_layers.len(),
         scan.covered_fraction.unwrap_or(0.0) * 100.0,
@@ -2729,7 +2755,103 @@ fn complete_workspace_mosaics(
         } else {
             ""
         },
+        scan.seam_health.as_ref().map_or(String::new(), |health| {
+            format!(
+                "; seam health recommends {} after {} healthy, {} elevated, and {} unresolved overlaps",
+                workspace_seam_action_name(health.recommended_action),
+                health.healthy_seams,
+                health.elevated_seams,
+                health.unresolved_seams,
+            )
+        }),
     ))
+}
+
+fn persist_workspace_seam_health(
+    state: &AppState,
+    scan: &mut WorkspaceScanReport,
+    mosaic: &WorkspaceMosaic,
+    artifacts: &WorkspaceSeamHealthArtifacts,
+) -> Result<(), String> {
+    let report_json =
+        serde_json::to_vec_pretty(&artifacts.report).map_err(|error| error.to_string())?;
+    let disagreement_png =
+        encode_gray_png(&mosaic.disagreement).map_err(|error| error.to_string())?;
+    let confidence_png =
+        encode_gray_png(&artifacts.overlap_confidence).map_err(|error| error.to_string())?;
+    let overlay_png = encode_rgba_png(&artifacts.overlay).map_err(|error| error.to_string())?;
+    let preview_png = encode_rgb_png(&artifacts.preview).map_err(|error| error.to_string())?;
+    for (name, media_type, data) in [
+        (
+            WORKSPACE_SEAM_HEALTH_ARTIFACT,
+            "application/json",
+            report_json.as_slice(),
+        ),
+        (
+            WORKSPACE_DISAGREEMENT_ARTIFACT,
+            "image/png",
+            disagreement_png.as_slice(),
+        ),
+        (
+            WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT,
+            "image/png",
+            confidence_png.as_slice(),
+        ),
+        (
+            WORKSPACE_SEAM_OVERLAY_ARTIFACT,
+            "image/png",
+            overlay_png.as_slice(),
+        ),
+        (
+            WORKSPACE_SEAM_PREVIEW_ARTIFACT,
+            "image/png",
+            preview_png.as_slice(),
+        ),
+    ] {
+        persist_workspace_artifact(state, scan, name, media_type, data)?;
+    }
+    let report = &artifacts.report;
+    scan.seam_health = Some(WorkspaceSeamHealthSummary {
+        report_artifact_name: WORKSPACE_SEAM_HEALTH_ARTIFACT.into(),
+        disagreement_artifact_name: WORKSPACE_DISAGREEMENT_ARTIFACT.into(),
+        overlap_confidence_artifact_name: WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT.into(),
+        overlay_artifact_name: WORKSPACE_SEAM_OVERLAY_ARTIFACT.into(),
+        preview_artifact_name: WORKSPACE_SEAM_PREVIEW_ARTIFACT.into(),
+        total_seams: report.total_seams,
+        healthy_seams: report.healthy_seams,
+        elevated_seams: report.elevated_seams,
+        unresolved_seams: report.unresolved_seams,
+        target_regions: report.target_regions.len() as u32,
+        overlap_pixel_fraction: report.overlap_pixel_fraction,
+        disagreement_p50_luma: report.disagreement_p50_luma,
+        disagreement_p95_luma: report.disagreement_p95_luma,
+        recommended_action: report.recommended_action,
+    });
+    match report.recommended_action {
+        WorkspaceSeamHealthAction::Accept => {}
+        WorkspaceSeamHealthAction::TargetedRefinement => scan.warnings.push(format!(
+            "seam diagnostics selected {} local regions for a refinement scan",
+            report.target_regions.len(),
+        )),
+        WorkspaceSeamHealthAction::ReviewGeometry => scan.warnings.push(format!(
+            "{} elevated overlaps have a coherent displacement; review workspace geometry before rescanning",
+            report.elevated_seams,
+        )),
+        WorkspaceSeamHealthAction::IncreaseOverlap => scan.warnings.push(format!(
+            "{} overlaps have elevated disagreement without a unique translation; rescan their regions with more overlap",
+            report.unresolved_seams,
+        )),
+    }
+    Ok(())
+}
+
+fn workspace_seam_action_name(action: WorkspaceSeamHealthAction) -> &'static str {
+    match action {
+        WorkspaceSeamHealthAction::Accept => "accept",
+        WorkspaceSeamHealthAction::TargetedRefinement => "targeted refinement",
+        WorkspaceSeamHealthAction::ReviewGeometry => "geometry review",
+        WorkspaceSeamHealthAction::IncreaseOverlap => "increased overlap",
+    }
 }
 
 fn persist_workspace_height_artifacts(
@@ -12983,6 +13105,7 @@ mod tests {
             mosaic_layers: Vec::new(),
             parallax: None,
             height_map: None,
+            seam_health: None,
             warnings: vec![],
             failure: None,
         }
@@ -13692,6 +13815,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_seam_health_persists_report_and_inspection_images() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        let frame = GrayFrame {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 16, 32, 64],
+        };
+        let mosaic = WorkspaceMosaic {
+            frame: frame.clone(),
+            disagreement: frame.clone(),
+            source_count: GrayFrame {
+                width: 2,
+                height: 2,
+                pixels: vec![1, 2, 2, 1],
+            },
+            seam_health: None,
+            covered_fraction: 1.0,
+            nominal_fallback_fraction: 0.0,
+            tiles: Vec::new(),
+            registrations: Vec::new(),
+        };
+        let artifacts = WorkspaceSeamHealthArtifacts {
+            report: velocitypnp_vision::WorkspaceSeamHealthReport {
+                algorithm_version: "test".into(),
+                overlap_pixel_fraction: 0.5,
+                disagreement_p50_luma: 16.0,
+                disagreement_p95_luma: 32.0,
+                disagreement_threshold_luma: 24.0,
+                material_shift_threshold_mm: 0.2,
+                total_seams: 1,
+                healthy_seams: 0,
+                elevated_seams: 1,
+                unresolved_seams: 0,
+                recommended_action: WorkspaceSeamHealthAction::TargetedRefinement,
+                systematic_correction_x_mm: None,
+                systematic_correction_y_mm: None,
+                target_regions: vec![scan.region],
+                seams: Vec::new(),
+            },
+            overlap_confidence: frame.clone(),
+            overlay: RgbaFrame {
+                width: 2,
+                height: 2,
+                pixels: vec![0; 16],
+            },
+            preview: RgbFrame {
+                width: 2,
+                height: 2,
+                pixels: vec![0; 12],
+            },
+        };
+
+        persist_workspace_seam_health(&state, &mut scan, &mosaic, &artifacts).unwrap();
+
+        let summary = scan.seam_health.unwrap();
+        assert_eq!(summary.target_regions, 1);
+        assert_eq!(
+            summary.recommended_action,
+            WorkspaceSeamHealthAction::TargetedRefinement
+        );
+        for artifact_name in [
+            summary.report_artifact_name,
+            summary.disagreement_artifact_name,
+            summary.overlap_confidence_artifact_name,
+            summary.overlay_artifact_name,
+            summary.preview_artifact_name,
+        ] {
+            assert!(state
+                .store
+                .get_workspace_scan_artifact(scan.id, &artifact_name)
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn workspace_scan_persists_both_calibrated_height_layers() {
         let state = test_state();
         let mut scan = test_workspace_scan(Uuid::new_v4());
@@ -13707,6 +13907,12 @@ mod tests {
                 height: 2,
                 pixels: vec![0; 4],
             },
+            source_count: GrayFrame {
+                width: 2,
+                height: 2,
+                pixels: vec![1; 4],
+            },
+            seam_health: None,
             covered_fraction: 1.0,
             nominal_fallback_fraction: 0.0,
             tiles: tiles.clone(),
