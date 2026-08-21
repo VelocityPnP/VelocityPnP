@@ -7,10 +7,11 @@ rust-version.workspace = true
 
 [features]
 default = []
-native-v4l2 = ["dep:v4l"]
+native-v4l2 = ["dep:libc", "dep:v4l"]
 
 [dependencies]
 anyhow.workspace = true
+libc = { workspace = true, optional = true }
 opencv.workspace = true
 png.workspace = true
 serde.workspace = true

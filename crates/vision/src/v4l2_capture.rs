@@ -2,11 +2,12 @@ use crate::GrayFrame;
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use v4l::buffer::Type;
+use v4l::buffer::{Flags as BufferFlags, Type};
 use v4l::control::{Control, Description, Flags, Type as ControlType, Value};
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::MmapStream;
@@ -51,6 +52,10 @@ pub struct CaptureMetadata {
     pub interval_denominator: u32,
     pub sequence: u32,
     pub settle_frames: u32,
+    #[serde(default)]
+    pub timestamp_monotonic: bool,
+    #[serde(default)]
+    pub fresh_after_boundary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +67,12 @@ pub struct CapturedGrayFrame {
 enum PersistentCaptureRequest {
     Capture {
         settle_frames: u32,
+        response: mpsc::SyncSender<Result<CapturedGrayFrame, String>>,
+    },
+    CaptureFreshAfter {
+        not_before: Duration,
+        fallback_settle_frames: u32,
+        maximum_frames: u32,
         response: mpsc::SyncSender<Result<CapturedGrayFrame, String>>,
     },
     Stop,
@@ -115,6 +126,54 @@ impl PersistentGrayCapture {
             .context("persistent camera thread stopped during capture")?
             .map_err(anyhow::Error::msg)
     }
+
+    pub fn capture_fresh_after(
+        &self,
+        not_before: Duration,
+        fallback_settle_frames: u32,
+        maximum_frames: u32,
+    ) -> Result<CapturedGrayFrame> {
+        ensure!(
+            fallback_settle_frames <= 120,
+            "camera fallback settling frame count is excessive"
+        );
+        ensure!(
+            (1..=120).contains(&maximum_frames),
+            "fresh camera frame limit must be between 1 and 120"
+        );
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.requests
+            .send(PersistentCaptureRequest::CaptureFreshAfter {
+                not_before,
+                fallback_settle_frames,
+                maximum_frames,
+                response: response_tx,
+            })
+            .context("requesting a fresh persistent camera frame")?;
+        response_rx
+            .recv()
+            .context("persistent camera thread stopped during fresh capture")?
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+pub fn monotonic_timestamp() -> Result<Duration> {
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timestamp) };
+    if result != 0 {
+        return Err(io::Error::last_os_error()).context("reading the monotonic clock");
+    }
+    ensure!(
+        timestamp.tv_sec >= 0 && (0..1_000_000_000).contains(&timestamp.tv_nsec),
+        "monotonic clock returned an invalid timestamp"
+    );
+    Ok(Duration::new(
+        timestamp.tv_sec as u64,
+        timestamp.tv_nsec as u32,
+    ))
 }
 
 impl Drop for PersistentGrayCapture {
@@ -388,18 +447,43 @@ fn persistent_capture_worker(
     }
 
     while let Ok(request) = requests.recv() {
-        let PersistentCaptureRequest::Capture {
-            settle_frames,
-            response,
-        } = request
-        else {
-            break;
+        let (settle_frames, freshness, frame_limit, response) = match request {
+            PersistentCaptureRequest::Capture {
+                settle_frames,
+                response,
+            } => (
+                settle_frames,
+                None,
+                settle_frames.saturating_add(1),
+                response,
+            ),
+            PersistentCaptureRequest::CaptureFreshAfter {
+                not_before,
+                fallback_settle_frames,
+                maximum_frames,
+                response,
+            } => (
+                fallback_settle_frames,
+                Some(not_before),
+                maximum_frames,
+                response,
+            ),
+            PersistentCaptureRequest::Stop => break,
         };
         let capture = (|| -> Result<CapturedGrayFrame> {
             let mut captured = None;
-            for index in 0..=settle_frames {
+            for index in 0..frame_limit {
                 let (buffer, metadata) = stream.next().context("capturing camera frame")?;
-                if index < settle_frames {
+                let timestamp_fresh = freshness.and_then(|not_before| {
+                    frame_is_fresh_after(
+                        metadata.flags,
+                        metadata.timestamp.sec,
+                        metadata.timestamp.usec,
+                        not_before,
+                    )
+                });
+                let accepted = timestamp_fresh.unwrap_or(index >= settle_frames);
+                if !accepted {
                     continue;
                 }
                 let used = (metadata.bytesused as usize).min(buffer.len());
@@ -419,15 +503,36 @@ fn persistent_capture_worker(
                         interval_numerator: parameters.interval.numerator,
                         interval_denominator: parameters.interval.denominator,
                         sequence: metadata.sequence,
-                        settle_frames,
+                        settle_frames: index,
+                        timestamp_monotonic: metadata
+                            .flags
+                            .contains(BufferFlags::TIMESTAMP_MONOTONIC),
+                        fresh_after_boundary: timestamp_fresh == Some(true),
                     },
                 });
+                break;
             }
-            captured.context("persistent camera returned no frame")
+            captured.context("persistent camera returned no frame after the freshness boundary")
         })()
         .map_err(|error| format!("{error:#}"));
         let _ = response.send(capture);
     }
+}
+
+fn frame_is_fresh_after(
+    flags: BufferFlags,
+    seconds: libc::time_t,
+    microseconds: libc::time_t,
+    not_before: Duration,
+) -> Option<bool> {
+    if !flags.contains(BufferFlags::TIMESTAMP_MONOTONIC)
+        || seconds < 0
+        || !(0..1_000_000).contains(&microseconds)
+    {
+        return None;
+    }
+    let timestamp = Duration::new(seconds as u64, microseconds as u32 * 1_000);
+    Some(timestamp >= not_before)
 }
 
 pub fn capture_gray_frame(config: &V4l2CaptureConfig) -> Result<CapturedGrayFrame> {
@@ -495,6 +600,8 @@ pub fn capture_gray_frames(
                 interval_denominator: parameters.interval.denominator,
                 sequence: metadata.sequence,
                 settle_frames: config.settle_frames,
+                timestamp_monotonic: metadata.flags.contains(BufferFlags::TIMESTAMP_MONOTONIC),
+                fresh_after_boundary: false,
             },
         });
     }
@@ -583,6 +690,30 @@ mod tests {
         let mut config = V4l2CaptureConfig::lumenpnp("/dev/null");
         config.width = 1279;
         assert!(PersistentGrayCapture::open(config).is_err());
+    }
+
+    #[test]
+    fn fresh_capture_uses_monotonic_camera_timestamps() {
+        let flags = BufferFlags::TIMESTAMP_MONOTONIC;
+        let boundary = Duration::new(10, 500_000_000);
+        assert_eq!(
+            frame_is_fresh_after(flags, 10, 499_999, boundary),
+            Some(false)
+        );
+        assert_eq!(
+            frame_is_fresh_after(flags, 10, 500_000, boundary),
+            Some(true)
+        );
+        assert_eq!(
+            frame_is_fresh_after(BufferFlags::empty(), 11, 0, boundary),
+            None
+        );
+        assert_eq!(frame_is_fresh_after(flags, 10, 1_000_000, boundary), None);
+    }
+
+    #[test]
+    fn monotonic_clock_returns_a_valid_timestamp() {
+        assert!(monotonic_timestamp().unwrap() > Duration::ZERO);
     }
 
     #[test]

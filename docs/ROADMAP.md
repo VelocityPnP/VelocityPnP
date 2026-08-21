@@ -99,6 +99,8 @@ The project is organized by measurable gates rather than calendar estimates.
   duration/storage estimates, artifact quotas, and mosaic-only retention
 - [x] Add transient-source, chunked height reconstruction for full-workspace
   layered scans without persistent per-tile storage
+- [x] Add and physically validate a low-overlap, timestamp-gated reconnaissance
+  scan that produces a usable full-workspace inventory in under 20 minutes
 - [x] Georeference survey rasters and use installed plate-plane geometry for
   full-workspace scan planning
 - [ ] Add board-region discovery and package-template pose comparison

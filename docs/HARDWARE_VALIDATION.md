@@ -1293,6 +1293,40 @@ Y=144.859 mm with a 10.049 mm radius. The fitted projection was
 machine returned homed, ready, and fault-free to X=220.131, Y=190.271,
 Z=31.5.
 
+### Full-workspace reconnaissance
+
+Reconnaissance baseline `ed0f676c-64e9-4f7f-89ae-8aecaf0a5c60` completed on
+2026-08-20. It used 20 percent overlap, 0.20 mm/pixel output, 1,200 mm/min
+motion, calibrated installed-plate placement, and no tile registration or
+parallax analysis. It captured all 1,295 tiles in a 37-by-35 raster. The scan
+took 1,349.4 seconds, so it missed the 20-minute target by 149.4 seconds.
+
+The camera supplied monotonic timestamps for all 1,294 captures after the
+initial frame. The capture path discarded four queued frames after every
+move, with no fixed-settle fallback. Coverage was 100 percent with no nominal
+fallback. The 2,247-by-1,214 mosaic and manifest retained 1,618,636 bytes.
+The mosaic SHA-256 is
+`fab06c429d6d9e7f3172ab6f7d20d43f77c4832e2336c3f7c6303389796fb481`.
+
+Visual inspection found clear plate holes and numbering. The datum PCB, FTP
+PCB, feeder lanes, pocket tape, rails, and bottom-camera area were all
+identifiable. This gave enough image-quality margin to reduce reconnaissance
+overlap without changing resolution, feed, projection, or capture freshness.
+
+Optimized scan `c17f976a-f25a-419c-8bab-e73dfec12540` used 10 percent overlap.
+It captured all 1,023 tiles in a 33-by-31 raster and completed in 1,177.3
+seconds, or 19 minutes 37.3 seconds. The hardware-adjusted estimate was 1,158
+seconds, 19.3 seconds below the measured result. All 1,022 post-first captures
+used monotonic timestamp selection. Coverage was again 100 percent with no
+nominal fallback, registration, or failure.
+
+The optimized 2,247-by-1,214 mosaic and manifest retained 1,513,489 bytes.
+Its SHA-256 is
+`e47ed6b6c371c1918928c3ddc4619da031bce41ed49f8d154c122d7a238299ce`.
+Visual comparison found no material seam or identifiability regression at 10
+percent overlap. The machine ended homed, ready, and fault-free at X=220.131,
+Y=190.271, Z=31.5. This passes the under-20-minute workspace inventory target.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

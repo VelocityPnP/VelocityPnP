@@ -146,6 +146,19 @@ class ClientTests(unittest.TestCase):
             "region_preset": "installed_plates",
         })
 
+        with patch.object(client, "_request", return_value=estimate) as send:
+            client.estimate_workspace_scan(
+                "calibration",
+                region_preset="installed_plates",
+                mode="reconnaissance",
+            )
+        send.assert_called_once_with("POST", "/workspace-scans/estimate", {
+            "calibration_id": "calibration",
+            "mode": "reconnaissance",
+            "artifact_retention": "mosaic_only",
+            "region_preset": "installed_plates",
+        })
+
         with patch.object(client, "_request") as send:
             with self.assertRaisesRegex(ValueError, "explicit confirmation"):
                 client.start_workspace_scan(
@@ -163,19 +176,47 @@ class ClientTests(unittest.TestCase):
 
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
-        with patch.object(client, "_request_bytes", return_value=b"png") as send:
-            self.assertEqual(
-                client.workspace_scan_mosaic(
-                    "scan", surface_model="installed_plate_planes",
-                ),
-                b"png",
+        layered_report = {
+            "mosaic_layers": [{
+                "surface_model": "installed_plate_planes",
+                "artifact_name": "mosaic-installed-plate-planes.png",
+            }],
+        }
+        with (
+            patch.object(client, "_request", return_value=layered_report),
+            patch.object(client, "_request_bytes", return_value=b"png") as send,
+        ):
+            result = client.workspace_scan_mosaic(
+                "scan", surface_model="installed_plate_planes",
             )
+        self.assertEqual(result, b"png")
         send.assert_called_once_with(
             "GET",
             "/workspace-scans/scan/artifacts/"
             "mosaic-installed-plate-planes.png",
             "image/png",
         )
+
+        reconnaissance_report = {
+            "mosaic_layers": [{
+                "surface_model": "installed_plate_planes",
+                "artifact_name": "mosaic.png",
+            }],
+        }
+        with (
+            patch.object(client, "_request", return_value=reconnaissance_report),
+            patch.object(client, "_request_bytes", return_value=b"recon") as send,
+        ):
+            result = client.workspace_scan_mosaic(
+                "scan", surface_model="installed_plate_planes",
+            )
+        self.assertEqual(result, b"recon")
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/scan/artifacts/mosaic.png",
+            "image/png",
+        )
+
         with self.assertRaisesRegex(ValueError, "surface_model"):
             client.workspace_scan_mosaic("scan", surface_model="unknown")
 

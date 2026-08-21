@@ -1078,8 +1078,11 @@ components:
         calibration_id: { type: string, format: uuid }
         mode:
           type: string
-          enum: [precision, survey]
+          enum: [precision, survey, reconnaissance]
           default: precision
+          description: >-
+            reconnaissance requires installed_plates and makes one coarse
+            plate-plane mosaic with timestamp-gated persistent capture.
         artifact_retention:
           type: string
           enum: [full_sources, transient_sources, thumbnails, mosaic_only]
@@ -1093,11 +1096,12 @@ components:
           enum: [installed_plates]
         overlap_fraction:
           type: number
-          minimum: 0.2
+          minimum: 0.1
           maximum: 0.75
           description: >-
-            Survey mode defaults to 0.30. Installed-plate layered scans use at
-            least 0.60 for reliable multi-height reconstruction.
+            Reconnaissance mode defaults to 0.10. Other modes require at least
+            0.20. Survey mode defaults to 0.30. Installed-plate layered scans
+            use at least 0.60 for reliable multi-height reconstruction.
         output_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
         feed_mm_per_min:
           type: number
@@ -1143,7 +1147,7 @@ components:
         - persistent_capture
         - warnings
       properties:
-        mode: { type: string, enum: [precision, survey] }
+        mode: { type: string, enum: [precision, survey, reconnaissance] }
         artifact_retention:
           type: string
           enum: [full_sources, transient_sources, thumbnails, mosaic_only]
@@ -1197,6 +1201,8 @@ components:
         - region
         - feed_mm_per_min
         - capture_settle_frames
+        - discarded_capture_frames
+        - timestamp_fresh_frames
         - planned_tiles
         - captured_tiles
         - estimated_duration_seconds
@@ -1217,7 +1223,7 @@ components:
         status:
           type: string
           enum: [pending, running, succeeded, failed]
-        mode: { type: string, enum: [precision, survey] }
+        mode: { type: string, enum: [precision, survey, reconnaissance] }
         artifact_retention:
           type: string
           enum: [full_sources, transient_sources, thumbnails, mosaic_only]
@@ -1231,6 +1237,8 @@ components:
             - type: "null"
         feed_mm_per_min: { type: number, minimum: 0 }
         capture_settle_frames: { type: integer, minimum: 0 }
+        discarded_capture_frames: { type: integer, minimum: 0 }
+        timestamp_fresh_frames: { type: integer, minimum: 0 }
         planned_tiles: { type: integer, minimum: 1 }
         captured_tiles: { type: integer, minimum: 0 }
         mosaic_width_px: { type: [integer, "null"], minimum: 2 }

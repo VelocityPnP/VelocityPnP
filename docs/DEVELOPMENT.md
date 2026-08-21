@@ -135,6 +135,17 @@ request has a retained-byte estimate and quota. A request that exceeds its
 quota fails before motion. The runtime checks actual encoded bytes before each
 artifact is stored. The default survey quota is 64 MiB.
 
+`reconnaissance` mode requires the `installed_plates` region preset. It makes
+one installed-plate-plane mosaic at 0.20 mm/pixel with 10 percent overlap and
+`mosaic_only` retention by default. It uses calibrated placement without tile
+registration or parallax analysis. After each move completes, it accepts a
+frame whose monotonic V4L2 timestamp is at least one frame period newer than
+the motion boundary. A camera without monotonic timestamps uses the validated
+four-frame fallback. The scan report records actual discarded frames in
+`discarded_capture_frames` and timestamp-selected captures in
+`timestamp_fresh_frames`. Its estimate includes the serialized motion-control
+and capture-dispatch cost measured on the attached V3.0.4 machine.
+
 Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
 
 ```bash

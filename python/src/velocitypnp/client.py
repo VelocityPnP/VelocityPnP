@@ -162,18 +162,27 @@ class Client:
         scan_id: str | uuid.UUID,
         surface_model: str = "top_camera_working_plane",
     ) -> bytes:
-        artifacts = {
+        fallback_artifacts = {
             "top_camera_working_plane": "mosaic.png",
             "installed_plate_planes": "mosaic-installed-plate-planes.png",
         }
-        if surface_model not in artifacts:
+        if surface_model not in fallback_artifacts:
             raise ValueError(
                 "surface_model must be top_camera_working_plane or "
                 "installed_plate_planes"
             )
+        report = self.workspace_scan(scan_id)
+        artifact_name = next(
+            (
+                layer["artifact_name"]
+                for layer in report.get("mosaic_layers", [])
+                if layer.get("surface_model") == surface_model
+            ),
+            fallback_artifacts[surface_model],
+        )
         return self._request_bytes(
             "GET",
-            f"/workspace-scans/{scan_id}/artifacts/{artifacts[surface_model]}",
+            f"/workspace-scans/{scan_id}/artifacts/{artifact_name}",
             "image/png",
         )
 
@@ -260,8 +269,10 @@ class Client:
             raise ValueError("workspace scan requires region or region_preset")
         if region_preset is not None and region_preset != "installed_plates":
             raise ValueError("workspace region_preset must be installed_plates")
-        if mode not in {"precision", "survey"}:
-            raise ValueError("workspace scan mode must be precision or survey")
+        if mode not in {"precision", "survey", "reconnaissance"}:
+            raise ValueError(
+                "workspace scan mode must be precision, survey, or reconnaissance"
+            )
         if artifact_retention not in {
             "full_sources", "transient_sources", "thumbnails", "mosaic_only",
         }:

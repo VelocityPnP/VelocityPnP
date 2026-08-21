@@ -69,6 +69,13 @@ Installed-plate layered scans raise overlap to at least 60 percent for reliable
 multi-height reconstruction.
 Pass `feed_mm_per_min` only to request a slower scan.
 
+Use `mode="reconnaissance"` with `region_preset="installed_plates"` for a
+fast plate-plane inventory image. It defaults to 20 percent overlap,
+0.20 mm/pixel output, and mosaic-only retention. It uses post-motion camera
+timestamps instead of a fixed four-frame wait when the camera driver supports
+monotonic timestamps. Raised objects can have local seams; use a focused
+layered scan for precise height reconstruction after object discovery.
+
 An installed-plate scan with `artifact_retention="full_sources"` or
 `artifact_retention="transient_sources"` also measures a confidence-aware
 surface map and makes a height-corrected mosaic. Transient retention deletes

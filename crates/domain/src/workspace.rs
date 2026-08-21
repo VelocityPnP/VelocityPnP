@@ -58,6 +58,7 @@ pub enum WorkspaceScanMode {
     #[default]
     Precision,
     Survey,
+    Reconnaissance,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +249,10 @@ pub struct WorkspaceScanReport {
     pub feed_mm_per_min: f64,
     #[serde(default)]
     pub capture_settle_frames: u32,
+    #[serde(default)]
+    pub discarded_capture_frames: u32,
+    #[serde(default)]
+    pub timestamp_fresh_frames: u32,
     pub frame_width_px: u32,
     pub frame_height_px: u32,
     pub usable_pixel_bounds: WorkspacePixelBounds,

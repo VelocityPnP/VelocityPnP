@@ -58,8 +58,8 @@ use velocitypnp_vision::{
     detect_installed_plate_hole, encode_gray_png, encode_rgb_png, encode_rgba_png,
     fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
     fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
-    measure_workspace_parallax, plan_bottom_camera_correction, plan_pixel_correction,
-    plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    measure_workspace_parallax, monotonic_timestamp, plan_bottom_camera_correction,
+    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
     render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
@@ -93,6 +93,15 @@ const WORKSPACE_PRECISION_SETTLE_FRAMES: u32 = 5;
 // Persistent capture allocates four V4L2 buffers. Discard all four after each
 // move so that the accepted frame was exposed at the completed pose.
 const WORKSPACE_SURVEY_SETTLE_FRAMES: u32 = 4;
+const RECONNAISSANCE_OVERLAP: f64 = 0.10;
+const MIN_RECONNAISSANCE_OVERLAP: f64 = 0.10;
+const MIN_WORKSPACE_OVERLAP: f64 = 0.20;
+const RECONNAISSANCE_OUTPUT_MM_PER_PIXEL: f64 = 0.20;
+const RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES: u32 = 1;
+const RECONNAISSANCE_MAX_FRESH_CAPTURE_FRAMES: u32 = 32;
+// Account for the serialized jog completion and fresh-capture dispatch that
+// are not part of ideal feed time. This was measured on a LumenPnP V3.0.4.
+const RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS: f64 = 0.18;
 const MIN_WORKSPACE_COVERAGE: f64 = 0.99;
 const DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL: f64 = 0.10;
 const DEFAULT_SURVEY_OVERLAP: f64 = 0.30;
@@ -728,12 +737,13 @@ async fn estimate_workspace_scan(
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) =
         load_workspace_camera_model(&state, body.specification.calibration_id)?;
-    let (camera_model, installed_camera_model, installed_geometry) =
+    let (camera_model, surface_model, installed_camera_model, installed_geometry) =
         select_workspace_surface_models(
             &state,
             &snapshot,
             top_camera_model,
             body.specification.region_preset,
+            body.specification.mode,
         )?;
     let current_pose = state
         .machine
@@ -745,7 +755,7 @@ async fn estimate_workspace_scan(
         &body.specification,
         &top_profile,
         &camera_model,
-        WorkspaceSurfaceModel::TopCameraWorkingPlane,
+        surface_model,
         installed_camera_model.as_ref(),
         installed_geometry.as_ref(),
         current_pose,
@@ -778,19 +788,20 @@ async fn start_workspace_scan(
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) =
         load_workspace_camera_model(&state, body.specification.calibration_id)?;
-    let (camera_model, installed_camera_model, installed_geometry) =
+    let (camera_model, surface_model, installed_camera_model, installed_geometry) =
         select_workspace_surface_models(
             &state,
             &snapshot,
             top_camera_model,
             body.specification.region_preset,
+            body.specification.mode,
         )?;
     let (plan, estimate) = prepare_workspace_scan(
         &state,
         &body.specification,
         &top_profile,
         &camera_model,
-        WorkspaceSurfaceModel::TopCameraWorkingPlane,
+        surface_model,
         installed_camera_model.as_ref(),
         installed_geometry.as_ref(),
         current_pose,
@@ -820,6 +831,8 @@ async fn start_workspace_scan(
         output_mm_per_pixel: plan.output_mm_per_pixel,
         feed_mm_per_min: estimate.feed_mm_per_min,
         capture_settle_frames: estimate.capture_settle_frames,
+        discarded_capture_frames: 0,
+        timestamp_fresh_frames: 0,
         frame_width_px: plan.frame_width_px,
         frame_height_px: plan.frame_height_px,
         usable_pixel_bounds: plan.usable_pixel_bounds,
@@ -891,6 +904,8 @@ fn prepare_workspace_scan(
     start_pose: Pose,
 ) -> ApiResult<(WorkspaceScanPlan, WorkspaceScanEstimate)> {
     let mut warnings = Vec::new();
+    let reconnaissance = specification.mode == WorkspaceScanMode::Reconnaissance;
+    let streaming = specification.mode != WorkspaceScanMode::Precision;
     if installed_camera_model.is_some() {
         warnings.push(
             "mixed-height scan will produce separate working-plane and installed-plate mosaics"
@@ -936,16 +951,28 @@ fn prepare_workspace_scan(
             ));
         }
     };
-    let survey = specification.mode == WorkspaceScanMode::Survey;
-    let requested_overlap = specification.overlap_fraction.unwrap_or(if survey {
+    if reconnaissance {
+        warnings.push(
+            "reconnaissance uses the installed-plate projection and monotonic camera timestamps; raised objects can have local seams until a focused height scan"
+                .into(),
+        );
+    }
+    let requested_overlap = specification.overlap_fraction.unwrap_or(if reconnaissance {
+        RECONNAISSANCE_OVERLAP
+    } else if streaming {
         DEFAULT_SURVEY_OVERLAP
     } else {
         0.35
     });
-    if !(0.2..=0.75).contains(&requested_overlap) {
-        return Err(ApiError::bad_request(
-            "workspace overlap must be between 0.2 and 0.75",
-        ));
+    let minimum_requested_overlap = if reconnaissance {
+        MIN_RECONNAISSANCE_OVERLAP
+    } else {
+        MIN_WORKSPACE_OVERLAP
+    };
+    if !(minimum_requested_overlap..=0.75).contains(&requested_overlap) {
+        return Err(ApiError::bad_request(format!(
+            "workspace overlap must be between {minimum_requested_overlap:.2} and 0.75 for this mode"
+        )));
     }
     let minimum_layered_overlap = if installed_camera_model.is_some() {
         layered_workspace_overlap(minimum_layered_workspace_overlap(
@@ -953,7 +980,7 @@ fn prepare_workspace_scan(
             &planning_camera_model,
         )?)
     } else {
-        0.2
+        minimum_requested_overlap
     };
     let overlap_fraction = requested_overlap.max(minimum_layered_overlap);
     if overlap_fraction > requested_overlap {
@@ -965,19 +992,20 @@ fn prepare_workspace_scan(
     }
     let output_mm_per_pixel = specification
         .output_mm_per_pixel
-        .or_else(|| survey.then_some(DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL));
-    if survey && output_mm_per_pixel.is_some_and(|scale| scale < 0.05) {
+        .or_else(|| reconnaissance.then_some(RECONNAISSANCE_OUTPUT_MM_PER_PIXEL))
+        .or_else(|| streaming.then_some(DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL));
+    if streaming && output_mm_per_pixel.is_some_and(|scale| scale < 0.05) {
         return Err(ApiError::bad_request(
             "survey output_mm_per_pixel must be at least 0.05",
         ));
     }
-    let artifact_retention = specification.artifact_retention.unwrap_or(if survey {
+    let artifact_retention = specification.artifact_retention.unwrap_or(if streaming {
         WorkspaceArtifactRetention::MosaicOnly
     } else {
         WorkspaceArtifactRetention::FullSources
     });
     if artifact_retention == WorkspaceArtifactRetention::TransientSources
-        && (!survey || installed_camera_model.is_none())
+        && (specification.mode != WorkspaceScanMode::Survey || installed_camera_model.is_none())
     {
         return Err(ApiError::bad_request(
             "transient_sources requires a layered installed-plate survey",
@@ -985,7 +1013,7 @@ fn prepare_workspace_scan(
     }
     let tile_limit = if artifact_retention == WorkspaceArtifactRetention::TransientSources {
         MAX_CHUNKED_WORKSPACE_SURVEY_TILES
-    } else if survey {
+    } else if streaming {
         MAX_WORKSPACE_SURVEY_TILES
     } else {
         MAX_WORKSPACE_SCAN_TILES
@@ -1010,7 +1038,7 @@ fn prepare_workspace_scan(
                 .into()
         });
     }
-    let default_quota = if survey {
+    let default_quota = if streaming {
         DEFAULT_SURVEY_ARTIFACT_QUOTA_BYTES
     } else {
         DEFAULT_PRECISION_ARTIFACT_QUOTA_BYTES
@@ -1042,7 +1070,7 @@ fn prepare_workspace_scan(
         overlap_fraction,
         output_mm_per_pixel,
         max_tiles,
-        if survey {
+        if streaming {
             MAX_WORKSPACE_SURVEY_PIXELS
         } else {
             MAX_WORKSPACE_MOSAIC_PIXELS
@@ -1071,7 +1099,7 @@ fn prepare_workspace_scan(
                     WorkspaceSurfaceModel::InstalledPlatePlanes,
                 ]
             } else {
-                vec![WorkspaceSurfaceModel::TopCameraWorkingPlane]
+                vec![surface_model]
             },
             artifact_quota_bytes,
             top_profile,
@@ -1140,13 +1168,25 @@ fn select_workspace_surface_models(
     snapshot: &CalibrationSnapshot,
     top_camera_model: PlanarCameraModel,
     region_preset: Option<WorkspaceRegionPreset>,
+    mode: WorkspaceScanMode,
 ) -> ApiResult<(
     PlanarCameraModel,
+    WorkspaceSurfaceModel,
     Option<PlanarCameraModel>,
     Option<InstalledPlateGeometryReport>,
 )> {
     if region_preset != Some(WorkspaceRegionPreset::InstalledPlates) {
-        return Ok((top_camera_model, None, None));
+        if mode == WorkspaceScanMode::Reconnaissance {
+            return Err(ApiError::bad_request(
+                "reconnaissance mode requires the installed_plates region preset",
+            ));
+        }
+        return Ok((
+            top_camera_model,
+            WorkspaceSurfaceModel::TopCameraWorkingPlane,
+            None,
+            None,
+        ));
     }
     if !crate::calibration_artifacts::artifact_tree_is_current(
         state,
@@ -1216,7 +1256,21 @@ fn select_workspace_surface_models(
     }
     let model = rescale_planar_camera_model(&top_camera_model, mean_mapping)
         .map_err(ApiError::bad_request)?;
-    Ok((top_camera_model, Some(model), Some(geometry)))
+    if mode == WorkspaceScanMode::Reconnaissance {
+        Ok((
+            model,
+            WorkspaceSurfaceModel::InstalledPlatePlanes,
+            None,
+            Some(geometry),
+        ))
+    } else {
+        Ok((
+            top_camera_model,
+            WorkspaceSurfaceModel::TopCameraWorkingPlane,
+            Some(model),
+            Some(geometry),
+        ))
+    }
 }
 
 fn installed_plates_scan_region(
@@ -1328,7 +1382,7 @@ fn workspace_scan_feed(
     mode: WorkspaceScanMode,
     requested: Option<f64>,
 ) -> ApiResult<f64> {
-    let default = if mode == WorkspaceScanMode::Survey {
+    let default = if mode != WorkspaceScanMode::Precision {
         profile.default_feed_mm_per_min
     } else {
         profile
@@ -1385,8 +1439,11 @@ fn workspace_scan_estimate(
     }
     travel_mm += (park_pose.x_mm - prior.x_mm).hypot(park_pose.y_mm - prior.y_mm);
     let planned_tiles = plan.tiles.len() as u32;
-    let planned_registrations =
-        plan.rows * plan.columns.saturating_sub(1) + plan.rows.saturating_sub(1) * plan.columns;
+    let planned_registrations = if mode == WorkspaceScanMode::Reconnaissance {
+        0
+    } else {
+        plan.rows * plan.columns.saturating_sub(1) + plan.rows.saturating_sub(1) * plan.columns
+    };
     let mosaic_width_px = ((plan.region.x_max_mm - plan.region.x_min_mm) / plan.output_mm_per_pixel)
         .ceil() as u32
         + 1;
@@ -1442,16 +1499,24 @@ fn workspace_scan_estimate(
         + parallax_bytes
         + height_product_bytes;
     let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
-    let base_duration_seconds = if mode == WorkspaceScanMode::Survey {
+    let base_duration_seconds = if mode != WorkspaceScanMode::Precision {
         let first_frames = top_profile.settle_frames + 1;
-        let later_frames = WORKSPACE_SURVEY_SETTLE_FRAMES + 1;
+        let later_frames = if mode == WorkspaceScanMode::Reconnaissance {
+            RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES + 1
+        } else {
+            WORKSPACE_SURVEY_SETTLE_FRAMES + 1
+        };
         let capture_frames = u64::from(first_frames)
             + u64::from(planned_tiles.saturating_sub(1)) * u64::from(later_frames);
         (movement_seconds
             + capture_frames as f64 / f64::from(top_profile.frames_per_second)
-            + f64::from(planned_registrations)
-                * ESTIMATED_REGISTRATION_SECONDS
-                * (surface_models.len() + usize::from(surface_models.len() > 1)) as f64
+            + if mode == WorkspaceScanMode::Reconnaissance {
+                f64::from(planned_tiles.saturating_sub(1)) * RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS
+            } else {
+                f64::from(planned_registrations)
+                    * ESTIMATED_REGISTRATION_SECONDS
+                    * (surface_models.len() + usize::from(surface_models.len() > 1)) as f64
+            }
             + 20.0)
             .ceil() as u64
     } else {
@@ -1486,7 +1551,9 @@ fn workspace_scan_estimate(
         overlap_fraction: plan.overlap_fraction,
         output_mm_per_pixel: plan.output_mm_per_pixel,
         feed_mm_per_min,
-        capture_settle_frames: if mode == WorkspaceScanMode::Survey {
+        capture_settle_frames: if mode == WorkspaceScanMode::Reconnaissance {
+            RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES
+        } else if mode == WorkspaceScanMode::Survey {
             WORKSPACE_SURVEY_SETTLE_FRAMES
         } else {
             WORKSPACE_PRECISION_SETTLE_FRAMES
@@ -1500,7 +1567,7 @@ fn workspace_scan_estimate(
         estimated_duration_seconds,
         estimated_retained_bytes,
         artifact_quota_bytes,
-        persistent_capture: mode == WorkspaceScanMode::Survey,
+        persistent_capture: mode != WorkspaceScanMode::Precision,
         warnings: Vec::new(),
     }
 }
@@ -1658,7 +1725,7 @@ async fn capture_and_build_workspace_scan(
     lease_id: Uuid,
     use_lights: bool,
 ) -> Result<String, String> {
-    if scan.mode == WorkspaceScanMode::Survey {
+    if scan.mode != WorkspaceScanMode::Precision {
         return capture_and_build_workspace_survey(
             state,
             scan,
@@ -1817,11 +1884,13 @@ async fn capture_and_build_workspace_survey(
     let updates = profile_control_updates(top_profile);
     let config = camera_capture_config(top_profile, top_path.to_owned());
     let mut session = Some(open_persistent_workspace_camera_with_retry(&config, &updates).await?);
-    let mut layer_streams = vec![(
-        WorkspaceSurfaceModel::TopCameraWorkingPlane,
+    let primary_stream = if scan.mode == WorkspaceScanMode::Reconnaissance {
+        WorkspaceMosaicStream::new_without_registration(plan.clone(), camera_model.clone())
+    } else {
         WorkspaceMosaicStream::new(plan.clone(), camera_model.clone())
-            .map_err(|error| error.to_string())?,
-    )];
+    }
+    .map_err(|error| error.to_string())?;
+    let mut layer_streams = vec![(scan.surface_model, primary_stream)];
     if let Some(installed_camera_model) = installed_camera_model {
         layer_streams.push((
             WorkspaceSurfaceModel::InstalledPlatePlanes,
@@ -1830,16 +1899,19 @@ async fn capture_and_build_workspace_survey(
         ));
     }
     let mut streams = Some(layer_streams);
-    let mut parallax_stream = installed_camera_model
-        .map(|installed_camera_model| {
+    let mut parallax_stream = if scan.mode == WorkspaceScanMode::Reconnaissance {
+        None
+    } else {
+        installed_camera_model.map(|installed_camera_model| {
             WorkspaceParallaxStream::new(
                 plan.clone(),
                 camera_model.clone(),
                 installed_camera_model.clone(),
             )
         })
-        .transpose()
-        .map_err(|error| error.to_string())?;
+    }
+    .transpose()
+    .map_err(|error| error.to_string())?;
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     let feed_mm_per_min = scan.feed_mm_per_min;
@@ -1857,6 +1929,20 @@ async fn capture_and_build_workspace_survey(
             .jog(lease_id, tile.nominal_pose.into(), feed_mm_per_min)
             .await
             .map_err(|error| error.to_string())?;
+        let fresh_after = if scan.mode == WorkspaceScanMode::Reconnaissance && capture_index > 0 {
+            let guard = Duration::from_secs_f64(
+                f64::from(RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES)
+                    / f64::from(config.frames_per_second),
+            );
+            Some(
+                monotonic_timestamp()
+                    .map_err(|error| error.to_string())?
+                    .checked_add(guard)
+                    .ok_or_else(|| "camera freshness boundary overflow".to_string())?,
+            )
+        } else {
+            None
+        };
         let settle_frames = if capture_index == 0 {
             top_profile.settle_frames
         } else {
@@ -1864,14 +1950,22 @@ async fn capture_and_build_workspace_survey(
                 .settle_frames
                 .min(WORKSPACE_SURVEY_SETTLE_FRAMES)
         };
-        let frame = capture_persistent_workspace_frame(
+        let capture = capture_persistent_workspace_frame(
             &mut session,
             &config,
             &updates,
             settle_frames,
             top_profile.settle_frames,
+            fresh_after,
         )
         .await?;
+        scan.discarded_capture_frames = scan
+            .discarded_capture_frames
+            .saturating_add(capture.metadata.settle_frames);
+        if capture.metadata.fresh_after_boundary {
+            scan.timestamp_fresh_frames = scan.timestamp_fresh_frames.saturating_add(1);
+        }
+        let frame = capture.frame;
         persist_workspace_tile_artifact(state, scan, tile, &frame, transient_sources.as_ref())?;
 
         let mut active_streams = streams
@@ -2432,7 +2526,8 @@ async fn capture_persistent_workspace_frame(
     control_updates: &[CameraControlUpdate],
     settle_frames: u32,
     reopen_settle_frames: u32,
-) -> Result<GrayFrame, String> {
+    fresh_after: Option<Duration>,
+) -> Result<velocitypnp_vision::CapturedGrayFrame, String> {
     let mut last_error = String::new();
     for attempt in 1..=MAX_CAMERA_CAPTURE_ATTEMPTS {
         if session.is_none() {
@@ -2457,10 +2552,18 @@ async fn capture_persistent_workspace_frame(
         } else {
             reopen_settle_frames
         };
+        let requested_fresh_after = (attempt == 1).then_some(fresh_after).flatten();
         match tokio::task::spawn_blocking(move || {
-            active
-                .capture(requested_settle_frames)
-                .map(|capture| capture.frame)
+            let capture = if let Some(not_before) = requested_fresh_after {
+                active.capture_fresh_after(
+                    not_before,
+                    requested_settle_frames,
+                    RECONNAISSANCE_MAX_FRESH_CAPTURE_FRAMES,
+                )
+            } else {
+                active.capture(requested_settle_frames)
+            }?;
+            Ok::<_, anyhow::Error>(capture)
         })
         .await
         {
@@ -12849,6 +12952,8 @@ mod tests {
             output_mm_per_pixel: DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL,
             feed_mm_per_min: 1_200.0,
             capture_settle_frames: WORKSPACE_SURVEY_SETTLE_FRAMES,
+            discarded_capture_frames: 0,
+            timestamp_fresh_frames: 0,
             frame_width_px: 1280,
             frame_height_px: 720,
             usable_pixel_bounds: velocitypnp_domain::WorkspacePixelBounds {
@@ -13427,6 +13532,84 @@ mod tests {
         assert!(
             workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, Some(1_201.0)).is_err()
         );
+        assert_eq!(
+            workspace_scan_feed(&state.profile, WorkspaceScanMode::Reconnaissance, None).unwrap(),
+            1_200.0
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnaissance_uses_a_coarse_single_plate_layer() {
+        let state = test_state();
+        let mut top_profile =
+            CameraProfile::initial_lumenpnp(&state.profile.id, CameraRole::TopCamera);
+        top_profile.settle_frames = 5;
+        let mm_per_pixel = 0.018;
+        let plate_model = PlanarCameraModel {
+            role: CameraRole::TopCamera,
+            center_x_px: 640.0,
+            center_y_px: 360.0,
+            normalization_x_px: 640.0,
+            normalization_y_px: 360.0,
+            correction_x_coefficients_mm: [mm_per_pixel * 640.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            correction_y_coefficients_mm: [0.0, mm_per_pixel * 360.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            supported_min_x_px: 0.0,
+            supported_max_x_px: 1279.0,
+            supported_min_y_px: 0.0,
+            supported_max_y_px: 719.0,
+            kind: velocitypnp_domain::PlanarCameraModelKind::Affine,
+        };
+        let specification = WorkspaceScanSpecification {
+            calibration_id: Uuid::new_v4(),
+            mode: WorkspaceScanMode::Reconnaissance,
+            artifact_retention: None,
+            region: None,
+            region_preset: Some(WorkspaceRegionPreset::InstalledPlates),
+            overlap_fraction: None,
+            output_mm_per_pixel: None,
+            feed_mm_per_min: None,
+            max_tiles: None,
+            artifact_quota_bytes: None,
+        };
+
+        let (plan, estimate) = prepare_workspace_scan(
+            &state,
+            &specification,
+            &top_profile,
+            &plate_model,
+            WorkspaceSurfaceModel::InstalledPlatePlanes,
+            None,
+            None,
+            state.profile.home_pose,
+        )
+        .unwrap();
+
+        assert_eq!(estimate.mode, WorkspaceScanMode::Reconnaissance);
+        assert_eq!(
+            estimate.surface_model,
+            WorkspaceSurfaceModel::InstalledPlatePlanes
+        );
+        assert_eq!(
+            estimate.surface_models,
+            vec![WorkspaceSurfaceModel::InstalledPlatePlanes]
+        );
+        assert_eq!(
+            estimate.artifact_retention,
+            WorkspaceArtifactRetention::MosaicOnly
+        );
+        assert_eq!(estimate.capture_settle_frames, 1);
+        assert_eq!(estimate.planned_registrations, 0);
+        assert!(estimate.persistent_capture);
+        assert!((plan.overlap_fraction - RECONNAISSANCE_OVERLAP).abs() < 1e-9);
+        assert!((plan.output_mm_per_pixel - RECONNAISSANCE_OUTPUT_MM_PER_PIXEL).abs() < 1e-9);
+        assert!(estimate
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("monotonic camera timestamps")));
+        assert!(!estimate
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("mixed-height")));
     }
 
     #[test]

@@ -338,8 +338,8 @@ pub fn plan_workspace_scan(
         "workspace scan requires a top-camera planar model"
     );
     ensure!(
-        (0.2..=0.75).contains(&overlap_fraction),
-        "workspace overlap must be between 0.2 and 0.75"
+        (0.1..=0.75).contains(&overlap_fraction),
+        "workspace overlap must be between 0.1 and 0.75"
     );
     ensure!(max_tiles > 0, "workspace max_tiles must be non-zero");
     ensure!(

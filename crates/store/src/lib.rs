@@ -495,6 +495,8 @@ mod tests {
             output_mm_per_pixel: 0.02,
             feed_mm_per_min: 600.0,
             capture_settle_frames: 5,
+            discarded_capture_frames: 0,
+            timestamp_fresh_frames: 0,
             frame_width_px: 1280,
             frame_height_px: 720,
             usable_pixel_bounds: WorkspacePixelBounds {
