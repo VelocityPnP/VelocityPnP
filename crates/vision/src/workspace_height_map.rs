@@ -20,6 +20,12 @@ const DISPLAY_PLANE_SMOOTHNESS_COST: f64 = 0.35;
 const DISPLAY_PLANE_WORKING_BIAS: f64 = 0.08;
 const DISPLAY_PLANE_EVIDENCE_THRESHOLD: u8 = 2;
 const DISPLAY_PLANE_RELAXATION_PASSES: usize = 8;
+const HEIGHT_EDGE_EVIDENCE_RADIUS_MM: f64 = 0.30;
+const HEIGHT_EDGE_MIN_EVIDENCE_FRACTION: f64 = 0.35;
+const HEIGHT_EDGE_INFERRED_MARGIN_LUMA: f32 = 1.0;
+const HEIGHT_EDGE_MEASURED_MARGIN_LUMA: f32 = 1.5;
+const HEIGHT_EDGE_CONFIDENCE_MARGIN_LUMA: f32 = 1.5;
+const UNKNOWN_EDGE_MARGIN_LUMA: f32 = 1.0;
 const MIN_CAMERA_APERTURE_DETECTIONS: usize = 3;
 const CAMERA_APERTURE_CLUSTER_RADIUS_MM: f64 = 4.0;
 const CAMERA_APERTURE_FEATHER_MM: f64 = 1.0;
@@ -197,6 +203,7 @@ where
         render_layer(fraction).map(|frame| RenderedHeightLayer {
             frame,
             disagreement: None,
+            source_count: None,
         })
     })
 }
@@ -215,6 +222,7 @@ where
         render_layer(fraction).map(|mosaic| RenderedHeightLayer {
             frame: mosaic.frame,
             disagreement: Some(mosaic.disagreement),
+            source_count: Some(mosaic.source_count),
         })
     })
 }
@@ -404,8 +412,8 @@ where
             );
         }
     }
-    let (_, class_preview) = height_class_artifacts(plan, height_map, &composite.frame);
-    composite.class_preview = class_preview;
+    composite.class_preview =
+        height_class_preview(plan, height_map, &composite.frame, &composite.class_overlay);
     Ok(Some(WorkspaceCameraApertureComposite {
         center_x_mm: projection.center_x_mm,
         center_y_mm: projection.center_y_mm,
@@ -649,6 +657,7 @@ fn largest_camera_aperture_cluster(
 struct RenderedHeightLayer {
     frame: GrayFrame,
     disagreement: Option<GrayFrame>,
+    source_count: Option<GrayFrame>,
 }
 
 fn render_workspace_height_mosaic_internal<F>(
@@ -676,26 +685,32 @@ where
     )?;
     let mut pixels = vec![0; width as usize * height as usize];
     let mut confidence = vec![0; pixels.len()];
-    let mut requested_fractions = vec![None; pixels.len()];
+    let mut requested_candidate_indices = vec![i16::MIN; pixels.len()];
+    let mut pixel_cell_indices = vec![0_u32; pixels.len()];
+    let mut selected_candidate_indices = vec![i16::MIN; pixels.len()];
     for y in 0..height {
         let world_y = plan.region.y_max_mm - f64::from(y) * plan.output_mm_per_pixel;
         for x in 0..width {
             let world_x = plan.region.x_min_mm + f64::from(x) * plan.output_mm_per_pixel;
             let target = (y * width + x) as usize;
-            let cell = height_cell_index(
+            let cell_index = height_cell_index(
                 height_map.region,
                 height_map.rows,
                 height_map.columns,
                 world_x,
                 world_y,
-            )
-            .and_then(|index| height_map.cells.get(index));
-            requested_fractions[target] = cell
-                .and_then(|cell| cell.surface_fraction)
-                .map(quantize_surface_fraction);
-            confidence[target] = cell
-                .map(|cell| (cell.confidence * 255.0).round().clamp(0.0, 255.0) as u8)
-                .unwrap_or(0);
+            );
+            let cell_index =
+                cell_index.expect("validated plan pixel must be inside the height map");
+            let cell = &height_map.cells[cell_index];
+            pixel_cell_indices[target] = cell_index as u32;
+            requested_candidate_indices[target] = cell
+                .surface_fraction
+                .map(quantize_surface_fraction)
+                .map(candidate_index)
+                .map_or(i16::MIN, |index| index as i16);
+            selected_candidate_indices[target] = requested_candidate_indices[target];
+            confidence[target] = (cell.confidence * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
     ensure!(
@@ -705,6 +720,11 @@ where
             .any(|fraction| fraction.abs() < 1e-9),
         "height mosaic has no working-plane fallback"
     );
+    let edge_candidate_indices = edge_candidate_indices(height_map);
+    let mut base_costs = vec![f32::NAN; pixels.len()];
+    let mut alternative_costs = vec![f32::NAN; pixels.len()];
+    let mut alternative_pixels = vec![0_u8; pixels.len()];
+    let mut alternative_candidate_indices = vec![i16::MIN; pixels.len()];
     let mut endpoint_layers = [None, None];
     for fraction in &height_map.candidate_fractions {
         let layer = render_layer(*fraction)?;
@@ -718,18 +738,80 @@ where
                 "height candidate disagreement dimensions differ"
             );
         }
+        if let Some(source_count) = &layer.source_count {
+            ensure!(
+                source_count.width == width && source_count.height == height,
+                "height candidate source-count dimensions differ"
+            );
+        }
+        ensure!(
+            layer.disagreement.is_some() == layer.source_count.is_some(),
+            "height candidate consistency artifacts are incomplete"
+        );
+        let local_costs = layer
+            .disagreement
+            .as_ref()
+            .zip(layer.source_count.as_ref())
+            .map(|(disagreement, source_count)| {
+                local_disagreement_costs(plan, disagreement, source_count)
+            });
+        let layer_candidate_index = candidate_index(*fraction) as i16;
         for (index, pixel) in pixels.iter_mut().enumerate() {
-            let selected = requested_fractions[index]
-                .is_some_and(|requested| (requested - fraction).abs() < 1e-9);
-            let unknown_fallback = requested_fractions[index].is_none() && fraction.abs() < 1e-9;
+            let selected = requested_candidate_indices[index] == layer_candidate_index;
+            let unknown_fallback = requested_candidate_indices[index] == i16::MIN
+                && layer_candidate_index == candidate_index(0.0) as i16;
             if selected || unknown_fallback {
                 *pixel = layer.frame.pixels[index];
+            }
+            let Some(local_costs) = &local_costs else {
+                continue;
+            };
+            let cost = local_costs[index];
+            if !cost.is_finite() {
+                continue;
+            }
+            if selected {
+                base_costs[index] = cost;
+                continue;
+            }
+            let cell_index = pixel_cell_indices[index] as usize;
+            if requested_candidate_indices[index] == i16::MIN
+                || !edge_candidate_indices[cell_index].contains(&layer_candidate_index)
+            {
+                continue;
+            }
+            if !alternative_costs[index].is_finite() || cost < alternative_costs[index] {
+                alternative_costs[index] = cost;
+                alternative_pixels[index] = layer.frame.pixels[index];
+                alternative_candidate_indices[index] = layer_candidate_index;
             }
         }
         if fraction.abs() < 1e-9 {
             endpoint_layers[0] = Some(layer);
         } else if (*fraction - 1.0).abs() < 1e-9 {
             endpoint_layers[1] = Some(layer);
+        }
+    }
+    for index in 0..pixels.len() {
+        let cell_index = pixel_cell_indices[index] as usize;
+        let base_cost = base_costs[index];
+        let alternative_cost = alternative_costs[index];
+        if requested_candidate_indices[index] == i16::MIN
+            || !base_cost.is_finite()
+            || !alternative_cost.is_finite()
+        {
+            continue;
+        }
+        let cell = &height_map.cells[cell_index];
+        let source_margin = match cell.source {
+            WorkspaceHeightCellSource::Measured => HEIGHT_EDGE_MEASURED_MARGIN_LUMA,
+            WorkspaceHeightCellSource::Inferred => HEIGHT_EDGE_INFERRED_MARGIN_LUMA,
+            WorkspaceHeightCellSource::Unknown => continue,
+        };
+        let margin = source_margin + cell.confidence as f32 * HEIGHT_EDGE_CONFIDENCE_MARGIN_LUMA;
+        if alternative_cost + margin < base_cost {
+            pixels[index] = alternative_pixels[index];
+            selected_candidate_indices[index] = alternative_candidate_indices[index];
         }
     }
     if let [Some(working), Some(installed)] = &endpoint_layers {
@@ -742,6 +824,20 @@ where
                 working_disagreement,
                 installed_disagreement,
             );
+            let local_costs = working
+                .source_count
+                .as_ref()
+                .zip(installed.source_count.as_ref())
+                .map(|(working_source_count, installed_source_count)| {
+                    (
+                        local_disagreement_costs(plan, working_disagreement, working_source_count),
+                        local_disagreement_costs(
+                            plan,
+                            installed_disagreement,
+                            installed_source_count,
+                        ),
+                    )
+                });
             for y in 0..height {
                 let world_y = plan.region.y_max_mm - f64::from(y) * plan.output_mm_per_pixel;
                 for x in 0..width {
@@ -759,9 +855,27 @@ where
                         continue;
                     }
                     let target = (y * width + x) as usize;
-                    pixels[target] = if display_planes[cell_index] {
+                    let mut installed_selected = display_planes[cell_index];
+                    if let Some((working_costs, installed_costs)) = &local_costs {
+                        let working_cost = working_costs[target];
+                        let installed_cost = installed_costs[target];
+                        if working_cost.is_finite() && installed_cost.is_finite() {
+                            if installed_selected
+                                && working_cost + UNKNOWN_EDGE_MARGIN_LUMA < installed_cost
+                            {
+                                installed_selected = false;
+                            } else if !installed_selected
+                                && installed_cost + UNKNOWN_EDGE_MARGIN_LUMA < working_cost
+                            {
+                                installed_selected = true;
+                            }
+                        }
+                    }
+                    pixels[target] = if installed_selected {
+                        selected_candidate_indices[target] = candidate_index(1.0) as i16;
                         installed.frame.pixels[target]
                     } else {
+                        selected_candidate_indices[target] = candidate_index(0.0) as i16;
                         working.frame.pixels[target]
                     };
                 }
@@ -773,7 +887,8 @@ where
         height,
         pixels,
     };
-    let (class_overlay, class_preview) = height_class_artifacts(plan, height_map, &frame);
+    let (class_overlay, class_preview) =
+        height_class_artifacts(plan, height_map, &frame, &selected_candidate_indices);
     Ok(WorkspaceHeightComposite {
         frame,
         class_overlay,
@@ -786,6 +901,87 @@ where
         height_preview: height_map_preview(height_map),
         candidate_fractions: height_map.candidate_fractions.clone(),
     })
+}
+
+fn edge_candidate_indices(height_map: &WorkspaceHeightMap) -> Vec<Vec<i16>> {
+    let mut candidates = Vec::with_capacity(height_map.cells.len());
+    for cell in &height_map.cells {
+        let row_min = cell.row.saturating_sub(1);
+        let row_max = (cell.row + 1).min(height_map.rows - 1);
+        let column_min = cell.column.saturating_sub(1);
+        let column_max = (cell.column + 1).min(height_map.columns - 1);
+        let base = cell
+            .surface_fraction
+            .map(quantize_surface_fraction)
+            .map(candidate_index);
+        let mut local = BTreeSet::new();
+        for row in row_min..=row_max {
+            for column in column_min..=column_max {
+                let index = (row * height_map.columns + column) as usize;
+                let Some(fraction) = height_map.cells[index].surface_fraction else {
+                    continue;
+                };
+                let candidate = candidate_index(quantize_surface_fraction(fraction));
+                if Some(candidate) != base {
+                    local.insert(candidate as i16);
+                }
+            }
+        }
+        candidates.push(local.into_iter().collect());
+    }
+    candidates
+}
+
+fn local_disagreement_costs(
+    plan: &WorkspaceScanPlan,
+    disagreement: &GrayFrame,
+    source_count: &GrayFrame,
+) -> Vec<f32> {
+    let width = disagreement.width as usize;
+    let height = disagreement.height as usize;
+    let stride = width + 1;
+    let mut sums = vec![0_u64; stride * (height + 1)];
+    let mut counts = vec![0_u32; stride * (height + 1)];
+    for y in 0..height {
+        let mut row_sum = 0_u64;
+        let mut row_count = 0_u32;
+        for x in 0..width {
+            let source = y * width + x;
+            if source_count.pixels[source] >= 2 {
+                row_sum += u64::from(disagreement.pixels[source]);
+                row_count += 1;
+            }
+            let target = (y + 1) * stride + x + 1;
+            sums[target] = sums[target - stride] + row_sum;
+            counts[target] = counts[target - stride] + row_count;
+        }
+    }
+    let radius = (HEIGHT_EDGE_EVIDENCE_RADIUS_MM / plan.output_mm_per_pixel)
+        .ceil()
+        .max(1.0) as usize;
+    let mut costs = vec![f32::NAN; width * height];
+    for y in 0..height {
+        let y_min = y.saturating_sub(radius);
+        let y_max = (y + radius + 1).min(height);
+        for x in 0..width {
+            let x_min = x.saturating_sub(radius);
+            let x_max = (x + radius + 1).min(width);
+            let top_left = y_min * stride + x_min;
+            let top_right = y_min * stride + x_max;
+            let bottom_left = y_max * stride + x_min;
+            let bottom_right = y_max * stride + x_max;
+            let count =
+                counts[bottom_right] + counts[top_left] - counts[top_right] - counts[bottom_left];
+            let area = (x_max - x_min) * (y_max - y_min);
+            let minimum_count = (area as f64 * HEIGHT_EDGE_MIN_EVIDENCE_FRACTION).ceil() as u32;
+            if count < minimum_count.max(1) {
+                continue;
+            }
+            let sum = sums[bottom_right] + sums[top_left] - sums[top_right] - sums[bottom_left];
+            costs[y * width + x] = sum as f32 / count as f32;
+        }
+    }
+    costs
 }
 
 fn select_unknown_display_planes(
@@ -891,7 +1087,9 @@ fn height_class_artifacts(
     plan: &WorkspaceScanPlan,
     height_map: &WorkspaceHeightMap,
     mosaic: &GrayFrame,
+    selected_candidate_indices: &[i16],
 ) -> (RgbaFrame, RgbFrame) {
+    debug_assert_eq!(selected_candidate_indices.len(), mosaic.pixels.len());
     let mut overlay_pixels = Vec::with_capacity(mosaic.pixels.len() * 4);
     let mut preview_pixels = Vec::with_capacity(mosaic.pixels.len() * 3);
     for y in 0..mosaic.height {
@@ -917,12 +1115,13 @@ fn height_class_artifacts(
                 WorkspaceHeightCellSource::Inferred => INFERRED_CLASS_OPACITY,
                 WorkspaceHeightCellSource::Unknown => 0.0,
             };
-            let Some(fraction) = cell.surface_fraction else {
+            let selected_candidate = selected_candidate_indices[(y * mosaic.width + x) as usize];
+            if selected_candidate == i16::MIN {
                 overlay_pixels.extend_from_slice(&[0, 0, 0, 0]);
                 preview_pixels.extend_from_slice(&[luma; 3]);
                 continue;
-            };
-            let fraction = quantize_surface_fraction(fraction);
+            }
+            let fraction = f64::from(selected_candidate) * WORKSPACE_HEIGHT_CANDIDATE_STEP;
             if opacity == 0.0 || (fraction - 1.0).abs() < 1e-9 {
                 overlay_pixels.extend_from_slice(&[0, 0, 0, 0]);
                 preview_pixels.extend_from_slice(&[luma; 3]);
@@ -952,6 +1151,54 @@ fn height_class_artifacts(
             pixels: preview_pixels,
         },
     )
+}
+
+fn height_class_preview(
+    plan: &WorkspaceScanPlan,
+    height_map: &WorkspaceHeightMap,
+    mosaic: &GrayFrame,
+    overlay: &RgbaFrame,
+) -> RgbFrame {
+    debug_assert_eq!(overlay.width, mosaic.width);
+    debug_assert_eq!(overlay.height, mosaic.height);
+    let mut pixels = Vec::with_capacity(mosaic.pixels.len() * 3);
+    for y in 0..mosaic.height {
+        let world_y = plan.region.y_max_mm - f64::from(y) * plan.output_mm_per_pixel;
+        for x in 0..mosaic.width {
+            let world_x = plan.region.x_min_mm + f64::from(x) * plan.output_mm_per_pixel;
+            let index = (y * mosaic.width + x) as usize;
+            let overlay_index = index * 4;
+            let opacity = if overlay.pixels[overlay_index + 3] == 0 {
+                0.0
+            } else {
+                height_cell_index(
+                    height_map.region,
+                    height_map.rows,
+                    height_map.columns,
+                    world_x,
+                    world_y,
+                )
+                .and_then(|cell_index| height_map.cells.get(cell_index))
+                .map_or(0.0, |cell| match cell.source {
+                    WorkspaceHeightCellSource::Measured => MEASURED_CLASS_OPACITY,
+                    WorkspaceHeightCellSource::Inferred => INFERRED_CLASS_OPACITY,
+                    WorkspaceHeightCellSource::Unknown => 0.0,
+                })
+            };
+            for channel in 0..3 {
+                pixels.push(blend_channel(
+                    mosaic.pixels[index],
+                    overlay.pixels[overlay_index + channel],
+                    opacity,
+                ));
+            }
+        }
+    }
+    RgbFrame {
+        width: mosaic.width,
+        height: mosaic.height,
+        pixels,
+    }
 }
 
 fn height_class_color(fraction: f64) -> [u8; 3] {
@@ -1363,6 +1610,93 @@ mod tests {
             &composite.class_preview.pixels[2 * 3..3 * 3],
             &[224, 224, 224]
         );
+    }
+
+    #[test]
+    fn consistency_localizes_a_height_boundary_inside_a_measured_cell() {
+        let parallax = report(vec![
+            observation(0.5, 1.0, 0.0, 0.01),
+            observation(1.0, 1.0, 0.0, 0.01),
+            observation(2.5, 1.0, 1.0, 0.01),
+            observation(3.0, 1.0, 1.0, 0.01),
+        ]);
+        let map = build_workspace_height_map(region(), &parallax).unwrap();
+        let plan = WorkspaceScanPlan {
+            region: region(),
+            overlap_fraction: 0.6,
+            output_mm_per_pixel: 1.0,
+            frame_width_px: 2,
+            frame_height_px: 2,
+            usable_pixel_bounds: WorkspacePixelBounds {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            },
+            rows: 1,
+            columns: 1,
+            tiles: vec![WorkspaceScanTile {
+                index: 0,
+                row: 0,
+                column: 0,
+                capture_order: 0,
+                nominal_pose: Pose {
+                    x_mm: 0.0,
+                    y_mm: 0.0,
+                    z_mm: 31.5,
+                    rotation_deg: 0.0,
+                },
+                placement_correction_x_mm: 0.0,
+                placement_correction_y_mm: 0.0,
+                artifact_name: String::new(),
+            }],
+        };
+        let render = |source_count: u8| {
+            render_workspace_height_mosaic_with_consistency(&plan, &map, |fraction| {
+                let installed = (fraction - 1.0).abs() < 1e-9;
+                let disagreement = (0..15)
+                    .map(|index| {
+                        let actual_installed = index % 5 >= 1;
+                        if actual_installed == installed {
+                            1
+                        } else {
+                            20
+                        }
+                    })
+                    .collect();
+                Ok(WorkspaceMosaic {
+                    frame: GrayFrame {
+                        width: 5,
+                        height: 3,
+                        pixels: vec![if installed { 224 } else { 32 }; 15],
+                    },
+                    disagreement: GrayFrame {
+                        width: 5,
+                        height: 3,
+                        pixels: disagreement,
+                    },
+                    source_count: GrayFrame {
+                        width: 5,
+                        height: 3,
+                        pixels: vec![source_count; 15],
+                    },
+                    seam_health: None,
+                    covered_fraction: 1.0,
+                    nominal_fallback_fraction: 0.0,
+                    tiles: Vec::new(),
+                    registrations: Vec::new(),
+                })
+            })
+            .unwrap()
+        };
+
+        let localized = render(2);
+        assert_eq!(&localized.frame.pixels[0..5], &[32, 224, 224, 224, 224]);
+        assert_eq!(&localized.class_overlay.pixels[0..4], &[0, 190, 255, 128]);
+        assert_eq!(&localized.class_overlay.pixels[4..8], &[0, 0, 0, 0]);
+
+        let unsupported = render(1);
+        assert_eq!(&unsupported.frame.pixels[0..5], &[32, 32, 224, 224, 224]);
     }
 
     #[test]

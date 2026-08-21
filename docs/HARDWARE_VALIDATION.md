@@ -1484,6 +1484,39 @@ confirmed that every current target passed the hard completeness, coverage,
 and texture checks. This separates successful scan execution from image
 acceptance without requiring another machine run.
 
+### Edge-localized height selection
+
+Visual review of the refined composite found regular 2 mm blocks at the right
+edges of the FTP PCB and feeder banks. The pattern matched the surface-map cell
+size. The renderer had used one candidate projection for every pixel in a
+measured or inferred cell. Its per-pixel source-disagreement signal affected
+only the fallback choice for unknown cells.
+
+The renderer now treats the cell height as a prior. Near a different local
+height, it selects an alternate candidate only when a 0.30 mm image
+neighborhood has coverage from at least two source tiles and its disagreement
+beats a source- and confidence-dependent margin. Unknown cells use the same
+pixel-local evidence between the working and installed-plate endpoints. A
+single-source pixel cannot override the prior.
+
+The completed refinement children used transient source retention, so their
+deleted source frames cannot be reconstructed with the new selector. A
+no-motion replay used the retained 242-frame full-source scan
+`0d08896d-4d34-4f1b-8e98-a133bba4c061`. It rebuilt all 14 candidate planes
+from 1,373 accepted parallax observations. Mean luma discontinuity on the
+2 mm cell grid, relative to nearby non-grid lines, decreased from 0.2007 to
+0.1495. This is a 25.5 percent decrease. Only 8.03 percent of output pixels
+changed, with a median change of zero and a 95th-percentile change of one luma
+level. The 561-by-561 output SHA-256 is
+`06859bcf25236fd6d4cd98a5f523d9aa13eb03f848502078818e3cae822ab6e5`.
+
+Focused tests also put a true projection boundary one millimeter inside a
+2 mm measured cell. Two-source disagreement moved the display edge to the true
+location. The same case with one source kept the measured-cell boundary.
+Chunked and single-pass reconstruction remained byte-identical. A new scan of
+the affected refinement regions is still required to update the current full
+workspace composite.
+
 After the queue, the machine was at the visual datum X=220.131, Y=190.271,
 Z=31.5, homed, ready, and fault-free. Normal disconnect operation
 `e85d478b-c406-44f9-b18c-791fcc21e720` switched outputs off, released control,

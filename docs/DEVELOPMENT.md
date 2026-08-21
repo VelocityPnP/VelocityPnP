@@ -403,11 +403,20 @@ overlay. Unknown pixels are also transparent. Measured non-plate cells use a
 stronger tint than locally inferred cells.
 
 The reconstruction tests candidate planes at one-eighth of the calibrated
-working-plane-to-plate scale. It locally extends only consistent measurements.
+working-plane-to-plate scale. A measured or inferred 2 mm cell is a geometric
+prior, not a hard image boundary. In cells next to a different height, the
+renderer compares source-image disagreement in a 0.30 mm neighborhood at the
+local candidate planes. It can move the display transition inside the cell
+when two or more source tiles give a better-supported projection. Confidence
+and measurement source add a change margin. Pixels without enough overlap keep
+the cell prior.
+
 Unknown cells stay unknown in the data. For display, the corrected mosaic
 compares source-image disagreement at the calibrated working and installed
-plate endpoints, then selects the locally supported projection with spatial
-regularization. This does not turn display selection into measured height.
+plate endpoints, uses spatial regularization for the cell prior, and applies
+the same overlap-supported pixel boundary localization. The transparent class
+overlay follows the selected display boundary, but this does not turn display
+selection into measured height.
 If at least three retained source frames agree on the bottom-camera aperture,
 their detected center motion fits a local camera-depth projection. This avoids
 using the plate-height pixel scale for the lower camera surface. All views are
