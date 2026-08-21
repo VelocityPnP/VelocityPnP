@@ -238,6 +238,51 @@ class ClientTests(unittest.TestCase):
                 )
         send.assert_not_called()
 
+    def test_workspace_refinement_batch_requires_safety_and_sets_limits(self):
+        client = Client(timeout=1)
+        started = {
+            "operation": {"id": "batch"},
+            "items": [{"target": {"target_index": 2, "priority": 1}}],
+        }
+        with patch.object(client, "_request", return_value=started) as send:
+            self.assertEqual(
+                client.start_workspace_refinement_batch(
+                    "calibration",
+                    "parent",
+                    "lease",
+                    max_targets=3,
+                    feed_mm_per_min=1200.0,
+                    safety_checks_confirmed=True,
+                ),
+                started,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/workspace-scans/parent/refinements",
+            {
+                "lease_id": "lease",
+                "calibration_id": "calibration",
+                "confirmed_external_safety_checks": True,
+                "max_targets": 3,
+                "feed_mm_per_min": 1200.0,
+            },
+        )
+
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.start_workspace_refinement_batch(
+                    "calibration", "parent", "lease",
+                )
+            with self.assertRaisesRegex(ValueError, "1 through 32"):
+                client.start_workspace_refinement_batch(
+                    "calibration",
+                    "parent",
+                    "lease",
+                    max_targets=0,
+                    safety_checks_confirmed=True,
+                )
+        send.assert_not_called()
+
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
         layered_report = {

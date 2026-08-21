@@ -70,7 +70,7 @@ use velocitypnp_vision::{
     WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream,
     WorkspaceParallaxObservation, WorkspaceParallaxReport, WorkspaceParallaxStream,
     WorkspaceScanPlan, WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport,
-    MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
+    WorkspaceSeamStatus, MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
@@ -88,6 +88,8 @@ const LEGACY_INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progres
 const INSTALLED_PLATE_PROGRESS_ALGORITHM: &str = "installed_plate_progress.v2";
 const MAX_WORKSPACE_SCAN_TILES: u32 = 64;
 const MAX_WORKSPACE_SURVEY_TILES: u32 = 4_096;
+const MAX_WORKSPACE_REFINEMENT_BATCH_TARGETS: u32 = 32;
+const WORKSPACE_REFINEMENT_PRIORITY_ALGORITHM: &str = "workspace_refinement_priority.v1";
 const MAX_CHUNKED_WORKSPACE_SURVEY_TILES: u32 = 12_000;
 const MAX_WORKSPACE_MOSAIC_PIXELS: usize = 25_000_000;
 const MAX_WORKSPACE_SURVEY_PIXELS: usize = 12_000_000;
@@ -144,6 +146,8 @@ pub struct AppState {
     pub profile: Arc<MachineProfile>,
     pub store: Store,
     camera_capture_lock: Arc<tokio::sync::Mutex<()>>,
+    workspace_scan_admission_lock: Arc<tokio::sync::Mutex<()>>,
+    workspace_scan_motion_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -153,6 +157,8 @@ impl AppState {
             profile: Arc::new(profile),
             store,
             camera_capture_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_scan_admission_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_scan_motion_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
@@ -236,6 +242,35 @@ impl AppState {
                     tracing::error!(%error, operation_id = %scan.operation_id, "failed to inspect workspace scan operation");
                 }
             }
+            if let Some(batch_operation_id) = scan.refinement_batch_operation_id {
+                match self.store.get_operation(batch_operation_id) {
+                    Ok(Some(mut operation))
+                        if matches!(
+                            operation.status,
+                            OperationStatus::Pending | OperationStatus::Running
+                        ) =>
+                    {
+                        operation.status = OperationStatus::Failed;
+                        operation.message = Some(message.into());
+                        operation.updated_at = Utc::now();
+                        if let Err(error) = self.store.put_operation(&operation) {
+                            tracing::error!(
+                                %error,
+                                operation_id = %operation.id,
+                                "failed to recover refinement batch operation"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            operation_id = %batch_operation_id,
+                            "failed to inspect refinement batch operation"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -290,6 +325,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspace-scans/{id}/refinement-targets",
             get(get_workspace_refinement_targets),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/refinements",
+            post(start_workspace_refinement_batch),
         )
         .route(
             "/api/v1/workspace-scans/{id}/artifacts/{name}",
@@ -747,6 +786,13 @@ struct StartWorkspaceScanResponse {
     estimate: WorkspaceScanEstimate,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct WorkspaceRefinementQueueMetadata {
+    batch_operation_id: Option<Uuid>,
+    priority: Option<u32>,
+    severity_score: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 struct WorkspaceRefinementSource {
     parent_scan_id: Uuid,
@@ -761,7 +807,181 @@ struct WorkspaceRefinementTargetsResponse {
     parent_scan_id: Uuid,
     algorithm_version: String,
     recommended_action: WorkspaceSeamHealthAction,
+    priority_algorithm_version: &'static str,
     target_regions: Vec<WorkspaceScanRegion>,
+    targets: Vec<WorkspaceRefinementTargetResponse>,
+    remaining_targets: u32,
+}
+
+#[derive(Deserialize)]
+struct StartWorkspaceRefinementBatchRequest {
+    lease_id: Uuid,
+    calibration_id: Uuid,
+    confirmed_external_safety_checks: bool,
+    #[serde(default)]
+    max_targets: Option<u32>,
+    #[serde(default)]
+    overlap_fraction: Option<f64>,
+    #[serde(default)]
+    output_mm_per_pixel: Option<f64>,
+    #[serde(default)]
+    feed_mm_per_min: Option<f64>,
+    #[serde(default)]
+    artifact_quota_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct StartWorkspaceRefinementBatchResponse {
+    operation: Operation,
+    parent_scan_id: Uuid,
+    algorithm_version: String,
+    recommended_action: WorkspaceSeamHealthAction,
+    priority_algorithm_version: &'static str,
+    completed_target_indices: Vec<u32>,
+    items: Vec<WorkspaceRefinementBatchItemResponse>,
+    estimated_duration_seconds: u64,
+    estimated_retained_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct WorkspaceRefinementBatchItemResponse {
+    target: WorkspaceRefinementTargetResponse,
+    scan: WorkspaceScanReport,
+    operation: Operation,
+    estimate: WorkspaceScanEstimate,
+}
+
+#[derive(Clone)]
+struct PreparedWorkspaceRefinement {
+    target: WorkspaceRefinementTargetResponse,
+    scan: WorkspaceScanReport,
+    operation: Operation,
+    estimate: WorkspaceScanEstimate,
+    plan: WorkspaceScanPlan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceRefinementTargetResponse {
+    target_index: u32,
+    priority: u32,
+    region: WorkspaceScanRegion,
+    severity_score: f64,
+    elevated_seams: u32,
+    unresolved_seams: u32,
+    maximum_disagreement_p95_luma: f64,
+    maximum_correction_mm: f64,
+    reason: String,
+    completed_scan_id: Option<Uuid>,
+    latest_scan_id: Option<Uuid>,
+    latest_scan_status: Option<WorkspaceScanStatus>,
+}
+
+fn rank_workspace_refinement_targets(
+    report: &WorkspaceSeamHealthReport,
+    scans: &[WorkspaceScanReport],
+    parent_scan_id: Uuid,
+) -> Vec<WorkspaceRefinementTargetResponse> {
+    let mut targets = report
+        .target_regions
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(target_index, region)| {
+            let mut elevated_seams = 0_u32;
+            let mut unresolved_seams = 0_u32;
+            let mut maximum_disagreement_p95_luma = 0.0_f64;
+            let mut maximum_correction_mm = 0.0_f64;
+            for seam in report.seams.iter().filter(|seam| {
+                seam.status != WorkspaceSeamStatus::Healthy
+                    && workspace_regions_overlap(region, seam.region)
+            }) {
+                match seam.status {
+                    WorkspaceSeamStatus::Elevated => elevated_seams += 1,
+                    WorkspaceSeamStatus::Unresolved => unresolved_seams += 1,
+                    WorkspaceSeamStatus::Healthy => {}
+                }
+                maximum_disagreement_p95_luma =
+                    maximum_disagreement_p95_luma.max(seam.disagreement_p95_luma);
+                let correction_mm = seam
+                    .correction_x_mm
+                    .zip(seam.correction_y_mm)
+                    .map_or(0.0, |(x_mm, y_mm)| x_mm.hypot(y_mm));
+                maximum_correction_mm = maximum_correction_mm.max(correction_mm);
+            }
+            let disagreement_ratio = maximum_disagreement_p95_luma
+                / report.disagreement_threshold_luma.max(1.0);
+            let correction_ratio = maximum_correction_mm
+                / report.material_shift_threshold_mm.max(f64::EPSILON);
+            let area_mm2 = (region.x_max_mm - region.x_min_mm)
+                * (region.y_max_mm - region.y_min_mm);
+            let severity_score = f64::from(elevated_seams) * 4.0
+                + f64::from(unresolved_seams) * 2.0
+                + disagreement_ratio
+                + correction_ratio
+                + area_mm2.ln_1p() / 10.0;
+            let matching = scans
+                .iter()
+                .filter(|scan| {
+                    scan.parent_scan_id == Some(parent_scan_id)
+                        && scan.refinement_target_index == Some(target_index as u32)
+                        && scan
+                            .refinement_algorithm_version
+                            .as_deref()
+                            .is_none_or(|version| version == report.algorithm_version)
+                })
+                .max_by_key(|scan| scan.updated_at);
+            let completed = scans
+                .iter()
+                .filter(|scan| {
+                    scan.parent_scan_id == Some(parent_scan_id)
+                        && scan.refinement_target_index == Some(target_index as u32)
+                        && scan.status == WorkspaceScanStatus::Succeeded
+                        && scan
+                            .refinement_algorithm_version
+                            .as_deref()
+                            .is_none_or(|version| version == report.algorithm_version)
+                })
+                .max_by_key(|scan| scan.updated_at);
+            let reason = if elevated_seams == 0 && unresolved_seams == 0 {
+                format!("localized disagreement over {area_mm2:.0} square millimeters")
+            } else {
+                format!(
+                    "{elevated_seams} elevated and {unresolved_seams} unresolved seams; peak disagreement {maximum_disagreement_p95_luma:.1} luma"
+                )
+            };
+            WorkspaceRefinementTargetResponse {
+                target_index: target_index as u32,
+                priority: 0,
+                region,
+                severity_score,
+                elevated_seams,
+                unresolved_seams,
+                maximum_disagreement_p95_luma,
+                maximum_correction_mm,
+                reason,
+                completed_scan_id: completed.map(|scan| scan.id),
+                latest_scan_id: matching.map(|scan| scan.id),
+                latest_scan_status: matching.map(|scan| scan.status),
+            }
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by(|first, second| {
+        second
+            .severity_score
+            .total_cmp(&first.severity_score)
+            .then_with(|| first.target_index.cmp(&second.target_index))
+    });
+    for (index, target) in targets.iter_mut().enumerate() {
+        target.priority = index as u32 + 1;
+    }
+    targets
+}
+
+fn workspace_regions_overlap(first: WorkspaceScanRegion, second: WorkspaceScanRegion) -> bool {
+    first.x_min_mm < second.x_max_mm
+        && first.x_max_mm > second.x_min_mm
+        && first.y_min_mm < second.y_max_mm
+        && first.y_max_mm > second.y_min_mm
 }
 
 fn effective_workspace_region_preset(
@@ -956,6 +1176,8 @@ async fn start_workspace_scan(
     let current_pose = status
         .pose
         .ok_or_else(|| ApiError::bad_request("workspace scan requires a known machine pose"))?;
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
     let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
@@ -987,14 +1209,93 @@ async fn start_workspace_scan(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
     let operation = Operation::pending("vision.workspace_scan");
+    let scan = pending_workspace_scan(
+        &state,
+        operation.id,
+        snapshot.id,
+        refinement.as_ref(),
+        &plan,
+        &estimate,
+        WorkspaceRefinementQueueMetadata::default(),
+    );
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_workspace_scan(&scan)
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+
+    let returned = StartWorkspaceScanResponse {
+        scan: scan.clone(),
+        operation: operation.clone(),
+        estimate,
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_workspace_scan(
+            task_state,
+            scan,
+            plan,
+            camera_model,
+            installed_camera_model,
+            top_profile,
+            top_path,
+            body.lease_id,
+        ),
+    );
+    Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+fn ensure_no_active_workspace_scans(state: &AppState) -> ApiResult<()> {
+    let active = state
+        .store
+        .list_workspace_scans()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|scan| {
+            matches!(
+                scan.status,
+                WorkspaceScanStatus::Pending | WorkspaceScanStatus::Running
+            )
+        });
+    if let Some(scan) = active {
+        return Err(ApiError::bad_request(format!(
+            "workspace scan {} is already active",
+            scan.id
+        )));
+    }
+    Ok(())
+}
+
+fn pending_workspace_scan(
+    state: &AppState,
+    operation_id: Uuid,
+    calibration_id: Uuid,
+    refinement: Option<&WorkspaceRefinementSource>,
+    plan: &WorkspaceScanPlan,
+    estimate: &WorkspaceScanEstimate,
+    queue: WorkspaceRefinementQueueMetadata,
+) -> WorkspaceScanReport {
     let now = Utc::now();
-    let scan = WorkspaceScanReport {
+    WorkspaceScanReport {
         id: Uuid::new_v4(),
-        operation_id: operation.id,
-        calibration_id: snapshot.id,
+        operation_id,
+        calibration_id,
         profile_id: state.profile.id.clone(),
-        parent_scan_id: refinement.as_ref().map(|source| source.parent_scan_id),
-        refinement_target_index: refinement.as_ref().map(|source| source.target_index),
+        parent_scan_id: refinement.map(|source| source.parent_scan_id),
+        refinement_target_index: refinement.map(|source| source.target_index),
+        refinement_algorithm_version: refinement.map(|source| source.algorithm_version.clone()),
+        refinement_batch_operation_id: queue.batch_operation_id,
+        refinement_priority: queue.priority,
+        refinement_severity_score: queue.severity_score,
+        refinement_priority_algorithm_version: queue
+            .batch_operation_id
+            .map(|_| WORKSPACE_REFINEMENT_PRIORITY_ALGORITHM.into()),
         created_at: now,
         updated_at: now,
         status: WorkspaceScanStatus::Pending,
@@ -1036,37 +1337,7 @@ async fn start_workspace_scan(
         seam_health: None,
         warnings: estimate.warnings.clone(),
         failure: None,
-    };
-    state
-        .store
-        .put_operation(&operation)
-        .map_err(ApiError::internal)?;
-    state
-        .store
-        .put_workspace_scan(&scan)
-        .map_err(ApiError::internal)?;
-
-    let returned = StartWorkspaceScanResponse {
-        scan: scan.clone(),
-        operation: operation.clone(),
-        estimate,
-    };
-    let task_state = state.clone();
-    spawn_prepared_operation(
-        state,
-        operation,
-        execute_workspace_scan(
-            task_state,
-            scan,
-            plan,
-            camera_model,
-            installed_camera_model,
-            top_profile,
-            top_path,
-            body.lease_id,
-        ),
-    );
-    Ok((StatusCode::ACCEPTED, Json(returned)))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1851,6 +2122,32 @@ fn load_workspace_camera_model(
 #[allow(clippy::too_many_arguments)]
 async fn execute_workspace_scan(
     state: AppState,
+    scan: WorkspaceScanReport,
+    plan: WorkspaceScanPlan,
+    camera_model: PlanarCameraModel,
+    installed_camera_model: Option<PlanarCameraModel>,
+    top_profile: CameraProfile,
+    top_path: String,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    let motion_lock = state.workspace_scan_motion_lock.clone();
+    let _motion_guard = motion_lock.lock().await;
+    execute_workspace_scan_locked(
+        state,
+        scan,
+        plan,
+        camera_model,
+        installed_camera_model,
+        top_profile,
+        top_path,
+        lease_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_workspace_scan_locked(
+    state: AppState,
     mut scan: WorkspaceScanReport,
     plan: WorkspaceScanPlan,
     camera_model: PlanarCameraModel,
@@ -1936,6 +2233,192 @@ async fn execute_workspace_scan(
         }
     }
     result.map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_workspace_refinement_batch(
+    state: AppState,
+    batch_operation_id: Uuid,
+    queue: Vec<PreparedWorkspaceRefinement>,
+    camera_model: PlanarCameraModel,
+    installed_camera_model: Option<PlanarCameraModel>,
+    top_profile: CameraProfile,
+    top_path: String,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    let motion_lock = state.workspace_scan_motion_lock.clone();
+    let _motion_guard = motion_lock.lock().await;
+    let total = queue.len();
+    for index in 0..total {
+        let item = queue[index].clone();
+        let progress = format!(
+            "running priority {} target {} ({}/{total})",
+            item.target.priority,
+            item.target.target_index,
+            index + 1
+        );
+        if let Err(error) =
+            update_workspace_refinement_batch_progress(&state, batch_operation_id, progress.clone())
+        {
+            let message = format!("could not persist refinement batch progress: {error}");
+            cancel_workspace_refinement_queue(&state, &queue[index..], &message);
+            return Err(message);
+        }
+        let status = state.machine.status();
+        if let Err(error) = status.assert_lease(lease_id, Utc::now()) {
+            let message = format!(
+                "refinement target {} cannot start: {error}",
+                item.target.target_index
+            );
+            cancel_workspace_refinement_queue(&state, &queue[index..], &message);
+            return Err(message);
+        }
+        if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+            let message = format!(
+                "refinement target {} requires a homed ready machine with a known pose",
+                item.target.target_index
+            );
+            cancel_workspace_refinement_queue(&state, &queue[index..], &message);
+            return Err(message);
+        }
+        if let Err(error) = state
+            .machine
+            .renew_lease(lease_id, CALIBRATION_LEASE_SECONDS)
+            .await
+        {
+            let message = format!(
+                "refinement target {} could not renew control: {error}",
+                item.target.target_index
+            );
+            cancel_workspace_refinement_queue(&state, &queue[index..], &message);
+            return Err(message);
+        }
+        let mut operation = item.operation.clone();
+        operation.status = OperationStatus::Running;
+        operation.updated_at = Utc::now();
+        operation.message = Some(progress);
+        if let Err(error) = state.store.put_operation(&operation) {
+            let message = format!(
+                "could not mark refinement target {} running: {error}",
+                item.target.target_index
+            );
+            cancel_workspace_refinement_queue(&state, &queue[index..], &message);
+            return Err(message);
+        }
+        let result = execute_workspace_scan_locked(
+            state.clone(),
+            item.scan,
+            item.plan,
+            camera_model.clone(),
+            installed_camera_model.clone(),
+            top_profile.clone(),
+            top_path.clone(),
+            lease_id,
+        )
+        .await;
+        operation.updated_at = Utc::now();
+        match result {
+            Ok(message) => {
+                operation.status = OperationStatus::Succeeded;
+                operation.message = message;
+                if let Err(error) = state.store.put_operation(&operation) {
+                    let message = format!(
+                        "refinement target {} succeeded but its operation could not be stored: {error}",
+                        item.target.target_index
+                    );
+                    cancel_workspace_refinement_queue(&state, &queue[index + 1..], &message);
+                    return Err(message);
+                }
+                if let Err(error) = update_workspace_refinement_batch_progress(
+                    &state,
+                    batch_operation_id,
+                    format!(
+                        "completed {} of {total}; last target {}",
+                        index + 1,
+                        item.target.target_index
+                    ),
+                ) {
+                    let message = format!("could not persist refinement batch progress: {error}");
+                    cancel_workspace_refinement_queue(&state, &queue[index + 1..], &message);
+                    return Err(message);
+                }
+            }
+            Err(error) => {
+                operation.status = OperationStatus::Failed;
+                operation.message = Some(error.clone());
+                if let Err(store_error) = state.store.put_operation(&operation) {
+                    tracing::error!(
+                        %store_error,
+                        operation_id = %operation.id,
+                        "failed to persist queued refinement operation failure"
+                    );
+                }
+                let message = format!(
+                    "refinement batch stopped at priority {} target {}: {error}",
+                    item.target.priority, item.target.target_index
+                );
+                cancel_workspace_refinement_queue(&state, &queue[index + 1..], &message);
+                return Err(message);
+            }
+        }
+    }
+    Ok(Some(format!(
+        "completed {total} prioritized workspace refinement targets"
+    )))
+}
+
+fn update_workspace_refinement_batch_progress(
+    state: &AppState,
+    operation_id: Uuid,
+    message: String,
+) -> Result<(), String> {
+    let mut operation = state
+        .store
+        .get_operation(operation_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "refinement batch operation is missing".to_string())?;
+    operation.status = OperationStatus::Running;
+    operation.message = Some(message);
+    operation.updated_at = Utc::now();
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(|error| error.to_string())
+}
+
+fn cancel_workspace_refinement_queue(
+    state: &AppState,
+    queue: &[PreparedWorkspaceRefinement],
+    reason: &str,
+) {
+    for item in queue {
+        let mut scan = item.scan.clone();
+        if scan.status == WorkspaceScanStatus::Pending {
+            scan.status = WorkspaceScanStatus::Failed;
+            scan.failure = Some(format!("not run because {reason}"));
+            scan.updated_at = Utc::now();
+            if let Err(error) = state.store.put_workspace_scan(&scan) {
+                tracing::error!(
+                    %error,
+                    scan_id = %scan.id,
+                    "failed to cancel queued refinement scan"
+                );
+            }
+        }
+        let mut operation = item.operation.clone();
+        if operation.status == OperationStatus::Pending {
+            operation.status = OperationStatus::Cancelled;
+            operation.message = Some(format!("not run because {reason}"));
+            operation.updated_at = Utc::now();
+            if let Err(error) = state.store.put_operation(&operation) {
+                tracing::error!(
+                    %error,
+                    operation_id = %operation.id,
+                    "failed to cancel queued refinement operation"
+                );
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3411,12 +3894,257 @@ async fn get_workspace_refinement_targets(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
     let artifacts = reanalyze_retained_workspace_seams(&state, &scan).await?;
+    let scans = state
+        .store
+        .list_workspace_scans()
+        .map_err(ApiError::internal)?;
+    let targets = rank_workspace_refinement_targets(&artifacts.report, &scans, scan.id);
+    let remaining_targets = targets
+        .iter()
+        .filter(|target| target.completed_scan_id.is_none())
+        .count() as u32;
     Ok(Json(WorkspaceRefinementTargetsResponse {
         parent_scan_id: scan.id,
         algorithm_version: artifacts.report.algorithm_version,
         recommended_action: artifacts.report.recommended_action,
+        priority_algorithm_version: WORKSPACE_REFINEMENT_PRIORITY_ALGORITHM,
         target_regions: artifacts.report.target_regions,
+        targets,
+        remaining_targets,
     }))
+}
+
+async fn start_workspace_refinement_batch(
+    State(state): State<AppState>,
+    Path(parent_scan_id): Path<Uuid>,
+    Json(body): Json<StartWorkspaceRefinementBatchRequest>,
+) -> ApiResult<(StatusCode, Json<StartWorkspaceRefinementBatchResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "workspace refinement requires confirmation that all target regions and the travel envelope are clear, both nozzles are level, and power isolation is reachable",
+        ));
+    }
+    let max_targets = body
+        .max_targets
+        .unwrap_or(MAX_WORKSPACE_REFINEMENT_BATCH_TARGETS);
+    if max_targets == 0 || max_targets > MAX_WORKSPACE_REFINEMENT_BATCH_TARGETS {
+        return Err(ApiError::bad_request(format!(
+            "max_targets must be between 1 and {MAX_WORKSPACE_REFINEMENT_BATCH_TARGETS}"
+        )));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed {
+        return Err(ApiError::bad_request(
+            "workspace refinement requires a homed ready machine",
+        ));
+    }
+    let current_pose = status
+        .pose
+        .ok_or_else(|| ApiError::bad_request("workspace refinement requires a known pose"))?;
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    let parent = state
+        .store
+        .get_workspace_scan(parent_scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("parent workspace scan not found"))?;
+    if parent.status != WorkspaceScanStatus::Succeeded
+        || parent.mode != WorkspaceScanMode::Reconnaissance
+    {
+        return Err(ApiError::bad_request(
+            "workspace refinement requires a successful reconnaissance parent",
+        ));
+    }
+    if parent.profile_id != state.profile.id || parent.calibration_id != body.calibration_id {
+        return Err(ApiError::bad_request(
+            "workspace refinement must use its parent's profile and calibration",
+        ));
+    }
+    let artifacts = reanalyze_retained_workspace_seams(&state, &parent).await?;
+    match artifacts.report.recommended_action {
+        WorkspaceSeamHealthAction::TargetedRefinement
+        | WorkspaceSeamHealthAction::IncreaseOverlap => {}
+        WorkspaceSeamHealthAction::ReviewGeometry => {
+            return Err(ApiError::bad_request(
+                "workspace seam health requires geometry review before refinement",
+            ));
+        }
+        WorkspaceSeamHealthAction::Accept => {
+            return Err(ApiError::bad_request(
+                "workspace seam health does not require refinement",
+            ));
+        }
+    }
+    let scans = state
+        .store
+        .list_workspace_scans()
+        .map_err(ApiError::internal)?;
+    let ranked = rank_workspace_refinement_targets(&artifacts.report, &scans, parent.id);
+    let completed_target_indices = ranked
+        .iter()
+        .filter(|target| target.completed_scan_id.is_some())
+        .map(|target| target.target_index)
+        .collect::<Vec<_>>();
+    let selected = ranked
+        .into_iter()
+        .filter(|target| target.completed_scan_id.is_none())
+        .take(max_targets as usize)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(ApiError::bad_request(
+            "all current workspace refinement targets already succeeded",
+        ));
+    }
+
+    let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let top_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let (snapshot, top_camera_model) = load_workspace_camera_model(&state, body.calibration_id)?;
+    let (camera_model, surface_model, installed_camera_model, installed_geometry) =
+        select_workspace_surface_models(
+            &state,
+            &snapshot,
+            top_camera_model,
+            Some(WorkspaceRegionPreset::InstalledPlates),
+            WorkspaceScanMode::Refinement,
+        )?;
+    let batch_operation = Operation::pending("vision.workspace_refinement_batch");
+    let batch_operation_id = batch_operation.id;
+    let return_pose = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .and_then(|visual| visual.seed_pose.resolve(current_pose))
+        .unwrap_or(state.profile.home_pose);
+    let mut prepared = Vec::with_capacity(selected.len());
+    for (queue_index, target) in selected.into_iter().enumerate() {
+        let refinement = WorkspaceRefinementSource {
+            parent_scan_id: parent.id,
+            target_index: target.target_index,
+            region: target.region,
+            recommended_action: artifacts.report.recommended_action,
+            algorithm_version: artifacts.report.algorithm_version.clone(),
+        };
+        let specification = WorkspaceScanSpecification {
+            calibration_id: body.calibration_id,
+            mode: WorkspaceScanMode::Refinement,
+            artifact_retention: Some(WorkspaceArtifactRetention::TransientSources),
+            region: None,
+            region_preset: None,
+            parent_scan_id: Some(parent.id),
+            refinement_target_index: Some(target.target_index),
+            overlap_fraction: body.overlap_fraction,
+            output_mm_per_pixel: body.output_mm_per_pixel,
+            feed_mm_per_min: body.feed_mm_per_min,
+            max_tiles: None,
+            artifact_quota_bytes: body.artifact_quota_bytes,
+        };
+        let start_pose = if queue_index == 0 {
+            current_pose
+        } else {
+            return_pose
+        };
+        let (plan, estimate) = prepare_workspace_scan(
+            &state,
+            &specification,
+            &top_profile,
+            &camera_model,
+            surface_model,
+            installed_camera_model.as_ref(),
+            installed_geometry.as_ref(),
+            Some(&refinement),
+            start_pose,
+        )?;
+        let operation = Operation::pending("vision.workspace_refinement");
+        let scan = pending_workspace_scan(
+            &state,
+            operation.id,
+            snapshot.id,
+            Some(&refinement),
+            &plan,
+            &estimate,
+            WorkspaceRefinementQueueMetadata {
+                batch_operation_id: Some(batch_operation.id),
+                priority: Some(target.priority),
+                severity_score: Some(target.severity_score),
+            },
+        );
+        prepared.push(PreparedWorkspaceRefinement {
+            target,
+            scan,
+            operation,
+            estimate,
+            plan,
+        });
+    }
+    let estimated_duration_seconds = prepared.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.estimate.estimated_duration_seconds)
+            .ok_or_else(|| ApiError::bad_request("refinement duration estimate overflow"))
+    })?;
+    let estimated_retained_bytes = prepared.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.estimate.estimated_retained_bytes)
+            .ok_or_else(|| ApiError::bad_request("refinement storage estimate overflow"))
+    })?;
+    state
+        .machine
+        .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&batch_operation)
+        .map_err(ApiError::internal)?;
+    for item in &prepared {
+        state
+            .store
+            .put_operation(&item.operation)
+            .map_err(ApiError::internal)?;
+        state
+            .store
+            .put_workspace_scan(&item.scan)
+            .map_err(ApiError::internal)?;
+    }
+    let items = prepared
+        .iter()
+        .map(|item| WorkspaceRefinementBatchItemResponse {
+            target: item.target.clone(),
+            scan: item.scan.clone(),
+            operation: item.operation.clone(),
+            estimate: item.estimate.clone(),
+        })
+        .collect();
+    let response = StartWorkspaceRefinementBatchResponse {
+        operation: batch_operation.clone(),
+        parent_scan_id: parent.id,
+        algorithm_version: artifacts.report.algorithm_version,
+        recommended_action: artifacts.report.recommended_action,
+        priority_algorithm_version: WORKSPACE_REFINEMENT_PRIORITY_ALGORITHM,
+        completed_target_indices,
+        items,
+        estimated_duration_seconds,
+        estimated_retained_bytes,
+    };
+    drop(admission_guard);
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        batch_operation,
+        execute_workspace_refinement_batch(
+            task_state,
+            batch_operation_id,
+            prepared,
+            camera_model,
+            installed_camera_model,
+            top_profile,
+            top_path,
+            body.lease_id,
+        ),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
 async fn get_workspace_scan_artifact(
@@ -13333,6 +14061,11 @@ mod tests {
             profile_id: "lumenpnp-v3.0.4".into(),
             parent_scan_id: None,
             refinement_target_index: None,
+            refinement_algorithm_version: None,
+            refinement_batch_operation_id: None,
+            refinement_priority: None,
+            refinement_severity_score: None,
+            refinement_priority_algorithm_version: None,
             created_at: now,
             updated_at: now,
             status: WorkspaceScanStatus::Pending,
@@ -13866,8 +14599,11 @@ mod tests {
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
         let store = Store::memory().unwrap();
         let operation = Operation::pending("vision.workspace_scan");
-        let scan = test_workspace_scan(operation.id);
+        let batch_operation = Operation::pending("vision.workspace_refinement_batch");
+        let mut scan = test_workspace_scan(operation.id);
+        scan.refinement_batch_operation_id = Some(batch_operation.id);
         store.put_operation(&operation).unwrap();
+        store.put_operation(&batch_operation).unwrap();
         store.put_workspace_scan(&scan).unwrap();
         let machine = MachineHandle::spawn(
             Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
@@ -13889,6 +14625,15 @@ mod tests {
             state
                 .store
                 .get_operation(operation.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            OperationStatus::Failed
+        );
+        assert_eq!(
+            state
+                .store
+                .get_operation(batch_operation.id)
                 .unwrap()
                 .unwrap()
                 .status,
@@ -14357,6 +15102,100 @@ mod tests {
         );
         assert_eq!(source.target_index, 0);
         assert!(source.region.x_min_mm < source.region.x_max_mm);
+    }
+
+    #[test]
+    fn refinement_targets_rank_by_severity_and_suppress_successes() {
+        let parent_scan_id = Uuid::new_v4();
+        let completed_scan_id = Uuid::new_v4();
+        let mut completed = test_workspace_scan(Uuid::new_v4());
+        completed.id = completed_scan_id;
+        completed.parent_scan_id = Some(parent_scan_id);
+        completed.refinement_target_index = Some(0);
+        completed.status = WorkspaceScanStatus::Succeeded;
+        let report = WorkspaceSeamHealthReport {
+            algorithm_version: "workspace_seam_health.v2".into(),
+            overlap_pixel_fraction: 0.1,
+            disagreement_p50_luma: 2.0,
+            disagreement_p95_luma: 20.0,
+            disagreement_threshold_luma: 8.0,
+            material_shift_threshold_mm: 0.2,
+            total_seams: 0,
+            healthy_seams: 0,
+            elevated_seams: 0,
+            unresolved_seams: 0,
+            recommended_action: WorkspaceSeamHealthAction::TargetedRefinement,
+            systematic_correction_x_mm: None,
+            systematic_correction_y_mm: None,
+            target_regions: vec![
+                WorkspaceScanRegion {
+                    x_min_mm: 0.0,
+                    x_max_mm: 10.0,
+                    y_min_mm: 0.0,
+                    y_max_mm: 10.0,
+                },
+                WorkspaceScanRegion {
+                    x_min_mm: 20.0,
+                    x_max_mm: 60.0,
+                    y_min_mm: 0.0,
+                    y_max_mm: 40.0,
+                },
+            ],
+            seams: Vec::new(),
+        };
+
+        let targets = rank_workspace_refinement_targets(
+            &report,
+            std::slice::from_ref(&completed),
+            parent_scan_id,
+        );
+
+        assert_eq!(targets[0].target_index, 1);
+        assert_eq!(targets[0].priority, 1);
+        let target_zero = targets
+            .iter()
+            .find(|target| target.target_index == 0)
+            .unwrap();
+        assert_eq!(target_zero.completed_scan_id, Some(completed_scan_id));
+        assert_eq!(
+            target_zero.latest_scan_status,
+            Some(WorkspaceScanStatus::Succeeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_admission_rejects_an_active_scan() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        state.store.put_workspace_scan(&scan).unwrap();
+
+        let error = ensure_no_active_workspace_scans(&state).unwrap_err();
+        assert!(error.message.contains("is already active"));
+
+        scan.status = WorkspaceScanStatus::Succeeded;
+        state.store.put_workspace_scan(&scan).unwrap();
+        ensure_no_active_workspace_scans(&state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refinement_batch_progress_is_observable() {
+        let state = test_state();
+        let operation = Operation::pending("vision.workspace_refinement_batch");
+        state.store.put_operation(&operation).unwrap();
+
+        update_workspace_refinement_batch_progress(
+            &state,
+            operation.id,
+            "completed 2 of 4; last target 5".into(),
+        )
+        .unwrap();
+
+        let stored = state.store.get_operation(operation.id).unwrap().unwrap();
+        assert_eq!(stored.status, OperationStatus::Running);
+        assert_eq!(
+            stored.message.as_deref(),
+            Some("completed 2 of 4; last target 5")
+        );
     }
 
     #[test]

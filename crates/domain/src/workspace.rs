@@ -264,6 +264,16 @@ pub struct WorkspaceScanReport {
     pub parent_scan_id: Option<Uuid>,
     #[serde(default)]
     pub refinement_target_index: Option<u32>,
+    #[serde(default)]
+    pub refinement_algorithm_version: Option<String>,
+    #[serde(default)]
+    pub refinement_batch_operation_id: Option<Uuid>,
+    #[serde(default)]
+    pub refinement_priority: Option<u32>,
+    #[serde(default)]
+    pub refinement_severity_score: Option<f64>,
+    #[serde(default)]
+    pub refinement_priority_algorithm_version: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub status: WorkspaceScanStatus,

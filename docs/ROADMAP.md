@@ -105,6 +105,8 @@ The project is organized by measurable gates rather than calendar estimates.
   machine-coordinate target regions for selective refinement
 - [x] Physically validate a lineage-tracked, height-corrected selective
   refinement patch from a reconnaissance target
+- [x] Add severity-ranked, resumable, sequential refinement queues that skip
+  successful targets and stop safely on the first failed patch
 - [x] Georeference survey rasters and use installed plate-plane geometry for
   full-workspace scan planning
 - [ ] Add board-region discovery and package-template pose comparison

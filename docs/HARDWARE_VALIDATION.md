@@ -1407,8 +1407,61 @@ reconstruction. This correction was validated without another machine scan.
 
 The scan returned homed, ready, and fault-free to X=220.131, Y=190.271,
 Z=31.5, with the lights off. This validates one bounded, lineage-tracked,
-height-corrected refinement patch. Automatic scheduling of all parent targets
-remains separate work.
+height-corrected refinement patch. The batch validation below completes the
+automatic scheduling work.
+
+### Prioritized refinement batch
+
+On 2026-08-21, the current classifier replay again returned eight targets for
+parent scan `8e5db6e2-c51c-4d4b-a62a-29c390126918`. It ranked them by local
+elevated and unresolved seams, peak disagreement, material correction, and
+area. The read-only target response identified the successful FTP-PCB child
+for target 6 and reported seven remaining targets. The queue selected targets
+0, 1, 5, 2, 3, 4, and 7 in descending severity order. The skipped target kept
+priority 2, so the queued child priorities were 1 and 3 through 8.
+
+After external safety confirmation, combined XYZ homing completed at X=0,
+Y=0, and Z=31.5. Batch operation
+`9d67063b-5875-4275-b364-755f9a62222b` then ran the seven children strictly
+sequentially under the exclusive scan-motion lock. All 2,073 planned tiles
+completed. The batch succeeded in 2,272.1 seconds, or 37 minutes 52.1 seconds,
+against a conservative 4,181-second estimate. It retained 34,729,276 bytes
+against a 90,971,496-byte estimate.
+
+The child results were:
+
+| Target | Tiles | Elapsed s | Retained bytes | Accepted registrations |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 1,007 | 1,118.1 | 13,714,571 | 1,885 / 1,942 |
+| 1 | 510 | 513.8 | 10,509,466 | 722 / 959 |
+| 5 | 306 | 308.2 | 8,686,017 | 430 / 577 |
+| 2 | 180 | 210.3 | 1,281,309 | 17 / 319 |
+| 3 | 50 | 56.3 | 321,645 | 0 / 85 |
+| 4 | 8 | 26.4 | 102,179 | 9 / 10 |
+| 7 | 12 | 39.1 | 114,089 | 0 / 16 |
+
+Every child retained its parent UUID, target index, classifier version,
+severity score, batch operation UUID, and priority. The subsequent
+`workspace_refinement_priority.v1` lineage field and live batch progress
+message are state-reporting additions; they did not require repeat motion.
+Each child also produced a height map and `mosaic-height-corrected.png`. A
+post-run target replay reported zero remaining targets. This validates
+successful-target suppression and queue completion against the stored parent.
+
+Visual inspection found feeder strips and tapes identifiable in target 0, the
+datum tool clear in target 5, and the local objects in targets 2, 3, 4, and 7
+coherent. Target 1 remained identifiable but showed block boundaries in its
+mostly plate-height area. Targets 3 and 7 accepted no feature registrations;
+their small corrected patches remained coherent through calibrated nominal
+placement and endpoint selection. A successful scan status means capture and
+reconstruction completed; it is not yet a separate image-quality acceptance
+gate.
+
+After the queue, the machine was at the visual datum X=220.131, Y=190.271,
+Z=31.5, homed, ready, and fault-free. Normal disconnect operation
+`e85d478b-c406-44f9-b18c-791fcc21e720` switched outputs off, released control,
+and cleared pose and homing. The daemon then stopped normally. No emergency
+stop was used.
 
 ## Procedure sources
 

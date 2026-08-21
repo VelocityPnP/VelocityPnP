@@ -225,6 +225,39 @@ patch. Temporary captures are deleted after chunked height reconstruction.
 Each request scans one target, so quota checks, failures, and any retry stay
 local to that ROI.
 
+The target response also contains a severity-ranked `targets` list. Each item
+keeps its stable `target_index`, reports why it was ranked, and identifies the
+latest and successful child scans. `remaining_targets` excludes targets with a
+successful child under the current classifier version. The response and child
+reports record `workspace_refinement_priority.v1` separately from the seam
+classifier version so future ranking changes remain traceable.
+
+Start all remaining targets as one sequential queue:
+
+```bash
+wget -qO- --method=POST \
+  --header='Content-Type: application/json' \
+  --body-data='{
+    "lease_id":"LEASE_UUID",
+    "calibration_id":"CALIBRATION_UUID",
+    "confirmed_external_safety_checks":true
+  }' \
+  http://127.0.0.1:4080/api/v1/workspace-scans/PARENT_UUID/refinements
+```
+
+The daemon calculates every child plan and quota before it schedules motion.
+It skips targets that already succeeded, then runs the remaining targets from
+highest to lowest severity. `max_targets` can bound one batch to between 1 and
+32 patches. One exclusive scan lock prevents a manual scan from interleaving
+with the queue. Each child has its own operation, report, quota, lineage,
+priority, and corrected mosaic. The batch renews its lease before each child.
+The batch operation message reports the active target and completed count.
+A failed child stops the queue, parks and disables lights through the normal
+scan cleanup path, and marks unattempted children with the reason. A later
+request automatically retries failed or unattempted targets and still skips
+successful ones. Daemon restart recovery fails both interrupted children and
+their batch operation instead of leaving work marked as running.
+
 Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
 
 ```bash

@@ -222,6 +222,53 @@ class Client:
             safety_checks_confirmed=safety_checks_confirmed,
         )
 
+    def start_workspace_refinement_batch(
+        self,
+        calibration_id: str | uuid.UUID,
+        parent_scan_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        max_targets: int | None = None,
+        overlap_fraction: float | None = None,
+        output_mm_per_pixel: float | None = None,
+        feed_mm_per_min: float | None = None,
+        artifact_quota_bytes: int | None = None,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "workspace refinement requires explicit confirmation that all "
+                "target regions and the travel envelope are clear, both nozzles "
+                "are level, and power isolation is reachable"
+            )
+        if max_targets is not None and not 1 <= max_targets <= 32:
+            raise ValueError("workspace refinement max_targets must be 1 through 32")
+        for name, value in {
+            "overlap_fraction": overlap_fraction,
+            "output_mm_per_pixel": output_mm_per_pixel,
+            "feed_mm_per_min": feed_mm_per_min,
+            "artifact_quota_bytes": artifact_quota_bytes,
+        }.items():
+            if value is not None and value <= 0:
+                raise ValueError(f"workspace refinement {name} must be above zero")
+        request: dict[str, Any] = {
+            "lease_id": str(lease_id),
+            "calibration_id": str(calibration_id),
+            "confirmed_external_safety_checks": True,
+        }
+        for name, value in {
+            "max_targets": max_targets,
+            "overlap_fraction": overlap_fraction,
+            "output_mm_per_pixel": output_mm_per_pixel,
+            "feed_mm_per_min": feed_mm_per_min,
+            "artifact_quota_bytes": artifact_quota_bytes,
+        }.items():
+            if value is not None:
+                request[name] = value
+        return self._request(
+            "POST", f"/workspace-scans/{parent_scan_id}/refinements", request,
+        )
+
     def workspace_scan_mosaic(
         self,
         scan_id: str | uuid.UUID,

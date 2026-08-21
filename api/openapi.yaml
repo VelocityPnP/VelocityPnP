@@ -206,6 +206,28 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WorkspaceRefinementTargets" }
+  /workspace-scans/{id}/refinements:
+    post:
+      operationId: startWorkspaceRefinementBatch
+      description: >-
+        Ranks current refinement targets, skips successful targets, and runs
+        the selected patches sequentially. A target failure stops the queue.
+        Pending child scans remain visible with a failed status and an
+        explanation. External safety confirmation applies to every selected
+        region.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartWorkspaceRefinementBatchRequest" }
+      responses:
+        "202":
+          description: Accepted prioritized refinement batch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StartWorkspaceRefinementBatchResponse" }
   /workspace-scans/{id}/artifacts/{name}:
     get:
       operationId: getWorkspaceScanArtifact
@@ -1249,12 +1271,17 @@ components:
         profile_id: { type: string }
         parent_scan_id: { type: [string, "null"], format: uuid }
         refinement_target_index: { type: [integer, "null"], minimum: 0 }
+        refinement_algorithm_version: { type: [string, "null"] }
+        refinement_batch_operation_id: { type: [string, "null"], format: uuid }
+        refinement_priority: { type: [integer, "null"], minimum: 1 }
+        refinement_severity_score: { type: [number, "null"], minimum: 0 }
+        refinement_priority_algorithm_version: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         status:
           type: string
           enum: [pending, running, succeeded, failed]
-        mode: { type: string, enum: [precision, survey, reconnaissance] }
+        mode: { type: string, enum: [precision, survey, reconnaissance, refinement] }
         artifact_retention:
           type: string
           enum: [full_sources, transient_sources, thumbnails, mosaic_only]
@@ -1309,16 +1336,117 @@ components:
         - parent_scan_id
         - algorithm_version
         - recommended_action
+        - priority_algorithm_version
         - target_regions
+        - targets
+        - remaining_targets
       properties:
         parent_scan_id: { type: string, format: uuid }
         algorithm_version: { type: string }
         recommended_action:
           type: string
           enum: [accept, targeted_refinement, review_geometry, increase_overlap]
+        priority_algorithm_version: { type: string }
         target_regions:
           type: array
           items: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        targets:
+          type: array
+          description: Severity-ranked targets. Priority 1 runs first.
+          items: { $ref: "#/components/schemas/WorkspaceRefinementTarget" }
+        remaining_targets: { type: integer, minimum: 0 }
+    WorkspaceRefinementTarget:
+      type: object
+      required:
+        - target_index
+        - priority
+        - region
+        - severity_score
+        - elevated_seams
+        - unresolved_seams
+        - maximum_disagreement_p95_luma
+        - maximum_correction_mm
+        - reason
+        - completed_scan_id
+        - latest_scan_id
+        - latest_scan_status
+      properties:
+        target_index: { type: integer, minimum: 0 }
+        priority: { type: integer, minimum: 1 }
+        region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        severity_score: { type: number, minimum: 0 }
+        elevated_seams: { type: integer, minimum: 0 }
+        unresolved_seams: { type: integer, minimum: 0 }
+        maximum_disagreement_p95_luma: { type: number, minimum: 0 }
+        maximum_correction_mm: { type: number, minimum: 0 }
+        reason: { type: string }
+        completed_scan_id: { type: [string, "null"], format: uuid }
+        latest_scan_id: { type: [string, "null"], format: uuid }
+        latest_scan_status:
+          oneOf:
+            - type: string
+              enum: [pending, running, succeeded, failed]
+            - type: "null"
+    StartWorkspaceRefinementBatchRequest:
+      type: object
+      required:
+        - lease_id
+        - calibration_id
+        - confirmed_external_safety_checks
+      properties:
+        lease_id: { type: string, format: uuid }
+        calibration_id: { type: string, format: uuid }
+        confirmed_external_safety_checks: { type: boolean }
+        max_targets:
+          type: integer
+          minimum: 1
+          maximum: 32
+          default: 32
+        overlap_fraction: { type: number, minimum: 0.6, maximum: 0.75 }
+        output_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
+        feed_mm_per_min: { type: number, exclusiveMinimum: 0 }
+        artifact_quota_bytes:
+          type: integer
+          minimum: 1
+          maximum: 536870912
+          description: Retained-artifact quota for each child scan.
+    StartWorkspaceRefinementBatchResponse:
+      type: object
+      required:
+        - operation
+        - parent_scan_id
+        - algorithm_version
+        - recommended_action
+        - priority_algorithm_version
+        - completed_target_indices
+        - items
+        - estimated_duration_seconds
+        - estimated_retained_bytes
+      properties:
+        operation: { $ref: "#/components/schemas/Operation" }
+        parent_scan_id: { type: string, format: uuid }
+        algorithm_version: { type: string }
+        recommended_action:
+          type: string
+          enum: [targeted_refinement, increase_overlap]
+        priority_algorithm_version: { type: string }
+        completed_target_indices:
+          type: array
+          items: { type: integer, minimum: 0 }
+        items:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/WorkspaceRefinementBatchItem" }
+        estimated_duration_seconds: { type: integer, minimum: 0 }
+        estimated_retained_bytes: { type: integer, minimum: 0 }
+    WorkspaceRefinementBatchItem:
+      type: object
+      required: [target, scan, operation, estimate]
+      properties:
+        target: { $ref: "#/components/schemas/WorkspaceRefinementTarget" }
+        scan: { $ref: "#/components/schemas/WorkspaceScanReport" }
+        operation: { $ref: "#/components/schemas/Operation" }
+        estimate: { $ref: "#/components/schemas/WorkspaceScanEstimate" }
     WorkspaceMosaicLayerReport:
       type: object
       required:

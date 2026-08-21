@@ -27,7 +27,8 @@ This repository contains the first working platform slice:
 - calibrated top-camera workspace scanning with streaming survey mosaics,
   bounded OpenCV tile registration, explicit raster coordinates, measured
   plate-plane geometry, reconnaissance seam diagnostics, lineage-tracked
-  selective refinement, preflight estimates, and artifact quotas
+  selective refinement, prioritized refinement queues, preflight estimates,
+  and artifact quotas
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 
