@@ -283,6 +283,43 @@ class ClientTests(unittest.TestCase):
                 )
         send.assert_not_called()
 
+    def test_workspace_refinement_composite_and_artifacts(self):
+        client = Client(timeout=1)
+        quality = {"accepted": True, "accepted_target_count": 8}
+        with patch.object(client, "_request", return_value=quality) as send:
+            self.assertEqual(
+                client.build_workspace_refinement_composite("parent"), quality,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/workspace-scans/parent/refinement-composite",
+            {},
+        )
+
+        with patch.object(client, "_request", return_value=quality) as send:
+            self.assertEqual(
+                client.workspace_scan_refinement_quality("parent"), quality,
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/parent/artifacts/refinement-quality.json",
+        )
+
+        for method, artifact_name in [
+            (client.workspace_scan_refined_mosaic, "mosaic-refined.png"),
+            (
+                client.workspace_scan_refinement_quality_preview,
+                "mosaic-refined-quality.png",
+            ),
+        ]:
+            with patch.object(client, "_request_bytes", return_value=b"png") as send:
+                self.assertEqual(method("parent"), b"png")
+            send.assert_called_once_with(
+                "GET",
+                f"/workspace-scans/parent/artifacts/{artifact_name}",
+                "image/png",
+            )
+
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
         layered_report = {

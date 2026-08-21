@@ -220,6 +220,20 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub fn workspace_scan_artifact_bytes_except(
+        &self,
+        scan_id: Uuid,
+        excluded_name: &str,
+    ) -> Result<u64> {
+        let bytes: i64 = self.connection.lock().query_row(
+            "SELECT COALESCE(SUM(length(data)), 0) FROM workspace_scan_artifacts \
+             WHERE scan_id = ?1 AND name <> ?2",
+            params![scan_id.to_string(), excluded_name],
+            |row| row.get(0),
+        )?;
+        u64::try_from(bytes).context("workspace artifact byte count is negative")
+    }
+
     pub fn put_camera_profile(&self, profile: &CameraProfile) -> Result<()> {
         self.put_named("camera_profile", &profile.storage_id(), profile)
     }
@@ -534,6 +548,7 @@ mod tests {
             parallax: None,
             height_map: None,
             seam_health: None,
+            refinement_composite: None,
             warnings: vec![],
             failure: None,
         };

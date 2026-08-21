@@ -269,6 +269,41 @@ class Client:
             "POST", f"/workspace-scans/{parent_scan_id}/refinements", request,
         )
 
+    def build_workspace_refinement_composite(
+        self, parent_scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/workspace-scans/{parent_scan_id}/refinement-composite",
+            {},
+        )
+
+    def workspace_scan_refined_mosaic(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/mosaic-refined.png",
+            "image/png",
+        )
+
+    def workspace_scan_refinement_quality(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/refinement-quality.json",
+        )
+
+    def workspace_scan_refinement_quality_preview(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/mosaic-refined-quality.png",
+            "image/png",
+        )
+
     def workspace_scan_mosaic(
         self,
         scan_id: str | uuid.UUID,

@@ -107,6 +107,8 @@ The project is organized by measurable gates rather than calendar estimates.
   refinement patch from a reconnaissance target
 - [x] Add severity-ranked, resumable, sequential refinement queues that skip
   successful targets and stop safely on the first failed patch
+- [x] Merge successful height-corrected refinements into the parent raster and
+  apply a separate, versioned image-quality gate
 - [x] Georeference survey rasters and use installed plate-plane geometry for
   full-workspace scan planning
 - [ ] Add board-region discovery and package-template pose comparison

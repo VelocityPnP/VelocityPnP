@@ -228,6 +228,22 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StartWorkspaceRefinementBatchResponse" }
+  /workspace-scans/{id}/refinement-composite:
+    post:
+      operationId: buildWorkspaceRefinementComposite
+      description: >-
+        Resamples every current successful height-corrected refinement into
+        the reconnaissance raster. This operation causes no machine motion.
+        It persists a plain composite, a quality report, and an outlined
+        quality preview. Scan success does not bypass the quality gate.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Georeferenced refinement composite and quality result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceRefinementCompositeSummary" }
   /workspace-scans/{id}/artifacts/{name}:
     get:
       operationId: getWorkspaceScanArtifact
@@ -1328,6 +1344,10 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceSeamHealthSummary"
             - type: "null"
+        refinement_composite:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceRefinementCompositeSummary"
+            - type: "null"
         warnings: { type: array, items: { type: string } }
         failure: { type: [string, "null"] }
     WorkspaceRefinementTargets:
@@ -1335,6 +1355,8 @@ components:
       required:
         - parent_scan_id
         - algorithm_version
+        - source_algorithm_version
+        - source_recommended_action
         - recommended_action
         - priority_algorithm_version
         - target_regions
@@ -1343,6 +1365,10 @@ components:
       properties:
         parent_scan_id: { type: string, format: uuid }
         algorithm_version: { type: string }
+        source_algorithm_version: { type: string }
+        source_recommended_action:
+          type: string
+          enum: [accept, targeted_refinement, review_geometry, increase_overlap]
         recommended_action:
           type: string
           enum: [accept, targeted_refinement, review_geometry, increase_overlap]
@@ -1447,6 +1473,90 @@ components:
         scan: { $ref: "#/components/schemas/WorkspaceScanReport" }
         operation: { $ref: "#/components/schemas/Operation" }
         estimate: { $ref: "#/components/schemas/WorkspaceScanEstimate" }
+    WorkspaceRefinementCompositeSummary:
+      type: object
+      required:
+        - algorithm_version
+        - mosaic_artifact_name
+        - quality_report_artifact_name
+        - quality_preview_artifact_name
+        - thresholds
+        - accepted
+        - target_count
+        - composed_target_count
+        - accepted_target_count
+        - missing_target_indices
+        - patches
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        mosaic_artifact_name: { type: string }
+        quality_report_artifact_name: { type: string }
+        quality_preview_artifact_name: { type: string }
+        thresholds: { $ref: "#/components/schemas/WorkspaceRefinementQualityThresholds" }
+        accepted: { type: boolean }
+        target_count: { type: integer, minimum: 0 }
+        composed_target_count: { type: integer, minimum: 0 }
+        accepted_target_count: { type: integer, minimum: 0 }
+        missing_target_indices:
+          type: array
+          items: { type: integer, minimum: 0 }
+        patches:
+          type: array
+          items: { $ref: "#/components/schemas/WorkspaceRefinementPatchQuality" }
+        findings:
+          type: array
+          items: { type: string }
+    WorkspaceRefinementPatchQuality:
+      type: object
+      required:
+        - target_index
+        - scan_id
+        - artifact_name
+        - composed
+        - accepted
+        - covered_fraction
+        - photometric_offset_luma
+        - boundary_disagreement_p95_luma
+        - parent_texture_energy
+        - refinement_texture_energy
+        - texture_retention_ratio
+        - internal_seam_discontinuity_ratio
+        - findings
+        - observations
+      properties:
+        target_index: { type: integer, minimum: 0 }
+        scan_id: { type: string, format: uuid }
+        artifact_name: { type: string }
+        composed: { type: boolean }
+        accepted: { type: boolean }
+        covered_fraction: { type: number, minimum: 0, maximum: 1 }
+        photometric_offset_luma: { type: number }
+        boundary_disagreement_p95_luma: { type: number, minimum: 0 }
+        parent_texture_energy: { type: number, minimum: 0 }
+        refinement_texture_energy: { type: number, minimum: 0 }
+        texture_retention_ratio: { type: [number, "null"], minimum: 0 }
+        internal_seam_discontinuity_ratio:
+          type: [number, "null"]
+          minimum: 0
+        findings:
+          type: array
+          items: { type: string }
+        observations:
+          type: array
+          items: { type: string }
+    WorkspaceRefinementQualityThresholds:
+      type: object
+      required:
+        - minimum_coverage_fraction
+        - minimum_texture_retention_ratio
+        - boundary_review_p95_luma
+        - seam_discontinuity_review_ratio
+      properties:
+        minimum_coverage_fraction: { type: number, minimum: 0, maximum: 1 }
+        minimum_texture_retention_ratio: { type: number, minimum: 0 }
+        boundary_review_p95_luma: { type: number, minimum: 0 }
+        seam_discontinuity_review_ratio: { type: number, minimum: 0 }
     WorkspaceMosaicLayerReport:
       type: object
       required:

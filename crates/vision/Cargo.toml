@@ -15,6 +15,7 @@ libc = { workspace = true, optional = true }
 opencv.workspace = true
 png.workspace = true
 serde.workspace = true
+uuid.workspace = true
 v4l = { workspace = true, optional = true }
 velocitypnp-domain = { path = "../domain" }
 

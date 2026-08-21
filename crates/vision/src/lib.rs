@@ -6,6 +6,7 @@ mod opencv_backend;
 mod workspace_height_map;
 mod workspace_mosaic;
 mod workspace_parallax;
+mod workspace_refinement;
 mod workspace_seam_health;
 
 #[cfg(test)]
@@ -32,6 +33,11 @@ pub use workspace_mosaic::{
 pub use workspace_parallax::{
     measure_workspace_parallax, WorkspaceParallaxObservation, WorkspaceParallaxReport,
     WorkspaceParallaxStream, MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
+};
+pub use workspace_refinement::{
+    compose_workspace_refinements, WorkspaceRefinementComposite, WorkspaceRefinementPatch,
+    MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
+    MIN_REFINEMENT_COMPOSITE_COVERAGE, MIN_REFINEMENT_TEXTURE_RETENTION_RATIO,
 };
 pub use workspace_seam_health::{
     reanalyze_workspace_seam_health, WorkspaceSeamDiagnostic, WorkspaceSeamHealthArtifacts,

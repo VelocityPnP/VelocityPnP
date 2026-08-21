@@ -1453,9 +1453,36 @@ datum tool clear in target 5, and the local objects in targets 2, 3, 4, and 7
 coherent. Target 1 remained identifiable but showed block boundaries in its
 mostly plate-height area. Targets 3 and 7 accepted no feature registrations;
 their small corrected patches remained coherent through calibrated nominal
-placement and endpoint selection. A successful scan status means capture and
-reconstruction completed; it is not yet a separate image-quality acceptance
-gate.
+placement and endpoint selection.
+
+### Refined workspace composite and quality gate
+
+On the same date, the no-motion refinement-composite operation replayed the
+current target set and found all eight successful height-corrected children.
+It resampled them into the 2,247-by-1,214 parent raster at 0.20 mm/pixel. It
+used the stored machine-coordinate transforms, a two-millimeter edge feather,
+and a robust brightness correction of 0 to 9 luma levels across the patches.
+The release build completed the idempotent operation in 0.75 seconds.
+
+All eight patches had 100 percent reported coverage. Their texture-retention
+ratios were 0.680 to 1.107, above the 0.60 gate. The result therefore passed
+`workspace_refinement_composite.v1` with eight of eight targets accepted and
+no missing target. The parent now contains `mosaic-refined.png`,
+`refinement-quality.json`, and `mosaic-refined-quality.png`. These products
+increased the complete retained parent artifact set to 12,222,422 bytes.
+The plain composite SHA-256 is
+`8afc34b68a99afa9b96e7753cc5e9964f1aeabd2db8a062d294f204541acde49`.
+The quality-preview SHA-256 is
+`ed6b3634995bc1fdfb9be3bd0caebe109ac581aca070ce02b1d4cf1c6cb1c372`.
+
+Visual review found a coherent full workspace. The plate grid stays stable.
+The feeder tapes, datum tool, bottom-camera area, and FTP PCB are identifiable
+in one image. The quality report retains high boundary or midpoint signals as
+review observations for targets 0, 1, 5, and 6. These signals did not fail the
+gate because real feeder and PCB edges caused them. The green-outline preview
+confirmed that every current target passed the hard completeness, coverage,
+and texture checks. This separates successful scan execution from image
+acceptance without requiring another machine run.
 
 After the queue, the machine was at the visual datum X=220.131, Y=190.271,
 Z=31.5, homed, ready, and fault-free. Normal disconnect operation

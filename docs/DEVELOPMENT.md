@@ -258,6 +258,45 @@ request automatically retries failed or unattempted targets and still skips
 successful ones. Daemon restart recovery fails both interrupted children and
 their batch operation instead of leaving work marked as running.
 
+After the queue succeeds, build one refined workspace image without machine
+motion:
+
+```bash
+wget -qO- --method=POST \
+  --header='Content-Type: application/json' \
+  --body-data='{}' \
+  http://127.0.0.1:4080/api/v1/workspace-scans/PARENT_UUID/refinement-composite
+```
+
+The daemon replays the current seam classifier. It selects the latest
+successful, matching, height-corrected child for each target. It resamples
+each child into the parent machine-coordinate raster. A two-millimeter feather
+joins each patch to the coarse image. A robust boundary median supplies a
+brightness correction that is limited to 32 luma levels.
+
+The hard gate requires every current target, at least 99 percent reported
+coverage in every patch, and at least 0.60 retained texture energy when the
+parent region has enough texture to measure. Boundary disagreement above 64
+luma and tile-midline discontinuity above 3.0 are review observations. They do
+not fail the gate because an object edge or a real height change can produce
+the same signal after transient source frames are deleted.
+
+The parent scan stores `workspace_refinement_composite.v1` under
+`refinement_composite` with the source classifier version and action. A
+geometry-review action fails the gate. The generated artifacts are:
+
+- `mosaic-refined.png`: plain composite at the parent scale and transform.
+- `refinement-quality.json`: thresholds, measurements, failures, and review
+  observations for each child.
+- `mosaic-refined-quality.png`: the composite with green accepted or red
+  rejected target outlines.
+
+Generation is idempotent. It replaces these artifacts and recalculates the
+stored byte count and manifest instead of adding their sizes again. A
+successful child scan is only evidence that capture and reconstruction
+finished. The separate composite result says whether the image passed the
+automatic gate.
+
 Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
 
 ```bash

@@ -91,3 +91,10 @@ source disagreement. When retained sources contain the bottom camera, repeated
 aperture detections fit its local depth projection. The agreeing views are
 self-aligned and center-weighted to remove camera-well ringing. The scan report
 records the result under `height_map.camera_aperture`.
+
+After a reconnaissance refinement queue completes, call
+`build_workspace_refinement_composite(parent_scan_id)`. This causes no motion.
+It returns the separate image-quality result and stores it on the parent scan.
+Use `workspace_scan_refined_mosaic` for the plain georeferenced PNG,
+`workspace_scan_refinement_quality` for the measurements, and
+`workspace_scan_refinement_quality_preview` for the outlined review image.

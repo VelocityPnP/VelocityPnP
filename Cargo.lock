@@ -2347,6 +2347,7 @@ dependencies = [
  "png",
  "serde",
  "serde_json",
+ "uuid",
  "v4l",
  "velocitypnp-domain",
 ]

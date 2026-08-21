@@ -207,6 +207,59 @@ pub struct WorkspaceHeightMapSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRefinementPatchQuality {
+    pub target_index: u32,
+    pub scan_id: Uuid,
+    pub artifact_name: String,
+    pub composed: bool,
+    pub accepted: bool,
+    pub covered_fraction: f64,
+    #[serde(default)]
+    pub photometric_offset_luma: f64,
+    pub boundary_disagreement_p95_luma: f64,
+    pub parent_texture_energy: f64,
+    pub refinement_texture_energy: f64,
+    pub texture_retention_ratio: Option<f64>,
+    pub internal_seam_discontinuity_ratio: Option<f64>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+    #[serde(default)]
+    pub observations: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRefinementQualityThresholds {
+    pub minimum_coverage_fraction: f64,
+    pub minimum_texture_retention_ratio: f64,
+    pub boundary_review_p95_luma: f64,
+    pub seam_discontinuity_review_ratio: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRefinementCompositeSummary {
+    pub algorithm_version: String,
+    #[serde(default)]
+    pub source_algorithm_version: String,
+    #[serde(default)]
+    pub source_recommended_action: WorkspaceSeamHealthAction,
+    pub mosaic_artifact_name: String,
+    pub quality_report_artifact_name: String,
+    pub quality_preview_artifact_name: String,
+    #[serde(default)]
+    pub thresholds: WorkspaceRefinementQualityThresholds,
+    pub accepted: bool,
+    pub target_count: u32,
+    pub composed_target_count: u32,
+    pub accepted_target_count: u32,
+    #[serde(default)]
+    pub missing_target_indices: Vec<u32>,
+    #[serde(default)]
+    pub patches: Vec<WorkspaceRefinementPatchQuality>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceScanTile {
     pub index: u32,
     pub row: u32,
@@ -331,6 +384,8 @@ pub struct WorkspaceScanReport {
     pub height_map: Option<WorkspaceHeightMapSummary>,
     #[serde(default)]
     pub seam_health: Option<WorkspaceSeamHealthSummary>,
+    #[serde(default)]
+    pub refinement_composite: Option<WorkspaceRefinementCompositeSummary>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
 }
@@ -378,5 +433,49 @@ mod tests {
             WorkspaceSurfaceModel::default(),
             WorkspaceSurfaceModel::TopCameraWorkingPlane
         );
+    }
+
+    #[test]
+    fn draft_refinement_quality_documents_default_new_diagnostics() {
+        let summary: WorkspaceRefinementCompositeSummary =
+            serde_json::from_value(serde_json::json!({
+                "algorithm_version": "workspace_refinement_composite.v1",
+                "mosaic_artifact_name": "mosaic-refined.png",
+                "quality_report_artifact_name": "refinement-quality.json",
+                "quality_preview_artifact_name": "mosaic-refined-quality.png",
+                "accepted": true,
+                "target_count": 1,
+                "composed_target_count": 1,
+                "accepted_target_count": 1,
+                "missing_target_indices": [],
+                "patches": [{
+                    "target_index": 0,
+                    "scan_id": Uuid::nil(),
+                    "artifact_name": "mosaic-height-corrected.png",
+                    "composed": true,
+                    "accepted": true,
+                    "covered_fraction": 1.0,
+                    "boundary_disagreement_p95_luma": 5.0,
+                    "parent_texture_energy": 10.0,
+                    "refinement_texture_energy": 11.0,
+                    "texture_retention_ratio": 1.1,
+                    "internal_seam_discontinuity_ratio": null,
+                    "findings": []
+                }],
+                "findings": []
+            }))
+            .unwrap();
+
+        assert_eq!(
+            summary.thresholds,
+            WorkspaceRefinementQualityThresholds::default()
+        );
+        assert!(summary.source_algorithm_version.is_empty());
+        assert_eq!(
+            summary.source_recommended_action,
+            WorkspaceSeamHealthAction::Accept
+        );
+        assert_eq!(summary.patches[0].photometric_offset_luma, 0.0);
+        assert!(summary.patches[0].observations.is_empty());
     }
 }

@@ -39,7 +39,8 @@ use velocitypnp_domain::{
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
     WorkspaceCameraApertureSummary, WorkspaceHeightMapSummary, WorkspaceMosaicLayerReport,
-    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
     WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
     WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
@@ -53,24 +54,27 @@ use velocitypnp_store::Store;
 use velocitypnp_vision::{
     apply_camera_controls, build_workspace_height_map, build_workspace_mosaic,
     calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer, camera_sample_metrics,
-    capture_gray_frame, capture_gray_frames, composite_workspace_camera_aperture, decode_gray_png,
-    detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
-    detect_installed_plate_hole, encode_gray_png, encode_rgb_png, encode_rgba_png,
-    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
-    fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
-    measure_workspace_parallax, monotonic_timestamp, plan_bottom_camera_correction,
-    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
-    reanalyze_workspace_seam_health, render_workspace_height_mosaic_with_consistency,
-    rescale_planar_camera_model, resize_gray_frame, summarize_camera_reproducibility,
-    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
-    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
-    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame,
-    V4l2CaptureConfig, VisualHomingPlan, WorkspaceCameraApertureComposite,
-    WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream,
-    WorkspaceParallaxObservation, WorkspaceParallaxReport, WorkspaceParallaxStream,
-    WorkspaceScanPlan, WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport,
-    WorkspaceSeamStatus, MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
+    capture_gray_frame, capture_gray_frames, compose_workspace_refinements,
+    composite_workspace_camera_aperture, decode_gray_png, detect_bright_fiducial_near,
+    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
+    encode_gray_png, encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry,
+    fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
+    monotonic_timestamp, plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing,
+    plan_workspace_scan, query_camera_controls, reanalyze_workspace_seam_health,
+    render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
+    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
+    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
+    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
+    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
+    GrayFrame, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig,
+    VisualHomingPlan, WorkspaceCameraApertureComposite, WorkspaceHeightComposite,
+    WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxObservation,
+    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRefinementPatch, WorkspaceScanPlan,
+    WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport, WorkspaceSeamStatus,
+    MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
+    MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
+    MIN_REFINEMENT_TEXTURE_RETENTION_RATIO, MIN_WORKSPACE_SURFACE_FRACTION,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
@@ -90,6 +94,7 @@ const MAX_WORKSPACE_SCAN_TILES: u32 = 64;
 const MAX_WORKSPACE_SURVEY_TILES: u32 = 4_096;
 const MAX_WORKSPACE_REFINEMENT_BATCH_TARGETS: u32 = 32;
 const WORKSPACE_REFINEMENT_PRIORITY_ALGORITHM: &str = "workspace_refinement_priority.v1";
+const WORKSPACE_REFINEMENT_COMPOSITE_ALGORITHM: &str = "workspace_refinement_composite.v1";
 const MAX_CHUNKED_WORKSPACE_SURVEY_TILES: u32 = 12_000;
 const MAX_WORKSPACE_MOSAIC_PIXELS: usize = 25_000_000;
 const MAX_WORKSPACE_SURVEY_PIXELS: usize = 12_000_000;
@@ -133,6 +138,9 @@ const WORKSPACE_DISAGREEMENT_ARTIFACT: &str = "mosaic-disagreement.png";
 const WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT: &str = "overlap-confidence.png";
 const WORKSPACE_SEAM_OVERLAY_ARTIFACT: &str = "seam-health-overlay.png";
 const WORKSPACE_SEAM_PREVIEW_ARTIFACT: &str = "mosaic-seam-health.png";
+const WORKSPACE_REFINED_MOSAIC_ARTIFACT: &str = "mosaic-refined.png";
+const WORKSPACE_REFINEMENT_QUALITY_ARTIFACT: &str = "refinement-quality.json";
+const WORKSPACE_REFINEMENT_QUALITY_PREVIEW_ARTIFACT: &str = "mosaic-refined-quality.png";
 
 struct WorkspaceHeightArtifacts {
     map: WorkspaceHeightMap,
@@ -329,6 +337,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspace-scans/{id}/refinements",
             post(start_workspace_refinement_batch),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/refinement-composite",
+            post(build_workspace_refinement_composite),
         )
         .route(
             "/api/v1/workspace-scans/{id}/artifacts/{name}",
@@ -860,6 +872,18 @@ struct PreparedWorkspaceRefinement {
     plan: WorkspaceScanPlan,
 }
 
+struct EncodedWorkspaceRefinementPatch {
+    target_index: u32,
+    scan_id: Uuid,
+    artifact_name: String,
+    encoded: Vec<u8>,
+    expected_width: u32,
+    expected_height: u32,
+    raster_transform: WorkspaceRasterTransform,
+    covered_fraction: f64,
+    tiles: Vec<WorkspaceScanTile>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WorkspaceRefinementTargetResponse {
     target_index: u32,
@@ -1335,6 +1359,7 @@ fn pending_workspace_scan(
         parallax: None,
         height_map: None,
         seam_health: None,
+        refinement_composite: None,
         warnings: estimate.warnings.clone(),
         failure: None,
     }
@@ -3809,8 +3834,15 @@ fn persist_workspace_artifact(
     media_type: &str,
     data: &[u8],
 ) -> Result<(), String> {
+    let replaced_bytes = state
+        .store
+        .get_workspace_scan_artifact(scan.id, name)
+        .map_err(|error| error.to_string())?
+        .map_or(0_u64, |(_, existing)| existing.len() as u64);
     let retained = scan
         .retained_artifact_bytes
+        .checked_sub(replaced_bytes)
+        .ok_or_else(|| "workspace retained artifact size is inconsistent".to_string())?
         .checked_add(data.len() as u64)
         .ok_or_else(|| "workspace retained artifact size overflowed".to_string())?;
     if retained > scan.artifact_quota_bytes {
@@ -3831,7 +3863,10 @@ fn persist_workspace_manifest(
     state: &AppState,
     scan: &mut WorkspaceScanReport,
 ) -> Result<(), String> {
-    let artifact_bytes = scan.retained_artifact_bytes;
+    let artifact_bytes = state
+        .store
+        .workspace_scan_artifact_bytes_except(scan.id, "manifest.json")
+        .map_err(|error| error.to_string())?;
     let mut total_bytes = artifact_bytes;
     let manifest = 'manifest: {
         for _ in 0..8 {
@@ -4145,6 +4180,241 @@ async fn start_workspace_refinement_batch(
         ),
     );
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn build_workspace_refinement_composite(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<WorkspaceRefinementCompositeSummary>> {
+    let mut parent = state
+        .store
+        .get_workspace_scan(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if parent.status != WorkspaceScanStatus::Succeeded
+        || parent.mode != WorkspaceScanMode::Reconnaissance
+    {
+        return Err(ApiError::bad_request(
+            "refinement composition requires a successful reconnaissance scan",
+        ));
+    }
+    let parent_transform = parent.raster_transform.ok_or_else(|| {
+        ApiError::bad_request("reconnaissance scan has no machine-coordinate raster transform")
+    })?;
+    let parent_artifact_name = parent
+        .mosaic_artifact_name
+        .as_deref()
+        .unwrap_or("mosaic.png");
+    let (parent_media_type, parent_data) = state
+        .store
+        .get_workspace_scan_artifact(parent.id, parent_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("reconnaissance mosaic artifact not found"))?;
+    if parent_media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "reconnaissance mosaic artifact is not a PNG"
+        )));
+    }
+    let parent_width = parent.mosaic_width_px.ok_or_else(|| {
+        ApiError::internal(anyhow::anyhow!("reconnaissance mosaic width is absent"))
+    })?;
+    let parent_height = parent.mosaic_height_px.ok_or_else(|| {
+        ApiError::internal(anyhow::anyhow!("reconnaissance mosaic height is absent"))
+    })?;
+
+    let seam_artifacts = reanalyze_retained_workspace_seams(&state, &parent).await?;
+    let scans = state
+        .store
+        .list_workspace_scans()
+        .map_err(ApiError::internal)?;
+    let mut targets = rank_workspace_refinement_targets(&seam_artifacts.report, &scans, parent.id);
+    targets.sort_by_key(|target| target.target_index);
+    let mut missing_target_indices = Vec::new();
+    let mut encoded_patches = Vec::new();
+    for target in &targets {
+        let Some(scan_id) = target.completed_scan_id else {
+            missing_target_indices.push(target.target_index);
+            continue;
+        };
+        let child = scans
+            .iter()
+            .find(|scan| scan.id == scan_id)
+            .ok_or_else(|| {
+                ApiError::internal(anyhow::anyhow!("completed refinement scan is absent"))
+            })?;
+        if child.calibration_id != parent.calibration_id || child.profile_id != parent.profile_id {
+            missing_target_indices.push(target.target_index);
+            continue;
+        }
+        let Some(height_map) = child.height_map.as_ref() else {
+            missing_target_indices.push(target.target_index);
+            continue;
+        };
+        let artifact_name = height_map.corrected_mosaic_artifact_name.clone();
+        let (media_type, data) = state
+            .store
+            .get_workspace_scan_artifact(child.id, &artifact_name)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| {
+                ApiError::not_found(format!(
+                    "refinement target {} corrected mosaic not found",
+                    target.target_index,
+                ))
+            })?;
+        if media_type != "image/png" {
+            return Err(ApiError::internal(anyhow::anyhow!(
+                "refinement target {} corrected mosaic is not a PNG",
+                target.target_index,
+            )));
+        }
+        let expected_width = child.mosaic_width_px.ok_or_else(|| {
+            ApiError::internal(anyhow::anyhow!(
+                "refinement target {} mosaic width is absent",
+                target.target_index,
+            ))
+        })?;
+        let expected_height = child.mosaic_height_px.ok_or_else(|| {
+            ApiError::internal(anyhow::anyhow!(
+                "refinement target {} mosaic height is absent",
+                target.target_index,
+            ))
+        })?;
+        let raster_transform = child.raster_transform.ok_or_else(|| {
+            ApiError::internal(anyhow::anyhow!(
+                "refinement target {} has no raster transform",
+                target.target_index,
+            ))
+        })?;
+        encoded_patches.push(EncodedWorkspaceRefinementPatch {
+            target_index: target.target_index,
+            scan_id: child.id,
+            artifact_name,
+            encoded: data,
+            expected_width,
+            expected_height,
+            raster_transform,
+            covered_fraction: child.covered_fraction.unwrap_or(0.0),
+            tiles: child.tiles.clone(),
+        });
+    }
+    let composite = tokio::task::spawn_blocking(move || {
+        let parent_frame = decode_gray_png(&parent_data)?;
+        anyhow::ensure!(
+            parent_frame.width == parent_width && parent_frame.height == parent_height,
+            "reconnaissance mosaic dimensions do not match its report"
+        );
+        let patches = encoded_patches
+            .into_iter()
+            .map(|patch| {
+                let frame = decode_gray_png(&patch.encoded)?;
+                anyhow::ensure!(
+                    frame.width == patch.expected_width && frame.height == patch.expected_height,
+                    "refinement target {} mosaic dimensions do not match its report",
+                    patch.target_index,
+                );
+                Ok(WorkspaceRefinementPatch {
+                    target_index: patch.target_index,
+                    scan_id: patch.scan_id,
+                    artifact_name: patch.artifact_name,
+                    frame,
+                    raster_transform: patch.raster_transform,
+                    covered_fraction: patch.covered_fraction,
+                    tiles: patch.tiles,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        compose_workspace_refinements(&parent_frame, parent_transform, &patches)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    let accepted_target_count = composite
+        .patches
+        .iter()
+        .filter(|patch| patch.accepted)
+        .count() as u32;
+    let mut findings = Vec::new();
+    if !missing_target_indices.is_empty() {
+        findings.push(format!(
+            "{} current targets have no compatible successful height-corrected refinement",
+            missing_target_indices.len(),
+        ));
+    }
+    let rejected_targets = composite
+        .patches
+        .iter()
+        .filter(|patch| !patch.accepted)
+        .map(|patch| patch.target_index.to_string())
+        .collect::<Vec<_>>();
+    if !rejected_targets.is_empty() {
+        findings.push(format!(
+            "quality review is required for targets {}",
+            rejected_targets.join(", "),
+        ));
+    }
+    if seam_artifacts.report.recommended_action == WorkspaceSeamHealthAction::ReviewGeometry {
+        findings.push("the parent seam policy requires a geometry review".into());
+    }
+    let accepted = missing_target_indices.is_empty()
+        && accepted_target_count == targets.len() as u32
+        && seam_artifacts.report.recommended_action != WorkspaceSeamHealthAction::ReviewGeometry;
+    if accepted {
+        findings
+            .push("all current refinement targets passed the automatic composition gate".into());
+    }
+    let summary = WorkspaceRefinementCompositeSummary {
+        algorithm_version: WORKSPACE_REFINEMENT_COMPOSITE_ALGORITHM.into(),
+        source_algorithm_version: seam_artifacts.report.algorithm_version,
+        source_recommended_action: seam_artifacts.report.recommended_action,
+        mosaic_artifact_name: WORKSPACE_REFINED_MOSAIC_ARTIFACT.into(),
+        quality_report_artifact_name: WORKSPACE_REFINEMENT_QUALITY_ARTIFACT.into(),
+        quality_preview_artifact_name: WORKSPACE_REFINEMENT_QUALITY_PREVIEW_ARTIFACT.into(),
+        thresholds: WorkspaceRefinementQualityThresholds {
+            minimum_coverage_fraction: MIN_REFINEMENT_COMPOSITE_COVERAGE,
+            minimum_texture_retention_ratio: MIN_REFINEMENT_TEXTURE_RETENTION_RATIO,
+            boundary_review_p95_luma: MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA,
+            seam_discontinuity_review_ratio: MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
+        },
+        accepted,
+        target_count: targets.len() as u32,
+        composed_target_count: composite.patches.len() as u32,
+        accepted_target_count,
+        missing_target_indices,
+        patches: composite.patches,
+        findings,
+    };
+    let mosaic_png = encode_gray_png(&composite.frame).map_err(ApiError::internal)?;
+    let preview_png = encode_rgb_png(&composite.quality_preview).map_err(ApiError::internal)?;
+    let report_json = serde_json::to_vec_pretty(&summary).map_err(ApiError::internal)?;
+    persist_workspace_artifact(
+        &state,
+        &mut parent,
+        WORKSPACE_REFINED_MOSAIC_ARTIFACT,
+        "image/png",
+        &mosaic_png,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    persist_workspace_artifact(
+        &state,
+        &mut parent,
+        WORKSPACE_REFINEMENT_QUALITY_PREVIEW_ARTIFACT,
+        "image/png",
+        &preview_png,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    persist_workspace_artifact(
+        &state,
+        &mut parent,
+        WORKSPACE_REFINEMENT_QUALITY_ARTIFACT,
+        "application/json",
+        &report_json,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    parent.refinement_composite = Some(summary.clone());
+    parent.updated_at = Utc::now();
+    persist_workspace_manifest(&state, &mut parent)
+        .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    Ok(Json(summary))
 }
 
 async fn get_workspace_scan_artifact(
@@ -14120,6 +14390,7 @@ mod tests {
             parallax: None,
             height_map: None,
             seam_health: None,
+            refinement_composite: None,
             warnings: vec![],
             failure: None,
         }
@@ -15102,6 +15373,192 @@ mod tests {
         );
         assert_eq!(source.target_index, 0);
         assert!(source.region.x_min_mm < source.region.x_max_mm);
+    }
+
+    #[tokio::test]
+    async fn refinement_composite_is_georeferenced_gated_and_idempotent() {
+        let state = test_state();
+        let mut parent = test_workspace_scan(Uuid::new_v4());
+        parent.status = WorkspaceScanStatus::Succeeded;
+        parent.mode = WorkspaceScanMode::Reconnaissance;
+        parent.region = WorkspaceScanRegion {
+            x_min_mm: 0.0,
+            x_max_mm: 20.0,
+            y_min_mm: 0.0,
+            y_max_mm: 20.0,
+        };
+        parent.raster_transform = Some(WorkspaceRasterTransform {
+            top_left_x_mm: 0.0,
+            top_left_y_mm: 20.0,
+            x_mm_per_pixel: 1.0,
+            y_mm_per_pixel: -1.0,
+        });
+        parent.output_mm_per_pixel = 1.0;
+        parent.rows = 1;
+        parent.columns = 1;
+        parent.tiles.clear();
+        parent.mosaic_width_px = Some(21);
+        parent.mosaic_height_px = Some(21);
+        parent.covered_fraction = Some(1.0);
+        parent.mosaic_artifact_name = Some("mosaic.png".into());
+        parent.seam_health = Some(WorkspaceSeamHealthSummary {
+            report_artifact_name: WORKSPACE_SEAM_HEALTH_ARTIFACT.into(),
+            disagreement_artifact_name: WORKSPACE_DISAGREEMENT_ARTIFACT.into(),
+            overlap_confidence_artifact_name: WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT.into(),
+            overlay_artifact_name: WORKSPACE_SEAM_OVERLAY_ARTIFACT.into(),
+            preview_artifact_name: WORKSPACE_SEAM_PREVIEW_ARTIFACT.into(),
+            total_seams: 0,
+            healthy_seams: 0,
+            elevated_seams: 0,
+            unresolved_seams: 0,
+            target_regions: 1,
+            overlap_pixel_fraction: 1.0,
+            disagreement_p50_luma: 1.0,
+            disagreement_p95_luma: 40.0,
+            recommended_action: WorkspaceSeamHealthAction::TargetedRefinement,
+        });
+        state.store.put_workspace_scan(&parent).unwrap();
+        let mosaic = GrayFrame {
+            width: 21,
+            height: 21,
+            pixels: (0..441).map(|index| (index % 127) as u8).collect(),
+        };
+        let mut disagreement = GrayFrame {
+            width: 21,
+            height: 21,
+            pixels: vec![1; 441],
+        };
+        for y in 7..14 {
+            for x in 8..14 {
+                disagreement.pixels[y * 21 + x] = 40;
+            }
+        }
+        let prior = WorkspaceSeamHealthReport {
+            algorithm_version: "workspace_seam_health.v2".into(),
+            overlap_pixel_fraction: 1.0,
+            disagreement_p50_luma: 1.0,
+            disagreement_p95_luma: 40.0,
+            disagreement_threshold_luma: 7.0,
+            material_shift_threshold_mm: 1.0,
+            total_seams: 0,
+            healthy_seams: 0,
+            elevated_seams: 0,
+            unresolved_seams: 0,
+            recommended_action: WorkspaceSeamHealthAction::TargetedRefinement,
+            systematic_correction_x_mm: None,
+            systematic_correction_y_mm: None,
+            target_regions: vec![parent.region],
+            seams: Vec::new(),
+        };
+        for (name, media_type, data) in [
+            ("mosaic.png", "image/png", encode_gray_png(&mosaic).unwrap()),
+            (
+                WORKSPACE_DISAGREEMENT_ARTIFACT,
+                "image/png",
+                encode_gray_png(&disagreement).unwrap(),
+            ),
+            (
+                WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT,
+                "image/png",
+                encode_gray_png(&GrayFrame {
+                    width: 21,
+                    height: 21,
+                    pixels: vec![192; 441],
+                })
+                .unwrap(),
+            ),
+            (
+                WORKSPACE_SEAM_HEALTH_ARTIFACT,
+                "application/json",
+                serde_json::to_vec(&prior).unwrap(),
+            ),
+        ] {
+            state
+                .store
+                .put_workspace_scan_artifact(parent.id, name, media_type, &data)
+                .unwrap();
+        }
+        let mut child = test_workspace_scan(Uuid::new_v4());
+        child.calibration_id = parent.calibration_id;
+        child.profile_id = parent.profile_id.clone();
+        child.parent_scan_id = Some(parent.id);
+        child.refinement_target_index = Some(0);
+        child.refinement_algorithm_version = Some("workspace_seam_health.v2".into());
+        child.status = WorkspaceScanStatus::Succeeded;
+        child.mode = WorkspaceScanMode::Refinement;
+        child.region = parent.region;
+        child.raster_transform = parent.raster_transform;
+        child.mosaic_width_px = Some(21);
+        child.mosaic_height_px = Some(21);
+        child.covered_fraction = Some(1.0);
+        child.height_map = Some(WorkspaceHeightMapSummary {
+            map_artifact_name: WORKSPACE_HEIGHT_MAP_ARTIFACT.into(),
+            preview_artifact_name: WORKSPACE_HEIGHT_PREVIEW_ARTIFACT.into(),
+            confidence_artifact_name: WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT.into(),
+            corrected_mosaic_artifact_name: WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT.into(),
+            class_overlay_artifact_name: WORKSPACE_HEIGHT_CLASS_OVERLAY_ARTIFACT.into(),
+            class_preview_artifact_name: WORKSPACE_HEIGHT_CLASS_PREVIEW_ARTIFACT.into(),
+            cell_size_mm: 1.0,
+            rows: 1,
+            columns: 1,
+            measured_cells: 1,
+            inferred_cells: 0,
+            unknown_cells: 0,
+            candidate_fractions: vec![0.0],
+            camera_aperture: None,
+        });
+        state.store.put_workspace_scan(&child).unwrap();
+        state
+            .store
+            .put_workspace_scan_artifact(
+                child.id,
+                WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT,
+                "image/png",
+                &encode_gray_png(&mosaic).unwrap(),
+            )
+            .unwrap();
+
+        let first = build_workspace_refinement_composite(State(state.clone()), Path(parent.id))
+            .await
+            .unwrap()
+            .0;
+        assert!(first.accepted);
+        assert_eq!(first.target_count, 1);
+        assert_eq!(first.composed_target_count, 1);
+        assert_eq!(first.accepted_target_count, 1);
+        for name in [
+            WORKSPACE_REFINED_MOSAIC_ARTIFACT,
+            WORKSPACE_REFINEMENT_QUALITY_ARTIFACT,
+            WORKSPACE_REFINEMENT_QUALITY_PREVIEW_ARTIFACT,
+            "manifest.json",
+        ] {
+            assert!(state
+                .store
+                .get_workspace_scan_artifact(parent.id, name)
+                .unwrap()
+                .is_some());
+        }
+        let retained = state
+            .store
+            .get_workspace_scan(parent.id)
+            .unwrap()
+            .unwrap()
+            .retained_artifact_bytes;
+
+        let second = build_workspace_refinement_composite(State(state.clone()), Path(parent.id))
+            .await
+            .unwrap()
+            .0;
+        assert!(second.accepted);
+        assert_eq!(
+            state
+                .store
+                .get_workspace_scan(parent.id)
+                .unwrap()
+                .unwrap()
+                .retained_artifact_bytes,
+            retained,
+        );
     }
 
     #[test]
