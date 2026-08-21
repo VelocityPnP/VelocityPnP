@@ -99,6 +99,8 @@ class Client:
         output_mm_per_pixel: float | None = None,
         feed_mm_per_min: float | None = None,
         artifact_quota_bytes: int | None = None,
+        parent_scan_id: str | uuid.UUID | None = None,
+        refinement_target_index: int | None = None,
     ) -> dict[str, Any]:
         specification = self._workspace_scan_specification(
             calibration_id,
@@ -110,6 +112,8 @@ class Client:
             output_mm_per_pixel=output_mm_per_pixel,
             feed_mm_per_min=feed_mm_per_min,
             artifact_quota_bytes=artifact_quota_bytes,
+            parent_scan_id=parent_scan_id,
+            refinement_target_index=refinement_target_index,
         )
         return self._request("POST", "/workspace-scans/estimate", specification)
 
@@ -126,6 +130,8 @@ class Client:
         output_mm_per_pixel: float | None = None,
         feed_mm_per_min: float | None = None,
         artifact_quota_bytes: int | None = None,
+        parent_scan_id: str | uuid.UUID | None = None,
+        refinement_target_index: int | None = None,
         safety_checks_confirmed: bool = False,
     ) -> dict[str, Any]:
         if not safety_checks_confirmed:
@@ -144,6 +150,8 @@ class Client:
             output_mm_per_pixel=output_mm_per_pixel,
             feed_mm_per_min=feed_mm_per_min,
             artifact_quota_bytes=artifact_quota_bytes,
+            parent_scan_id=parent_scan_id,
+            refinement_target_index=refinement_target_index,
         )
         return self._request("POST", "/workspace-scans", {
             "lease_id": str(lease_id),
@@ -156,6 +164,63 @@ class Client:
 
     def workspace_scan(self, scan_id: str | uuid.UUID) -> dict[str, Any]:
         return self._request("GET", f"/workspace-scans/{scan_id}")
+
+    def workspace_refinement_targets(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET", f"/workspace-scans/{scan_id}/refinement-targets",
+        )
+
+    def estimate_workspace_refinement(
+        self,
+        calibration_id: str | uuid.UUID,
+        parent_scan_id: str | uuid.UUID,
+        target_index: int,
+        *,
+        overlap_fraction: float | None = None,
+        output_mm_per_pixel: float | None = None,
+        feed_mm_per_min: float | None = None,
+        artifact_quota_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        return self.estimate_workspace_scan(
+            calibration_id,
+            mode="refinement",
+            artifact_retention="transient_sources",
+            parent_scan_id=parent_scan_id,
+            refinement_target_index=target_index,
+            overlap_fraction=overlap_fraction,
+            output_mm_per_pixel=output_mm_per_pixel,
+            feed_mm_per_min=feed_mm_per_min,
+            artifact_quota_bytes=artifact_quota_bytes,
+        )
+
+    def start_workspace_refinement(
+        self,
+        calibration_id: str | uuid.UUID,
+        parent_scan_id: str | uuid.UUID,
+        target_index: int,
+        lease_id: str | uuid.UUID,
+        *,
+        overlap_fraction: float | None = None,
+        output_mm_per_pixel: float | None = None,
+        feed_mm_per_min: float | None = None,
+        artifact_quota_bytes: int | None = None,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        return self.start_workspace_scan(
+            calibration_id,
+            lease_id,
+            mode="refinement",
+            artifact_retention="transient_sources",
+            parent_scan_id=parent_scan_id,
+            refinement_target_index=target_index,
+            overlap_fraction=overlap_fraction,
+            output_mm_per_pixel=output_mm_per_pixel,
+            feed_mm_per_min=feed_mm_per_min,
+            artifact_quota_bytes=artifact_quota_bytes,
+            safety_checks_confirmed=safety_checks_confirmed,
+        )
 
     def workspace_scan_mosaic(
         self,
@@ -308,14 +373,29 @@ class Client:
         output_mm_per_pixel: float | None,
         feed_mm_per_min: float | None,
         artifact_quota_bytes: int | None,
+        parent_scan_id: str | uuid.UUID | None,
+        refinement_target_index: int | None,
     ) -> dict[str, Any]:
-        if region is None and region_preset is None:
+        refinement = mode == "refinement"
+        if refinement:
+            if parent_scan_id is None or refinement_target_index is None:
+                raise ValueError(
+                    "workspace refinement requires parent_scan_id and target index"
+                )
+            if region is not None or region_preset is not None:
+                raise ValueError(
+                    "workspace refinement selects its region from the parent scan"
+                )
+            if refinement_target_index < 0:
+                raise ValueError("workspace refinement target index cannot be negative")
+        elif region is None and region_preset is None:
             raise ValueError("workspace scan requires region or region_preset")
         if region_preset is not None and region_preset != "installed_plates":
             raise ValueError("workspace region_preset must be installed_plates")
-        if mode not in {"precision", "survey", "reconnaissance"}:
+        if mode not in {"precision", "survey", "reconnaissance", "refinement"}:
             raise ValueError(
-                "workspace scan mode must be precision, survey, or reconnaissance"
+                "workspace scan mode must be precision, survey, reconnaissance, "
+                "or refinement"
             )
         if artifact_retention not in {
             "full_sources", "transient_sources", "thumbnails", "mosaic_only",
@@ -335,6 +415,10 @@ class Client:
             specification["region"] = region
         if region_preset is not None:
             specification["region_preset"] = region_preset
+        if parent_scan_id is not None:
+            specification["parent_scan_id"] = str(parent_scan_id)
+        if refinement_target_index is not None:
+            specification["refinement_target_index"] = refinement_target_index
         for name, value in {
             "overlap_fraction": overlap_fraction,
             "output_mm_per_pixel": output_mm_per_pixel,

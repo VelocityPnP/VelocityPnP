@@ -473,6 +473,8 @@ mod tests {
             operation_id: Uuid::new_v4(),
             calibration_id: Uuid::new_v4(),
             profile_id: "lumenpnp-v3.0.4".into(),
+            parent_scan_id: None,
+            refinement_target_index: None,
             created_at: now,
             updated_at: now,
             status: WorkspaceScanStatus::Pending,

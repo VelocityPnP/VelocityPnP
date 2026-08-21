@@ -9,7 +9,7 @@ use velocitypnp_domain::{
     PlanarCameraModel, WorkspaceScanRegion, WorkspaceScanTile, WorkspaceSeamHealthAction,
 };
 
-const ALGORITHM_VERSION: &str = "workspace_seam_health.v1";
+const ALGORITHM_VERSION: &str = "workspace_seam_health.v2";
 const CORRELATION_SAMPLE_STEP_PX: i32 = 8;
 const CORRELATION_MAX_SHIFT_PX: i32 = 16;
 const CORRELATION_SHIFT_STEP_PX: i32 = 4;

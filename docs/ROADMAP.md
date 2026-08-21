@@ -103,6 +103,8 @@ The project is organized by measurable gates rather than calendar estimates.
   scan that produces a usable full-workspace inventory in under 20 minutes
 - [x] Add diagnostic-only reconnaissance seam health, visual artifacts, and
   machine-coordinate target regions for selective refinement
+- [x] Physically validate a lineage-tracked, height-corrected selective
+  refinement patch from a reconnaissance target
 - [x] Georeference survey rasters and use installed plate-plane geometry for
   full-workspace scan planning
 - [ ] Add board-region discovery and package-template pose comparison

@@ -1361,6 +1361,55 @@ the new diagnostic path were 1,180.6 and 1,180.9 seconds. The preflight model
 now uses 0.20 seconds per post-first tile for measured control and dispatch
 overhead.
 
+### Selective FTP-PCB refinement
+
+The current `workspace_seam_health.v2` policy replayed the retained products
+from reconnaissance scan `8e5db6e2-c51c-4d4b-a62a-29c390126918` without
+motion. It returned the same eight tuned target regions. Target 6 enclosed the
+FTP PCB at X=346.779 to 441.020 mm and Y=210.867 to 315.067 mm. The parent
+still retains its original four-region report; refinement planning deliberately
+uses current-policy replay instead of changing that historical record.
+
+Child scan `71e574d5-6975-45ae-bf25-190c88eeb7be` selected target 6 through
+`mode=refinement`. Reachable camera coverage clipped only its X maximum to
+438.950 mm. The child report retained the parent UUID, target index, and raster
+transform. Its plan used 60 percent overlap, 0.10 mm/pixel output, 1,200
+mm/min motion, transient sources, and three output-row reconstruction chunks.
+The preflight estimate was 774 tiles, 1,546 seconds, 20,006,548 retained bytes,
+and at most 784,650,240 temporary source bytes.
+
+All 774 tiles completed. The scan took 848.1 seconds, or 14 minutes 8.1
+seconds. The temporary source directory reached 372 MiB and was removed after
+reconstruction. Final retained artifacts used 51,881,038 bytes, below the 64
+MiB quota. Both endpoint mosaics covered 100 percent of the patch with no
+nominal fallback.
+
+Parallax analysis accepted 168,706 observations from all 2,913 attempted
+pairs. The 47-by-53 height map measured 1,406 cells, inferred 387, and left
+698 unknown. Visual inspection showed the expected ablation: the working-plane
+layer kept the FTP PCB sharp but doubled plate holes, while the plate-plane
+layer kept plate holes single but ghosted the PCB. The corrected patch kept
+the PCB outline, traces, labels, fiducials, and components coherent while also
+keeping the surrounding plate holes single. Tall white fixtures retained some
+local block artifacts, but board identification was not impaired. The
+height-corrected PNG SHA-256 is
+`9926acc73b26cd0dbc814c23071fe010be108700d2d71bf442ed670ca6255726`.
+
+This run also exposed a retained-storage estimate error. Its 168,706 dense
+board observations made `surface-height-observations.json` 47,256,714 bytes,
+while preflight estimated only 20,006,548 bytes for all artifacts. Runtime
+quota enforcement still passed, but this left too little margin. Subsequent
+transient-source scans now use every observation to build the height map, then
+retain a deterministic sample of at most 25,000 observations with the full
+aggregate counters. Preflight reserves 300 bytes for every retained sample.
+Full-source scans remain unchanged because their purpose includes offline
+reconstruction. This correction was validated without another machine scan.
+
+The scan returned homed, ready, and fault-free to X=220.131, Y=190.271,
+Z=31.5, with the lights off. This validates one bounded, lineage-tracked,
+height-corrected refinement patch. Automatic scheduling of all parent targets
+remains separate work.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

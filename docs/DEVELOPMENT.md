@@ -135,6 +135,13 @@ request has a retained-byte estimate and quota. A request that exceeds its
 quota fails before motion. The runtime checks actual encoded bytes before each
 artifact is stored. The default survey quota is 64 MiB.
 
+After a transient-source scan builds its height map, the retained parallax
+JSON keeps the full aggregate counters and a deterministic sample of at most
+25,000 observations. The final height map already consumed every accepted
+observation. This bound prevents dense board features from making diagnostic
+JSON dominate retained storage. Full-source scans keep every observation for
+offline reconstruction.
+
 `reconnaissance` mode requires the `installed_plates` region preset. It makes
 one installed-plate-plane mosaic at 0.20 mm/pixel with 10 percent overlap and
 `mosaic_only` retention by default. It uses calibrated placement without tile
@@ -179,6 +186,44 @@ The source directory must contain `manifest.json`, `mosaic.png`,
 `mosaic-disagreement.png`, `overlap-confidence.png`, and `seam-health.json`.
 The command reuses the recorded overlap correlations and writes a new report
 and inspection images to the output directory.
+
+Query current selective-refinement targets before choosing an index:
+
+```bash
+wget -qO- \
+  http://127.0.0.1:4080/api/v1/workspace-scans/PARENT_UUID/refinement-targets
+```
+
+This read-only endpoint replays the retained diagnostic rasters with the
+installed classifier. It does not change the parent report or move the
+machine. This keeps target selection current after classifier updates.
+
+Start one bounded target patch with `mode` set to `refinement`:
+
+```bash
+wget -qO- --method=POST \
+  --header='Content-Type: application/json' \
+  --body-data='{
+    "lease_id":"LEASE_UUID",
+    "calibration_id":"CALIBRATION_UUID",
+    "confirmed_external_safety_checks":true,
+    "mode":"refinement",
+    "parent_scan_id":"PARENT_UUID",
+    "refinement_target_index":0
+  }' \
+  http://127.0.0.1:4080/api/v1/workspace-scans
+```
+
+Refinement requires a successful reconnaissance parent with the same current
+profile and calibration. It rejects `accept` and `review_geometry` parents.
+It selects the ROI from the current replay, intersects it with reachable plate
+coverage, and defaults to 60 percent overlap, 0.10 mm/pixel, and transient
+sources. The child report stores `parent_scan_id`,
+`refinement_target_index`, and a machine-coordinate raster transform. Its
+`height_map.corrected_mosaic_artifact_name` names the georeferenced refined
+patch. Temporary captures are deleted after chunked height reconstruction.
+Each request scans one target, so quota checks, failures, and any retry stay
+local to that ROI.
 
 Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
 

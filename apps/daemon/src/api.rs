@@ -60,15 +60,16 @@ use velocitypnp_vision::{
     fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
     measure_workspace_parallax, monotonic_timestamp, plan_bottom_camera_correction,
     plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
-    render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
-    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
-    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
-    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
-    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
-    GrayFrame, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig,
-    VisualHomingPlan, WorkspaceCameraApertureComposite, WorkspaceHeightComposite,
-    WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxReport,
-    WorkspaceParallaxStream, WorkspaceScanPlan, WorkspaceSeamHealthArtifacts,
+    reanalyze_workspace_seam_health, render_workspace_height_mosaic_with_consistency,
+    rescale_planar_camera_model, resize_gray_frame, summarize_camera_reproducibility,
+    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
+    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
+    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    FiducialDetection, GrayFrame, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame,
+    V4l2CaptureConfig, VisualHomingPlan, WorkspaceCameraApertureComposite,
+    WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream,
+    WorkspaceParallaxObservation, WorkspaceParallaxReport, WorkspaceParallaxStream,
+    WorkspaceScanPlan, WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport,
     MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
@@ -117,6 +118,8 @@ const WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS: u32 = 512;
 const WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS: u32 = 2;
 const ESTIMATED_REGISTRATION_SECONDS: f64 = 0.12;
 const ESTIMATED_HEIGHT_RENDER_SECONDS_PER_TILE: f64 = 0.02;
+const MAX_TRANSIENT_PARALLAX_OBSERVATIONS: usize = 25_000;
+const ESTIMATED_PARALLAX_OBSERVATION_BYTES: u64 = 300;
 const WORKSPACE_HEIGHT_MAP_ARTIFACT: &str = "surface-height-map.json";
 const WORKSPACE_HEIGHT_PREVIEW_ARTIFACT: &str = "surface-height-map.png";
 const WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT: &str = "surface-height-confidence.png";
@@ -284,6 +287,10 @@ pub fn router(state: AppState) -> Router {
             post(estimate_workspace_scan),
         )
         .route("/api/v1/workspace-scans/{id}", get(get_workspace_scan))
+        .route(
+            "/api/v1/workspace-scans/{id}/refinement-targets",
+            get(get_workspace_refinement_targets),
+        )
         .route(
             "/api/v1/workspace-scans/{id}/artifacts/{name}",
             get(get_workspace_scan_artifact),
@@ -704,6 +711,10 @@ struct WorkspaceScanSpecification {
     #[serde(default)]
     region_preset: Option<WorkspaceRegionPreset>,
     #[serde(default)]
+    parent_scan_id: Option<Uuid>,
+    #[serde(default)]
+    refinement_target_index: Option<u32>,
+    #[serde(default)]
     overlap_fraction: Option<f64>,
     #[serde(default)]
     output_mm_per_pixel: Option<f64>,
@@ -736,10 +747,164 @@ struct StartWorkspaceScanResponse {
     estimate: WorkspaceScanEstimate,
 }
 
+#[derive(Debug, Clone)]
+struct WorkspaceRefinementSource {
+    parent_scan_id: Uuid,
+    target_index: u32,
+    region: WorkspaceScanRegion,
+    recommended_action: WorkspaceSeamHealthAction,
+    algorithm_version: String,
+}
+
+#[derive(Serialize)]
+struct WorkspaceRefinementTargetsResponse {
+    parent_scan_id: Uuid,
+    algorithm_version: String,
+    recommended_action: WorkspaceSeamHealthAction,
+    target_regions: Vec<WorkspaceScanRegion>,
+}
+
+fn effective_workspace_region_preset(
+    specification: &WorkspaceScanSpecification,
+    refinement: Option<&WorkspaceRefinementSource>,
+) -> Option<WorkspaceRegionPreset> {
+    if refinement.is_some() {
+        Some(WorkspaceRegionPreset::InstalledPlates)
+    } else {
+        specification.region_preset
+    }
+}
+
+async fn resolve_workspace_refinement_source(
+    state: &AppState,
+    specification: &WorkspaceScanSpecification,
+) -> ApiResult<Option<WorkspaceRefinementSource>> {
+    if specification.mode != WorkspaceScanMode::Refinement {
+        if specification.parent_scan_id.is_some() || specification.refinement_target_index.is_some()
+        {
+            return Err(ApiError::bad_request(
+                "parent_scan_id and refinement_target_index require refinement mode",
+            ));
+        }
+        return Ok(None);
+    }
+    if specification.region.is_some() || specification.region_preset.is_some() {
+        return Err(ApiError::bad_request(
+            "refinement mode selects its region from the parent scan",
+        ));
+    }
+    let parent_scan_id = specification
+        .parent_scan_id
+        .ok_or_else(|| ApiError::bad_request("refinement mode requires parent_scan_id"))?;
+    let target_index = specification
+        .refinement_target_index
+        .ok_or_else(|| ApiError::bad_request("refinement mode requires refinement_target_index"))?;
+    let parent = state
+        .store
+        .get_workspace_scan(parent_scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("parent workspace scan not found"))?;
+    if parent.status != WorkspaceScanStatus::Succeeded
+        || parent.mode != WorkspaceScanMode::Reconnaissance
+    {
+        return Err(ApiError::bad_request(
+            "workspace refinement requires a successful reconnaissance parent",
+        ));
+    }
+    if parent.profile_id != state.profile.id
+        || parent.calibration_id != specification.calibration_id
+    {
+        return Err(ApiError::bad_request(
+            "workspace refinement must use its parent's profile and calibration",
+        ));
+    }
+    let artifacts = reanalyze_retained_workspace_seams(state, &parent).await?;
+    match artifacts.report.recommended_action {
+        WorkspaceSeamHealthAction::TargetedRefinement
+        | WorkspaceSeamHealthAction::IncreaseOverlap => {}
+        WorkspaceSeamHealthAction::ReviewGeometry => {
+            return Err(ApiError::bad_request(
+                "workspace seam health requires geometry review before refinement",
+            ));
+        }
+        WorkspaceSeamHealthAction::Accept => {
+            return Err(ApiError::bad_request(
+                "workspace seam health does not require refinement",
+            ));
+        }
+    }
+    let region = artifacts
+        .report
+        .target_regions
+        .get(target_index as usize)
+        .copied()
+        .ok_or_else(|| {
+            ApiError::bad_request("refinement_target_index is outside the target list")
+        })?;
+    Ok(Some(WorkspaceRefinementSource {
+        parent_scan_id,
+        target_index,
+        region,
+        recommended_action: artifacts.report.recommended_action,
+        algorithm_version: artifacts.report.algorithm_version,
+    }))
+}
+
+async fn reanalyze_retained_workspace_seams(
+    state: &AppState,
+    scan: &WorkspaceScanReport,
+) -> ApiResult<WorkspaceSeamHealthArtifacts> {
+    if scan.status != WorkspaceScanStatus::Succeeded
+        || scan.mode != WorkspaceScanMode::Reconnaissance
+    {
+        return Err(ApiError::bad_request(
+            "seam reanalysis requires a successful reconnaissance scan",
+        ));
+    }
+    let summary = scan
+        .seam_health
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("workspace scan has no seam diagnostics"))?;
+    let read_artifact = |name: &str| -> ApiResult<Vec<u8>> {
+        state
+            .store
+            .get_workspace_scan_artifact(scan.id, name)
+            .map_err(ApiError::internal)?
+            .map(|(_, data)| data)
+            .ok_or_else(|| ApiError::not_found(format!("workspace artifact {name} not found")))
+    };
+    let mosaic = read_artifact(scan.mosaic_artifact_name.as_deref().unwrap_or("mosaic.png"))?;
+    let disagreement = read_artifact(&summary.disagreement_artifact_name)?;
+    let overlap_confidence = read_artifact(&summary.overlap_confidence_artifact_name)?;
+    let report = read_artifact(&summary.report_artifact_name)?;
+    let plan = WorkspaceScanPlan {
+        region: scan.region,
+        overlap_fraction: scan.overlap_fraction,
+        output_mm_per_pixel: scan.output_mm_per_pixel,
+        frame_width_px: scan.frame_width_px,
+        frame_height_px: scan.frame_height_px,
+        usable_pixel_bounds: scan.usable_pixel_bounds,
+        rows: scan.rows,
+        columns: scan.columns,
+        tiles: scan.tiles.clone(),
+    };
+    tokio::task::spawn_blocking(move || {
+        let mosaic = decode_gray_png(&mosaic)?;
+        let disagreement = decode_gray_png(&disagreement)?;
+        let overlap_confidence = decode_gray_png(&overlap_confidence)?;
+        let prior: WorkspaceSeamHealthReport = serde_json::from_slice(&report)?;
+        reanalyze_workspace_seam_health(&plan, &mosaic, &disagreement, &overlap_confidence, &prior)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)
+}
+
 async fn estimate_workspace_scan(
     State(state): State<AppState>,
     Json(body): Json<EstimateWorkspaceScanRequest>,
 ) -> ApiResult<Json<WorkspaceScanEstimate>> {
+    let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) =
         load_workspace_camera_model(&state, body.specification.calibration_id)?;
@@ -748,7 +913,7 @@ async fn estimate_workspace_scan(
             &state,
             &snapshot,
             top_camera_model,
-            body.specification.region_preset,
+            effective_workspace_region_preset(&body.specification, refinement.as_ref()),
             body.specification.mode,
         )?;
     let current_pose = state
@@ -764,6 +929,7 @@ async fn estimate_workspace_scan(
         surface_model,
         installed_camera_model.as_ref(),
         installed_geometry.as_ref(),
+        refinement.as_ref(),
         current_pose,
     )?;
     Ok(Json(estimate))
@@ -790,6 +956,7 @@ async fn start_workspace_scan(
     let current_pose = status
         .pose
         .ok_or_else(|| ApiError::bad_request("workspace scan requires a known machine pose"))?;
+    let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) =
@@ -799,7 +966,7 @@ async fn start_workspace_scan(
             &state,
             &snapshot,
             top_camera_model,
-            body.specification.region_preset,
+            effective_workspace_region_preset(&body.specification, refinement.as_ref()),
             body.specification.mode,
         )?;
     let (plan, estimate) = prepare_workspace_scan(
@@ -810,6 +977,7 @@ async fn start_workspace_scan(
         surface_model,
         installed_camera_model.as_ref(),
         installed_geometry.as_ref(),
+        refinement.as_ref(),
         current_pose,
     )?;
     state
@@ -825,6 +993,8 @@ async fn start_workspace_scan(
         operation_id: operation.id,
         calibration_id: snapshot.id,
         profile_id: state.profile.id.clone(),
+        parent_scan_id: refinement.as_ref().map(|source| source.parent_scan_id),
+        refinement_target_index: refinement.as_ref().map(|source| source.target_index),
         created_at: now,
         updated_at: now,
         status: WorkspaceScanStatus::Pending,
@@ -908,10 +1078,12 @@ fn prepare_workspace_scan(
     surface_model: WorkspaceSurfaceModel,
     installed_camera_model: Option<&PlanarCameraModel>,
     installed_geometry: Option<&InstalledPlateGeometryReport>,
+    refinement: Option<&WorkspaceRefinementSource>,
     start_pose: Pose,
 ) -> ApiResult<(WorkspaceScanPlan, WorkspaceScanEstimate)> {
     let mut warnings = Vec::new();
     let reconnaissance = specification.mode == WorkspaceScanMode::Reconnaissance;
+    let refinement_mode = specification.mode == WorkspaceScanMode::Refinement;
     let streaming = specification.mode != WorkspaceScanMode::Precision;
     if installed_camera_model.is_some() {
         warnings.push(
@@ -930,7 +1102,7 @@ fn prepare_workspace_scan(
         })
         .transpose()?
         .unwrap_or_else(|| camera_model.clone());
-    let preset_region = match specification.region_preset {
+    let preset_region = match effective_workspace_region_preset(specification, refinement) {
         Some(WorkspaceRegionPreset::InstalledPlates) => {
             let plate_region = installed_plates_scan_region(&state.profile, installed_geometry)?;
             let reachable_region = workspace_camera_reachable_region(
@@ -948,14 +1120,30 @@ fn prepare_workspace_scan(
         }
         None => None,
     };
-    let region = match (specification.region, preset_region) {
-        (Some(region), None) => region,
-        (None, Some(region)) => region,
-        (Some(region), Some(preset_region)) => intersect_workspace_regions(region, preset_region)?,
-        (None, None) => {
-            return Err(ApiError::bad_request(
-                "workspace scan requires region or region_preset",
-            ));
+    let region = if let Some(refinement) = refinement {
+        let preset_region = preset_region.ok_or_else(|| {
+            ApiError::bad_request("workspace refinement requires installed-plate coverage")
+        })?;
+        warnings.push(format!(
+            "refinement target {} comes from {} using {} and action {}",
+            refinement.target_index,
+            refinement.parent_scan_id,
+            refinement.algorithm_version,
+            workspace_seam_action_name(refinement.recommended_action),
+        ));
+        intersect_workspace_regions(refinement.region, preset_region)?
+    } else {
+        match (specification.region, preset_region) {
+            (Some(region), None) => region,
+            (None, Some(region)) => region,
+            (Some(region), Some(preset_region)) => {
+                intersect_workspace_regions(region, preset_region)?
+            }
+            (None, None) => {
+                return Err(ApiError::bad_request(
+                    "workspace scan requires region or region_preset",
+                ));
+            }
         }
     };
     if reconnaissance {
@@ -966,6 +1154,8 @@ fn prepare_workspace_scan(
     }
     let requested_overlap = specification.overlap_fraction.unwrap_or(if reconnaissance {
         RECONNAISSANCE_OVERLAP
+    } else if refinement_mode {
+        DEFAULT_LAYERED_WORKSPACE_OVERLAP
     } else if streaming {
         DEFAULT_SURVEY_OVERLAP
     } else {
@@ -1006,13 +1196,20 @@ fn prepare_workspace_scan(
             "survey output_mm_per_pixel must be at least 0.05",
         ));
     }
-    let artifact_retention = specification.artifact_retention.unwrap_or(if streaming {
-        WorkspaceArtifactRetention::MosaicOnly
-    } else {
-        WorkspaceArtifactRetention::FullSources
-    });
+    let artifact_retention = specification
+        .artifact_retention
+        .unwrap_or(if refinement_mode {
+            WorkspaceArtifactRetention::TransientSources
+        } else if streaming {
+            WorkspaceArtifactRetention::MosaicOnly
+        } else {
+            WorkspaceArtifactRetention::FullSources
+        });
     if artifact_retention == WorkspaceArtifactRetention::TransientSources
-        && (specification.mode != WorkspaceScanMode::Survey || installed_camera_model.is_none())
+        && (!matches!(
+            specification.mode,
+            WorkspaceScanMode::Survey | WorkspaceScanMode::Refinement
+        ) || installed_camera_model.is_none())
     {
         return Err(ApiError::bad_request(
             "transient_sources requires a layered installed-plate survey",
@@ -1484,7 +1681,13 @@ fn workspace_scan_estimate(
         WorkspaceArtifactRetention::MosaicOnly => 0,
     };
     let parallax_bytes = if surface_models.len() > 1 {
-        u64::from(planned_registrations) * 4_096 + 4_096
+        if artifact_retention == WorkspaceArtifactRetention::TransientSources {
+            u64::try_from(MAX_TRANSIENT_PARALLAX_OBSERVATIONS).unwrap_or(u64::MAX)
+                * ESTIMATED_PARALLAX_OBSERVATION_BYTES
+                + 4_096
+        } else {
+            u64::from(planned_registrations) * 4_096 + 4_096
+        }
     } else {
         0
     };
@@ -1575,7 +1778,7 @@ fn workspace_scan_estimate(
         feed_mm_per_min,
         capture_settle_frames: if mode == WorkspaceScanMode::Reconnaissance {
             RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES
-        } else if mode == WorkspaceScanMode::Survey {
+        } else if mode != WorkspaceScanMode::Precision {
             WORKSPACE_SURVEY_SETTLE_FRAMES
         } else {
             WORKSPACE_PRECISION_SETTLE_FRAMES
@@ -2718,7 +2921,15 @@ fn complete_workspace_mosaics(
     scan.parallax = None;
     if let Some(parallax) = parallax {
         let artifact_name = "surface-height-observations.json";
-        let encoded = serde_json::to_vec_pretty(&parallax).map_err(|error| error.to_string())?;
+        let observation_limit =
+            if scan.artifact_retention == WorkspaceArtifactRetention::TransientSources {
+                MAX_TRANSIENT_PARALLAX_OBSERVATIONS
+            } else {
+                usize::MAX
+            };
+        let artifact = workspace_parallax_artifact(&parallax, observation_limit);
+        let retained_observations = artifact.retained_observations;
+        let encoded = serde_json::to_vec_pretty(&artifact).map_err(|error| error.to_string())?;
         persist_workspace_artifact(state, scan, artifact_name, "application/json", &encoded)?;
         scan.parallax = Some(WorkspaceParallaxSummary {
             artifact_name: artifact_name.into(),
@@ -2732,6 +2943,12 @@ fn complete_workspace_mosaics(
         if parallax.accepted_observations == 0 {
             scan.warnings
                 .push("parallax analysis found no supported local height observations".into());
+        }
+        if retained_observations < parallax.accepted_observations {
+            scan.warnings.push(format!(
+                "retained a distributed sample of {retained_observations} from {} accepted parallax observations after height reconstruction",
+                parallax.accepted_observations,
+            ));
         }
     }
     scan.height_map = None;
@@ -2765,6 +2982,50 @@ fn complete_workspace_mosaics(
             )
         }),
     ))
+}
+
+#[derive(Serialize)]
+struct PersistedWorkspaceParallaxReport<'a> {
+    working_plane_fraction: f64,
+    installed_plate_fraction: f64,
+    attempted_pairs: u32,
+    pairs_with_overlap: u32,
+    raw_matches: u32,
+    descriptor_matches: u32,
+    accepted_observations: u32,
+    retained_observations: u32,
+    observations: Vec<&'a WorkspaceParallaxObservation>,
+}
+
+fn workspace_parallax_artifact(
+    report: &WorkspaceParallaxReport,
+    observation_limit: usize,
+) -> PersistedWorkspaceParallaxReport<'_> {
+    let retained = report.observations.len().min(observation_limit);
+    let observations: Vec<&WorkspaceParallaxObservation> = if retained == report.observations.len()
+    {
+        report.observations.iter().collect()
+    } else if retained < 2 {
+        report.observations.iter().take(retained).collect()
+    } else {
+        (0..retained)
+            .map(|index| {
+                let source_index = index * (report.observations.len() - 1) / (retained - 1);
+                &report.observations[source_index]
+            })
+            .collect()
+    };
+    PersistedWorkspaceParallaxReport {
+        working_plane_fraction: report.working_plane_fraction,
+        installed_plate_fraction: report.installed_plate_fraction,
+        attempted_pairs: report.attempted_pairs,
+        pairs_with_overlap: report.pairs_with_overlap,
+        raw_matches: report.raw_matches,
+        descriptor_matches: report.descriptor_matches,
+        accepted_observations: report.accepted_observations,
+        retained_observations: observations.len() as u32,
+        observations,
+    }
 }
 
 fn persist_workspace_seam_health(
@@ -3138,6 +3399,24 @@ async fn get_workspace_scan(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("workspace scan not found"))
+}
+
+async fn get_workspace_refinement_targets(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<WorkspaceRefinementTargetsResponse>> {
+    let scan = state
+        .store
+        .get_workspace_scan(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    let artifacts = reanalyze_retained_workspace_seams(&state, &scan).await?;
+    Ok(Json(WorkspaceRefinementTargetsResponse {
+        parent_scan_id: scan.id,
+        algorithm_version: artifacts.report.algorithm_version,
+        recommended_action: artifacts.report.recommended_action,
+        target_regions: artifacts.report.target_regions,
+    }))
 }
 
 async fn get_workspace_scan_artifact(
@@ -13052,6 +13331,8 @@ mod tests {
             operation_id,
             calibration_id: Uuid::new_v4(),
             profile_id: "lumenpnp-v3.0.4".into(),
+            parent_scan_id: None,
+            refinement_target_index: None,
             created_at: now,
             updated_at: now,
             status: WorkspaceScanStatus::Pending,
@@ -13688,6 +13969,8 @@ mod tests {
             artifact_retention: None,
             region: None,
             region_preset: Some(WorkspaceRegionPreset::InstalledPlates),
+            parent_scan_id: None,
+            refinement_target_index: None,
             overlap_fraction: None,
             output_mm_per_pixel: None,
             feed_mm_per_min: None,
@@ -13701,6 +13984,7 @@ mod tests {
             &top_profile,
             &plate_model,
             WorkspaceSurfaceModel::InstalledPlatePlanes,
+            None,
             None,
             None,
             state.profile.home_pose,
@@ -13733,6 +14017,65 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("mixed-height")));
+
+        let refinement_specification = WorkspaceScanSpecification {
+            calibration_id: specification.calibration_id,
+            mode: WorkspaceScanMode::Refinement,
+            artifact_retention: None,
+            region: None,
+            region_preset: None,
+            parent_scan_id: Some(Uuid::new_v4()),
+            refinement_target_index: Some(2),
+            overlap_fraction: None,
+            output_mm_per_pixel: None,
+            feed_mm_per_min: None,
+            max_tiles: None,
+            artifact_quota_bytes: None,
+        };
+        let refinement = WorkspaceRefinementSource {
+            parent_scan_id: refinement_specification.parent_scan_id.unwrap(),
+            target_index: 2,
+            region: WorkspaceScanRegion {
+                x_min_mm: plan.region.x_min_mm + 20.0,
+                x_max_mm: plan.region.x_min_mm + 70.0,
+                y_min_mm: plan.region.y_min_mm + 20.0,
+                y_max_mm: plan.region.y_min_mm + 70.0,
+            },
+            recommended_action: WorkspaceSeamHealthAction::TargetedRefinement,
+            algorithm_version: "workspace_seam_health.v2".into(),
+        };
+        let (_, refinement_estimate) = prepare_workspace_scan(
+            &state,
+            &refinement_specification,
+            &top_profile,
+            &plate_model,
+            WorkspaceSurfaceModel::TopCameraWorkingPlane,
+            Some(&plate_model),
+            None,
+            Some(&refinement),
+            state.profile.home_pose,
+        )
+        .unwrap();
+
+        assert_eq!(refinement_estimate.mode, WorkspaceScanMode::Refinement);
+        assert_eq!(
+            refinement_estimate.artifact_retention,
+            WorkspaceArtifactRetention::TransientSources
+        );
+        assert!(
+            (refinement_estimate.overlap_fraction - DEFAULT_LAYERED_WORKSPACE_OVERLAP).abs() < 1e-9
+        );
+        assert_eq!(
+            refinement_estimate.surface_models,
+            vec![
+                WorkspaceSurfaceModel::TopCameraWorkingPlane,
+                WorkspaceSurfaceModel::InstalledPlatePlanes,
+            ]
+        );
+        assert!(refinement_estimate
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("refinement target 2")));
     }
 
     #[test]
@@ -13889,6 +14232,162 @@ mod tests {
                 .unwrap()
                 .is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn refinement_replays_retained_seams_with_the_current_policy() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        scan.status = WorkspaceScanStatus::Succeeded;
+        scan.mode = WorkspaceScanMode::Reconnaissance;
+        scan.region = WorkspaceScanRegion {
+            x_min_mm: 0.0,
+            x_max_mm: 20.0,
+            y_min_mm: 0.0,
+            y_max_mm: 20.0,
+        };
+        scan.output_mm_per_pixel = 1.0;
+        scan.rows = 1;
+        scan.columns = 1;
+        scan.tiles.clear();
+        scan.mosaic_artifact_name = Some("mosaic.png".into());
+        scan.seam_health = Some(WorkspaceSeamHealthSummary {
+            report_artifact_name: WORKSPACE_SEAM_HEALTH_ARTIFACT.into(),
+            disagreement_artifact_name: WORKSPACE_DISAGREEMENT_ARTIFACT.into(),
+            overlap_confidence_artifact_name: WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT.into(),
+            overlay_artifact_name: WORKSPACE_SEAM_OVERLAY_ARTIFACT.into(),
+            preview_artifact_name: WORKSPACE_SEAM_PREVIEW_ARTIFACT.into(),
+            total_seams: 0,
+            healthy_seams: 0,
+            elevated_seams: 0,
+            unresolved_seams: 0,
+            target_regions: 0,
+            overlap_pixel_fraction: 1.0,
+            disagreement_p50_luma: 1.0,
+            disagreement_p95_luma: 1.0,
+            recommended_action: WorkspaceSeamHealthAction::Accept,
+        });
+        state.store.put_workspace_scan(&scan).unwrap();
+
+        let mosaic = GrayFrame {
+            width: 21,
+            height: 21,
+            pixels: (0..441).map(|index| (index % 31) as u8).collect(),
+        };
+        let mut disagreement = GrayFrame {
+            width: 21,
+            height: 21,
+            pixels: vec![1; 441],
+        };
+        for y in 7..14 {
+            for x in 8..14 {
+                disagreement.pixels[y * 21 + x] = 40;
+            }
+        }
+        let prior = WorkspaceSeamHealthReport {
+            algorithm_version: "workspace_seam_health.v1".into(),
+            overlap_pixel_fraction: 1.0,
+            disagreement_p50_luma: 1.0,
+            disagreement_p95_luma: 40.0,
+            disagreement_threshold_luma: 7.0,
+            material_shift_threshold_mm: 1.0,
+            total_seams: 0,
+            healthy_seams: 0,
+            elevated_seams: 0,
+            unresolved_seams: 0,
+            recommended_action: WorkspaceSeamHealthAction::Accept,
+            systematic_correction_x_mm: None,
+            systematic_correction_y_mm: None,
+            target_regions: Vec::new(),
+            seams: Vec::new(),
+        };
+        for (name, media_type, data) in [
+            ("mosaic.png", "image/png", encode_gray_png(&mosaic).unwrap()),
+            (
+                WORKSPACE_DISAGREEMENT_ARTIFACT,
+                "image/png",
+                encode_gray_png(&disagreement).unwrap(),
+            ),
+            (
+                WORKSPACE_OVERLAP_CONFIDENCE_ARTIFACT,
+                "image/png",
+                encode_gray_png(&GrayFrame {
+                    width: 21,
+                    height: 21,
+                    pixels: vec![192; 441],
+                })
+                .unwrap(),
+            ),
+            (
+                WORKSPACE_SEAM_HEALTH_ARTIFACT,
+                "application/json",
+                serde_json::to_vec(&prior).unwrap(),
+            ),
+        ] {
+            state
+                .store
+                .put_workspace_scan_artifact(scan.id, name, media_type, &data)
+                .unwrap();
+        }
+
+        let specification = WorkspaceScanSpecification {
+            calibration_id: scan.calibration_id,
+            mode: WorkspaceScanMode::Refinement,
+            artifact_retention: None,
+            region: None,
+            region_preset: None,
+            parent_scan_id: Some(scan.id),
+            refinement_target_index: Some(0),
+            overlap_fraction: None,
+            output_mm_per_pixel: None,
+            feed_mm_per_min: None,
+            max_tiles: None,
+            artifact_quota_bytes: None,
+        };
+        let source = resolve_workspace_refinement_source(&state, &specification)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(source.parent_scan_id, scan.id);
+        assert_eq!(source.algorithm_version, "workspace_seam_health.v2");
+        assert_eq!(
+            source.recommended_action,
+            WorkspaceSeamHealthAction::TargetedRefinement
+        );
+        assert_eq!(source.target_index, 0);
+        assert!(source.region.x_min_mm < source.region.x_max_mm);
+    }
+
+    #[test]
+    fn transient_parallax_artifact_keeps_a_bounded_distributed_sample() {
+        let report = WorkspaceParallaxReport {
+            working_plane_fraction: 0.0,
+            installed_plate_fraction: 1.0,
+            attempted_pairs: 2,
+            pairs_with_overlap: 2,
+            raw_matches: 20,
+            descriptor_matches: 10,
+            accepted_observations: 10,
+            observations: (0..10)
+                .map(|index| WorkspaceParallaxObservation {
+                    x_mm: f64::from(index),
+                    y_mm: 0.0,
+                    surface_fraction: 0.5,
+                    residual_mm: 0.01,
+                    parallax_signal_mm: 0.2,
+                    fixed_tile_index: 0,
+                    moving_tile_index: 1,
+                })
+                .collect(),
+        };
+
+        let artifact = workspace_parallax_artifact(&report, 4);
+
+        assert_eq!(artifact.accepted_observations, 10);
+        assert_eq!(artifact.retained_observations, 4);
+        assert_eq!(artifact.observations[0].x_mm, 0.0);
+        assert_eq!(artifact.observations[3].x_mm, 9.0);
     }
 
     #[tokio::test]

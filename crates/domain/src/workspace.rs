@@ -59,6 +59,7 @@ pub enum WorkspaceScanMode {
     Precision,
     Survey,
     Reconnaissance,
+    Refinement,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +260,10 @@ pub struct WorkspaceScanReport {
     pub operation_id: Uuid,
     pub calibration_id: Uuid,
     pub profile_id: String,
+    #[serde(default)]
+    pub parent_scan_id: Option<Uuid>,
+    #[serde(default)]
+    pub refinement_target_index: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub status: WorkspaceScanStatus,

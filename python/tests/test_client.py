@@ -174,6 +174,70 @@ class ClientTests(unittest.TestCase):
                 )
         send.assert_not_called()
 
+    def test_workspace_refinement_uses_parent_target_and_transient_sources(self):
+        client = Client(timeout=1)
+        targets = {
+            "algorithm_version": "workspace_seam_health.v2",
+            "target_regions": [{"x_min_mm": 346.0}],
+        }
+        estimate = {"planned_tiles": 800}
+        started = {"scan": {"mode": "refinement"}}
+        with patch.object(
+            client, "_request", side_effect=[targets, estimate, started],
+        ) as send:
+            self.assertEqual(client.workspace_refinement_targets("parent"), targets)
+            self.assertEqual(
+                client.estimate_workspace_refinement(
+                    "calibration", "parent", 6,
+                ),
+                estimate,
+            )
+            self.assertEqual(
+                client.start_workspace_refinement(
+                    "calibration",
+                    "parent",
+                    6,
+                    "lease",
+                    safety_checks_confirmed=True,
+                ),
+                started,
+            )
+        specification = {
+            "calibration_id": "calibration",
+            "mode": "refinement",
+            "artifact_retention": "transient_sources",
+            "parent_scan_id": "parent",
+            "refinement_target_index": 6,
+        }
+        self.assertEqual(
+            send.call_args_list[0].args,
+            ("GET", "/workspace-scans/parent/refinement-targets"),
+        )
+        self.assertEqual(
+            send.call_args_list[1].args,
+            ("POST", "/workspace-scans/estimate", specification),
+        )
+        self.assertEqual(send.call_args_list[2].args, (
+            "POST",
+            "/workspace-scans",
+            {
+                "lease_id": "lease",
+                "confirmed_external_safety_checks": True,
+                **specification,
+            },
+        ))
+
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "target index cannot be negative"):
+                client.estimate_workspace_refinement(
+                    "calibration", "parent", -1,
+                )
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.start_workspace_refinement(
+                    "calibration", "parent", 0, "lease",
+                )
+        send.assert_not_called()
+
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
         layered_report = {
