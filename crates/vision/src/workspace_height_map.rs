@@ -686,7 +686,7 @@ where
     let mut pixels = vec![0; width as usize * height as usize];
     let mut confidence = vec![0; pixels.len()];
     let mut requested_candidate_indices = vec![i16::MIN; pixels.len()];
-    let mut pixel_cell_indices = vec![0_u32; pixels.len()];
+    let mut pixel_cell_indices = vec![u32::MAX; pixels.len()];
     let mut selected_candidate_indices = vec![i16::MIN; pixels.len()];
     for y in 0..height {
         let world_y = plan.region.y_max_mm - f64::from(y) * plan.output_mm_per_pixel;
@@ -700,8 +700,9 @@ where
                 world_x,
                 world_y,
             );
-            let cell_index =
-                cell_index.expect("validated plan pixel must be inside the height map");
+            let Some(cell_index) = cell_index else {
+                continue;
+            };
             let cell = &height_map.cells[cell_index];
             pixel_cell_indices[target] = cell_index as u32;
             requested_candidate_indices[target] = cell
@@ -774,7 +775,11 @@ where
                 base_costs[index] = cost;
                 continue;
             }
-            let cell_index = pixel_cell_indices[index] as usize;
+            let cell_index = pixel_cell_indices[index];
+            if cell_index == u32::MAX {
+                continue;
+            }
+            let cell_index = cell_index as usize;
             if requested_candidate_indices[index] == i16::MIN
                 || !edge_candidate_indices[cell_index].contains(&layer_candidate_index)
             {
@@ -793,7 +798,11 @@ where
         }
     }
     for index in 0..pixels.len() {
-        let cell_index = pixel_cell_indices[index] as usize;
+        let cell_index = pixel_cell_indices[index];
+        if cell_index == u32::MAX {
+            continue;
+        }
+        let cell_index = cell_index as usize;
         let base_cost = base_costs[index];
         let alternative_cost = alternative_costs[index];
         if requested_candidate_indices[index] == i16::MIN
@@ -1610,6 +1619,64 @@ mod tests {
             &composite.class_preview.pixels[2 * 3..3 * 3],
             &[224, 224, 224]
         );
+    }
+
+    #[test]
+    fn height_raster_roundoff_keeps_the_working_plane_fallback() {
+        let parallax = report(vec![
+            observation(0.5, 1.0, 0.0, 0.01),
+            observation(1.0, 1.0, 0.0, 0.01),
+            observation(2.5, 1.0, 1.0, 0.01),
+            observation(3.0, 1.0, 1.0, 0.01),
+        ]);
+        let map = build_workspace_height_map(region(), &parallax).unwrap();
+        let plan = WorkspaceScanPlan {
+            region: region(),
+            overlap_fraction: 0.5,
+            output_mm_per_pixel: 0.3,
+            frame_width_px: 2,
+            frame_height_px: 2,
+            usable_pixel_bounds: WorkspacePixelBounds {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            },
+            rows: 1,
+            columns: 1,
+            tiles: vec![WorkspaceScanTile {
+                index: 0,
+                row: 0,
+                column: 0,
+                capture_order: 0,
+                nominal_pose: Pose {
+                    x_mm: 0.0,
+                    y_mm: 0.0,
+                    z_mm: 31.5,
+                    rotation_deg: 0.0,
+                },
+                placement_correction_x_mm: 0.0,
+                placement_correction_y_mm: 0.0,
+                artifact_name: String::new(),
+            }],
+        };
+        let working = GrayFrame {
+            width: 15,
+            height: 8,
+            pixels: vec![32; 120],
+        };
+        let installed = GrayFrame {
+            width: 15,
+            height: 8,
+            pixels: vec![224; 120],
+        };
+
+        let composite =
+            compose_workspace_height_mosaic(&plan, &map, &[(0.0, working), (1.0, installed)])
+                .unwrap();
+
+        assert_eq!(composite.frame.pixels.last(), Some(&32));
+        assert_eq!(composite.class_overlay.pixels.last(), Some(&0));
     }
 
     #[test]

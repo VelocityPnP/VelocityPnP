@@ -409,7 +409,9 @@ renderer compares source-image disagreement in a 0.30 mm neighborhood at the
 local candidate planes. It can move the display transition inside the cell
 when two or more source tiles give a better-supported projection. Confidence
 and measurement source add a change margin. Pixels without enough overlap keep
-the cell prior.
+the cell prior. If ceil-rounded output dimensions put an outer raster pixel
+just beyond the height-map region, that pixel keeps the working-plane image
+and a transparent class overlay.
 
 Unknown cells stay unknown in the data. For display, the corrected mosaic
 compares source-image disagreement at the calibrated working and installed

@@ -1514,7 +1514,7 @@ Focused tests also put a true projection boundary one millimeter inside a
 2 mm measured cell. Two-source disagreement moved the display edge to the true
 location. The same case with one source kept the measured-cell boundary.
 Chunked and single-pass reconstruction remained byte-identical. A new scan of
-the affected refinement regions is still required to update the current full
+the affected refinement regions was still required to update the current full
 workspace composite.
 
 After the queue, the machine was at the visual datum X=220.131, Y=190.271,
@@ -1522,6 +1522,63 @@ Z=31.5, homed, ready, and fault-free. Normal disconnect operation
 `e85d478b-c406-44f9-b18c-791fcc21e720` switched outputs off, released control,
 and cleared pose and homing. The daemon then stopped normally. No emergency
 stop was used.
+
+### Edge-localized refinement rescan
+
+On 2026-08-21, physical rescans exercised the pixel-local height selector in
+the four regions where review had found the clearest cell-boundary artifacts.
+The first 180-frame target 2 attempt captured every frame, then stopped during
+reconstruction because a ceil-rounded outer raster pixel lay just outside the
+height-map region. Scan `3b81fa27-2ef6-4146-9474-220fe0d1bdba` and operation
+`3404cb66-9062-4704-b1f7-37f873857353` failed without a controller fault. The
+machine stayed homed and ready.
+
+The renderer now leaves such edge pixels at the working-plane fallback with a
+transparent class overlay. A regression test uses a 4-by-2 mm region at
+0.30 mm/pixel, whose 15-by-8 output includes that rounding case. Targeted
+height-map, strict Clippy, and chunked-versus-single reconstruction checks
+passed before the release daemon was rebuilt and the machine was re-homed.
+
+The successful physical results were:
+
+| Target | Scan ID | Tiles | Time | Registrations | Retained bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 0, feeder bank | `f83e633e-e290-4729-bb38-0a2d0e399957` | 1,007 | 18m24s | 1,885/1,942 | 13,791,993 |
+| 1, feeder | `c6554102-fa44-4a6e-889b-3bfdeb3e36cb` | 510 | 8m41s | 754/959 | 10,636,632 |
+| 2, small feeder | `ff6ce636-8b2a-48b5-841f-9ce70c6ca5b3` | 180 | 3m21s | 17/319 | 1,323,327 |
+| 6, FTP PCB | `aed03fc9-7259-456d-994d-817ce91bc39f` | 774 | 13m50s | 1,097/1,487 | 11,666,097 |
+
+All four scans reported 100 percent coverage. Their combined successful scan
+time was 44m16s. A diagnostic compared mean absolute luma gradients on the
+2 mm height-map grid with neighboring gradients two pixels to either side.
+The grid-relative seam excess changed as follows:
+
+| Target | Before | After | Decrease |
+| --- | ---: | ---: | ---: |
+| 0 | 1.0343 | 0.5667 | 45.2% |
+| 1 | 6.8775 | 4.1285 | 40.0% |
+| 2 | 1.5086 | 0.6749 | 55.3% |
+| 6 | 0.5717 | 0.3214 | 43.8% |
+
+Visual review agreed with the diagnostic. The regular 2 mm protrusions largely
+disappeared, long feeder rails and holes became more coherent, and the FTP PCB
+became much sharper. A few marks remain at real vertical object transitions.
+These are local projection-boundary cases, rather than the former regular grid
+pattern.
+
+The no-motion composite replay found and accepted all eight current refinement
+children with complete coverage. It produced a 2,247-by-1,214 image. The
+refined composite SHA-256 is
+`3de638842c72b49acef13c10bcbd89ccda939080bc6f34b9edf556469834147e`.
+The quality-preview SHA-256 is
+`9d9c1913b7bdace75bd2e0e9d8590f1959e947ce06b425546008c551818d6cd1`.
+The plate grid stayed stable while the changed feeder and PCB regions became
+cleaner.
+
+After reconstruction, the machine was homed, ready, fault-free, and parked at
+X=220.131, Y=190.271, Z=31.5. Normal disconnect operation
+`4901fd28-e1d5-49d0-b1c4-fbc0ac6e05b1` switched outputs off and released the
+machine. The daemon then stopped normally. No emergency stop was used.
 
 ## Procedure sources
 
