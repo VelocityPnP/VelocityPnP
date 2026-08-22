@@ -104,6 +104,14 @@ enum Command {
     DiscoverObjects {
         scan: Uuid,
     },
+    SetWorkspaceBaseline {
+        scan: Uuid,
+    },
+    WorkspaceChanges {
+        scan: Uuid,
+        #[arg(long)]
+        baseline: Option<Uuid>,
+    },
     CalibrationWorkflow,
     CalibrationArtifacts,
     NewCalibration {
@@ -439,6 +447,22 @@ async fn main() -> Result<()> {
                 &client,
                 &format!("{base}/workspace-scans/{scan}/object-proposals"),
                 Some(json!({})),
+            )
+            .await?
+        }
+        Command::SetWorkspaceBaseline { scan } => {
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/inventory-baseline"),
+                None,
+            )
+            .await?
+        }
+        Command::WorkspaceChanges { scan, baseline } => {
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/change-set"),
+                Some(json!({"baseline_id": baseline})),
             )
             .await?
         }
@@ -800,6 +824,31 @@ mod tests {
         assert!(matches!(
             args.command,
             Command::DiscoverObjects { scan: parsed } if parsed == scan
+        ));
+
+        let args =
+            Args::try_parse_from(["velocitypnp", "set-workspace-baseline", &scan.to_string()])
+                .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::SetWorkspaceBaseline { scan: parsed } if parsed == scan
+        ));
+
+        let baseline = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "workspace-changes",
+            &scan.to_string(),
+            "--baseline",
+            &baseline.to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::WorkspaceChanges {
+                scan: parsed_scan,
+                baseline: Some(parsed_baseline),
+            } if parsed_scan == scan && parsed_baseline == baseline
         ));
     }
 }

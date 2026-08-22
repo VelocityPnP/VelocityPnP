@@ -641,6 +641,35 @@ export interface WorkspaceBoardDiscoveryReport {
   warnings: string[];
 }
 
+export interface WorkspaceInventoryBaseline {
+  id: string;
+  scan_id: string;
+  profile_id: string;
+  calibration_id: string;
+  proposal_algorithm_version: string;
+  activated_at: string;
+  supersedes_baseline_id: string | null;
+}
+
+export interface WorkspaceChangeSetReport {
+  algorithm_version: string;
+  baseline_id: string;
+  baseline_scan_id: string;
+  observation_scan_id: string;
+  added_count: number;
+  removed_count: number;
+  modified_count: number;
+  unchanged_count: number;
+  reused_baseline_count: number;
+  target_regions: Array<{
+    x_min_mm: number;
+    x_max_mm: number;
+    y_min_mm: number;
+    y_max_mm: number;
+  }>;
+  warnings: string[];
+}
+
 export interface WorkspaceScanReport {
   id: string;
   updated_at: string;
@@ -652,6 +681,15 @@ export interface WorkspaceScanReport {
     algorithm_version: string;
     candidate_count: number;
     matched_candidate_count: number;
+  } | null;
+  change_set: {
+    baseline_id: string;
+    added_count: number;
+    removed_count: number;
+    modified_count: number;
+    unchanged_count: number;
+    reused_baseline_count: number;
+    target_region_count: number;
   } | null;
 }
 

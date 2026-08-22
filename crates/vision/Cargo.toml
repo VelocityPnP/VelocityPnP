@@ -20,4 +20,5 @@ v4l = { workspace = true, optional = true }
 velocitypnp-domain = { path = "../domain" }
 
 [dev-dependencies]
+chrono.workspace = true
 serde_json.workspace = true

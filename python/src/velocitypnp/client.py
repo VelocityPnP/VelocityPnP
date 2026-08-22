@@ -296,6 +296,41 @@ class Client:
             {},
         )
 
+    def set_workspace_inventory_baseline(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/workspace-scans/{scan_id}/inventory-baseline",
+            {},
+        )
+
+    def workspace_inventory_baseline(self) -> dict[str, Any]:
+        return self._request("GET", "/workspace-inventory/baseline")
+
+    def compare_workspace_observation(
+        self,
+        scan_id: str | uuid.UUID,
+        *,
+        baseline_id: str | uuid.UUID | None = None,
+    ) -> dict[str, Any]:
+        request = {
+            "baseline_id": str(baseline_id) if baseline_id is not None else None,
+        }
+        return self._request(
+            "POST",
+            f"/workspace-scans/{scan_id}/change-set",
+            request,
+        )
+
+    def workspace_change_set_report(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/workspace-change-set.json",
+        )
+
     def workspace_board_discovery_report(
         self, scan_id: str | uuid.UUID,
     ) -> dict[str, Any]:

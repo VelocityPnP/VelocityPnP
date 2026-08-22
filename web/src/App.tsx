@@ -3,7 +3,8 @@ import { api, waitForOperation } from "./api";
 import type {
   AutomatedCalibrationRun, BoardDesign, CalibrationArtifactPlan, CalibrationSnapshot,
   CalibrationStep, Device, MachineEvent, MachineStatus, Pose, SensorReading,
-  VisualHomingResult, WorkspaceBoardDiscoveryReport, WorkspaceScanReport,
+  VisualHomingResult, WorkspaceBoardDiscoveryReport, WorkspaceChangeSetReport,
+  WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
 import "./styles.css";
 
@@ -482,6 +483,9 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
   const [selectedScan, setSelectedScan] = useState("");
   const [discovery, setDiscovery] = useState<WorkspaceBoardDiscoveryReport | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [baseline, setBaseline] = useState<WorkspaceInventoryBaseline | null>(null);
+  const [changes, setChanges] = useState<WorkspaceChangeSetReport | null>(null);
   const [pcb, setPcb] = useState<File | null>(null);
   const [bom, setBom] = useState<File | null>(null);
   const load = useCallback(async () => {
@@ -521,6 +525,32 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       setDiscovering(false);
     }
   };
+  const setInventoryBaseline = async () => {
+    if (!selectedScan) return;
+    setInventoryBusy(true);
+    try {
+      setBaseline(await api.setWorkspaceInventoryBaseline(selectedScan));
+      setChanges(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInventoryBusy(false);
+    }
+  };
+  const compareInventory = async () => {
+    if (!selectedScan) return;
+    setInventoryBusy(true);
+    try {
+      setChanges(await api.compareWorkspaceObservation(selectedScan));
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInventoryBusy(false);
+    }
+  };
+  const selectedReport = scans.find((scan) => scan.id === selectedScan);
+  const hasProposals = discovery !== null || selectedReport?.board_discovery != null;
   return <div className="boards-layout">
     <section className="card import-card"><p className="eyebrow">KiCad-native workflow</p><h2>Import a board</h2><p>Use the PCB as the source of placement geometry. A CSV BOM is optional enrichment.</p>
       <label className="file-drop"><span>{pcb?.name ?? "Choose .kicad_pcb"}</span><input type="file" accept=".kicad_pcb" onChange={(e) => setPcb(e.target.files?.[0] ?? null)} /></label>
@@ -535,12 +565,16 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       <div className="card-heading"><div><p className="eyebrow">Workspace inventory</p><h2>Analyze workspace objects</h2></div>{scans.length > 0 && <span className="count">{scans.length}</span>}</div>
       <p>Select a completed height-aware scan. Plate-aligned proposals use known fixtures and retain uncertain objects for later classification. Analysis causes no machine motion.</p>
       <div className="board-discovery-controls">
-        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); }}>
+        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); setChanges(null); }}>
           {scans.length === 0 && <option value="">No eligible scans</option>}
           {scans.map((scan) => <option key={scan.id} value={scan.id}>{new Date(scan.updated_at).toLocaleString()} · {pretty(scan.mode)}{scan.board_discovery ? ` · ${scan.board_discovery.candidate_count} prior candidates` : ""}</option>)}
         </select>
         <button disabled={!selectedScan || discovering} onClick={() => void discover()}>{discovering ? "Analyzing…" : "Analyze objects"}</button>
+        <button disabled={!selectedScan || !hasProposals || inventoryBusy} onClick={() => void setInventoryBaseline()}>Use as baseline</button>
+        <button disabled={!selectedScan || !hasProposals || inventoryBusy} onClick={() => void compareInventory()}>Compare to baseline</button>
       </div>
+      {baseline && <p>Baseline saved from scan <strong>{baseline.scan_id.slice(0, 8)}</strong>. Future compatible scans can reuse unchanged inventory.</p>}
+      {changes && <p><strong>{changes.added_count}</strong> added, <strong>{changes.removed_count}</strong> removed, <strong>{changes.modified_count}</strong> modified, and <strong>{changes.unchanged_count}</strong> unchanged. <strong>{changes.target_regions.length}</strong> regions need refinement.</p>}
       {discovery && <div className="board-discovery-result">
         <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with semantic object proposals" />
         <div><p><strong>{discovery.candidates.length}</strong> raised-surface proposals. Known fixtures are purple, boards are green, feeders are blue, and unresolved objects are amber.</p>

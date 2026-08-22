@@ -274,6 +274,50 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WorkspaceBoardDiscoveryReport" }
+  /workspace-scans/{id}/inventory-baseline:
+    post:
+      operationId: activateWorkspaceInventoryBaseline
+      description: >-
+        Marks this successful semantic workspace scan as the persistent
+        inventory baseline. This operation causes no machine motion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Active workspace inventory baseline
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceInventoryBaseline" }
+  /workspace-scans/{id}/change-set:
+    post:
+      operationId: buildWorkspaceChangeSet
+      description: >-
+        Compares semantic objects with a compatible persistent baseline.
+        Objects outside a partial observation are reused. Changed non-machine
+        objects produce bounded refinement regions. This operation causes no
+        machine motion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BuildWorkspaceChangeSetRequest" }
+      responses:
+        "200":
+          description: Workspace object changes and refinement regions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceChangeSetReport" }
+  /workspace-inventory/baseline:
+    get:
+      operationId: getWorkspaceInventoryBaseline
+      responses:
+        "200":
+          description: Most recently activated workspace inventory baseline
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceInventoryBaseline" }
   /workspace-scans/{id}/artifacts/{name}:
     get:
       operationId: getWorkspaceScanArtifact
@@ -1382,6 +1426,10 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceBoardDiscoverySummary"
             - type: "null"
+        change_set:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceChangeSetSummary"
+            - type: "null"
         warnings: { type: array, items: { type: string } }
         failure: { type: [string, "null"] }
     WorkspaceRefinementTargets:
@@ -1561,6 +1609,159 @@ components:
         matched_candidate_count: { type: integer, minimum: 0 }
         board_design_count: { type: integer, minimum: 0 }
         height_source_count: { type: integer, minimum: 1 }
+    BuildWorkspaceChangeSetRequest:
+      type: object
+      properties:
+        baseline_id: { type: [string, "null"], format: uuid }
+    WorkspaceInventoryBaseline:
+      type: object
+      required:
+        - id
+        - scan_id
+        - profile_id
+        - calibration_id
+        - proposal_algorithm_version
+        - activated_at
+        - supersedes_baseline_id
+      properties:
+        id: { type: string, format: uuid }
+        scan_id: { type: string, format: uuid }
+        profile_id: { type: string }
+        calibration_id: { type: string, format: uuid }
+        proposal_algorithm_version: { type: string }
+        activated_at: { type: string, format: date-time }
+        supersedes_baseline_id: { type: [string, "null"], format: uuid }
+    WorkspaceChangeSetSummary:
+      type: object
+      required:
+        - algorithm_version
+        - baseline_id
+        - baseline_scan_id
+        - report_artifact_name
+        - added_count
+        - removed_count
+        - modified_count
+        - unchanged_count
+        - reused_baseline_count
+        - target_region_count
+      properties:
+        algorithm_version: { type: string }
+        baseline_id: { type: string, format: uuid }
+        baseline_scan_id: { type: string, format: uuid }
+        report_artifact_name: { type: string }
+        added_count: { type: integer, minimum: 0 }
+        removed_count: { type: integer, minimum: 0 }
+        modified_count: { type: integer, minimum: 0 }
+        unchanged_count: { type: integer, minimum: 0 }
+        reused_baseline_count: { type: integer, minimum: 0 }
+        target_region_count: { type: integer, minimum: 0 }
+    WorkspaceChangeSetReport:
+      type: object
+      required:
+        - algorithm_version
+        - baseline_id
+        - baseline_scan_id
+        - observation_scan_id
+        - thresholds
+        - added_count
+        - removed_count
+        - modified_count
+        - unchanged_count
+        - reused_baseline_count
+        - changes
+        - current_inventory
+        - target_regions
+        - warnings
+      properties:
+        algorithm_version: { type: string }
+        baseline_id: { type: string, format: uuid }
+        baseline_scan_id: { type: string, format: uuid }
+        observation_scan_id: { type: string, format: uuid }
+        thresholds:
+          type: object
+          required:
+            - minimum_match_overlap_fraction
+            - unchanged_overlap_fraction
+            - maximum_unchanged_visual_difference
+            - refinement_margin_mm
+          properties:
+            minimum_match_overlap_fraction: { type: number, minimum: 0, maximum: 1 }
+            unchanged_overlap_fraction: { type: number, minimum: 0, maximum: 1 }
+            maximum_unchanged_visual_difference: { type: number, minimum: 0, maximum: 1 }
+            refinement_margin_mm: { type: number, minimum: 0 }
+        added_count: { type: integer, minimum: 0 }
+        removed_count: { type: integer, minimum: 0 }
+        modified_count: { type: integer, minimum: 0 }
+        unchanged_count: { type: integer, minimum: 0 }
+        reused_baseline_count: { type: integer, minimum: 0 }
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/WorkspaceObjectChange" }
+        current_inventory:
+          type: array
+          items: { $ref: "#/components/schemas/WorkspaceInventoryObject" }
+        target_regions:
+          type: array
+          items: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        warnings: { type: array, items: { type: string } }
+    WorkspaceObjectChange:
+      type: object
+      required:
+        - change_index
+        - kind
+        - baseline_candidate_index
+        - observation_candidate_index
+        - class
+        - known_fixture_id
+        - region
+        - overlap_fraction
+        - visual_difference
+        - refinement_required
+        - explanation
+      properties:
+        change_index: { type: integer, minimum: 0 }
+        kind:
+          type: string
+          enum: [added, removed, modified, unchanged, reused_baseline]
+        baseline_candidate_index: { type: [integer, "null"], minimum: 0 }
+        observation_candidate_index: { type: [integer, "null"], minimum: 0 }
+        class: { $ref: "#/components/schemas/WorkspaceObjectClass" }
+        known_fixture_id: { type: [string, "null"] }
+        region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        overlap_fraction: { type: [number, "null"], minimum: 0, maximum: 1 }
+        visual_difference: { type: [number, "null"], minimum: 0, maximum: 1 }
+        refinement_required: { type: boolean }
+        explanation: { type: string }
+    WorkspaceInventoryObject:
+      type: object
+      required:
+        - inventory_index
+        - source
+        - source_scan_id
+        - source_candidate_index
+        - class
+        - classification_confidence
+        - known_fixture_id
+        - region
+        - outline_machine_mm
+      properties:
+        inventory_index: { type: integer, minimum: 0 }
+        source: { type: string, enum: [observation, baseline_reuse] }
+        source_scan_id: { type: string, format: uuid }
+        source_candidate_index: { type: integer, minimum: 0 }
+        class: { $ref: "#/components/schemas/WorkspaceObjectClass" }
+        classification_confidence: { type: number, minimum: 0, maximum: 1 }
+        known_fixture_id: { type: [string, "null"] }
+        region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        outline_machine_mm:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
     WorkspaceBoardDiscoveryReport:
       type: object
       required:

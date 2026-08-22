@@ -3,7 +3,7 @@ import type {
   CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
   Operation, SensorReading, VisualHomingResult, WorkspaceBoardDiscoveryReport,
-  WorkspaceScanReport,
+  WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -192,5 +192,14 @@ export const api = {
   discoverWorkspaceObjects: (scanId: string) =>
     jsonPost<WorkspaceBoardDiscoveryReport>(
       `/workspace-scans/${scanId}/object-proposals`,
+    ),
+  setWorkspaceInventoryBaseline: (scanId: string) =>
+    jsonPost<WorkspaceInventoryBaseline>(
+      `/workspace-scans/${scanId}/inventory-baseline`,
+    ),
+  compareWorkspaceObservation: (scanId: string, baselineId?: string) =>
+    jsonPost<WorkspaceChangeSetReport>(
+      `/workspace-scans/${scanId}/change-set`,
+      baselineId ? { baseline_id: baselineId } : {},
     ),
 };

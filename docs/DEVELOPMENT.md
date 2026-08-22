@@ -478,6 +478,48 @@ create a `BoardInstance`, move the camera, compare package templates, or accept
 a design-to-machine transform. Local fiducial and package verification is the
 next gate.
 
+### Persistent workspace inventory
+
+Use a successful full scan and its accepted refinements as a stable inventory
+baseline. First, build the object proposals. Then, activate the baseline:
+
+```bash
+cargo run -p velocitypnp -- discover-objects FULL_SCAN_UUID
+cargo run -p velocitypnp -- set-workspace-baseline FULL_SCAN_UUID
+```
+
+For later board or feeder changes, use a faster height-aware scan. Build its
+object proposals and compare them with the baseline:
+
+```bash
+cargo run -p velocitypnp -- discover-objects FAST_SCAN_UUID
+cargo run -p velocitypnp -- workspace-changes FAST_SCAN_UUID
+```
+
+The API routes are `POST /workspace-scans/SCAN_UUID/inventory-baseline` and
+`POST /workspace-scans/SCAN_UUID/change-set`. The Python client provides
+`set_workspace_inventory_baseline()` and `compare_workspace_observation()`.
+
+The comparison uses calibrated machine regions, the semantic class, and the
+normalized image crop. It removes global luma changes before it compares the
+crops. A partial scan keeps baseline objects that are outside the observed
+region. A covered object can be added, removed, modified, or unchanged.
+Changes to boards, feeders, unrecognized tooling, and unknown objects make
+bounded scan refinement targets. Known tooling, calibration, and fixed-machine
+fixtures do not make targets.
+
+A baseline is compatible only with the same machine profile, calibration
+snapshot, and object-proposal algorithm. A geometry calibration change thus
+requires a new baseline. Each comparison is stored as
+`workspace-change-set.json`; the scan manifest contains its counts and target
+count. The intended operation is one occasional full baseline scan, then fast
+observations and refinement of only the detected changes.
+
+The report records all match, overlap, appearance, and target-margin
+thresholds. The first values are versioned implementation defaults, not
+physical acceptance limits. Tune them with repeated unchanged scans and
+deliberate board and feeder changes before production use.
+
 `full_sources` supports offline replay. `transient_sources` produces the same
 height products without keeping thousands of source frames. `thumbnails` and
 `mosaic_only` scans still produce the two endpoint mosaics and sparse parallax

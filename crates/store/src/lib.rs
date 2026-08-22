@@ -7,7 +7,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CameraProfile, CameraRole, Feeder,
-    InspectionReport, Job, MachineEvent, Operation, WorkspaceScanReport,
+    InspectionReport, Job, MachineEvent, Operation, WorkspaceInventoryBaseline,
+    WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -178,6 +179,24 @@ impl Store {
 
     pub fn get_workspace_scan(&self, id: Uuid) -> Result<Option<WorkspaceScanReport>> {
         self.get("workspace_scan", id)
+    }
+
+    pub fn put_workspace_inventory_baseline(
+        &self,
+        baseline: &WorkspaceInventoryBaseline,
+    ) -> Result<()> {
+        self.put("workspace_inventory_baseline", baseline.id, baseline)
+    }
+
+    pub fn list_workspace_inventory_baselines(&self) -> Result<Vec<WorkspaceInventoryBaseline>> {
+        self.list("workspace_inventory_baseline")
+    }
+
+    pub fn get_workspace_inventory_baseline(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkspaceInventoryBaseline>> {
+        self.get("workspace_inventory_baseline", id)
     }
 
     pub fn put_workspace_scan_artifact(
@@ -550,6 +569,7 @@ mod tests {
             seam_health: None,
             refinement_composite: None,
             board_discovery: None,
+            change_set: None,
             warnings: vec![],
             failure: None,
         };
@@ -568,6 +588,25 @@ mod tests {
                 .get_workspace_scan_artifact(scan.id, "mosaic.png")
                 .unwrap(),
             Some(("image/png".into(), data.to_vec()))
+        );
+
+        let baseline = WorkspaceInventoryBaseline {
+            id: Uuid::new_v4(),
+            scan_id: scan.id,
+            profile_id: scan.profile_id.clone(),
+            calibration_id: scan.calibration_id,
+            proposal_algorithm_version: "workspace_object_proposals.v2".into(),
+            activated_at: now,
+            supersedes_baseline_id: None,
+        };
+        store.put_workspace_inventory_baseline(&baseline).unwrap();
+        assert_eq!(
+            store.get_workspace_inventory_baseline(baseline.id).unwrap(),
+            Some(baseline.clone())
+        );
+        assert_eq!(
+            store.list_workspace_inventory_baselines().unwrap(),
+            vec![baseline]
         );
     }
 }

@@ -39,7 +39,8 @@ use velocitypnp_domain::{
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
     WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
-    WorkspaceCameraApertureSummary, WorkspaceHeightMapSummary, WorkspaceMosaicLayerReport,
+    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
+    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
     WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
     WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
     WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
@@ -55,11 +56,11 @@ use velocitypnp_store::Store;
 use velocitypnp_vision::{
     apply_camera_controls, build_workspace_discovery_context, build_workspace_height_map,
     build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
-    camera_sample_metrics, capture_gray_frame, capture_gray_frames, compose_workspace_refinements,
-    composite_workspace_camera_aperture, decode_gray_png, detect_bright_fiducial_near,
-    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
-    discover_workspace_objects, encode_gray_png, encode_rgb_png, encode_rgba_png,
-    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    camera_sample_metrics, capture_gray_frame, capture_gray_frames, compare_workspace_observation,
+    compose_workspace_refinements, composite_workspace_camera_aperture, decode_gray_png,
+    detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
+    detect_installed_plate_hole, discover_workspace_objects, encode_gray_png, encode_rgb_png,
+    encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
     fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
@@ -72,13 +73,14 @@ use velocitypnp_vision::{
     DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame, NozzleToolingReport,
     PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig, VisualHomingPlan,
     WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
-    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxObservation, WorkspaceParallaxReport,
-    WorkspaceParallaxStream, WorkspaceRefinementPatch, WorkspaceScanPlan,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject, WorkspaceParallaxObservation,
+    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRefinementPatch, WorkspaceScanPlan,
     WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport, WorkspaceSeamStatus,
     MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
     MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
     MIN_REFINEMENT_TEXTURE_RETENTION_RATIO, MIN_WORKSPACE_SURFACE_FRACTION,
-    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+    WORKSPACE_BOARD_DISCOVERY_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
+    WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT, WORKSPACE_CHANGE_SET_ARTIFACT,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
@@ -353,6 +355,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspace-scans/{id}/object-proposals",
             post(build_workspace_board_discovery),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/inventory-baseline",
+            post(activate_workspace_inventory_baseline),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/change-set",
+            post(build_workspace_change_set),
+        )
+        .route(
+            "/api/v1/workspace-inventory/baseline",
+            get(get_workspace_inventory_baseline),
         )
         .route(
             "/api/v1/workspace-scans/{id}/artifacts/{name}",
@@ -896,6 +910,12 @@ struct EncodedWorkspaceRefinementPatch {
     tiles: Vec<WorkspaceScanTile>,
 }
 
+#[derive(Default, Deserialize)]
+struct BuildWorkspaceChangeSetRequest {
+    #[serde(default)]
+    baseline_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WorkspaceRefinementTargetResponse {
     target_index: u32,
@@ -1373,6 +1393,7 @@ fn pending_workspace_scan(
         seam_health: None,
         refinement_composite: None,
         board_discovery: None,
+        change_set: None,
         warnings: estimate.warnings.clone(),
         failure: None,
     }
@@ -4637,6 +4658,225 @@ async fn build_workspace_board_discovery(
     persist_workspace_manifest(&state, &mut scan)
         .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
     Ok(Json(discovery.report))
+}
+
+fn load_workspace_object_report(
+    state: &AppState,
+    scan: &WorkspaceScanReport,
+) -> ApiResult<WorkspaceBoardDiscoveryReport> {
+    let summary = scan
+        .board_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("workspace scan has no semantic object proposals"))?;
+    if summary.algorithm_version != WORKSPACE_BOARD_DISCOVERY_ALGORITHM {
+        return Err(ApiError::bad_request(format!(
+            "workspace scan uses unsupported object proposal algorithm {}",
+            summary.algorithm_version
+        )));
+    }
+    let (media_type, data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &summary.report_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace object proposal report not found"))?;
+    if media_type != "application/json" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "workspace object proposal report is not JSON"
+        )));
+    }
+    let report: WorkspaceBoardDiscoveryReport =
+        serde_json::from_slice(&data).map_err(ApiError::internal)?;
+    if report.algorithm_version != WORKSPACE_BOARD_DISCOVERY_ALGORITHM {
+        return Err(ApiError::bad_request(format!(
+            "workspace object report uses unsupported algorithm {}",
+            report.algorithm_version
+        )));
+    }
+    Ok(report)
+}
+
+fn load_workspace_observed_objects(
+    state: &AppState,
+    scan: &WorkspaceScanReport,
+) -> ApiResult<Vec<WorkspaceObservedObject>> {
+    let report = load_workspace_object_report(state, scan)?;
+    report
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            let evidence = if let Some(name) = candidate.evidence_artifact_name.as_deref() {
+                match state
+                    .store
+                    .get_workspace_scan_artifact(scan.id, name)
+                    .map_err(ApiError::internal)?
+                {
+                    Some((media_type, data)) if media_type == "image/png" => {
+                        Some(decode_gray_png(&data).map_err(ApiError::internal)?)
+                    }
+                    Some(_) => {
+                        return Err(ApiError::internal(anyhow::anyhow!(
+                            "workspace object evidence {name} is not a PNG"
+                        )));
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            Ok(WorkspaceObservedObject {
+                candidate,
+                evidence,
+            })
+        })
+        .collect()
+}
+
+fn latest_workspace_inventory_baseline(
+    state: &AppState,
+    profile_id: Option<&str>,
+    calibration_id: Option<Uuid>,
+) -> ApiResult<Option<WorkspaceInventoryBaseline>> {
+    Ok(state
+        .store
+        .list_workspace_inventory_baselines()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|baseline| {
+            profile_id.is_none_or(|profile_id| baseline.profile_id == profile_id)
+                && calibration_id
+                    .is_none_or(|calibration_id| baseline.calibration_id == calibration_id)
+        })
+        .max_by_key(|baseline| baseline.activated_at))
+}
+
+async fn activate_workspace_inventory_baseline(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+) -> ApiResult<Json<WorkspaceInventoryBaseline>> {
+    let scan = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "inventory baseline requires a successful workspace scan",
+        ));
+    }
+    load_workspace_object_report(&state, &scan)?;
+    let current = latest_workspace_inventory_baseline(&state, Some(&scan.profile_id), None)?;
+    if let Some(existing) = current.as_ref().filter(|baseline| {
+        baseline.scan_id == scan.id
+            && baseline.calibration_id == scan.calibration_id
+            && baseline.proposal_algorithm_version == WORKSPACE_BOARD_DISCOVERY_ALGORITHM
+    }) {
+        return Ok(Json(existing.clone()));
+    }
+    let supersedes_baseline_id = current.map(|baseline| baseline.id);
+    let baseline = WorkspaceInventoryBaseline {
+        id: Uuid::new_v4(),
+        scan_id: scan.id,
+        profile_id: scan.profile_id,
+        calibration_id: scan.calibration_id,
+        proposal_algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
+        activated_at: Utc::now(),
+        supersedes_baseline_id,
+    };
+    state
+        .store
+        .put_workspace_inventory_baseline(&baseline)
+        .map_err(ApiError::internal)?;
+    Ok(Json(baseline))
+}
+
+async fn get_workspace_inventory_baseline(
+    State(state): State<AppState>,
+) -> ApiResult<Json<WorkspaceInventoryBaseline>> {
+    latest_workspace_inventory_baseline(&state, Some(&state.profile.id), None)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("workspace inventory baseline not found"))
+}
+
+async fn build_workspace_change_set(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+    Json(body): Json<BuildWorkspaceChangeSetRequest>,
+) -> ApiResult<Json<WorkspaceChangeSetReport>> {
+    let mut observation = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace observation scan not found"))?;
+    if observation.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "workspace comparison requires a successful observation scan",
+        ));
+    }
+    let baseline = if let Some(baseline_id) = body.baseline_id {
+        state
+            .store
+            .get_workspace_inventory_baseline(baseline_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("workspace inventory baseline not found"))?
+    } else {
+        latest_workspace_inventory_baseline(
+            &state,
+            Some(&observation.profile_id),
+            Some(observation.calibration_id),
+        )?
+        .ok_or_else(|| ApiError::not_found("compatible workspace inventory baseline not found"))?
+    };
+    if baseline.profile_id != observation.profile_id
+        || baseline.calibration_id != observation.calibration_id
+    {
+        return Err(ApiError::bad_request(
+            "workspace baseline and observation use different machine geometry",
+        ));
+    }
+    if baseline.proposal_algorithm_version != WORKSPACE_BOARD_DISCOVERY_ALGORITHM {
+        return Err(ApiError::bad_request(
+            "workspace baseline uses an unsupported object proposal algorithm",
+        ));
+    }
+    let baseline_scan = state
+        .store
+        .get_workspace_scan(baseline.scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace baseline scan not found"))?;
+    let baseline_objects = load_workspace_observed_objects(&state, &baseline_scan)?;
+    let observation_objects = load_workspace_observed_objects(&state, &observation)?;
+    let report = compare_workspace_observation(
+        &baseline,
+        observation.id,
+        observation.region,
+        &baseline_objects,
+        &observation_objects,
+    )
+    .map_err(ApiError::internal)?;
+    let report_json = serde_json::to_vec_pretty(&report).map_err(ApiError::internal)?;
+    persist_workspace_artifact(
+        &state,
+        &mut observation,
+        WORKSPACE_CHANGE_SET_ARTIFACT,
+        "application/json",
+        &report_json,
+    )
+    .map_err(ApiError::internal)?;
+    observation.change_set = Some(WorkspaceChangeSetSummary {
+        algorithm_version: report.algorithm_version.clone(),
+        baseline_id: report.baseline_id,
+        baseline_scan_id: report.baseline_scan_id,
+        report_artifact_name: WORKSPACE_CHANGE_SET_ARTIFACT.into(),
+        added_count: report.added_count,
+        removed_count: report.removed_count,
+        modified_count: report.modified_count,
+        unchanged_count: report.unchanged_count,
+        reused_baseline_count: report.reused_baseline_count,
+        target_region_count: report.target_regions.len() as u32,
+    });
+    observation.updated_at = Utc::now();
+    persist_workspace_manifest(&state, &mut observation).map_err(ApiError::internal)?;
+    Ok(Json(report))
 }
 
 async fn get_workspace_scan_artifact(
@@ -14614,9 +14854,131 @@ mod tests {
             seam_health: None,
             refinement_composite: None,
             board_discovery: None,
+            change_set: None,
             warnings: vec![],
             failure: None,
         }
+    }
+
+    fn put_test_workspace_objects(state: &AppState, scan: &mut WorkspaceScanReport) {
+        let evidence_name = "object-evidence-000.png";
+        let report = WorkspaceBoardDiscoveryReport {
+            algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
+            source_mosaic_artifact_name: "mosaic.png".into(),
+            height_sources: Vec::new(),
+            installed_plate_fraction: 1.0,
+            raised_surface_max_fraction: 2.0,
+            board_design_count: 0,
+            candidates: vec![velocitypnp_domain::WorkspaceBoardCandidate {
+                candidate_index: 0,
+                region: WorkspaceScanRegion {
+                    x_min_mm: 190.0,
+                    x_max_mm: 210.0,
+                    y_min_mm: 175.0,
+                    y_max_mm: 195.0,
+                },
+                outline_machine_mm: vec![
+                    [190.0, 175.0],
+                    [210.0, 175.0],
+                    [210.0, 195.0],
+                    [190.0, 195.0],
+                ],
+                plate_id: Some("staging".into()),
+                plate_role: None,
+                center_x_mm: 200.0,
+                center_y_mm: 185.0,
+                width_mm: 20.0,
+                height_mm: 20.0,
+                rotation_deg: 0.0,
+                evidence_cell_count: 20,
+                measured_cell_fraction: 1.0,
+                mean_surface_fraction: 0.5,
+                mean_height_confidence: 1.0,
+                fill_fraction: 1.0,
+                texture_energy_luma: 10.0,
+                board_likelihood: 0.5,
+                classification: Some(velocitypnp_domain::WorkspaceObjectClassification {
+                    class: velocitypnp_domain::WorkspaceObjectClass::Unknown,
+                    confidence: 0.5,
+                    classifier_id: "test".into(),
+                    review_required: true,
+                    evidence: Vec::new(),
+                }),
+                known_fixture_id: None,
+                evidence_artifact_name: Some(evidence_name.into()),
+                design_matches: Vec::new(),
+            }],
+            warnings: Vec::new(),
+        };
+        scan.board_discovery = Some(WorkspaceBoardDiscoverySummary {
+            algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
+            source_mosaic_artifact_name: "mosaic.png".into(),
+            report_artifact_name: WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT.into(),
+            preview_artifact_name: WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT.into(),
+            candidate_count: 1,
+            matched_candidate_count: 0,
+            board_design_count: 0,
+            height_source_count: 0,
+        });
+        state.store.put_workspace_scan(scan).unwrap();
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+                "application/json",
+                &serde_json::to_vec(&report).unwrap(),
+            )
+            .unwrap();
+        let frame = GrayFrame {
+            width: 16,
+            height: 16,
+            pixels: (0..256).map(|index| (index % 251) as u8).collect(),
+        };
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                evidence_name,
+                "image/png",
+                &encode_gray_png(&frame).unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn workspace_inventory_baseline_and_change_set_round_trip() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        scan.status = WorkspaceScanStatus::Succeeded;
+        put_test_workspace_objects(&state, &mut scan);
+
+        let Json(baseline) =
+            activate_workspace_inventory_baseline(State(state.clone()), Path(scan.id))
+                .await
+                .unwrap();
+        assert_eq!(baseline.scan_id, scan.id);
+
+        let Json(report) = build_workspace_change_set(
+            State(state.clone()),
+            Path(scan.id),
+            Json(BuildWorkspaceChangeSetRequest::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.unchanged_count, 1);
+        assert_eq!(report.modified_count, 0);
+        assert!(report.target_regions.is_empty());
+
+        let stored = state.store.get_workspace_scan(scan.id).unwrap().unwrap();
+        assert_eq!(stored.change_set.unwrap().unchanged_count, 1);
+        let (_, artifact) = state
+            .store
+            .get_workspace_scan_artifact(scan.id, WORKSPACE_CHANGE_SET_ARTIFACT)
+            .unwrap()
+            .unwrap();
+        let stored_report: WorkspaceChangeSetReport = serde_json::from_slice(&artifact).unwrap();
+        assert_eq!(stored_report.baseline_id, baseline.id);
     }
 
     fn test_calibration_run(operation_id: Uuid) -> AutomatedCalibrationRun {

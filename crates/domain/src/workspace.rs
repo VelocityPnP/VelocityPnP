@@ -368,6 +368,110 @@ pub struct WorkspaceBoardDiscoverySummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceInventoryBaseline {
+    pub id: Uuid,
+    pub scan_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub proposal_algorithm_version: String,
+    pub activated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub supersedes_baseline_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceObjectChangeKind {
+    Added,
+    Removed,
+    Modified,
+    Unchanged,
+    ReusedBaseline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceInventoryObjectSource {
+    Observation,
+    BaselineReuse,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceInventoryObject {
+    pub inventory_index: u32,
+    pub source: WorkspaceInventoryObjectSource,
+    pub source_scan_id: Uuid,
+    pub source_candidate_index: u32,
+    pub class: WorkspaceObjectClass,
+    pub classification_confidence: f64,
+    #[serde(default)]
+    pub known_fixture_id: Option<String>,
+    pub region: WorkspaceScanRegion,
+    pub outline_machine_mm: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceObjectChange {
+    pub change_index: u32,
+    pub kind: WorkspaceObjectChangeKind,
+    #[serde(default)]
+    pub baseline_candidate_index: Option<u32>,
+    #[serde(default)]
+    pub observation_candidate_index: Option<u32>,
+    pub class: WorkspaceObjectClass,
+    #[serde(default)]
+    pub known_fixture_id: Option<String>,
+    pub region: WorkspaceScanRegion,
+    #[serde(default)]
+    pub overlap_fraction: Option<f64>,
+    #[serde(default)]
+    pub visual_difference: Option<f64>,
+    pub refinement_required: bool,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceChangeThresholds {
+    pub minimum_match_overlap_fraction: f64,
+    pub unchanged_overlap_fraction: f64,
+    pub maximum_unchanged_visual_difference: f64,
+    pub refinement_margin_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceChangeSetReport {
+    pub algorithm_version: String,
+    pub baseline_id: Uuid,
+    pub baseline_scan_id: Uuid,
+    pub observation_scan_id: Uuid,
+    pub thresholds: WorkspaceChangeThresholds,
+    pub added_count: u32,
+    pub removed_count: u32,
+    pub modified_count: u32,
+    pub unchanged_count: u32,
+    pub reused_baseline_count: u32,
+    pub changes: Vec<WorkspaceObjectChange>,
+    pub current_inventory: Vec<WorkspaceInventoryObject>,
+    pub target_regions: Vec<WorkspaceScanRegion>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceChangeSetSummary {
+    pub algorithm_version: String,
+    pub baseline_id: Uuid,
+    pub baseline_scan_id: Uuid,
+    pub report_artifact_name: String,
+    pub added_count: u32,
+    pub removed_count: u32,
+    pub modified_count: u32,
+    pub unchanged_count: u32,
+    pub reused_baseline_count: u32,
+    pub target_region_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceScanTile {
     pub index: u32,
     pub row: u32,
@@ -496,6 +600,8 @@ pub struct WorkspaceScanReport {
     pub refinement_composite: Option<WorkspaceRefinementCompositeSummary>,
     #[serde(default)]
     pub board_discovery: Option<WorkspaceBoardDiscoverySummary>,
+    #[serde(default)]
+    pub change_set: Option<WorkspaceChangeSetSummary>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
 }

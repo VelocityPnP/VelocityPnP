@@ -364,6 +364,40 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.workspace_object_evidence("scan", -1)
 
+        baseline = {"id": "baseline", "scan_id": "scan"}
+        with patch.object(client, "_request", return_value=baseline) as send:
+            self.assertEqual(
+                client.set_workspace_inventory_baseline("scan"), baseline,
+            )
+        send.assert_called_once_with(
+            "POST", "/workspace-scans/scan/inventory-baseline", {},
+        )
+
+        with patch.object(client, "_request", return_value=baseline) as send:
+            self.assertEqual(client.workspace_inventory_baseline(), baseline)
+        send.assert_called_once_with("GET", "/workspace-inventory/baseline")
+
+        changes = {"modified_count": 1, "target_regions": [{}]}
+        with patch.object(client, "_request", return_value=changes) as send:
+            self.assertEqual(
+                client.compare_workspace_observation(
+                    "scan", baseline_id="baseline",
+                ),
+                changes,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/workspace-scans/scan/change-set",
+            {"baseline_id": "baseline"},
+        )
+
+        with patch.object(client, "_request", return_value=changes) as send:
+            self.assertEqual(client.workspace_change_set_report("scan"), changes)
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/scan/artifacts/workspace-change-set.json",
+        )
+
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
         layered_report = {

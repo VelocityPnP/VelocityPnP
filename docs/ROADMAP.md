@@ -116,6 +116,10 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add no-motion raised-surface object proposals with calibrated plate-axis
   outlines, semantic fixture handling, ML-ready evidence crops, and KiCad
   dimension matching
+- [x] Add persistent inventory baselines, partial-observation change sets, and
+  change-driven refinement regions
+- [ ] Tune inventory change thresholds with unchanged scans and deliberate
+  board and feeder changes on attached hardware
 - [ ] Add learned semantic segmentation with versioned datasets, calibrated
   confidence, and machine/configuration holdout tests
 - [ ] Add package-template pose comparison and live fiducial verification
