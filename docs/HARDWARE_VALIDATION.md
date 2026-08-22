@@ -1631,6 +1631,65 @@ preview is 3,261,911 bytes with SHA-256
 The report is 16,267 bytes with SHA-256
 `bd37acfbff67edc0d8797ff89acb02bf0d681edb0893cd97f1cfb253f4df3428`.
 
+### Persistent inventory change detection
+
+On 2026-08-22, physical scans validated the persistent inventory workflow
+against active baseline scan `8e5db6e2-c51c-4d4b-a62a-29c390126918`.
+Unchanged control scan `d6b84845-2e7d-4780-b650-3e83383bc1d0`
+captured all 1,023 reconnaissance tiles in 21 minutes 1 second. All eight
+baseline objects were unchanged. Their normalized raster differences were
+0.0092 to 0.0259 against the 0.0400 change threshold. No refinement target
+was made. Two unmatched seam regions were below the 400 square millimeter
+new-object review area.
+
+The operator then rotated the Opulo FTP PCB clockwise and made a smaller
+translation. Cropped reconnaissance scan
+`7d50b7e5-f0b9-428e-a09b-f228115f56fd` covered X=335 to 441 mm and Y=200 to
+326 mm. It captured all 136 tiles in 3 minutes 49 seconds. Baseline-guided
+raster comparison marked only the FTP PCB as modified. Its difference was
+0.0672. The other seven baseline objects were outside the partial scan and
+were reused. The bounded refinement target was X=340.2 to 441.0 mm and
+Y=205.98 to 319.0 mm.
+
+Refinement scan `65b9e462-0c87-477c-82e9-acafc0185e67` captured all 817
+tiles at 60 percent overlap and 0.1 mm/pixel. Capture took 15 minutes 49
+seconds. Single-threaded height reconstruction took a further 37 minutes 55
+seconds. It accepted 179,116 parallax observations and retained a distributed
+25,000-observation sample. The transient source directory was removed after
+reconstruction.
+
+The refinement composite accepted the patch with complete coverage, a 1.13
+texture-retention ratio, and an 11-luma boundary-disagreement p95. It recorded
+an internal seam-discontinuity review ratio of 3.67 against the 3.00 review
+level. Object proposals found the main 94.15-by-104.18 mm region and one false
+6-by-6 mm component at the refinement boundary.
+
+The first semantic comparison then called the rotated main region unchanged.
+Its normalized proposal-crop difference was only 0.0334 against the 0.1000
+semantic threshold. This lost the earlier raw raster evidence. It also called
+the 6-by-6 mm boundary component an added object.
+
+`workspace_change_set.v3` now retains a separate plate-projected raster score
+when a reconnaissance scan later gains semantic proposals.
+`workspace_object_proposals.v3` also rejects regions below 100 square
+millimeters. No-motion replay produced seven baseline objects instead of
+eight because it removed a 10-by-6 mm camera-area fragment. Baseline
+`c142332c-a903-4464-9583-180917bf9851` superseded the v2 baseline. Replay of
+the changed physical data then produced one modified PCB, no added or removed
+objects, and six reused baseline objects. It retained both the 0.0334 semantic
+score and the 0.0672 raster score. The false boundary object was absent.
+Because the accepted child covered more than 90 percent of the changed object,
+the final report made no repeat refinement target.
+
+This test detects the board change but does not estimate the board's physical
+rotation. Proposal outlines remain aligned to the calibrated plate. Image or
+KiCad registration must measure the board pose before job setup.
+
+Normal disconnect operation `6f0cfe6d-e4d2-45f7-93c7-692d0d8b703c`
+released the controller before the daemon was rebuilt for no-motion replay.
+The final daemon state is disconnected, unhomed, and fault-free. No emergency
+stop was used.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

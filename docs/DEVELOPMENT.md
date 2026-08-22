@@ -448,9 +448,10 @@ The equivalent API is
 `discover_workspace_objects(scan_id)`. The operation uses an accepted refined
 mosaic when present. Otherwise, it uses the height-corrected mosaic.
 
-The `workspace_object_proposals.v2` policy selects known height-map cells above
+The `workspace_object_proposals.v3` policy selects known height-map cells above
 the installed-plate plane. It joins nearby evidence and rejects small isolated
-height noise. Each proposal rectangle is parallel and perpendicular to its
+height noise, including regions below 100 square millimeters. Each proposal
+rectangle is parallel and perpendicular to its
 calibrated plate axes. Its enclosing machine-axis rectangle is the region that
 the scan planner can refine. Actual board rotation is left for later image and
 KiCad registration.
@@ -500,14 +501,17 @@ The API routes are `POST /workspace-scans/SCAN_UUID/inventory-baseline` and
 `set_workspace_inventory_baseline()` and `compare_workspace_observation()`.
 
 For two height-aware semantic scans, the comparison uses calibrated machine
-regions, the semantic class, and the normalized image crop. For a raw
-reconnaissance scan, it uses the baseline object regions, both plate-projected
-mosaics, and the scan's seam-health regions. This baseline-guided mode can find
-changes before it makes a height map. It removes global luma changes before it
-compares image regions. A partial scan keeps baseline objects that are outside
-the observed region. A covered object can be added, modified, or unchanged.
-The raw pass calls a changed baseline object `modified`; refinement determines
-whether it moved, changed, or was removed.
+regions, the semantic class, and the normalized image crop. A reconnaissance
+scan also keeps its plate-projected raster score after it gains semantic
+proposals. Thus, height refinement cannot hide a change that the fast scan
+already measured. Before height refinement, baseline-guided mode uses the
+baseline object regions, both plate-projected mosaics, and the scan's
+seam-health regions. It removes global luma changes before it compares image
+regions. A partial scan keeps baseline objects that are outside the observed
+region. A covered object can be added, modified, or unchanged. An accepted
+refinement that covers at least 90% of an object satisfies its refinement
+request. The change remains in the report, but it does not make a repeat scan
+target.
 
 Changes to boards, feeders, unrecognized tooling, and unknown objects make
 bounded scan refinement targets. Known tooling, calibration, and fixed-machine

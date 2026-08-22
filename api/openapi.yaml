@@ -1729,6 +1729,7 @@ components:
         - region
         - overlap_fraction
         - visual_difference
+        - raster_difference
         - refinement_required
         - explanation
       properties:
@@ -1743,6 +1744,7 @@ components:
         region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
         overlap_fraction: { type: [number, "null"], minimum: 0, maximum: 1 }
         visual_difference: { type: [number, "null"], minimum: 0, maximum: 1 }
+        raster_difference: { type: [number, "null"], minimum: 0, maximum: 1 }
         refinement_required: { type: boolean }
         explanation: { type: string }
     WorkspaceInventoryObject:

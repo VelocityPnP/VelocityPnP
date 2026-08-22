@@ -7,7 +7,7 @@ use velocitypnp_domain::{
     WorkspaceObjectClass, WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_CHANGE_SET_ALGORITHM: &str = "workspace_change_set.v2";
+pub const WORKSPACE_CHANGE_SET_ALGORITHM: &str = "workspace_change_set.v3";
 pub const WORKSPACE_CHANGE_SET_ARTIFACT: &str = "workspace-change-set.json";
 pub const MINIMUM_OBJECT_MATCH_OVERLAP: f64 = 0.25;
 pub const UNCHANGED_OBJECT_OVERLAP: f64 = 0.65;
@@ -17,11 +17,20 @@ pub const MINIMUM_NEW_RASTER_REGION_AREA_MM2: f64 = 400.0;
 pub const CHANGE_REFINEMENT_MARGIN_MM: f64 = 4.0;
 const COMPARISON_FRAME_SIZE: u32 = 96;
 const MINIMUM_RASTER_REGION_COVERAGE: f64 = 0.15;
+const COMPLETED_REFINEMENT_COVERAGE: f64 = 0.90;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceObservedObject {
     pub candidate: WorkspaceBoardCandidate,
     pub evidence: Option<GrayFrame>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceRasterEvidence<'a> {
+    pub baseline: &'a GrayFrame,
+    pub baseline_transform: WorkspaceRasterTransform,
+    pub observation: &'a GrayFrame,
+    pub observation_transform: WorkspaceRasterTransform,
 }
 
 pub fn compare_workspace_observation(
@@ -30,14 +39,21 @@ pub fn compare_workspace_observation(
     observation_region: WorkspaceScanRegion,
     baseline_objects: &[WorkspaceObservedObject],
     observation_objects: &[WorkspaceObservedObject],
+    raster_evidence: Option<WorkspaceRasterEvidence<'_>>,
+    completed_refinement_regions: &[WorkspaceScanRegion],
 ) -> Result<WorkspaceChangeSetReport> {
     observation_region.validate().map_err(anyhow::Error::msg)?;
+    if let Some(raster) = raster_evidence {
+        validate_raster_transform(raster.baseline_transform)?;
+        validate_raster_transform(raster.observation_transform)?;
+    }
     let thresholds = WorkspaceChangeThresholds {
         minimum_match_overlap_fraction: MINIMUM_OBJECT_MATCH_OVERLAP,
         unchanged_overlap_fraction: UNCHANGED_OBJECT_OVERLAP,
         maximum_unchanged_visual_difference: MAXIMUM_UNCHANGED_VISUAL_DIFFERENCE,
         refinement_margin_mm: CHANGE_REFINEMENT_MARGIN_MM,
-        maximum_unchanged_raster_difference: 0.0,
+        maximum_unchanged_raster_difference: raster_evidence
+            .map_or(0.0, |_| MAXIMUM_UNCHANGED_RASTER_DIFFERENCE),
         minimum_new_raster_region_area_mm2: 0.0,
     };
     let mut baseline_matched = vec![false; baseline_objects.len()];
@@ -59,20 +75,44 @@ pub fn compare_workspace_observation(
                     None
                 }
             };
+            let raster_difference = raster_evidence
+                .filter(|_| region_contains(observation_region, prior.candidate.region))
+                .map(|raster| {
+                    let baseline_crop = crop_machine_region(
+                        raster.baseline,
+                        raster.baseline_transform,
+                        prior.candidate.region,
+                    )?;
+                    let observation_crop = crop_machine_region(
+                        raster.observation,
+                        raster.observation_transform,
+                        prior.candidate.region,
+                    )?;
+                    normalized_visual_difference(&baseline_crop, &observation_crop)
+                })
+                .transpose()?;
             let prior_class = candidate_class(&prior.candidate);
             let current_class = candidate_class(&observation.candidate);
             let class_changed = prior_class != current_class;
             let geometry_changed = overlap_fraction < UNCHANGED_OBJECT_OVERLAP;
             let appearance_changed = visual_difference
                 .is_some_and(|difference| difference > MAXIMUM_UNCHANGED_VISUAL_DIFFERENCE);
-            let modified = class_changed || geometry_changed || appearance_changed;
+            let raster_changed = raster_difference
+                .is_some_and(|difference| difference > MAXIMUM_UNCHANGED_RASTER_DIFFERENCE);
+            let modified =
+                class_changed || geometry_changed || appearance_changed || raster_changed;
             let kind = if modified {
                 WorkspaceObjectChangeKind::Modified
             } else {
                 WorkspaceObjectChangeKind::Unchanged
             };
             let region = union_region(prior.candidate.region, observation.candidate.region);
-            let refinement_required = modified && needs_refinement(&observation.candidate);
+            let refinement_required = modified
+                && needs_refinement(&observation.candidate)
+                && !has_completed_refinement(
+                    observation.candidate.region,
+                    completed_refinement_regions,
+                );
             if refinement_required {
                 target_regions.push(expand_and_clip_region(
                     region,
@@ -90,12 +130,14 @@ pub fn compare_workspace_observation(
                 region,
                 overlap_fraction: Some(overlap_fraction),
                 visual_difference,
+                raster_difference,
                 refinement_required,
                 explanation: change_explanation(
                     modified,
                     class_changed,
                     geometry_changed,
                     appearance_changed,
+                    raster_changed,
                     visual_difference.is_none(),
                 ),
             });
@@ -106,7 +148,11 @@ pub fn compare_workspace_observation(
             ));
         } else {
             let class = candidate_class(&observation.candidate);
-            let refinement_required = needs_refinement(&observation.candidate);
+            let refinement_required = needs_refinement(&observation.candidate)
+                && !has_completed_refinement(
+                    observation.candidate.region,
+                    completed_refinement_regions,
+                );
             if refinement_required {
                 target_regions.push(expand_and_clip_region(
                     observation.candidate.region,
@@ -124,6 +170,7 @@ pub fn compare_workspace_observation(
                 region: observation.candidate.region,
                 overlap_fraction: None,
                 visual_difference: None,
+                raster_difference: None,
                 refinement_required,
                 explanation: "the observation contains no matching baseline object".into(),
             });
@@ -142,7 +189,8 @@ pub fn compare_workspace_observation(
         let class = candidate_class(&prior.candidate);
         let completely_observed = region_contains(observation_region, prior.candidate.region);
         if completely_observed {
-            let refinement_required = needs_refinement(&prior.candidate);
+            let refinement_required = needs_refinement(&prior.candidate)
+                && !has_completed_refinement(prior.candidate.region, completed_refinement_regions);
             if refinement_required {
                 target_regions.push(expand_and_clip_region(
                     prior.candidate.region,
@@ -160,6 +208,7 @@ pub fn compare_workspace_observation(
                 region: prior.candidate.region,
                 overlap_fraction: None,
                 visual_difference: None,
+                raster_difference: None,
                 refinement_required,
                 explanation: "the baseline object is absent from a fully observed region".into(),
             });
@@ -174,6 +223,7 @@ pub fn compare_workspace_observation(
                 region: prior.candidate.region,
                 overlap_fraction: None,
                 visual_difference: None,
+                raster_difference: None,
                 refinement_required: false,
                 explanation: "the partial observation does not cover this baseline object".into(),
             });
@@ -258,6 +308,7 @@ pub fn compare_workspace_reconnaissance(
                 region: prior.candidate.region,
                 overlap_fraction: None,
                 visual_difference: None,
+                raster_difference: None,
                 refinement_required: false,
                 explanation: "the reconnaissance scan does not cover this baseline object".into(),
             });
@@ -316,7 +367,8 @@ pub fn compare_workspace_reconnaissance(
             known_fixture_id: prior.candidate.known_fixture_id.clone(),
             region: prior.candidate.region,
             overlap_fraction: matched_region.map(|(_, coverage)| coverage),
-            visual_difference: Some(visual_difference),
+            visual_difference: None,
+            raster_difference: Some(visual_difference),
             refinement_required,
             explanation: if modified {
                 "the plate-projected appearance changed within the baseline object region".into()
@@ -356,6 +408,7 @@ pub fn compare_workspace_reconnaissance(
             region,
             overlap_fraction: None,
             visual_difference: None,
+            raster_difference: None,
             refinement_required: true,
             explanation: "a new reconnaissance seam region exceeds the review area".into(),
         });
@@ -487,6 +540,15 @@ fn needs_refinement(candidate: &WorkspaceBoardCandidate) -> bool {
     candidate.known_fixture_id.is_none() && !is_static_fixture(candidate_class(candidate))
 }
 
+fn has_completed_refinement(
+    region: WorkspaceScanRegion,
+    completed_regions: &[WorkspaceScanRegion],
+) -> bool {
+    completed_regions.iter().any(|completed| {
+        intersection_area(region, *completed) / region_area(region) >= COMPLETED_REFINEMENT_COVERAGE
+    })
+}
+
 fn inventory_object(
     scan_id: uuid::Uuid,
     candidate: &WorkspaceBoardCandidate,
@@ -513,6 +575,7 @@ fn change_explanation(
     class_changed: bool,
     geometry_changed: bool,
     appearance_changed: bool,
+    raster_changed: bool,
     missing_evidence: bool,
 ) -> String {
     if !modified {
@@ -531,6 +594,9 @@ fn change_explanation(
     }
     if appearance_changed {
         reasons.push("normalized appearance changed");
+    }
+    if raster_changed {
+        reasons.push("plate-projected reconnaissance appearance changed");
     }
     reasons.join("; ")
 }
@@ -742,7 +808,7 @@ mod tests {
             scan_id,
             profile_id: "profile".into(),
             calibration_id: Uuid::new_v4(),
-            proposal_algorithm_version: "workspace_object_proposals.v2".into(),
+            proposal_algorithm_version: "workspace_object_proposals.v3".into(),
             activated_at: chrono::Utc::now(),
             supersedes_baseline_id: None,
         }
@@ -792,6 +858,8 @@ mod tests {
             region(0.0, 100.0, 0.0, 100.0),
             std::slice::from_ref(&object),
             std::slice::from_ref(&object),
+            None,
+            &[],
         )
         .unwrap();
 
@@ -823,11 +891,56 @@ mod tests {
             region(0.0, 100.0, 0.0, 100.0),
             &[prior],
             &[current],
+            None,
+            &[],
         )
         .unwrap();
 
         assert_eq!(report.unchanged_count, 1);
         assert_eq!(report.modified_count, 0);
+    }
+
+    #[test]
+    fn semantic_comparison_preserves_reconnaissance_change_evidence() {
+        let object = candidate(
+            0,
+            region(10.0, 30.0, 20.0, 40.0),
+            WorkspaceObjectClass::Board,
+            None,
+            80,
+        );
+        let baseline_raster = raster(20);
+        let mut observation_raster = raster(20);
+        for y in 60..80 {
+            for x in 10..30 {
+                observation_raster.pixels[y * 100 + x] = if (x + y) % 2 == 0 { 0 } else { 255 };
+            }
+        }
+        let report = compare_workspace_observation(
+            &baseline(Uuid::new_v4()),
+            Uuid::new_v4(),
+            region(0.0, 100.0, 0.0, 100.0),
+            std::slice::from_ref(&object),
+            std::slice::from_ref(&object),
+            Some(WorkspaceRasterEvidence {
+                baseline: &baseline_raster,
+                baseline_transform: raster_transform(),
+                observation: &observation_raster,
+                observation_transform: raster_transform(),
+            }),
+            &[region(9.0, 31.0, 19.0, 41.0)],
+        )
+        .unwrap();
+
+        assert_eq!(report.modified_count, 1);
+        assert_eq!(report.unchanged_count, 0);
+        assert!(!report.changes[0].refinement_required);
+        assert!(report.target_regions.is_empty());
+        assert!(report.changes[0].visual_difference.unwrap() < 0.10);
+        assert!(report.changes[0].raster_difference.unwrap() > 0.04);
+        assert!(report.changes[0]
+            .explanation
+            .contains("reconnaissance appearance changed"));
     }
 
     #[test]
@@ -860,6 +973,8 @@ mod tests {
             region(0.0, 100.0, 0.0, 100.0),
             &[prior],
             &[changed, added],
+            None,
+            &[],
         )
         .unwrap();
 
@@ -882,6 +997,8 @@ mod tests {
             Uuid::new_v4(),
             region(0.0, 50.0, 0.0, 50.0),
             &[prior],
+            &[],
+            None,
             &[],
         )
         .unwrap();
@@ -910,6 +1027,8 @@ mod tests {
             region(0.0, 50.0, 0.0, 50.0),
             &[prior],
             &[],
+            None,
+            &[],
         )
         .unwrap();
 
@@ -932,6 +1051,8 @@ mod tests {
             Uuid::new_v4(),
             region(0.0, 50.0, 0.0, 50.0),
             &[prior],
+            &[],
+            None,
             &[],
         )
         .unwrap();
@@ -1007,6 +1128,6 @@ mod tests {
 
         assert_eq!(report.modified_count, 1);
         assert_eq!(report.target_regions.len(), 1);
-        assert!(report.changes[0].visual_difference.unwrap() > 0.04);
+        assert!(report.changes[0].raster_difference.unwrap() > 0.04);
     }
 }

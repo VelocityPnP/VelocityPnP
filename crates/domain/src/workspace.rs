@@ -434,6 +434,8 @@ pub struct WorkspaceObjectChange {
     pub overlap_fraction: Option<f64>,
     #[serde(default)]
     pub visual_difference: Option<f64>,
+    #[serde(default)]
+    pub raster_difference: Option<f64>,
     pub refinement_required: bool,
     pub explanation: String,
 }

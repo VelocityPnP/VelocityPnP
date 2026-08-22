@@ -75,14 +75,14 @@ use velocitypnp_vision::{
     PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig, VisualHomingPlan,
     WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
     WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject, WorkspaceParallaxObservation,
-    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRefinementPatch, WorkspaceScanPlan,
-    WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport, WorkspaceSeamStatus,
-    MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
-    MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
-    MIN_REFINEMENT_TEXTURE_RETENTION_RATIO, MIN_WORKSPACE_SURFACE_FRACTION,
-    WORKSPACE_BOARD_DISCOVERY_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
-    WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT, WORKSPACE_CHANGE_SET_ARTIFACT,
-    WORKSPACE_HEIGHT_CANDIDATE_STEP,
+    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRasterEvidence,
+    WorkspaceRefinementPatch, WorkspaceScanPlan, WorkspaceSeamHealthArtifacts,
+    WorkspaceSeamHealthReport, WorkspaceSeamStatus, MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA,
+    MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO, MAX_WORKSPACE_SURFACE_FRACTION,
+    MIN_REFINEMENT_COMPOSITE_COVERAGE, MIN_REFINEMENT_TEXTURE_RETENTION_RATIO,
+    MIN_WORKSPACE_SURFACE_FRACTION, WORKSPACE_BOARD_DISCOVERY_ALGORITHM,
+    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+    WORKSPACE_CHANGE_SET_ARTIFACT, WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -4871,12 +4871,50 @@ async fn build_workspace_change_set(
     let baseline_objects = load_workspace_observed_objects(&state, &baseline_scan)?;
     let report = if observation.board_discovery.is_some() {
         let observation_objects = load_workspace_observed_objects(&state, &observation)?;
+        let mut completed_refinement_regions = Vec::new();
+        if let Some(composite) = observation
+            .refinement_composite
+            .as_ref()
+            .filter(|composite| composite.accepted)
+        {
+            for patch in composite.patches.iter().filter(|patch| patch.accepted) {
+                let refinement = state
+                    .store
+                    .get_workspace_scan(patch.scan_id)
+                    .map_err(ApiError::internal)?
+                    .ok_or_else(|| {
+                        ApiError::not_found("accepted workspace refinement scan not found")
+                    })?;
+                completed_refinement_regions.push(refinement.region);
+            }
+        }
+        let raster_frames = if observation.mode == WorkspaceScanMode::Reconnaissance {
+            Some((
+                load_workspace_raw_raster(&state, &baseline_scan)?,
+                load_workspace_raw_raster(&state, &observation)?,
+            ))
+        } else {
+            None
+        };
+        let raster_evidence = raster_frames.as_ref().map(
+            |(
+                (baseline_raster, baseline_transform),
+                (observation_raster, observation_transform),
+            )| WorkspaceRasterEvidence {
+                baseline: baseline_raster,
+                baseline_transform: *baseline_transform,
+                observation: observation_raster,
+                observation_transform: *observation_transform,
+            },
+        );
         compare_workspace_observation(
             &baseline,
             observation.id,
             observation.region,
             &baseline_objects,
             &observation_objects,
+            raster_evidence,
+            &completed_refinement_regions,
         )
         .map_err(ApiError::internal)?
     } else {

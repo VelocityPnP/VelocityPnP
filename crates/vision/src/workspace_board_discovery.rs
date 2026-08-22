@@ -11,7 +11,7 @@ use velocitypnp_domain::{
     WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v2";
+pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v3";
 pub const WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT: &str = "board-discovery.json";
 pub const WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT: &str = "mosaic-board-candidates.png";
 
@@ -20,6 +20,7 @@ const RAISED_SURFACE_MAX_FRACTION: f64 = 0.875;
 const CONNECTION_RADIUS_CELLS: i32 = 2;
 const MINIMUM_EVIDENCE_CELLS: usize = 4;
 const MINIMUM_CANDIDATE_SPAN_MM: f64 = 6.0;
+const MINIMUM_CANDIDATE_AREA_MM2: f64 = 100.0;
 const MAXIMUM_DESIGN_MATCHES: usize = 3;
 const MAXIMUM_EVIDENCE_CROP_PIXELS_PER_AXIS: u32 = 2_048;
 const FIXTURE_MATCH_MINIMUM_FRACTION: f64 = 0.25;
@@ -676,7 +677,9 @@ fn candidate_from_component(
     }
     let width_mm = maximum_x - minimum_x;
     let height_mm = maximum_y - minimum_y;
-    if width_mm.min(height_mm) < MINIMUM_CANDIDATE_SPAN_MM {
+    if width_mm.min(height_mm) < MINIMUM_CANDIDATE_SPAN_MM
+        || width_mm * height_mm < MINIMUM_CANDIDATE_AREA_MM2
+    {
         return None;
     }
     let outline_machine_mm = [
