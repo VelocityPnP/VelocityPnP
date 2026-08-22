@@ -260,6 +260,68 @@ pub struct WorkspaceRefinementCompositeSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceBoardDesignMatch {
+    pub board_id: Uuid,
+    pub board_name: String,
+    pub rotation_deg: f64,
+    pub dimension_error_mm: f64,
+    pub dimension_error_fraction: f64,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceBoardCandidate {
+    pub candidate_index: u32,
+    pub region: WorkspaceScanRegion,
+    pub outline_machine_mm: Vec<[f64; 2]>,
+    pub center_x_mm: f64,
+    pub center_y_mm: f64,
+    pub width_mm: f64,
+    pub height_mm: f64,
+    pub rotation_deg: f64,
+    pub evidence_cell_count: u32,
+    pub measured_cell_fraction: f64,
+    pub mean_surface_fraction: f64,
+    pub mean_height_confidence: f64,
+    pub fill_fraction: f64,
+    pub texture_energy_luma: f64,
+    pub board_likelihood: f64,
+    #[serde(default)]
+    pub design_matches: Vec<WorkspaceBoardDesignMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceBoardHeightSource {
+    pub scan_id: Uuid,
+    pub artifact_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceBoardDiscoveryReport {
+    pub algorithm_version: String,
+    pub source_mosaic_artifact_name: String,
+    pub height_sources: Vec<WorkspaceBoardHeightSource>,
+    pub installed_plate_fraction: f64,
+    pub raised_surface_max_fraction: f64,
+    pub board_design_count: u32,
+    pub candidates: Vec<WorkspaceBoardCandidate>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceBoardDiscoverySummary {
+    pub algorithm_version: String,
+    pub source_mosaic_artifact_name: String,
+    pub report_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub candidate_count: u32,
+    pub matched_candidate_count: u32,
+    pub board_design_count: u32,
+    pub height_source_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceScanTile {
     pub index: u32,
     pub row: u32,
@@ -386,6 +448,8 @@ pub struct WorkspaceScanReport {
     pub seam_health: Option<WorkspaceSeamHealthSummary>,
     #[serde(default)]
     pub refinement_composite: Option<WorkspaceRefinementCompositeSummary>,
+    #[serde(default)]
+    pub board_discovery: Option<WorkspaceBoardDiscoverySummary>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
 }

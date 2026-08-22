@@ -98,6 +98,9 @@ enum Command {
         parts: Option<PathBuf>,
     },
     Boards,
+    DiscoverBoards {
+        scan: Uuid,
+    },
     CalibrationWorkflow,
     CalibrationArtifacts,
     NewCalibration {
@@ -417,6 +420,14 @@ async fn main() -> Result<()> {
                     .multipart(form)
                     .send()
                     .await?,
+            )
+            .await?
+        }
+        Command::DiscoverBoards { scan } => {
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/board-discovery"),
+                Some(json!({})),
             )
             .await?
         }
@@ -761,5 +772,16 @@ mod tests {
                 } if actuator_id == "lights" && parsed == enabled
             ));
         }
+    }
+
+    #[test]
+    fn discover_boards_accepts_a_workspace_scan_id() {
+        let scan = Uuid::new_v4();
+        let args =
+            Args::try_parse_from(["velocitypnp", "discover-boards", &scan.to_string()]).unwrap();
+        assert!(matches!(
+            args.command,
+            Command::DiscoverBoards { scan: parsed } if parsed == scan
+        ));
     }
 }

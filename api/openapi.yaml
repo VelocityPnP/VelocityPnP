@@ -244,6 +244,22 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WorkspaceRefinementCompositeSummary" }
+  /workspace-scans/{id}/board-discovery:
+    post:
+      operationId: buildWorkspaceBoardDiscovery
+      description: >-
+        Finds connected raised-surface candidates in a completed height map,
+        fits oriented machine-coordinate outlines, and compares their
+        dimensions with imported KiCad boards. This operation causes no
+        machine motion. It persists a JSON report and an outlined preview.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Ranked machine-space board candidates and design matches
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceBoardDiscoveryReport" }
   /workspace-scans/{id}/artifacts/{name}:
     get:
       operationId: getWorkspaceScanArtifact
@@ -1348,6 +1364,10 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceRefinementCompositeSummary"
             - type: "null"
+        board_discovery:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceBoardDiscoverySummary"
+            - type: "null"
         warnings: { type: array, items: { type: string } }
         failure: { type: [string, "null"] }
     WorkspaceRefinementTargets:
@@ -1507,6 +1527,122 @@ components:
         findings:
           type: array
           items: { type: string }
+    WorkspaceBoardDiscoverySummary:
+      type: object
+      required:
+        - algorithm_version
+        - source_mosaic_artifact_name
+        - report_artifact_name
+        - preview_artifact_name
+        - candidate_count
+        - matched_candidate_count
+        - board_design_count
+        - height_source_count
+      properties:
+        algorithm_version: { type: string }
+        source_mosaic_artifact_name: { type: string }
+        report_artifact_name: { type: string }
+        preview_artifact_name: { type: string }
+        candidate_count: { type: integer, minimum: 0 }
+        matched_candidate_count: { type: integer, minimum: 0 }
+        board_design_count: { type: integer, minimum: 0 }
+        height_source_count: { type: integer, minimum: 1 }
+    WorkspaceBoardDiscoveryReport:
+      type: object
+      required:
+        - algorithm_version
+        - source_mosaic_artifact_name
+        - height_sources
+        - installed_plate_fraction
+        - raised_surface_max_fraction
+        - board_design_count
+        - candidates
+        - warnings
+      properties:
+        algorithm_version: { type: string }
+        source_mosaic_artifact_name: { type: string }
+        height_sources:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/WorkspaceBoardHeightSource" }
+        installed_plate_fraction: { type: number }
+        raised_surface_max_fraction: { type: number }
+        board_design_count: { type: integer, minimum: 0 }
+        candidates:
+          type: array
+          items: { $ref: "#/components/schemas/WorkspaceBoardCandidate" }
+        warnings:
+          type: array
+          items: { type: string }
+    WorkspaceBoardHeightSource:
+      type: object
+      required: [scan_id, artifact_name]
+      properties:
+        scan_id: { type: string, format: uuid }
+        artifact_name: { type: string }
+    WorkspaceBoardCandidate:
+      type: object
+      required:
+        - candidate_index
+        - region
+        - outline_machine_mm
+        - center_x_mm
+        - center_y_mm
+        - width_mm
+        - height_mm
+        - rotation_deg
+        - evidence_cell_count
+        - measured_cell_fraction
+        - mean_surface_fraction
+        - mean_height_confidence
+        - fill_fraction
+        - texture_energy_luma
+        - board_likelihood
+        - design_matches
+      properties:
+        candidate_index: { type: integer, minimum: 0 }
+        region: { $ref: "#/components/schemas/WorkspaceScanRegion" }
+        outline_machine_mm:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
+        center_x_mm: { type: number }
+        center_y_mm: { type: number }
+        width_mm: { type: number, exclusiveMinimum: 0 }
+        height_mm: { type: number, exclusiveMinimum: 0 }
+        rotation_deg: { type: number }
+        evidence_cell_count: { type: integer, minimum: 1 }
+        measured_cell_fraction: { type: number, minimum: 0, maximum: 1 }
+        mean_surface_fraction: { type: number }
+        mean_height_confidence: { type: number, minimum: 0, maximum: 1 }
+        fill_fraction: { type: number, minimum: 0, maximum: 1 }
+        texture_energy_luma: { type: number, minimum: 0 }
+        board_likelihood: { type: number, minimum: 0, maximum: 1 }
+        design_matches:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/WorkspaceBoardDesignMatch" }
+    WorkspaceBoardDesignMatch:
+      type: object
+      required:
+        - board_id
+        - board_name
+        - rotation_deg
+        - dimension_error_mm
+        - dimension_error_fraction
+        - confidence
+      properties:
+        board_id: { type: string, format: uuid }
+        board_name: { type: string }
+        rotation_deg: { type: number }
+        dimension_error_mm: { type: number, minimum: 0 }
+        dimension_error_fraction: { type: number, minimum: 0 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
     WorkspaceRefinementPatchQuality:
       type: object
       required:

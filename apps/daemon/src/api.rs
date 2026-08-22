@@ -38,6 +38,7 @@ use velocitypnp_domain::{
     PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
+    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
     WorkspaceCameraApertureSummary, WorkspaceHeightMapSummary, WorkspaceMosaicLayerReport,
     WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
     WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
@@ -57,11 +58,12 @@ use velocitypnp_vision::{
     capture_gray_frame, capture_gray_frames, compose_workspace_refinements,
     composite_workspace_camera_aperture, decode_gray_png, detect_bright_fiducial_near,
     detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
-    encode_gray_png, encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry,
-    fit_nozzle_height_model, fit_nozzle_runout, fit_planar_camera_model,
-    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
-    monotonic_timestamp, plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing,
-    plan_workspace_scan, query_camera_controls, reanalyze_workspace_seam_health,
+    discover_workspace_boards, encode_gray_png, encode_rgb_png, encode_rgba_png,
+    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
+    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
+    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
+    query_camera_controls, reanalyze_workspace_seam_health,
     render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
@@ -75,6 +77,7 @@ use velocitypnp_vision::{
     MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
     MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
     MIN_REFINEMENT_TEXTURE_RETENTION_RATIO, MIN_WORKSPACE_SURFACE_FRACTION,
+    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
     WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
@@ -341,6 +344,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspace-scans/{id}/refinement-composite",
             post(build_workspace_refinement_composite),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/board-discovery",
+            post(build_workspace_board_discovery),
         )
         .route(
             "/api/v1/workspace-scans/{id}/artifacts/{name}",
@@ -1360,6 +1367,7 @@ fn pending_workspace_scan(
         height_map: None,
         seam_health: None,
         refinement_composite: None,
+        board_discovery: None,
         warnings: estimate.warnings.clone(),
         failure: None,
     }
@@ -4415,6 +4423,169 @@ async fn build_workspace_refinement_composite(
     persist_workspace_manifest(&state, &mut parent)
         .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
     Ok(Json(summary))
+}
+
+async fn build_workspace_board_discovery(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<WorkspaceBoardDiscoveryReport>> {
+    let mut scan = state
+        .store
+        .get_workspace_scan(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "board discovery requires a successful workspace scan",
+        ));
+    }
+    let raster_transform = scan.raster_transform.ok_or_else(|| {
+        ApiError::bad_request("workspace scan has no machine-coordinate raster transform")
+    })?;
+    let source_mosaic_artifact_name = scan
+        .refinement_composite
+        .as_ref()
+        .filter(|summary| summary.accepted)
+        .map(|summary| summary.mosaic_artifact_name.clone())
+        .or_else(|| {
+            scan.height_map
+                .as_ref()
+                .map(|summary| summary.corrected_mosaic_artifact_name.clone())
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "board discovery requires a height-aware scan or accepted refinement composite",
+            )
+        })?;
+    let (mosaic_media_type, mosaic_data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &source_mosaic_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("board discovery source mosaic not found"))?;
+    if mosaic_media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "board discovery source mosaic is not a PNG"
+        )));
+    }
+    let mut height_scan_ids = Vec::new();
+    if scan.height_map.is_some() {
+        height_scan_ids.push(scan.id);
+    }
+    if let Some(composite) = scan
+        .refinement_composite
+        .as_ref()
+        .filter(|summary| summary.accepted)
+    {
+        height_scan_ids.extend(
+            composite
+                .patches
+                .iter()
+                .filter(|patch| patch.accepted)
+                .map(|patch| patch.scan_id),
+        );
+    }
+    height_scan_ids.sort_unstable();
+    height_scan_ids.dedup();
+    let mut height_sources = Vec::new();
+    let mut height_data = Vec::new();
+    for height_scan_id in height_scan_ids {
+        let height_scan = state
+            .store
+            .get_workspace_scan(height_scan_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("board discovery height-source scan not found"))?;
+        if height_scan.calibration_id != scan.calibration_id
+            || height_scan.profile_id != scan.profile_id
+        {
+            return Err(ApiError::bad_request(
+                "board discovery height sources use different machine geometry",
+            ));
+        }
+        let height_map_artifact_name = height_scan
+            .height_map
+            .as_ref()
+            .ok_or_else(|| ApiError::not_found("height-source scan has no surface-height map"))?
+            .map_artifact_name
+            .clone();
+        let (height_media_type, data) = state
+            .store
+            .get_workspace_scan_artifact(height_scan_id, &height_map_artifact_name)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("workspace surface-height map not found"))?;
+        if height_media_type != "application/json" {
+            return Err(ApiError::internal(anyhow::anyhow!(
+                "workspace surface-height map is not JSON"
+            )));
+        }
+        height_sources.push(WorkspaceBoardHeightSource {
+            scan_id: height_scan_id,
+            artifact_name: height_map_artifact_name,
+        });
+        height_data.push(data);
+    }
+    if height_sources.is_empty() {
+        return Err(ApiError::bad_request(
+            "board discovery found no compatible surface-height evidence",
+        ));
+    }
+    let board_designs = state.store.list_boards().map_err(ApiError::internal)?;
+    let scan_region = scan.region;
+    let discovery = tokio::task::spawn_blocking(move || {
+        let mosaic = decode_gray_png(&mosaic_data)?;
+        let height_maps = height_data
+            .iter()
+            .map(|data| serde_json::from_slice::<WorkspaceHeightMap>(data))
+            .collect::<Result<Vec<_>, _>>()?;
+        let height_map = merge_workspace_height_maps(scan_region, &height_maps)?;
+        discover_workspace_boards(
+            &mosaic,
+            raster_transform,
+            &height_map,
+            &board_designs,
+            &source_mosaic_artifact_name,
+            &height_sources,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    let report_json = serde_json::to_vec_pretty(&discovery.report).map_err(ApiError::internal)?;
+    let preview_png = encode_rgb_png(&discovery.preview).map_err(ApiError::internal)?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+        "application/json",
+        &report_json,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
+        "image/png",
+        &preview_png,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    scan.board_discovery = Some(WorkspaceBoardDiscoverySummary {
+        algorithm_version: discovery.report.algorithm_version.clone(),
+        source_mosaic_artifact_name: discovery.report.source_mosaic_artifact_name.clone(),
+        report_artifact_name: WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT.into(),
+        preview_artifact_name: WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT.into(),
+        candidate_count: discovery.report.candidates.len() as u32,
+        matched_candidate_count: discovery
+            .report
+            .candidates
+            .iter()
+            .filter(|candidate| !candidate.design_matches.is_empty())
+            .count() as u32,
+        board_design_count: discovery.report.board_design_count,
+        height_source_count: discovery.report.height_sources.len() as u32,
+    });
+    scan.updated_at = Utc::now();
+    persist_workspace_manifest(&state, &mut scan)
+        .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    Ok(Json(discovery.report))
 }
 
 async fn get_workspace_scan_artifact(
@@ -14391,6 +14562,7 @@ mod tests {
             height_map: None,
             seam_health: None,
             refinement_composite: None,
+            board_discovery: None,
             warnings: vec![],
             failure: None,
         }
@@ -15554,6 +15726,151 @@ mod tests {
             state
                 .store
                 .get_workspace_scan(parent.id)
+                .unwrap()
+                .unwrap()
+                .retained_artifact_bytes,
+            retained,
+        );
+    }
+
+    #[tokio::test]
+    async fn board_discovery_persists_machine_space_candidates_and_matches() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        scan.status = WorkspaceScanStatus::Succeeded;
+        scan.mode = WorkspaceScanMode::Reconnaissance;
+        scan.region = WorkspaceScanRegion {
+            x_min_mm: 0.0,
+            x_max_mm: 40.0,
+            y_min_mm: 0.0,
+            y_max_mm: 30.0,
+        };
+        scan.raster_transform = Some(WorkspaceRasterTransform {
+            top_left_x_mm: 0.0,
+            top_left_y_mm: 30.0,
+            x_mm_per_pixel: 0.2,
+            y_mm_per_pixel: -0.2,
+        });
+        scan.mosaic_width_px = Some(200);
+        scan.mosaic_height_px = Some(150);
+        scan.height_map = Some(WorkspaceHeightMapSummary {
+            map_artifact_name: WORKSPACE_HEIGHT_MAP_ARTIFACT.into(),
+            preview_artifact_name: WORKSPACE_HEIGHT_PREVIEW_ARTIFACT.into(),
+            confidence_artifact_name: WORKSPACE_HEIGHT_CONFIDENCE_ARTIFACT.into(),
+            corrected_mosaic_artifact_name: WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT.into(),
+            class_overlay_artifact_name: WORKSPACE_HEIGHT_CLASS_OVERLAY_ARTIFACT.into(),
+            class_preview_artifact_name: WORKSPACE_HEIGHT_CLASS_PREVIEW_ARTIFACT.into(),
+            cell_size_mm: 2.0,
+            rows: 15,
+            columns: 20,
+            measured_cells: 300,
+            inferred_cells: 0,
+            unknown_cells: 0,
+            candidate_fractions: vec![0.5, 1.0],
+            camera_aperture: None,
+        });
+        state.store.put_workspace_scan(&scan).unwrap();
+        let cells = (0..15)
+            .flat_map(|row| {
+                (0..20).map(move |column| {
+                    let board = (4..10).contains(&row) && (3..13).contains(&column);
+                    velocitypnp_vision::WorkspaceHeightCell {
+                        row,
+                        column,
+                        center_x_mm: f64::from(column) * 2.0 + 1.0,
+                        center_y_mm: 29.0 - f64::from(row) * 2.0,
+                        surface_fraction: Some(if board { 0.5 } else { 1.0 }),
+                        confidence: 0.9,
+                        supporting_observations: 4,
+                        total_observations: 4,
+                        residual_p95_mm: Some(0.01),
+                        source: velocitypnp_vision::WorkspaceHeightCellSource::Measured,
+                    }
+                })
+            })
+            .collect();
+        let height_map = WorkspaceHeightMap {
+            region: scan.region,
+            cell_size_mm: 2.0,
+            rows: 15,
+            columns: 20,
+            candidate_step: 0.125,
+            minimum_surface_fraction: -1.0,
+            maximum_surface_fraction: 2.0,
+            measured_cells: 300,
+            inferred_cells: 0,
+            unknown_cells: 0,
+            candidate_fractions: vec![0.5, 1.0],
+            cells,
+        };
+        let mosaic = GrayFrame {
+            width: 200,
+            height: 150,
+            pixels: (0..30_000).map(|index| (index % 251) as u8).collect(),
+        };
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                WORKSPACE_HEIGHT_MAP_ARTIFACT,
+                "application/json",
+                &serde_json::to_vec(&height_map).unwrap(),
+            )
+            .unwrap();
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                WORKSPACE_HEIGHT_CORRECTED_MOSAIC_ARTIFACT,
+                "image/png",
+                &encode_gray_png(&mosaic).unwrap(),
+            )
+            .unwrap();
+        let board_id = Uuid::new_v4();
+        state
+            .store
+            .put_board(&BoardDesign {
+                id: board_id,
+                name: "fixture".into(),
+                source_format: "kicad_pcb".into(),
+                source_version: Some(20240108),
+                width_mm: Some(20.0),
+                height_mm: Some(12.0),
+                placements: Vec::new(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+
+        let first = build_workspace_board_discovery(State(state.clone()), Path(scan.id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(first.candidates.len(), 1);
+        assert_eq!(first.candidates[0].design_matches[0].board_id, board_id);
+        for name in [
+            WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+            WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
+            "manifest.json",
+        ] {
+            assert!(state
+                .store
+                .get_workspace_scan_artifact(scan.id, name)
+                .unwrap()
+                .is_some());
+        }
+        let stored = state.store.get_workspace_scan(scan.id).unwrap().unwrap();
+        let summary = stored.board_discovery.unwrap();
+        assert_eq!(summary.candidate_count, 1);
+        assert_eq!(summary.matched_candidate_count, 1);
+        let retained = stored.retained_artifact_bytes;
+
+        let _ = build_workspace_board_discovery(State(state.clone()), Path(scan.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .store
+                .get_workspace_scan(scan.id)
                 .unwrap()
                 .unwrap()
                 .retained_artifact_bytes,

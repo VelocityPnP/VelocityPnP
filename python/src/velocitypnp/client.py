@@ -278,6 +278,33 @@ class Client:
             {},
         )
 
+    def discover_workspace_boards(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/workspace-scans/{scan_id}/board-discovery",
+            {},
+        )
+
+    def workspace_board_discovery_report(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/board-discovery.json",
+        )
+
+    def workspace_board_discovery_preview(
+        self, scan_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            "mosaic-board-candidates.png",
+            "image/png",
+        )
+
     def workspace_scan_refined_mosaic(
         self, scan_id: str | uuid.UUID,
     ) -> bytes:

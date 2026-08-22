@@ -30,6 +30,8 @@ This repository contains the first working platform slice:
   selective refinement, prioritized refinement queues, preflight estimates,
   georeferenced refinement composites, explicit image-quality gates, and
   artifact quotas
+- no-motion workspace board candidates with machine-space outlines and
+  imported KiCad dimension matching
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

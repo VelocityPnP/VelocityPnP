@@ -320,6 +320,34 @@ class ClientTests(unittest.TestCase):
                 "image/png",
             )
 
+    def test_workspace_board_discovery_and_artifacts(self):
+        client = Client(timeout=1)
+        report = {"algorithm_version": "workspace_board_discovery.v1"}
+        with patch.object(client, "_request", return_value=report) as send:
+            self.assertEqual(client.discover_workspace_boards("scan"), report)
+        send.assert_called_once_with(
+            "POST", "/workspace-scans/scan/board-discovery", {},
+        )
+
+        with patch.object(client, "_request", return_value=report) as send:
+            self.assertEqual(
+                client.workspace_board_discovery_report("scan"), report,
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/scan/artifacts/board-discovery.json",
+        )
+
+        with patch.object(client, "_request_bytes", return_value=b"png") as send:
+            self.assertEqual(
+                client.workspace_board_discovery_preview("scan"), b"png",
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/scan/artifacts/mosaic-board-candidates.png",
+            "image/png",
+        )
+
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
         layered_report = {

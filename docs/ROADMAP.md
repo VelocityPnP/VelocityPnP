@@ -113,7 +113,9 @@ The project is organized by measurable gates rather than calendar estimates.
   per-pixel candidate selection
 - [x] Georeference survey rasters and use installed plate-plane geometry for
   full-workspace scan planning
-- [ ] Add board-region discovery and package-template pose comparison
+- [x] Add no-motion raised-surface board-region discovery with oriented
+  machine-space outlines, persisted previews, and KiCad dimension matching
+- [ ] Add package-template pose comparison and live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles

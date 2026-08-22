@@ -3,7 +3,7 @@ import { api, waitForOperation } from "./api";
 import type {
   AutomatedCalibrationRun, BoardDesign, CalibrationArtifactPlan, CalibrationSnapshot,
   CalibrationStep, Device, MachineEvent, MachineStatus, Pose, SensorReading,
-  VisualHomingResult,
+  VisualHomingResult, WorkspaceBoardDiscoveryReport, WorkspaceScanReport,
 } from "./types";
 import "./styles.css";
 
@@ -478,14 +478,48 @@ function CalibrationPanel({ status, devices, setError }: {
 
 function BoardsPanel({ setError }: { setError: (value: string | null) => void }) {
   const [boards, setBoards] = useState<BoardDesign[]>([]);
+  const [scans, setScans] = useState<WorkspaceScanReport[]>([]);
+  const [selectedScan, setSelectedScan] = useState("");
+  const [discovery, setDiscovery] = useState<WorkspaceBoardDiscoveryReport | null>(null);
+  const [discovering, setDiscovering] = useState(false);
   const [pcb, setPcb] = useState<File | null>(null);
   const [bom, setBom] = useState<File | null>(null);
-  const load = useCallback(() => void api.boards().then(setBoards).catch((reason) => setError(String(reason))), [setError]);
-  useEffect(load, [load]);
+  const load = useCallback(async () => {
+    try {
+      const [boardValues, scanValues] = await Promise.all([
+        api.boards(), api.workspaceScans(),
+      ]);
+      const eligible = scanValues
+        .filter((scan) => scan.status === "succeeded"
+          && (scan.height_map !== null || scan.refinement_composite?.accepted === true))
+        .sort((first, second) => second.updated_at.localeCompare(first.updated_at));
+      setBoards(boardValues);
+      setScans(eligible);
+      setSelectedScan((current) =>
+        eligible.some((scan) => scan.id === current) ? current : eligible[0]?.id ?? ""
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [setError]);
+  useEffect(() => { void load(); }, [load]);
   const upload = async () => {
     if (!pcb) return;
     try { await api.importBoard(pcb, bom); setPcb(null); setBom(null); load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const discover = async () => {
+    if (!selectedScan) return;
+    setDiscovering(true);
+    setDiscovery(null);
+    try {
+      setDiscovery(await api.discoverWorkspaceBoards(selectedScan));
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDiscovering(false);
+    }
   };
   return <div className="boards-layout">
     <section className="card import-card"><p className="eyebrow">KiCad-native workflow</p><h2>Import a board</h2><p>Use the PCB as the source of placement geometry. A CSV BOM is optional enrichment.</p>
@@ -497,6 +531,24 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       const active = board.placements.filter((p) => p.enabled && !p.fiducial).length;
       return <article className="card board-card" key={board.id}><div className="board-preview"><span>PCB</span><i /></div><div><p className="eyebrow">KiCad {board.source_version ?? "unknown"}</p><h2>{board.name}</h2><div className="board-stats"><span><strong>{active}</strong> placements</span><span><strong>{board.placements.filter((p) => p.fiducial).length}</strong> fiducials</span><span><strong>{formatSize(board)}</strong> size</span></div>{board.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}</div></article>;
     })}</section>
+    <section className="card board-discovery-card">
+      <div className="card-heading"><div><p className="eyebrow">Workspace inventory</p><h2>Discover installed boards</h2></div>{scans.length > 0 && <span className="count">{scans.length}</span>}</div>
+      <p>Select a completed height-aware scan. Detection uses the refined mosaic when its quality gate passed and causes no machine motion.</p>
+      <div className="board-discovery-controls">
+        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); }}>
+          {scans.length === 0 && <option value="">No eligible scans</option>}
+          {scans.map((scan) => <option key={scan.id} value={scan.id}>{new Date(scan.updated_at).toLocaleString()} · {pretty(scan.mode)}{scan.board_discovery ? ` · ${scan.board_discovery.candidate_count} prior candidates` : ""}</option>)}
+        </select>
+        <button disabled={!selectedScan || discovering} onClick={() => void discover()}>{discovering ? "Analyzing…" : "Discover boards"}</button>
+      </div>
+      {discovery && <div className="board-discovery-result">
+        <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with outlined board candidates" />
+        <div><p><strong>{discovery.candidates.length}</strong> raised-surface candidates; green outlines match imported board dimensions and amber outlines need more evidence.</p>
+          {discovery.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
+          <div className="candidate-list">{discovery.candidates.map((candidate) => <div key={candidate.candidate_index}><strong>Candidate {candidate.candidate_index + 1}</strong><span>{candidate.width_mm.toFixed(1)} × {candidate.height_mm.toFixed(1)} mm at {candidate.center_x_mm.toFixed(1)}, {candidate.center_y_mm.toFixed(1)}</span><span>{(candidate.board_likelihood * 100).toFixed(0)}% rank{candidate.design_matches[0] ? ` · ${candidate.design_matches[0].board_name}` : " · no dimension match"}</span></div>)}</div>
+        </div>
+      </div>}
+    </section>
   </div>;
 }
 

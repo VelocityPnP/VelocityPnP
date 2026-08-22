@@ -2,7 +2,8 @@ import type {
   AutomatedCalibrationRun, BoardDesign, CalibrationArtifactId, CalibrationArtifactPlan,
   CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, SensorReading, VisualHomingResult,
+  Operation, SensorReading, VisualHomingResult, WorkspaceBoardDiscoveryReport,
+  WorkspaceScanReport,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -182,4 +183,10 @@ export const api = {
     if (bom) form.append("bom", bom);
     return request<BoardDesign>("/boards/import", { method: "POST", body: form });
   },
+  workspaceScans: async () =>
+    (await request<{ scans: WorkspaceScanReport[] }>("/workspace-scans")).scans,
+  discoverWorkspaceBoards: (scanId: string) =>
+    jsonPost<WorkspaceBoardDiscoveryReport>(
+      `/workspace-scans/${scanId}/board-discovery`,
+    ),
 };

@@ -1580,6 +1580,32 @@ X=220.131, Y=190.271, Z=31.5. Normal disconnect operation
 `4901fd28-e1d5-49d0-b1c4-fbc0ac6e05b1` switched outputs off and released the
 machine. The daemon then stopped normally. No emergency stop was used.
 
+### No-motion board-region discovery
+
+On 2026-08-22, a simulated daemon replayed physical reconnaissance parent
+`8e5db6e2-c51c-4d4b-a62a-29c390126918`. The parent has an accepted refined
+mosaic but no single full-workspace height map. Board discovery merged the
+surface maps from all eight accepted refinement children into the parent's
+machine-coordinate grid. Each child scan and map artifact remains in the
+result as explicit lineage.
+
+The `workspace_board_discovery.v1` replay found eight raised-surface regions.
+Visual inspection found that the outlines covered the FTP PCB, the main feeder
+bank, two smaller feeder groups, the datum tool, and local camera-area
+features. The outlines are coarse regions from 2 mm surface evidence. Some
+include clamps or plate margin, so they are not yet board registration results.
+
+The stored board library was empty. Thus, the expected design-match count was
+zero and the report warned that no imported board dimensions were available.
+The report is 10,253 bytes. The RGB preview is 3,264,422 bytes. Its SHA-256 is
+`c3c2e31ccaf980c0c73939c19fe0a4d510b598a969c1bf3439796ced55076ad5`.
+The complete parent artifact set is now 15,487,829 bytes.
+
+This replay opened no controller or camera and caused no machine motion. The
+simulated daemon stopped normally after the artifacts and updated manifest
+were stored. Package-template comparison and local fiducial verification are
+still required before a candidate can become a board instance.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

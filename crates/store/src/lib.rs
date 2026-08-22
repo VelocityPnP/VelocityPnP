@@ -549,6 +549,7 @@ mod tests {
             height_map: None,
             seam_health: None,
             refinement_composite: None,
+            board_discovery: None,
             warnings: vec![],
             failure: None,
         };

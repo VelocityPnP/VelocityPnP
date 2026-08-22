@@ -571,6 +571,64 @@ export interface BoardDesign {
   warnings: string[];
 }
 
+export interface WorkspaceBoardDesignMatch {
+  board_id: string;
+  board_name: string;
+  rotation_deg: number;
+  dimension_error_mm: number;
+  dimension_error_fraction: number;
+  confidence: number;
+}
+
+export interface WorkspaceBoardCandidate {
+  candidate_index: number;
+  region: {
+    x_min_mm: number;
+    x_max_mm: number;
+    y_min_mm: number;
+    y_max_mm: number;
+  };
+  outline_machine_mm: Array<[number, number]>;
+  center_x_mm: number;
+  center_y_mm: number;
+  width_mm: number;
+  height_mm: number;
+  rotation_deg: number;
+  evidence_cell_count: number;
+  measured_cell_fraction: number;
+  mean_surface_fraction: number;
+  mean_height_confidence: number;
+  fill_fraction: number;
+  texture_energy_luma: number;
+  board_likelihood: number;
+  design_matches: WorkspaceBoardDesignMatch[];
+}
+
+export interface WorkspaceBoardDiscoveryReport {
+  algorithm_version: string;
+  source_mosaic_artifact_name: string;
+  height_sources: Array<{ scan_id: string; artifact_name: string }>;
+  installed_plate_fraction: number;
+  raised_surface_max_fraction: number;
+  board_design_count: number;
+  candidates: WorkspaceBoardCandidate[];
+  warnings: string[];
+}
+
+export interface WorkspaceScanReport {
+  id: string;
+  updated_at: string;
+  status: "pending" | "running" | "succeeded" | "failed";
+  mode: "precision" | "survey" | "reconnaissance" | "refinement";
+  height_map: object | null;
+  refinement_composite: { accepted: boolean } | null;
+  board_discovery: {
+    algorithm_version: string;
+    candidate_count: number;
+    matched_candidate_count: number;
+  } | null;
+}
+
 export interface MachineEvent {
   sequence: number;
   at: string;

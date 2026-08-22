@@ -433,6 +433,38 @@ object labels. Feeder, PCB, datum PCB, nozzle fixture, and bottom camera ring
 labels will come from later object detectors and can use the same transparent
 overlay format.
 
+### Workspace board discovery
+
+A successful height-aware scan or accepted refinement composite can produce
+initial board candidates without machine motion:
+
+```bash
+cargo run -p velocitypnp -- discover-boards SCAN_UUID
+```
+
+The equivalent API is
+`POST /api/v1/workspace-scans/SCAN_UUID/board-discovery`. The Python client
+provides `discover_workspace_boards(scan_id)`. The operation uses an accepted
+`mosaic-refined.png` when present. Otherwise, it uses the scan's
+`mosaic-height-corrected.png`.
+
+The `workspace_board_discovery.v1` policy selects known height-map cells above
+the installed-plate plane. It joins nearby evidence, rejects small isolated
+height noise, and fits an oriented rectangle in machine coordinates. It ranks
+each region from height confidence, filled area, image texture, shape, and any
+matching imported KiCad board dimensions. Both 0-degree and 90-degree design
+orientations are tested. A reconnaissance parent can merge the height maps
+from all accepted refinement children into its own machine-coordinate grid.
+The report keeps every child scan and artifact as explicit lineage.
+
+The scan stores `board-discovery.json` and
+`mosaic-board-candidates.png`. Green outlines have at least one plausible
+KiCad dimension match. Amber outlines are raised-surface candidates that need
+more evidence. Candidate rank is not board registration: this stage does not
+create a `BoardInstance`, move the camera, compare package templates, or accept
+a design-to-machine transform. Local fiducial and package verification is the
+next gate.
+
 `full_sources` supports offline replay. `transient_sources` produces the same
 height products without keeping thousands of source frames. `thumbnails` and
 `mosaic_only` scans still produce the two endpoint mosaics and sparse parallax
