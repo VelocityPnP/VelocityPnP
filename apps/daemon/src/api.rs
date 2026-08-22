@@ -66,7 +66,8 @@ use velocitypnp_vision::{
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
     query_camera_controls, reanalyze_workspace_seam_health,
-    render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
+    render_workspace_height_mosaic_with_consistency,
+    render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
     summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
@@ -2912,16 +2913,20 @@ async fn build_chunked_workspace_height_artifacts(
         let mut composites = Vec::with_capacity(chunks.len());
         let mut camera_aperture = None;
         for chunk in chunks {
-            let mut composite =
-                render_workspace_height_mosaic_with_consistency(&chunk.plan, &map, |fraction| {
-                    render_transient_workspace_height_layer(
-                        &source_directory,
+            let source_frames = load_transient_workspace_sources(&source_directory, &chunk.plan)?;
+            let mut composite = render_workspace_height_mosaic_with_consistency_parallel(
+                &chunk.plan,
+                &map,
+                |fraction| {
+                    render_cached_workspace_height_layer(
                         &chunk.plan,
                         &working_model,
                         &installed_model,
+                        &source_frames,
                         fraction,
                     )
-                })?;
+                },
+            )?;
             if let Some((minimum_diameter_px, maximum_diameter_px)) = camera_aperture_diameter_range
             {
                 if let Some(mut aperture) = composite_workspace_camera_aperture(
@@ -2931,7 +2936,12 @@ async fn build_chunked_workspace_height_artifacts(
                     minimum_diameter_px,
                     maximum_diameter_px,
                     &mut composite,
-                    |tile| read_transient_workspace_source(&source_directory, tile),
+                    |tile| {
+                        source_frames
+                            .get(tile.index as usize)
+                            .map(|frame| frame.as_ref().clone())
+                            .context("camera aperture source tile is outside its chunk")
+                    },
                 )? {
                     remap_workspace_camera_aperture(&mut aperture, &chunk.global_tile_indices)?;
                     let replace = camera_aperture.as_ref().is_none_or(
@@ -3088,6 +3098,7 @@ fn workspace_height_footprint_y_range(
     Ok((minimum_y, maximum_y))
 }
 
+#[cfg(test)]
 fn render_transient_workspace_height_layer(
     source_directory: &FilePath,
     plan: &WorkspaceScanPlan,
@@ -3103,6 +3114,50 @@ fn render_transient_workspace_height_layer(
     for tile in capture_sequence {
         let frame = read_transient_workspace_source(source_directory, tile)?;
         stream.push_frame(tile.index, frame)?;
+    }
+    stream.finish()
+}
+
+fn load_transient_workspace_sources(
+    source_directory: &FilePath,
+    plan: &WorkspaceScanPlan,
+) -> anyhow::Result<Vec<Arc<GrayFrame>>> {
+    let mut frames = std::iter::repeat_with(|| None)
+        .take(plan.tiles.len())
+        .collect::<Vec<_>>();
+    for tile in &plan.tiles {
+        let slot = frames
+            .get_mut(tile.index as usize)
+            .context("workspace source tile is outside its chunk")?;
+        anyhow::ensure!(slot.is_none(), "workspace source tile index is duplicated");
+        *slot = Some(Arc::new(read_transient_workspace_source(
+            source_directory,
+            tile,
+        )?));
+    }
+    frames
+        .into_iter()
+        .map(|frame| frame.context("workspace source cache has a missing tile"))
+        .collect()
+}
+
+fn render_cached_workspace_height_layer(
+    plan: &WorkspaceScanPlan,
+    working_model: &PlanarCameraModel,
+    installed_model: &PlanarCameraModel,
+    source_frames: &[Arc<GrayFrame>],
+    fraction: f64,
+) -> anyhow::Result<WorkspaceMosaic> {
+    let model = interpolate_planar_camera_model(working_model, installed_model, fraction)
+        .map_err(anyhow::Error::msg)?;
+    let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
+    let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
+    capture_sequence.sort_by_key(|tile| tile.capture_order);
+    for tile in capture_sequence {
+        let frame = source_frames
+            .get(tile.index as usize)
+            .context("workspace source tile is outside its cache")?;
+        stream.push_shared_frame(tile.index, Arc::clone(frame))?;
     }
     stream.finish()
 }
@@ -16865,15 +16920,17 @@ mod tests {
         let rendered = chunks
             .iter()
             .map(|chunk| {
-                let composite = render_workspace_height_mosaic_with_consistency(
+                let source_frames =
+                    load_transient_workspace_sources(&sources.directory, &chunk.plan).unwrap();
+                let composite = render_workspace_height_mosaic_with_consistency_parallel(
                     &chunk.plan,
                     &map,
                     |fraction| {
-                        render_transient_workspace_height_layer(
-                            &sources.directory,
+                        render_cached_workspace_height_layer(
                             &chunk.plan,
                             &working_model,
                             &installed_model,
+                            &source_frames,
                             fraction,
                         )
                     },
@@ -16940,15 +16997,17 @@ mod tests {
         let unknown_rendered = unknown_chunks
             .iter()
             .map(|chunk| {
-                let composite = render_workspace_height_mosaic_with_consistency(
+                let source_frames =
+                    load_transient_workspace_sources(&sources.directory, &chunk.plan).unwrap();
+                let composite = render_workspace_height_mosaic_with_consistency_parallel(
                     &chunk.plan,
                     &unknown_map,
                     |fraction| {
-                        render_transient_workspace_height_layer(
-                            &sources.directory,
+                        render_cached_workspace_height_layer(
                             &chunk.plan,
                             &working_model,
                             &installed_model,
+                            &source_frames,
                             fraction,
                         )
                     },

@@ -3,11 +3,12 @@ use serde_json::json;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use velocitypnp_domain::{InstalledPlateGeometryReport, PlanarCameraModel, WorkspaceScanReport};
 use velocitypnp_vision::{
     build_workspace_height_map, composite_workspace_camera_aperture, decode_gray_png,
     encode_gray_png, encode_rgb_png, encode_rgba_png, interpolate_planar_camera_model,
-    render_workspace_height_mosaic_with_consistency, rescale_planar_camera_model,
+    render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     WorkspaceMosaicStream, WorkspaceParallaxStream, WorkspaceScanPlan,
 };
 
@@ -55,8 +56,10 @@ fn main() -> Result<()> {
     };
     let mut source_frames = vec![None; plan.tiles.len()];
     for tile in &plan.tiles {
-        source_frames[tile.index as usize] =
-            Some(read_source_frame(&scan_directory, &tile.artifact_name)?);
+        source_frames[tile.index as usize] = Some(Arc::new(read_source_frame(
+            &scan_directory,
+            &tile.artifact_name,
+        )?));
     }
     let source_frames = source_frames
         .into_iter()
@@ -65,17 +68,23 @@ fn main() -> Result<()> {
     let mut parallax_stream =
         WorkspaceParallaxStream::new(plan.clone(), working_model.clone(), installed_model.clone())?;
     for tile in capture_sequence(&plan) {
-        parallax_stream.push_frame(tile.index, source_frames[tile.index as usize].clone())?;
+        parallax_stream.push_frame(
+            tile.index,
+            source_frames[tile.index as usize].as_ref().clone(),
+        )?;
     }
     let parallax = parallax_stream.finish()?;
     let height_map = build_workspace_height_map(plan.region, &parallax)?;
     let mut composite =
-        render_workspace_height_mosaic_with_consistency(&plan, &height_map, |fraction| {
+        render_workspace_height_mosaic_with_consistency_parallel(&plan, &height_map, |fraction| {
             let model = interpolate_planar_camera_model(&working_model, &installed_model, fraction)
                 .map_err(anyhow::Error::msg)?;
             let mut stream = WorkspaceMosaicStream::new_without_registration(plan.clone(), model)?;
             for tile in capture_sequence(&plan) {
-                stream.push_frame(tile.index, source_frames[tile.index as usize].clone())?;
+                stream.push_shared_frame(
+                    tile.index,
+                    Arc::clone(&source_frames[tile.index as usize]),
+                )?;
             }
             stream.finish()
         })?;
@@ -90,7 +99,7 @@ fn main() -> Result<()> {
         reference_diameter_px * 0.75,
         reference_diameter_px * 1.25,
         &mut composite,
-        |tile| Ok(source_frames[tile.index as usize].clone()),
+        |tile| Ok(source_frames[tile.index as usize].as_ref().clone()),
     )?;
     write_json(
         &output_directory.join("surface-height-map.json"),

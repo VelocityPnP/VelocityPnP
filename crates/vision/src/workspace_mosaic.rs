@@ -8,6 +8,7 @@ use opencv::core::{self, Mat, MatTraitConst, Point2f, Rect, Size, Vector, NORM_H
 use opencv::features2d;
 use opencv::imgproc;
 use opencv::prelude::*;
+use std::sync::Arc;
 use velocitypnp_domain::{
     Bounds, PlanarCameraModel, Pose, WorkspacePixelBounds, WorkspaceRegistrationMethod,
     WorkspaceScanRegion, WorkspaceScanTile, WorkspaceTileRegistration,
@@ -118,8 +119,8 @@ pub struct WorkspaceMosaicStream {
     tiles: Vec<WorkspaceScanTile>,
     registrations: Vec<WorkspaceTileRegistration>,
     next_row: u32,
-    pending_row: Vec<Option<GrayFrame>>,
-    previous_row: Option<Vec<GrayFrame>>,
+    pending_row: Vec<Option<Arc<GrayFrame>>>,
+    previous_row: Option<Vec<Arc<GrayFrame>>>,
     width: u32,
     height: u32,
     sample_step_px: usize,
@@ -133,6 +134,7 @@ pub struct WorkspaceMosaicStream {
     nominal_tile_means: Vec<f32>,
     nominal_tile_squared_means: Vec<f32>,
     nominal_source_counts: Vec<u8>,
+    nominal_fallback_enabled: bool,
     tile_mean_scratch: TileMeanScratch,
     registration_enabled: bool,
     seam_diagnostics_enabled: bool,
@@ -193,6 +195,18 @@ impl WorkspaceMosaicStream {
             .clamp(1.0, 12.0) as usize;
         let columns = plan.columns as usize;
         let tiles = plan.tiles.clone();
+        let nominal_fallback_enabled = registration_enabled
+            || tiles.iter().any(|tile| {
+                tile.placement_correction_x_mm.abs() > f64::EPSILON
+                    || tile.placement_correction_y_mm.abs() > f64::EPSILON
+            });
+        let nominal_buffer = || {
+            if nominal_fallback_enabled {
+                vec![0.0; pixel_count]
+            } else {
+                Vec::new()
+            }
+        };
         Ok(Self {
             plan,
             model,
@@ -209,11 +223,16 @@ impl WorkspaceMosaicStream {
             corrected_tile_means: vec![0.0; pixel_count],
             corrected_tile_squared_means: vec![0.0; pixel_count],
             corrected_source_counts: vec![0; pixel_count],
-            nominal_luma: vec![0.0; pixel_count],
-            nominal_weights: vec![0.0; pixel_count],
-            nominal_tile_means: vec![0.0; pixel_count],
-            nominal_tile_squared_means: vec![0.0; pixel_count],
-            nominal_source_counts: vec![0; pixel_count],
+            nominal_luma: nominal_buffer(),
+            nominal_weights: nominal_buffer(),
+            nominal_tile_means: nominal_buffer(),
+            nominal_tile_squared_means: nominal_buffer(),
+            nominal_source_counts: if nominal_fallback_enabled {
+                vec![0; pixel_count]
+            } else {
+                Vec::new()
+            },
+            nominal_fallback_enabled,
             tile_mean_scratch: TileMeanScratch::new(pixel_count),
             registration_enabled,
             seam_diagnostics_enabled,
@@ -222,6 +241,10 @@ impl WorkspaceMosaicStream {
     }
 
     pub fn push_frame(&mut self, tile_index: u32, frame: GrayFrame) -> Result<bool> {
+        self.push_shared_frame(tile_index, Arc::new(frame))
+    }
+
+    pub fn push_shared_frame(&mut self, tile_index: u32, frame: Arc<GrayFrame>) -> Result<bool> {
         let tile = self
             .plan
             .tiles
@@ -281,7 +304,7 @@ impl WorkspaceMosaicStream {
                         self.corrected_tile_squared_means[index],
                         self.corrected_source_counts[index],
                     )
-                } else if self.nominal_weights[index] > 0.0 {
+                } else if self.nominal_fallback_enabled && self.nominal_weights[index] > 0.0 {
                     covered += 1;
                     (
                         self.nominal_luma[index],
@@ -343,7 +366,7 @@ impl WorkspaceMosaicStream {
         })
     }
 
-    fn process_row(&mut self, frames: &[GrayFrame]) -> Result<()> {
+    fn process_row(&mut self, frames: &[Arc<GrayFrame>]) -> Result<()> {
         let row = self.next_row;
         for column in 0..self.plan.columns {
             let index = (row * self.plan.columns + column) as usize;
@@ -441,26 +464,28 @@ impl WorkspaceMosaicStream {
                 &mut self.corrected_tile_squared_means,
                 &mut self.corrected_source_counts,
             );
-            splat_workspace_tile(
-                &self.plan,
-                &self.model,
-                &frames[column as usize],
-                &self.tiles[index],
-                self.width,
-                self.height,
-                self.sample_step_px,
-                false,
-                false,
-                &mut self.nominal_luma,
-                &mut self.nominal_weights,
-                &mut self.tile_mean_scratch,
-                self.tiles[index].index.saturating_mul(2).saturating_add(2),
-            );
-            self.tile_mean_scratch.finish_tile(
-                &mut self.nominal_tile_means,
-                &mut self.nominal_tile_squared_means,
-                &mut self.nominal_source_counts,
-            );
+            if self.nominal_fallback_enabled {
+                splat_workspace_tile(
+                    &self.plan,
+                    &self.model,
+                    &frames[column as usize],
+                    &self.tiles[index],
+                    self.width,
+                    self.height,
+                    self.sample_step_px,
+                    false,
+                    false,
+                    &mut self.nominal_luma,
+                    &mut self.nominal_weights,
+                    &mut self.tile_mean_scratch,
+                    self.tiles[index].index.saturating_mul(2).saturating_add(2),
+                );
+                self.tile_mean_scratch.finish_tile(
+                    &mut self.nominal_tile_means,
+                    &mut self.nominal_tile_squared_means,
+                    &mut self.nominal_source_counts,
+                );
+            }
         }
         Ok(())
     }
@@ -1802,6 +1827,46 @@ mod tests {
         assert_eq!(plan.tiles[1].capture_order, 1);
         assert_eq!(plan.tiles[2].capture_order, 3);
         assert_eq!(plan.tiles[3].capture_order, 2);
+    }
+
+    #[test]
+    fn projected_stream_skips_only_redundant_nominal_buffers() {
+        let model = affine_model(200, 100, 0.01);
+        let plan = plan_workspace_scan(
+            WorkspaceScanRegion {
+                x_min_mm: 10.0,
+                x_max_mm: 13.0,
+                y_min_mm: 10.0,
+                y_max_mm: 11.5,
+            },
+            &model,
+            bounds(),
+            31.5,
+            0.0,
+            200,
+            100,
+            0.25,
+            None,
+            16,
+            1_000_000,
+        )
+        .unwrap();
+
+        let projected =
+            WorkspaceMosaicStream::new_without_registration(plan.clone(), model.clone()).unwrap();
+        assert!(!projected.nominal_fallback_enabled);
+        assert!(projected.nominal_luma.is_empty());
+
+        let registered = WorkspaceMosaicStream::new(plan.clone(), model.clone()).unwrap();
+        assert!(registered.nominal_fallback_enabled);
+        assert!(!registered.nominal_luma.is_empty());
+
+        let mut corrected_plan = plan;
+        corrected_plan.tiles[0].placement_correction_x_mm = 0.1;
+        let corrected =
+            WorkspaceMosaicStream::new_without_registration(corrected_plan, model).unwrap();
+        assert!(corrected.nominal_fallback_enabled);
+        assert!(!corrected.nominal_luma.is_empty());
     }
 
     #[test]

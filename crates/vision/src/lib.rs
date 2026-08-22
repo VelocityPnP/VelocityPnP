@@ -32,7 +32,8 @@ pub use workspace_board_discovery::{
 pub use workspace_height_map::{
     build_workspace_height_map, compose_workspace_height_mosaic,
     composite_workspace_camera_aperture, render_workspace_height_mosaic,
-    render_workspace_height_mosaic_with_consistency, WorkspaceCameraApertureComposite,
+    render_workspace_height_mosaic_with_consistency,
+    render_workspace_height_mosaic_with_consistency_parallel, WorkspaceCameraApertureComposite,
     WorkspaceHeightCell, WorkspaceHeightCellSource, WorkspaceHeightComposite, WorkspaceHeightMap,
     WORKSPACE_HEIGHT_CANDIDATE_STEP, WORKSPACE_HEIGHT_CELL_SIZE_MM,
 };

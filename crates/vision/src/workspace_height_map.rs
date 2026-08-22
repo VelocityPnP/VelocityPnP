@@ -6,6 +6,9 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use velocitypnp_domain::WorkspaceScanRegion;
 
 pub const WORKSPACE_HEIGHT_CELL_SIZE_MM: f64 = 2.0;
@@ -35,6 +38,7 @@ const CAMERA_APERTURE_SOURCE_EDGE_PX: f64 = 24.0;
 const CAMERA_APERTURE_SURFACE_FRACTION: f64 = 1.125;
 const CAMERA_APERTURE_HEIGHT_CLUSTER_MM: f64 = 22.0;
 const CAMERA_APERTURE_SOURCE_SEARCH_MM: f64 = 30.0;
+const MAX_PARALLEL_HEIGHT_RENDER_WORKERS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -220,6 +224,70 @@ where
 {
     render_workspace_height_mosaic_internal(plan, height_map, |fraction| {
         render_layer(fraction).map(|mosaic| RenderedHeightLayer {
+            frame: mosaic.frame,
+            disagreement: Some(mosaic.disagreement),
+            source_count: Some(mosaic.source_count),
+        })
+    })
+}
+
+/// Renders independent candidate planes on the available CPU cores, then
+/// applies the same deterministic height-selection pass as the serial path.
+pub fn render_workspace_height_mosaic_with_consistency_parallel<F>(
+    plan: &WorkspaceScanPlan,
+    height_map: &WorkspaceHeightMap,
+    render_layer: F,
+) -> Result<WorkspaceHeightComposite>
+where
+    F: Fn(f64) -> Result<WorkspaceMosaic> + Sync,
+{
+    let fractions = &height_map.candidate_fractions;
+    let worker_count = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_PARALLEL_HEIGHT_RENDER_WORKERS)
+        .min(fractions.len().max(1));
+    let next_index = AtomicUsize::new(0);
+    let layers = thread::scope(|scope| -> Result<Vec<WorkspaceMosaic>> {
+        let (sender, receiver) = mpsc::channel();
+        let render_layer = &render_layer;
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next_index = &next_index;
+            scope.spawn(move || loop {
+                let index = next_index.fetch_add(1, Ordering::Relaxed);
+                let Some(fraction) = fractions.get(index).copied() else {
+                    break;
+                };
+                if sender.send((index, render_layer(fraction))).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+        let mut results = std::iter::repeat_with(|| None)
+            .take(fractions.len())
+            .collect::<Vec<_>>();
+        for _ in fractions {
+            let (index, result) = receiver
+                .recv()
+                .context("height candidate worker stopped before completion")?;
+            results[index] = Some(result);
+        }
+        results
+            .into_iter()
+            .map(|result| result.context("height candidate worker omitted a plane")?)
+            .collect()
+    })?;
+    let mut layers = fractions.iter().copied().zip(layers);
+    render_workspace_height_mosaic_internal(plan, height_map, |requested_fraction| {
+        let (fraction, mosaic) = layers
+            .next()
+            .context("parallel height render omitted a candidate plane")?;
+        ensure!(
+            (fraction - requested_fraction).abs() < 1e-9,
+            "parallel height candidate order changed"
+        );
+        Ok(RenderedHeightLayer {
             frame: mosaic.frame,
             disagreement: Some(mosaic.disagreement),
             source_count: Some(mosaic.source_count),

@@ -413,6 +413,12 @@ the cell prior. If ceil-rounded output dimensions put an outer raster pixel
 just beyond the height-map region, that pixel keeps the working-plane image
 and a transparent class overlay.
 
+Transient reconstruction decodes each source frame once per output chunk and
+shares it across candidate planes. Independent candidate planes use the
+available CPU cores. A plane with no tile-placement correction omits the
+identical nominal projection and its buffers. Candidate selection and chunk
+merge order remain deterministic.
+
 Unknown cells stay unknown in the data. For display, the corrected mosaic
 compares source-image disagreement at the calibrated working and installed
 plate endpoints, uses spatial regularization for the cell prior, and applies
@@ -622,7 +628,7 @@ Do not enable hardware until simulator tests pass and the machine is physically
 clear. Starting the physical driver is intentionally verbose:
 
 ```bash
-cargo run -p velocitypnpd -- \
+cargo run --release -p velocitypnpd -- \
   --simulate=false \
   --allow-hardware \
   --serial-port /dev/serial/by-id/usb-STMicroelectronics_MARLIN_OPULO_LUMEN_REV4_CDC_in_FS_Mode_3286336D3331-if00
@@ -637,10 +643,12 @@ stopped Marlin parser and clears stale queued commands. Connect still enters
 preflight with no trusted pose or homing.
 
 Before a physical daemon restart after source changes, run `cargo build
---workspace`. `cargo check`, `cargo clippy`, and `cargo test` validate source
-and test harnesses, but they do not guarantee that the standalone
-`target/debug/velocitypnpd` executable was relinked. Check the executable
-timestamp and the expected hardware-path strings before connection.
+--release --workspace`. `cargo check`, `cargo clippy`, and `cargo test`
+validate source and test harnesses, but they do not guarantee that the
+standalone `target/release/velocitypnpd` executable was relinked. Check the
+executable timestamp and the expected hardware-path strings before connection.
+Use a release binary for height-aware scans; debug builds make the per-pixel
+reconstruction path much slower.
 
 The V3.0.4 profile exposes `vacuum_1` and `vacuum_2` as both actuators and raw
 pressure sensors. Reads require a lease and are allowed during preflight,

@@ -1690,6 +1690,42 @@ released the controller before the daemon was rebuilt for no-motion replay.
 The final daemon state is disconnected, unhomed, and fault-free. No emergency
 stop was used.
 
+### Height reconstruction throughput
+
+The rotated-PCB refinement exposed a post-capture bottleneck. Scan
+`65b9e462-0c87-477c-82e9-acafc0185e67` captured 817 frames in 15 minutes 49
+seconds, then spent 37 minutes 55 seconds in height reconstruction. The debug
+daemon used one busy reconstruction worker.
+
+Retained full-source scan `0d08896d-4d34-4f1b-8e98-a133bba4c061` provided a
+no-motion benchmark with 242 frames, 60 percent overlap, 0.1 mm/pixel output,
+and 14 candidate height planes. The original debug replay took 390.34 seconds
+of wall time, 406.96 seconds of user CPU time, and 280,952 KiB peak RSS.
+
+The transient renderer now decodes each chunk source once and shares immutable
+frames across candidate planes. Four bounded workers render independent planes.
+When tile-placement corrections are zero, the stream omits an identical second
+nominal projection. Registration-enabled or pre-corrected streams retain that
+fallback.
+
+The parallel shared-frame debug replay first took 234.55 seconds. Removing the
+duplicate nominal projection reduced it to 141.28 seconds, a 2.76-fold speedup
+over the original debug path. Final peak RSS was 320,424 KiB. The optimized
+release replay took 19.41 seconds, 46.64 seconds of user CPU time, and 318,136
+KiB peak RSS. This is 20.1 times faster than the debug path used by the physical
+refinement.
+
+All six output artifacts were byte-identical across the original debug,
+parallel debug, final debug, and release replays. The corrected mosaic retained
+SHA-256
+`06859bcf25236fd6d4cd98a5f523d9aa13eb03f848502078818e3cae822ab6e5`.
+
+Scaling by the measured frame and candidate-plane workload predicts about 1
+minute 48 seconds of reconstruction for the 817-frame PCB refinement. With the
+measured capture time, the same scan should finish in about 17 minutes 37
+seconds. A later physical scan must confirm this estimate. Hardware scans now
+use the release daemon.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

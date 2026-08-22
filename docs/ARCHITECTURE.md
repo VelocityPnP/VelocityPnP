@@ -145,6 +145,12 @@ mosaic-only retention and enforce estimated and actual artifact-byte quotas.
 This avoids total-tile memory and storage growth while retaining calibrated
 machine placement for low-texture overlaps.
 
+Height-aware transient reconstruction decodes each source once per output
+chunk. Candidate camera planes share those immutable frames and render in
+parallel on a bounded number of CPU workers. Chunks remain sequential to keep
+peak memory bounded. A zero-correction projection omits the duplicate nominal
+accumulator; corrected scans retain it for edge fallback.
+
 Coarse samples use a source-area mean instead of one source pixel. Blending
 uses separate X and Y feather weights across the full overlap. This reduces
 aliasing and periodic camera-shading bands without retaining more rows.
