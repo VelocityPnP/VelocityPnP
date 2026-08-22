@@ -1,12 +1,17 @@
-use crate::{GrayFrame, RgbFrame, WorkspaceHeightCellSource, WorkspaceHeightMap};
+use crate::{
+    GrayFrame, RgbFrame, WorkspaceHeightCell, WorkspaceHeightCellSource, WorkspaceHeightMap,
+};
 use anyhow::{ensure, Result};
 use std::collections::VecDeque;
 use velocitypnp_domain::{
-    BoardDesign, WorkspaceBoardCandidate, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
-    WorkspaceBoardHeightSource, WorkspaceRasterTransform, WorkspaceScanRegion,
+    BoardDesign, InstalledPlateGeometryReport, InstalledPlateRole, MachineProfile,
+    WorkspaceBoardCandidate, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
+    WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary, WorkspaceClassificationEvidence,
+    WorkspaceFixtureAnchor, WorkspaceObjectClass, WorkspaceObjectClassification,
+    WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_board_discovery.v1";
+pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v2";
 pub const WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT: &str = "board-discovery.json";
 pub const WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT: &str = "mosaic-board-candidates.png";
 
@@ -16,11 +21,295 @@ const CONNECTION_RADIUS_CELLS: i32 = 2;
 const MINIMUM_EVIDENCE_CELLS: usize = 4;
 const MINIMUM_CANDIDATE_SPAN_MM: f64 = 6.0;
 const MAXIMUM_DESIGN_MATCHES: usize = 3;
+const MAXIMUM_EVIDENCE_CROP_PIXELS_PER_AXIS: u32 = 2_048;
+const FIXTURE_MATCH_MINIMUM_FRACTION: f64 = 0.25;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspacePlateFrame {
+    pub plate_id: String,
+    pub role: InstalledPlateRole,
+    pub origin_machine_mm: [f64; 2],
+    pub axis_x: [f64; 2],
+    pub axis_y: [f64; 2],
+    pub x_min_mm: f64,
+    pub x_max_mm: f64,
+    pub y_min_mm: f64,
+    pub y_max_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum WorkspaceFixtureShape {
+    Rectangle(Vec<[f64; 2]>),
+    Circle {
+        center_machine_mm: [f64; 2],
+        radius_mm: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceResolvedFixture {
+    pub id: String,
+    pub class: WorkspaceObjectClass,
+    shape: WorkspaceFixtureShape,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct WorkspaceDiscoveryContext {
+    pub plates: Vec<WorkspacePlateFrame>,
+    pub fixtures: Vec<WorkspaceResolvedFixture>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceCandidateEvidenceArtifact {
+    pub artifact_name: String,
+    pub frame: GrayFrame,
+}
+
+pub struct WorkspaceObjectEvidence<'a> {
+    pub candidate: &'a WorkspaceBoardCandidate,
+    pub normalized_crop: &'a GrayFrame,
+    pub height_map: &'a WorkspaceHeightMap,
+    pub component_cell_indices: &'a [usize],
+    pub known_fixture: Option<(&'a WorkspaceResolvedFixture, f64)>,
+}
+
+/// Semantic classification is replaceable without changing region proposal,
+/// geometry, storage, or safety policy. A future learned model implements this
+/// interface and receives the same normalized evidence as the initial policy.
+pub trait WorkspaceObjectClassifier: Send + Sync {
+    fn classifier_id(&self) -> &str;
+    fn classify(&self, evidence: WorkspaceObjectEvidence<'_>) -> WorkspaceObjectClassification;
+}
+
+#[derive(Debug, Default)]
+pub struct DeterministicWorkspaceObjectClassifier;
+
+impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
+    fn classifier_id(&self) -> &str {
+        "deterministic_workspace_evidence.v1"
+    }
+
+    fn classify(&self, evidence: WorkspaceObjectEvidence<'_>) -> WorkspaceObjectClassification {
+        let candidate = evidence.candidate;
+        let mut observations = Vec::new();
+        if let Some((fixture, overlap_fraction)) = evidence.known_fixture {
+            let confidence = (0.75 + 0.25 * overlap_fraction).clamp(0.0, 1.0);
+            observations.push(WorkspaceClassificationEvidence {
+                source: format!("known_fixture:{}", fixture.id),
+                suggested_class: fixture.class,
+                confidence,
+                explanation: format!(
+                    "{:.1}% of raised height cells are in the calibrated fixture envelope",
+                    overlap_fraction * 100.0
+                ),
+            });
+            return WorkspaceObjectClassification {
+                class: fixture.class,
+                confidence,
+                classifier_id: self.classifier_id().into(),
+                review_required: false,
+                evidence: observations,
+            };
+        }
+
+        if let Some(role) = candidate.plate_role {
+            let (suggested_class, explanation) = match role {
+                InstalledPlateRole::Staging => (
+                    WorkspaceObjectClass::Feeder,
+                    "the region is on the calibrated staging plate",
+                ),
+                InstalledPlateRole::Build => (
+                    WorkspaceObjectClass::Board,
+                    "the region is on the calibrated build plate",
+                ),
+                InstalledPlateRole::Unspecified => (
+                    WorkspaceObjectClass::Unknown,
+                    "the installed plate has no semantic role",
+                ),
+            };
+            observations.push(WorkspaceClassificationEvidence {
+                source: "plate_role_prior".into(),
+                suggested_class,
+                confidence: if role == InstalledPlateRole::Unspecified {
+                    0.0
+                } else {
+                    0.55
+                },
+                explanation: explanation.into(),
+            });
+        }
+        observations.push(WorkspaceClassificationEvidence {
+            source: "raised_surface_geometry".into(),
+            suggested_class: WorkspaceObjectClass::Board,
+            confidence: candidate.board_likelihood,
+            explanation: "height, coverage, compactness, and texture support a board-like object"
+                .into(),
+        });
+        if let Some(design_match) = candidate.design_matches.first() {
+            observations.push(WorkspaceClassificationEvidence {
+                source: format!("kicad_dimensions:{}", design_match.board_id),
+                suggested_class: WorkspaceObjectClass::Board,
+                confidence: design_match.confidence,
+                explanation: format!(
+                    "plate-aligned dimensions differ from {} by {:.3} mm",
+                    design_match.board_name, design_match.dimension_error_mm
+                ),
+            });
+        }
+
+        let strongest = observations
+            .iter()
+            .filter(|item| item.suggested_class != WorkspaceObjectClass::Unknown)
+            .max_by(|first, second| first.confidence.total_cmp(&second.confidence));
+        let (class, confidence, review_required) = strongest
+            .filter(|item| item.confidence >= 0.75)
+            .map_or((WorkspaceObjectClass::Unknown, 0.5, true), |item| {
+                (
+                    item.suggested_class,
+                    item.confidence,
+                    item.confidence < 0.90,
+                )
+            });
+        WorkspaceObjectClassification {
+            class,
+            confidence,
+            classifier_id: self.classifier_id().into(),
+            review_required,
+            evidence: observations,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceBoardDiscoveryArtifacts {
     pub report: WorkspaceBoardDiscoveryReport,
     pub preview: RgbFrame,
+    pub evidence: Vec<WorkspaceCandidateEvidenceArtifact>,
+}
+
+pub fn build_workspace_discovery_context(
+    profile: &MachineProfile,
+    geometry: Option<&InstalledPlateGeometryReport>,
+    camera_aperture: Option<&WorkspaceCameraApertureSummary>,
+) -> Result<WorkspaceDiscoveryContext> {
+    let mut context = WorkspaceDiscoveryContext::default();
+    let Some(installed) = profile.installed_geometry_calibration.as_ref() else {
+        return Ok(context);
+    };
+    let visual = profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("installed plates require a visual datum"))?;
+    for plate in &installed.plates {
+        let model = geometry.and_then(|report| {
+            report
+                .plates
+                .iter()
+                .find(|fit| fit.plate_id == plate.id && fit.passed)
+                .map(|fit| fit.model)
+        });
+        let nominal_origin = [
+            visual.fiducial_x_mm + plate.origin_offset_x_mm,
+            visual.fiducial_y_mm + plate.origin_offset_y_mm,
+        ];
+        let transform = |point: [f64; 2]| {
+            model
+                .map(|model| model.apply(point[0], point[1]))
+                .unwrap_or(point)
+        };
+        let origin_machine_mm = transform(nominal_origin);
+        let column_end = transform([
+            nominal_origin[0] + plate.column_step_x_mm,
+            nominal_origin[1] + plate.column_step_y_mm,
+        ]);
+        let row_end = transform([
+            nominal_origin[0] + plate.row_step_x_mm,
+            nominal_origin[1] + plate.row_step_y_mm,
+        ]);
+        let column_vector = subtract(column_end, origin_machine_mm);
+        let row_vector = subtract(row_end, origin_machine_mm);
+        let axis_x = normalize_vector(column_vector)
+            .ok_or_else(|| anyhow::anyhow!("installed plate column axis is invalid"))?;
+        let mut axis_y = [-axis_x[1], axis_x[0]];
+        if dot(axis_y, row_vector) < 0.0 {
+            axis_y = [-axis_y[0], -axis_y[1]];
+        }
+        let column_pitch = vector_length(column_vector);
+        let row_pitch = dot(axis_y, row_vector).abs();
+        ensure!(
+            column_pitch > 0.0 && row_pitch > 0.0,
+            "installed plate pitch is invalid"
+        );
+        context.plates.push(WorkspacePlateFrame {
+            plate_id: plate.id.clone(),
+            role: plate.role,
+            origin_machine_mm,
+            axis_x,
+            axis_y,
+            x_min_mm: -column_pitch,
+            x_max_mm: f64::from(plate.column_count) * column_pitch,
+            y_min_mm: -row_pitch,
+            y_max_mm: f64::from(plate.row_count) * row_pitch,
+        });
+    }
+
+    let datum_origin = geometry
+        .map(|report| [report.datum_controller_x_mm, report.datum_controller_y_mm])
+        .unwrap_or([visual.fiducial_x_mm, visual.fiducial_y_mm]);
+    let datum_axes = context
+        .plates
+        .iter()
+        .find(|plate| plate.role == InstalledPlateRole::Staging)
+        .map(|plate| (plate.axis_x, plate.axis_y))
+        .unwrap_or(([1.0, 0.0], [0.0, 1.0]));
+    for fixture in &profile.workspace_fixtures {
+        fixture.validate().map_err(anyhow::Error::msg)?;
+        let (origin, axis_x, axis_y) = match &fixture.anchor {
+            WorkspaceFixtureAnchor::VisualDatum => (datum_origin, datum_axes.0, datum_axes.1),
+            WorkspaceFixtureAnchor::Plate { plate_id } => {
+                let plate = context
+                    .plates
+                    .iter()
+                    .find(|plate| &plate.plate_id == plate_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "workspace fixture {} refers to absent plate {}",
+                            fixture.id,
+                            plate_id
+                        )
+                    })?;
+                (plate.origin_machine_mm, plate.axis_x, plate.axis_y)
+            }
+        };
+        context.fixtures.push(WorkspaceResolvedFixture {
+            id: fixture.id.clone(),
+            class: fixture.class,
+            shape: WorkspaceFixtureShape::Rectangle(local_rectangle_to_machine(
+                origin,
+                axis_x,
+                axis_y,
+                fixture.x_min_mm,
+                fixture.x_max_mm,
+                fixture.y_min_mm,
+                fixture.y_max_mm,
+            )),
+        });
+    }
+    if let Some(aperture) = camera_aperture {
+        // The aperture fit describes the optical opening. The fixed camera
+        // mount, light ring, fasteners, and their parallax boundary extend
+        // farther. Keep the full V3 observed assembly out of board scoring.
+        let guard_radius_mm = (aperture.radius_mm + 8.0).max(40.0);
+        context.fixtures.push(WorkspaceResolvedFixture {
+            id: "bottom_camera_guard".into(),
+            class: WorkspaceObjectClass::FixedMachineFeature,
+            shape: WorkspaceFixtureShape::Circle {
+                center_machine_mm: [aperture.center_x_mm, aperture.center_y_mm],
+                radius_mm: guard_radius_mm,
+            },
+        });
+    }
+    Ok(context)
 }
 
 pub fn discover_workspace_boards(
@@ -30,6 +319,29 @@ pub fn discover_workspace_boards(
     board_designs: &[BoardDesign],
     source_mosaic_artifact_name: &str,
     height_sources: &[WorkspaceBoardHeightSource],
+) -> Result<WorkspaceBoardDiscoveryArtifacts> {
+    discover_workspace_objects(
+        mosaic,
+        raster_transform,
+        height_map,
+        board_designs,
+        source_mosaic_artifact_name,
+        height_sources,
+        &WorkspaceDiscoveryContext::default(),
+        &DeterministicWorkspaceObjectClassifier,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn discover_workspace_objects(
+    mosaic: &GrayFrame,
+    raster_transform: WorkspaceRasterTransform,
+    height_map: &WorkspaceHeightMap,
+    board_designs: &[BoardDesign],
+    source_mosaic_artifact_name: &str,
+    height_sources: &[WorkspaceBoardHeightSource],
+    context: &WorkspaceDiscoveryContext,
+    classifier: &dyn WorkspaceObjectClassifier,
 ) -> Result<WorkspaceBoardDiscoveryArtifacts> {
     ensure!(
         mosaic.width > 0
@@ -63,7 +375,7 @@ pub fn discover_workspace_boards(
         })
         .collect::<Vec<_>>();
     let components = connected_raised_components(&raised, height_map.rows, height_map.columns);
-    let mut candidates = components
+    let mut drafts = components
         .into_iter()
         .filter(|component| component.len() >= MINIMUM_EVIDENCE_CELLS)
         .filter_map(|component| {
@@ -73,20 +385,35 @@ pub fn discover_workspace_boards(
                 raster_transform,
                 height_map,
                 board_designs,
+                context,
+                classifier,
             )
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|first, second| {
+    drafts.sort_by(|first, second| {
         second
+            .candidate
             .board_likelihood
-            .total_cmp(&first.board_likelihood)
+            .total_cmp(&first.candidate.board_likelihood)
             .then_with(|| {
-                (second.width_mm * second.height_mm).total_cmp(&(first.width_mm * first.height_mm))
+                (second.candidate.width_mm * second.candidate.height_mm)
+                    .total_cmp(&(first.candidate.width_mm * first.candidate.height_mm))
             })
     });
-    for (index, candidate) in candidates.iter_mut().enumerate() {
-        candidate.candidate_index = index as u32;
+    let mut evidence = Vec::with_capacity(drafts.len());
+    for (index, draft) in drafts.iter_mut().enumerate() {
+        let artifact_name = format!("object-evidence-{index:03}.png");
+        draft.candidate.candidate_index = index as u32;
+        draft.candidate.evidence_artifact_name = Some(artifact_name.clone());
+        evidence.push(WorkspaceCandidateEvidenceArtifact {
+            artifact_name,
+            frame: draft.crop.clone(),
+        });
     }
+    let candidates = drafts
+        .into_iter()
+        .map(|draft| draft.candidate)
+        .collect::<Vec<_>>();
 
     let mut warnings = Vec::new();
     let dimensioned_board_count = board_designs
@@ -101,6 +428,20 @@ pub fn discover_workspace_boards(
     {
         warnings.push("no raised candidate matched an imported board outline".into());
     }
+    let unresolved_count = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .classification
+                .as_ref()
+                .is_none_or(|classification| classification.class == WorkspaceObjectClass::Unknown)
+        })
+        .count();
+    if unresolved_count > 0 {
+        warnings.push(format!(
+            "{unresolved_count} raised regions remain unknown pending refinement, KiCad matching, or learned classification"
+        ));
+    }
     let report = WorkspaceBoardDiscoveryReport {
         algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
         source_mosaic_artifact_name: source_mosaic_artifact_name.into(),
@@ -112,7 +453,11 @@ pub fn discover_workspace_boards(
         warnings,
     };
     let preview = board_candidate_preview(mosaic, raster_transform, &report.candidates);
-    Ok(WorkspaceBoardDiscoveryArtifacts { report, preview })
+    Ok(WorkspaceBoardDiscoveryArtifacts {
+        report,
+        preview,
+        evidence,
+    })
 }
 
 pub fn merge_workspace_height_maps(
@@ -286,13 +631,20 @@ fn connected_raised_components(mask: &[bool], rows: u32, columns: u32) -> Vec<Ve
     components
 }
 
+struct CandidateDraft {
+    candidate: WorkspaceBoardCandidate,
+    crop: GrayFrame,
+}
+
 fn candidate_from_component(
     component: &[usize],
     mosaic: &GrayFrame,
     raster_transform: WorkspaceRasterTransform,
     height_map: &WorkspaceHeightMap,
     board_designs: &[BoardDesign],
-) -> Option<WorkspaceBoardCandidate> {
+    context: &WorkspaceDiscoveryContext,
+    classifier: &dyn WorkspaceObjectClassifier,
+) -> Option<CandidateDraft> {
     let cells = component
         .iter()
         .map(|index| &height_map.cells[*index])
@@ -300,38 +652,13 @@ fn candidate_from_component(
     let count = cells.len() as f64;
     let mean_x = cells.iter().map(|cell| cell.center_x_mm).sum::<f64>() / count;
     let mean_y = cells.iter().map(|cell| cell.center_y_mm).sum::<f64>() / count;
-    let covariance_xx = cells
+    let plate = context
+        .plates
         .iter()
-        .map(|cell| (cell.center_x_mm - mean_x).powi(2))
-        .sum::<f64>()
-        / count;
-    let covariance_yy = cells
-        .iter()
-        .map(|cell| (cell.center_y_mm - mean_y).powi(2))
-        .sum::<f64>()
-        / count;
-    let covariance_xy = cells
-        .iter()
-        .map(|cell| (cell.center_x_mm - mean_x) * (cell.center_y_mm - mean_y))
-        .sum::<f64>()
-        / count;
-    let trace = covariance_xx + covariance_yy;
-    let discriminant =
-        ((covariance_xx - covariance_yy).powi(2) + 4.0 * covariance_xy.powi(2)).sqrt();
-    let principal = (trace + discriminant) * 0.5;
-    let secondary = (trace - discriminant) * 0.5;
-    let anisotropy = if principal > f64::EPSILON {
-        (principal - secondary) / principal
-    } else {
-        0.0
-    };
-    let rotation_rad = if anisotropy >= 0.10 {
-        0.5 * (2.0 * covariance_xy).atan2(covariance_xx - covariance_yy)
-    } else {
-        0.0
-    };
-    let axis_x = [rotation_rad.cos(), rotation_rad.sin()];
-    let axis_y = [-rotation_rad.sin(), rotation_rad.cos()];
+        .find(|plate| plate_contains(plate, [mean_x, mean_y]));
+    let axis_x = plate.map_or([1.0, 0.0], |plate| plate.axis_x);
+    let axis_y = plate.map_or([0.0, 1.0], |plate| plate.axis_y);
+    let rotation_rad = axis_x[1].atan2(axis_x[0]);
     let half_cell = height_map.cell_size_mm * 0.5;
     let support_x = half_cell * (axis_x[0].abs() + axis_x[1].abs());
     let support_y = half_cell * (axis_y[0].abs() + axis_y[1].abs());
@@ -400,12 +727,17 @@ fn candidate_from_component(
     let fill_fraction =
         (count * height_map.cell_size_mm.powi(2) / (width_mm * height_mm)).clamp(0.0, 1.0);
     let texture_energy_luma = region_texture_energy(mosaic, raster_transform, region);
-    let mut design_matches = board_design_matches(
-        board_designs,
-        width_mm,
-        height_mm,
-        rotation_rad.to_degrees(),
-    );
+    let known_fixture = best_fixture_match(&cells, &context.fixtures);
+    let mut design_matches = if known_fixture.is_some() {
+        Vec::new()
+    } else {
+        board_design_matches(
+            board_designs,
+            width_mm,
+            height_mm,
+            rotation_rad.to_degrees(),
+        )
+    };
     design_matches.truncate(MAXIMUM_DESIGN_MATCHES);
     let evidence_quality =
         (0.7 * mean_height_confidence + 0.3 * measured_cell_fraction).clamp(0.0, 1.0);
@@ -418,17 +750,29 @@ fn candidate_from_component(
     let design_score = design_matches
         .first()
         .map_or(0.0, |candidate| candidate.confidence);
-    let board_likelihood = if design_matches.is_empty() {
+    let mut board_likelihood = if design_matches.is_empty() {
         base_likelihood * 0.75
     } else {
         0.55 * base_likelihood + 0.45 * design_score
     }
     .clamp(0.0, 1.0);
+    if known_fixture.is_some() {
+        board_likelihood = 0.0;
+    }
 
-    Some(WorkspaceBoardCandidate {
+    let crop = normalized_evidence_crop(
+        mosaic,
+        raster_transform,
+        &outline_machine_mm,
+        width_mm,
+        height_mm,
+    );
+    let mut candidate = WorkspaceBoardCandidate {
         candidate_index: 0,
         region,
         outline_machine_mm,
+        plate_id: plate.map(|plate| plate.plate_id.clone()),
+        plate_role: plate.map(|plate| plate.role),
         center_x_mm,
         center_y_mm,
         width_mm,
@@ -441,8 +785,131 @@ fn candidate_from_component(
         fill_fraction,
         texture_energy_luma,
         board_likelihood,
+        classification: None,
+        known_fixture_id: known_fixture.map(|(fixture, _)| fixture.id.clone()),
+        evidence_artifact_name: None,
         design_matches,
-    })
+    };
+    candidate.classification = Some(classifier.classify(WorkspaceObjectEvidence {
+        candidate: &candidate,
+        normalized_crop: &crop,
+        height_map,
+        component_cell_indices: component,
+        known_fixture,
+    }));
+    Some(CandidateDraft { candidate, crop })
+}
+
+fn plate_contains(plate: &WorkspacePlateFrame, point: [f64; 2]) -> bool {
+    let offset = subtract(point, plate.origin_machine_mm);
+    let x = dot(offset, plate.axis_x);
+    let y = dot(offset, plate.axis_y);
+    (plate.x_min_mm..=plate.x_max_mm).contains(&x) && (plate.y_min_mm..=plate.y_max_mm).contains(&y)
+}
+
+fn best_fixture_match<'a>(
+    cells: &[&WorkspaceHeightCell],
+    fixtures: &'a [WorkspaceResolvedFixture],
+) -> Option<(&'a WorkspaceResolvedFixture, f64)> {
+    fixtures
+        .iter()
+        .map(|fixture| {
+            let inside = cells
+                .iter()
+                .filter(|cell| fixture_contains(fixture, [cell.center_x_mm, cell.center_y_mm]))
+                .count();
+            (fixture, inside as f64 / cells.len().max(1) as f64)
+        })
+        .filter(|(_, fraction)| *fraction >= FIXTURE_MATCH_MINIMUM_FRACTION)
+        .max_by(|first, second| first.1.total_cmp(&second.1))
+}
+
+fn fixture_contains(fixture: &WorkspaceResolvedFixture, point: [f64; 2]) -> bool {
+    match &fixture.shape {
+        WorkspaceFixtureShape::Rectangle(outline) => point_in_convex_polygon(outline, point),
+        WorkspaceFixtureShape::Circle {
+            center_machine_mm,
+            radius_mm,
+        } => vector_length(subtract(point, *center_machine_mm)) <= *radius_mm,
+    }
+}
+
+fn point_in_convex_polygon(outline: &[[f64; 2]], point: [f64; 2]) -> bool {
+    if outline.len() < 3 {
+        return false;
+    }
+    let mut sign = 0.0_f64;
+    for index in 0..outline.len() {
+        let start = outline[index];
+        let end = outline[(index + 1) % outline.len()];
+        let edge = subtract(end, start);
+        let relative = subtract(point, start);
+        let cross = edge[0] * relative[1] - edge[1] * relative[0];
+        if cross.abs() <= 1e-9 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if sign != cross.signum() {
+            return false;
+        }
+    }
+    true
+}
+
+fn normalized_evidence_crop(
+    mosaic: &GrayFrame,
+    transform: WorkspaceRasterTransform,
+    outline: &[[f64; 2]],
+    width_mm: f64,
+    height_mm: f64,
+) -> GrayFrame {
+    let source_mm_per_pixel = transform
+        .x_mm_per_pixel
+        .abs()
+        .max(transform.y_mm_per_pixel.abs());
+    let crop_mm_per_pixel = source_mm_per_pixel
+        .max(width_mm / f64::from(MAXIMUM_EVIDENCE_CROP_PIXELS_PER_AXIS))
+        .max(height_mm / f64::from(MAXIMUM_EVIDENCE_CROP_PIXELS_PER_AXIS));
+    let width = (width_mm / crop_mm_per_pixel).ceil().max(1.0) as u32;
+    let height = (height_mm / crop_mm_per_pixel).ceil().max(1.0) as u32;
+    let origin = outline[0];
+    let x_edge = subtract(outline[1], origin);
+    let y_edge = subtract(outline[3], origin);
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for row in 0..height {
+        let y_fraction = (f64::from(row) + 0.5) / f64::from(height);
+        for column in 0..width {
+            let x_fraction = (f64::from(column) + 0.5) / f64::from(width);
+            let point = [
+                origin[0] + x_fraction * x_edge[0] + y_fraction * y_edge[0],
+                origin[1] + x_fraction * x_edge[1] + y_fraction * y_edge[1],
+            ];
+            let pixel = machine_to_pixel(transform, point[0], point[1]);
+            pixels.push(sample_bilinear(mosaic, pixel[0], pixel[1]));
+        }
+    }
+    GrayFrame {
+        width,
+        height,
+        pixels,
+    }
+}
+
+fn sample_bilinear(frame: &GrayFrame, x: f64, y: f64) -> u8 {
+    let x = x.clamp(0.0, f64::from(frame.width.saturating_sub(1)));
+    let y = y.clamp(0.0, f64::from(frame.height.saturating_sub(1)));
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(frame.width - 1);
+    let y1 = (y0 + 1).min(frame.height - 1);
+    let x_fraction = x - f64::from(x0);
+    let y_fraction = y - f64::from(y0);
+    let sample =
+        |column: u32, row: u32| f64::from(frame.pixels[(row * frame.width + column) as usize]);
+    let top = sample(x0, y0) * (1.0 - x_fraction) + sample(x1, y0) * x_fraction;
+    let bottom = sample(x0, y1) * (1.0 - x_fraction) + sample(x1, y1) * x_fraction;
+    (top * (1.0 - y_fraction) + bottom * y_fraction).round() as u8
 }
 
 fn board_design_matches(
@@ -567,10 +1034,18 @@ fn board_candidate_preview(
         pixels,
     };
     for candidate in candidates {
-        let color = if candidate.design_matches.is_empty() {
-            [255, 174, 45]
-        } else {
-            [55, 230, 135]
+        let color = match candidate
+            .classification
+            .as_ref()
+            .map(|classification| classification.class)
+            .unwrap_or_default()
+        {
+            WorkspaceObjectClass::Board => [55, 230, 135],
+            WorkspaceObjectClass::Feeder => [45, 190, 255],
+            WorkspaceObjectClass::ToolingStation => [190, 95, 255],
+            WorkspaceObjectClass::CalibrationFixture => [210, 85, 220],
+            WorkspaceObjectClass::FixedMachineFeature => [120, 120, 255],
+            WorkspaceObjectClass::Unknown => [255, 174, 45],
         };
         for index in 0..candidate.outline_machine_mm.len() {
             let first = candidate.outline_machine_mm[index];
@@ -616,6 +1091,48 @@ fn draw_line(frame: &mut RgbFrame, start: [f64; 2], end: [f64; 2], color: [u8; 3
             }
         }
     }
+}
+
+fn local_rectangle_to_machine(
+    origin: [f64; 2],
+    axis_x: [f64; 2],
+    axis_y: [f64; 2],
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+) -> Vec<[f64; 2]> {
+    [
+        [x_min, y_min],
+        [x_max, y_min],
+        [x_max, y_max],
+        [x_min, y_max],
+    ]
+    .into_iter()
+    .map(|point| {
+        [
+            origin[0] + point[0] * axis_x[0] + point[1] * axis_y[0],
+            origin[1] + point[0] * axis_x[1] + point[1] * axis_y[1],
+        ]
+    })
+    .collect()
+}
+
+fn subtract(first: [f64; 2], second: [f64; 2]) -> [f64; 2] {
+    [first[0] - second[0], first[1] - second[1]]
+}
+
+fn dot(first: [f64; 2], second: [f64; 2]) -> f64 {
+    first[0] * second[0] + first[1] * second[1]
+}
+
+fn vector_length(vector: [f64; 2]) -> f64 {
+    vector[0].hypot(vector[1])
+}
+
+fn normalize_vector(vector: [f64; 2]) -> Option<[f64; 2]> {
+    let length = vector_length(vector);
+    (length > 1e-9).then_some([vector[0] / length, vector[1] / length])
 }
 
 fn normalize_angle(mut angle_deg: f64) -> f64 {
@@ -731,8 +1248,116 @@ mod tests {
         assert_eq!(candidate.design_matches.len(), 1);
         assert_eq!(candidate.design_matches[0].board_name, "fixture");
         assert_eq!(candidate.design_matches[0].confidence, 1.0);
+        assert_eq!(
+            candidate.classification.as_ref().unwrap().class,
+            WorkspaceObjectClass::Board
+        );
+        assert_eq!(
+            candidate.evidence_artifact_name.as_deref(),
+            Some("object-evidence-000.png")
+        );
+        assert_eq!(artifacts.evidence.len(), 1);
+        assert!(!artifacts.evidence[0].frame.pixels.is_empty());
         assert_eq!(artifacts.preview.width, mosaic.width);
         assert_eq!(artifacts.preview.height, mosaic.height);
+    }
+
+    #[test]
+    fn proposal_outline_uses_the_calibrated_plate_axes() {
+        let angle = 8.0_f64.to_radians();
+        let context = WorkspaceDiscoveryContext {
+            plates: vec![WorkspacePlateFrame {
+                plate_id: "staging".into(),
+                role: InstalledPlateRole::Staging,
+                origin_machine_mm: [0.0, 0.0],
+                axis_x: [angle.cos(), angle.sin()],
+                axis_y: [-angle.sin(), angle.cos()],
+                x_min_mm: -100.0,
+                x_max_mm: 100.0,
+                y_min_mm: -100.0,
+                y_max_mm: 100.0,
+            }],
+            fixtures: Vec::new(),
+        };
+        let map = synthetic_map();
+        let artifacts = discover_workspace_objects(
+            &GrayFrame {
+                width: 200,
+                height: 150,
+                pixels: vec![128; 30_000],
+            },
+            WorkspaceRasterTransform {
+                top_left_x_mm: 0.0,
+                top_left_y_mm: 30.0,
+                x_mm_per_pixel: 0.2,
+                y_mm_per_pixel: -0.2,
+            },
+            &map,
+            &[],
+            "mosaic.png",
+            &[],
+            &context,
+            &DeterministicWorkspaceObjectClassifier,
+        )
+        .unwrap();
+
+        let candidate = &artifacts.report.candidates[0];
+        let first_edge = subtract(
+            candidate.outline_machine_mm[1],
+            candidate.outline_machine_mm[0],
+        );
+        let edge_angle = first_edge[1].atan2(first_edge[0]).to_degrees();
+        assert!((edge_angle - 8.0).abs() < 1e-9);
+        assert_eq!(candidate.plate_id.as_deref(), Some("staging"));
+        assert_eq!(candidate.plate_role, Some(InstalledPlateRole::Staging));
+    }
+
+    #[test]
+    fn known_fixture_is_inventory_evidence_not_a_board() {
+        let context = WorkspaceDiscoveryContext {
+            plates: Vec::new(),
+            fixtures: vec![WorkspaceResolvedFixture {
+                id: "tooling".into(),
+                class: WorkspaceObjectClass::ToolingStation,
+                shape: WorkspaceFixtureShape::Rectangle(vec![
+                    [4.0, 8.0],
+                    [28.0, 8.0],
+                    [28.0, 24.0],
+                    [4.0, 24.0],
+                ]),
+            }],
+        };
+        let map = synthetic_map();
+        let artifacts = discover_workspace_objects(
+            &GrayFrame {
+                width: 40,
+                height: 30,
+                pixels: vec![128; 1_200],
+            },
+            WorkspaceRasterTransform {
+                top_left_x_mm: 0.0,
+                top_left_y_mm: 30.0,
+                x_mm_per_pixel: 1.0,
+                y_mm_per_pixel: -1.0,
+            },
+            &map,
+            &[board(20.0, 12.0)],
+            "mosaic.png",
+            &[],
+            &context,
+            &DeterministicWorkspaceObjectClassifier,
+        )
+        .unwrap();
+
+        let candidate = &artifacts.report.candidates[0];
+        assert_eq!(candidate.known_fixture_id.as_deref(), Some("tooling"));
+        assert_eq!(candidate.board_likelihood, 0.0);
+        assert!(candidate.design_matches.is_empty());
+        assert_eq!(
+            candidate.classification.as_ref().unwrap().class,
+            WorkspaceObjectClass::ToolingStation
+        );
+        assert!(!candidate.classification.as_ref().unwrap().review_required);
     }
 
     #[test]

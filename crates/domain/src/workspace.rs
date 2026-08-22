@@ -269,11 +269,51 @@ pub struct WorkspaceBoardDesignMatch {
     pub confidence: f64,
 }
 
+/// A semantic class for one observed workspace region.
+///
+/// `Unknown` is an intentional result. A classifier must not force an object
+/// class when the available evidence is weak or conflicting.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceObjectClass {
+    Board,
+    Feeder,
+    ToolingStation,
+    CalibrationFixture,
+    FixedMachineFeature,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceClassificationEvidence {
+    pub source: String,
+    pub suggested_class: WorkspaceObjectClass,
+    pub confidence: f64,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceObjectClassification {
+    pub class: WorkspaceObjectClass,
+    pub confidence: f64,
+    pub classifier_id: String,
+    pub review_required: bool,
+    #[serde(default)]
+    pub evidence: Vec<WorkspaceClassificationEvidence>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceBoardCandidate {
     pub candidate_index: u32,
+    /// Machine-axis rectangle that can be sent to the scan planner.
     pub region: WorkspaceScanRegion,
+    /// Plate-aligned evidence outline in machine coordinates.
     pub outline_machine_mm: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub plate_id: Option<String>,
+    #[serde(default)]
+    pub plate_role: Option<crate::InstalledPlateRole>,
     pub center_x_mm: f64,
     pub center_y_mm: f64,
     pub width_mm: f64,
@@ -286,6 +326,12 @@ pub struct WorkspaceBoardCandidate {
     pub fill_fraction: f64,
     pub texture_energy_luma: f64,
     pub board_likelihood: f64,
+    #[serde(default)]
+    pub classification: Option<WorkspaceObjectClassification>,
+    #[serde(default)]
+    pub known_fixture_id: Option<String>,
+    #[serde(default)]
+    pub evidence_artifact_name: Option<String>,
     #[serde(default)]
     pub design_matches: Vec<WorkspaceBoardDesignMatch>,
 }

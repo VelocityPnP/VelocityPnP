@@ -101,6 +101,9 @@ enum Command {
     DiscoverBoards {
         scan: Uuid,
     },
+    DiscoverObjects {
+        scan: Uuid,
+    },
     CalibrationWorkflow,
     CalibrationArtifacts,
     NewCalibration {
@@ -427,6 +430,14 @@ async fn main() -> Result<()> {
             post(
                 &client,
                 &format!("{base}/workspace-scans/{scan}/board-discovery"),
+                Some(json!({})),
+            )
+            .await?
+        }
+        Command::DiscoverObjects { scan } => {
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/object-proposals"),
                 Some(json!({})),
             )
             .await?
@@ -782,6 +793,13 @@ mod tests {
         assert!(matches!(
             args.command,
             Command::DiscoverBoards { scan: parsed } if parsed == scan
+        ));
+
+        let args =
+            Args::try_parse_from(["velocitypnp", "discover-objects", &scan.to_string()]).unwrap();
+        assert!(matches!(
+            args.command,
+            Command::DiscoverObjects { scan: parsed } if parsed == scan
         ));
     }
 }

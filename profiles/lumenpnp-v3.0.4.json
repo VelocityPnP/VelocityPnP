@@ -253,6 +253,26 @@
     "plate_search_radius_mm": 4.0,
     "feed_mm_per_min": 600.0
   },
+  "workspace_fixtures": [
+    {
+      "id": "datum_pcb",
+      "class": "calibration_fixture",
+      "anchor": { "kind": "visual_datum" },
+      "x_min_mm": -40.0,
+      "x_max_mm": 40.0,
+      "y_min_mm": -25.0,
+      "y_max_mm": 10.0
+    },
+    {
+      "id": "nozzle_bank",
+      "class": "tooling_station",
+      "anchor": { "kind": "plate", "plate_id": "staging_plate" },
+      "x_min_mm": 95.0,
+      "x_max_mm": 140.0,
+      "y_min_mm": 0.0,
+      "y_max_mm": 105.0
+    }
+  ],
   "capabilities": {
     "dual_nozzle": true,
     "rotation_motion": false,

@@ -53,12 +53,12 @@ use velocitypnp_planner::{
 };
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    apply_camera_controls, build_workspace_height_map, build_workspace_mosaic,
-    calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer, camera_sample_metrics,
-    capture_gray_frame, capture_gray_frames, compose_workspace_refinements,
+    apply_camera_controls, build_workspace_discovery_context, build_workspace_height_map,
+    build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
+    camera_sample_metrics, capture_gray_frame, capture_gray_frames, compose_workspace_refinements,
     composite_workspace_camera_aperture, decode_gray_png, detect_bright_fiducial_near,
     detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
-    discover_workspace_boards, encode_gray_png, encode_rgb_png, encode_rgba_png,
+    discover_workspace_objects, encode_gray_png, encode_rgb_png, encode_rgba_png,
     fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
     fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
@@ -68,11 +68,12 @@ use velocitypnp_vision::{
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
     summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
-    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport, FiducialDetection,
-    GrayFrame, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig,
-    VisualHomingPlan, WorkspaceCameraApertureComposite, WorkspaceHeightComposite,
-    WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxObservation,
-    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRefinementPatch, WorkspaceScanPlan,
+    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame, NozzleToolingReport,
+    PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig, VisualHomingPlan,
+    WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceParallaxObservation, WorkspaceParallaxReport,
+    WorkspaceParallaxStream, WorkspaceRefinementPatch, WorkspaceScanPlan,
     WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport, WorkspaceSeamStatus,
     MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
     MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
@@ -347,6 +348,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/workspace-scans/{id}/board-discovery",
+            post(build_workspace_board_discovery),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/object-proposals",
             post(build_workspace_board_discovery),
         )
         .route(
@@ -4488,6 +4493,7 @@ async fn build_workspace_board_discovery(
     height_scan_ids.dedup();
     let mut height_sources = Vec::new();
     let mut height_data = Vec::new();
+    let mut camera_apertures = Vec::new();
     for height_scan_id in height_scan_ids {
         let height_scan = state
             .store
@@ -4507,6 +4513,13 @@ async fn build_workspace_board_discovery(
             .ok_or_else(|| ApiError::not_found("height-source scan has no surface-height map"))?
             .map_artifact_name
             .clone();
+        if let Some(aperture) = height_scan
+            .height_map
+            .as_ref()
+            .and_then(|summary| summary.camera_aperture.clone())
+        {
+            camera_apertures.push(aperture);
+        }
         let (height_media_type, data) = state
             .store
             .get_workspace_scan_artifact(height_scan_id, &height_map_artifact_name)
@@ -4528,6 +4541,31 @@ async fn build_workspace_board_discovery(
             "board discovery found no compatible surface-height evidence",
         ));
     }
+    let camera_aperture = camera_apertures
+        .into_iter()
+        .max_by_key(|aperture| aperture.supporting_detections);
+    let calibration = state
+        .store
+        .get_calibration(scan.calibration_id)
+        .map_err(ApiError::internal)?;
+    let installed_plate_geometry = calibration
+        .as_ref()
+        .and_then(|calibration| {
+            calibration
+                .artifacts
+                .get(&CalibrationArtifactId::InstalledPlateGeometry)
+        })
+        .map(|artifact| {
+            serde_json::from_value::<InstalledPlateGeometryReport>(artifact.value.clone())
+        })
+        .transpose()
+        .map_err(ApiError::internal)?;
+    let discovery_context = build_workspace_discovery_context(
+        &state.profile,
+        installed_plate_geometry.as_ref(),
+        camera_aperture.as_ref(),
+    )
+    .map_err(ApiError::internal)?;
     let board_designs = state.store.list_boards().map_err(ApiError::internal)?;
     let scan_region = scan.region;
     let discovery = tokio::task::spawn_blocking(move || {
@@ -4537,13 +4575,15 @@ async fn build_workspace_board_discovery(
             .map(|data| serde_json::from_slice::<WorkspaceHeightMap>(data))
             .collect::<Result<Vec<_>, _>>()?;
         let height_map = merge_workspace_height_maps(scan_region, &height_maps)?;
-        discover_workspace_boards(
+        discover_workspace_objects(
             &mosaic,
             raster_transform,
             &height_map,
             &board_designs,
             &source_mosaic_artifact_name,
             &height_sources,
+            &discovery_context,
+            &DeterministicWorkspaceObjectClassifier,
         )
     })
     .await
@@ -4559,6 +4599,17 @@ async fn build_workspace_board_discovery(
         &report_json,
     )
     .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    for evidence in &discovery.evidence {
+        let encoded = encode_gray_png(&evidence.frame).map_err(ApiError::internal)?;
+        persist_workspace_artifact(
+            &state,
+            &mut scan,
+            &evidence.artifact_name,
+            "image/png",
+            &encoded,
+        )
+        .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    }
     persist_workspace_artifact(
         &state,
         &mut scan,
@@ -15850,6 +15901,7 @@ mod tests {
         for name in [
             WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
             WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
+            "object-evidence-000.png",
             "manifest.json",
         ] {
             assert!(state

@@ -513,7 +513,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
     setDiscovering(true);
     setDiscovery(null);
     try {
-      setDiscovery(await api.discoverWorkspaceBoards(selectedScan));
+      setDiscovery(await api.discoverWorkspaceObjects(selectedScan));
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -532,20 +532,20 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       return <article className="card board-card" key={board.id}><div className="board-preview"><span>PCB</span><i /></div><div><p className="eyebrow">KiCad {board.source_version ?? "unknown"}</p><h2>{board.name}</h2><div className="board-stats"><span><strong>{active}</strong> placements</span><span><strong>{board.placements.filter((p) => p.fiducial).length}</strong> fiducials</span><span><strong>{formatSize(board)}</strong> size</span></div>{board.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}</div></article>;
     })}</section>
     <section className="card board-discovery-card">
-      <div className="card-heading"><div><p className="eyebrow">Workspace inventory</p><h2>Discover installed boards</h2></div>{scans.length > 0 && <span className="count">{scans.length}</span>}</div>
-      <p>Select a completed height-aware scan. Detection uses the refined mosaic when its quality gate passed and causes no machine motion.</p>
+      <div className="card-heading"><div><p className="eyebrow">Workspace inventory</p><h2>Analyze workspace objects</h2></div>{scans.length > 0 && <span className="count">{scans.length}</span>}</div>
+      <p>Select a completed height-aware scan. Plate-aligned proposals use known fixtures and retain uncertain objects for later classification. Analysis causes no machine motion.</p>
       <div className="board-discovery-controls">
         <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); }}>
           {scans.length === 0 && <option value="">No eligible scans</option>}
           {scans.map((scan) => <option key={scan.id} value={scan.id}>{new Date(scan.updated_at).toLocaleString()} · {pretty(scan.mode)}{scan.board_discovery ? ` · ${scan.board_discovery.candidate_count} prior candidates` : ""}</option>)}
         </select>
-        <button disabled={!selectedScan || discovering} onClick={() => void discover()}>{discovering ? "Analyzing…" : "Discover boards"}</button>
+        <button disabled={!selectedScan || discovering} onClick={() => void discover()}>{discovering ? "Analyzing…" : "Analyze objects"}</button>
       </div>
       {discovery && <div className="board-discovery-result">
-        <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with outlined board candidates" />
-        <div><p><strong>{discovery.candidates.length}</strong> raised-surface candidates; green outlines match imported board dimensions and amber outlines need more evidence.</p>
+        <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with semantic object proposals" />
+        <div><p><strong>{discovery.candidates.length}</strong> raised-surface proposals. Known fixtures are purple, boards are green, feeders are blue, and unresolved objects are amber.</p>
           {discovery.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
-          <div className="candidate-list">{discovery.candidates.map((candidate) => <div key={candidate.candidate_index}><strong>Candidate {candidate.candidate_index + 1}</strong><span>{candidate.width_mm.toFixed(1)} × {candidate.height_mm.toFixed(1)} mm at {candidate.center_x_mm.toFixed(1)}, {candidate.center_y_mm.toFixed(1)}</span><span>{(candidate.board_likelihood * 100).toFixed(0)}% rank{candidate.design_matches[0] ? ` · ${candidate.design_matches[0].board_name}` : " · no dimension match"}</span></div>)}</div>
+          <div className="candidate-list">{discovery.candidates.map((candidate) => <div key={candidate.candidate_index}><strong>{pretty(candidate.classification?.class ?? "unknown")} {candidate.candidate_index + 1}</strong><span>{candidate.width_mm.toFixed(1)} × {candidate.height_mm.toFixed(1)} mm at {candidate.center_x_mm.toFixed(1)}, {candidate.center_y_mm.toFixed(1)}{candidate.plate_role ? ` · ${pretty(candidate.plate_role)} plate` : ""}</span><span>{((candidate.classification?.confidence ?? 0) * 100).toFixed(0)}% class confidence{candidate.known_fixture_id ? ` · ${pretty(candidate.known_fixture_id)}` : candidate.design_matches[0] ? ` · ${candidate.design_matches[0].board_name}` : " · review required"}</span>{candidate.evidence_artifact_name && <a href={`/api/v1/workspace-scans/${selectedScan}/artifacts/${candidate.evidence_artifact_name}`} target="_blank" rel="noreferrer">View normalized evidence</a>}</div>)}</div>
         </div>
       </div>}
     </section>

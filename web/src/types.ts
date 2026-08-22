@@ -580,6 +580,27 @@ export interface WorkspaceBoardDesignMatch {
   confidence: number;
 }
 
+export type WorkspaceObjectClass =
+  | "board"
+  | "feeder"
+  | "tooling_station"
+  | "calibration_fixture"
+  | "fixed_machine_feature"
+  | "unknown";
+
+export interface WorkspaceObjectClassification {
+  class: WorkspaceObjectClass;
+  confidence: number;
+  classifier_id: string;
+  review_required: boolean;
+  evidence: Array<{
+    source: string;
+    suggested_class: WorkspaceObjectClass;
+    confidence: number;
+    explanation: string;
+  }>;
+}
+
 export interface WorkspaceBoardCandidate {
   candidate_index: number;
   region: {
@@ -589,6 +610,8 @@ export interface WorkspaceBoardCandidate {
     y_max_mm: number;
   };
   outline_machine_mm: Array<[number, number]>;
+  plate_id: string | null;
+  plate_role: "staging" | "build" | "unspecified" | null;
   center_x_mm: number;
   center_y_mm: number;
   width_mm: number;
@@ -601,6 +624,9 @@ export interface WorkspaceBoardCandidate {
   fill_fraction: number;
   texture_energy_luma: number;
   board_likelihood: number;
+  classification: WorkspaceObjectClassification | null;
+  known_fixture_id: string | null;
+  evidence_artifact_name: string | null;
   design_matches: WorkspaceBoardDesignMatch[];
 }
 

@@ -433,34 +433,47 @@ object labels. Feeder, PCB, datum PCB, nozzle fixture, and bottom camera ring
 labels will come from later object detectors and can use the same transparent
 overlay format.
 
-### Workspace board discovery
+### Workspace object proposals
 
 A successful height-aware scan or accepted refinement composite can produce
-initial board candidates without machine motion:
+initial object proposals without machine motion:
 
 ```bash
-cargo run -p velocitypnp -- discover-boards SCAN_UUID
+cargo run -p velocitypnp -- discover-objects SCAN_UUID
 ```
 
 The equivalent API is
-`POST /api/v1/workspace-scans/SCAN_UUID/board-discovery`. The Python client
-provides `discover_workspace_boards(scan_id)`. The operation uses an accepted
-`mosaic-refined.png` when present. Otherwise, it uses the scan's
-`mosaic-height-corrected.png`.
+`POST /api/v1/workspace-scans/SCAN_UUID/object-proposals`. The former
+`board-discovery` route remains an alias. The Python client provides
+`discover_workspace_objects(scan_id)`. The operation uses an accepted refined
+mosaic when present. Otherwise, it uses the height-corrected mosaic.
 
-The `workspace_board_discovery.v1` policy selects known height-map cells above
-the installed-plate plane. It joins nearby evidence, rejects small isolated
-height noise, and fits an oriented rectangle in machine coordinates. It ranks
-each region from height confidence, filled area, image texture, shape, and any
-matching imported KiCad board dimensions. Both 0-degree and 90-degree design
-orientations are tested. A reconnaissance parent can merge the height maps
-from all accepted refinement children into its own machine-coordinate grid.
-The report keeps every child scan and artifact as explicit lineage.
+The `workspace_object_proposals.v2` policy selects known height-map cells above
+the installed-plate plane. It joins nearby evidence and rejects small isolated
+height noise. Each proposal rectangle is parallel and perpendicular to its
+calibrated plate axes. Its enclosing machine-axis rectangle is the region that
+the scan planner can refine. Actual board rotation is left for later image and
+KiCad registration.
 
-The scan stores `board-discovery.json` and
-`mosaic-board-candidates.png`. Green outlines have at least one plausible
-KiCad dimension match. Amber outlines are raised-surface candidates that need
-more evidence. Candidate rank is not board registration: this stage does not
+The semantic classifier is a replaceable interface. The initial deterministic
+classifier combines known-fixture overlap, plate role, raised-surface geometry,
+and KiCad dimensions. Weak or conflicting evidence produces `unknown`; the
+policy does not force a feeder or board label. A future learned classifier will
+receive the same normalized image crop and metadata. Each crop is retained as
+`object-evidence-NNN.png` so operator corrections can become labeled training
+data.
+
+The V3.0.4 profile supplies the source-derived datum-PCB outline and an
+installed nozzle-bank envelope. The detected bottom-camera aperture supplies a
+dynamic guard region. These objects remain semantic inventory evidence, but
+their board likelihood is zero. A reconnaissance parent can merge height maps
+from accepted refinement children. The report retains each source scan and
+artifact as lineage.
+
+The scan stores `board-discovery.json`, `mosaic-board-candidates.png`, and one
+normalized evidence crop per proposal. Green outlines are boards, blue outlines
+are feeders, purple outlines are known fixtures, and amber outlines need more
+evidence. Classification is not board registration: this stage does not
 create a `BoardInstance`, move the camera, compare package templates, or accept
 a design-to-machine transform. Local fiducial and package verification is the
 next gate.

@@ -247,16 +247,30 @@ paths:
   /workspace-scans/{id}/board-discovery:
     post:
       operationId: buildWorkspaceBoardDiscovery
+      deprecated: true
       description: >-
-        Finds connected raised-surface candidates in a completed height map,
-        fits oriented machine-coordinate outlines, and compares their
-        dimensions with imported KiCad boards. This operation causes no
-        machine motion. It persists a JSON report and an outlined preview.
+        Compatibility alias for object-proposals.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         "200":
-          description: Ranked machine-space board candidates and design matches
+          description: Plate-aligned semantic object proposals
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkspaceBoardDiscoveryReport" }
+  /workspace-scans/{id}/object-proposals:
+    post:
+      operationId: buildWorkspaceObjectProposals
+      description: >-
+        Finds connected raised-surface regions, aligns proposal edges with
+        calibrated plate axes, applies known-fixture evidence, and retains a
+        normalized image crop for each object. Weak semantic evidence returns
+        unknown. This operation causes no machine motion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Plate-aligned semantic object proposals and evidence
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WorkspaceBoardDiscoveryReport" }
@@ -1586,6 +1600,8 @@ components:
         - candidate_index
         - region
         - outline_machine_mm
+        - plate_id
+        - plate_role
         - center_x_mm
         - center_y_mm
         - width_mm
@@ -1598,6 +1614,9 @@ components:
         - fill_fraction
         - texture_energy_luma
         - board_likelihood
+        - classification
+        - known_fixture_id
+        - evidence_artifact_name
         - design_matches
       properties:
         candidate_index: { type: integer, minimum: 0 }
@@ -1611,6 +1630,12 @@ components:
             minItems: 2
             maxItems: 2
             items: { type: number }
+        plate_id: { type: [string, "null"] }
+        plate_role:
+          oneOf:
+            - type: string
+              enum: [unspecified, staging, build]
+            - type: "null"
         center_x_mm: { type: number }
         center_y_mm: { type: number }
         width_mm: { type: number, exclusiveMinimum: 0 }
@@ -1623,10 +1648,49 @@ components:
         fill_fraction: { type: number, minimum: 0, maximum: 1 }
         texture_energy_luma: { type: number, minimum: 0 }
         board_likelihood: { type: number, minimum: 0, maximum: 1 }
+        classification:
+          oneOf:
+            - { $ref: "#/components/schemas/WorkspaceObjectClassification" }
+            - type: "null"
+        known_fixture_id: { type: [string, "null"] }
+        evidence_artifact_name: { type: [string, "null"] }
         design_matches:
           type: array
           maxItems: 3
           items: { $ref: "#/components/schemas/WorkspaceBoardDesignMatch" }
+    WorkspaceObjectClassification:
+      type: object
+      required:
+        - class
+        - confidence
+        - classifier_id
+        - review_required
+        - evidence
+      properties:
+        class: { $ref: "#/components/schemas/WorkspaceObjectClass" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        classifier_id: { type: string }
+        review_required: { type: boolean }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/WorkspaceClassificationEvidence" }
+    WorkspaceClassificationEvidence:
+      type: object
+      required: [source, suggested_class, confidence, explanation]
+      properties:
+        source: { type: string }
+        suggested_class: { $ref: "#/components/schemas/WorkspaceObjectClass" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        explanation: { type: string }
+    WorkspaceObjectClass:
+      type: string
+      enum:
+        - board
+        - feeder
+        - tooling_station
+        - calibration_fixture
+        - fixed_machine_feature
+        - unknown
     WorkspaceBoardDesignMatch:
       type: object
       required:

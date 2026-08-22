@@ -141,6 +141,11 @@ pub struct MachineProfile {
     pub local_xy_direction_response: Option<LocalXyDirectionResponseProfile>,
     #[serde(default)]
     pub installed_geometry_calibration: Option<InstalledGeometryCalibrationProfile>,
+    /// Installed objects whose geometry is fixed relative to a calibrated
+    /// datum or plate. These objects remain inventory items, but they are not
+    /// board candidates.
+    #[serde(default)]
+    pub workspace_fixtures: Vec<WorkspaceFixtureRegionProfile>,
     pub capabilities: BTreeMap<String, bool>,
 }
 
@@ -476,6 +481,46 @@ pub struct InstalledGeometryCalibrationProfile {
     pub plate_diameter_tolerance_mm: f64,
     pub plate_search_radius_mm: f64,
     pub feed_mm_per_min: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceFixtureAnchor {
+    VisualDatum,
+    Plate { plate_id: String },
+}
+
+/// A rectangular installed fixture envelope in its anchor's local frame.
+/// Local X follows the calibrated plate column axis. Local Y is perpendicular
+/// to local X and points in the calibrated plate row direction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceFixtureRegionProfile {
+    pub id: String,
+    pub class: crate::WorkspaceObjectClass,
+    pub anchor: WorkspaceFixtureAnchor,
+    pub x_min_mm: f64,
+    pub x_max_mm: f64,
+    pub y_min_mm: f64,
+    pub y_max_mm: f64,
+}
+
+impl WorkspaceFixtureRegionProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let bounds = [self.x_min_mm, self.x_max_mm, self.y_min_mm, self.y_max_mm];
+        if self.id.trim().is_empty()
+            || self.class == crate::WorkspaceObjectClass::Unknown
+            || bounds.iter().any(|value| !value.is_finite())
+            || self.x_max_mm <= self.x_min_mm
+            || self.y_max_mm <= self.y_min_mm
+            || matches!(
+                &self.anchor,
+                WorkspaceFixtureAnchor::Plate { plate_id } if plate_id.trim().is_empty()
+            )
+        {
+            return Err("workspace fixture region profile is invalid");
+        }
+        Ok(())
+    }
 }
 
 impl ZKinematicsProfile {
@@ -1060,6 +1105,23 @@ mod tests {
                 .unwrap();
             assert!(profile.bounds.contains(target));
         }
+    }
+
+    #[test]
+    fn attached_v3_workspace_fixtures_are_semantic_and_valid() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        assert_eq!(profile.workspace_fixtures.len(), 2);
+        assert!(profile
+            .workspace_fixtures
+            .iter()
+            .all(|fixture| fixture.validate().is_ok()));
+        assert_eq!(profile.workspace_fixtures[0].id, "datum_pcb");
+        assert_eq!(
+            profile.workspace_fixtures[0].class,
+            crate::WorkspaceObjectClass::CalibrationFixture
+        );
+        assert_eq!(profile.workspace_fixtures[1].id, "nozzle_bank");
     }
 
     #[test]

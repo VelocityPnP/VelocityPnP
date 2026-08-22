@@ -287,6 +287,15 @@ class Client:
             {},
         )
 
+    def discover_workspace_objects(
+        self, scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/workspace-scans/{scan_id}/object-proposals",
+            {},
+        )
+
     def workspace_board_discovery_report(
         self, scan_id: str | uuid.UUID,
     ) -> dict[str, Any]:
@@ -302,6 +311,18 @@ class Client:
             "GET",
             f"/workspace-scans/{scan_id}/artifacts/"
             "mosaic-board-candidates.png",
+            "image/png",
+        )
+
+    def workspace_object_evidence(
+        self, scan_id: str | uuid.UUID, candidate_index: int,
+    ) -> bytes:
+        if candidate_index < 0:
+            raise ValueError("workspace candidate index cannot be negative")
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            f"object-evidence-{candidate_index:03}.png",
             "image/png",
         )
 

@@ -113,8 +113,11 @@ The project is organized by measurable gates rather than calendar estimates.
   per-pixel candidate selection
 - [x] Georeference survey rasters and use installed plate-plane geometry for
   full-workspace scan planning
-- [x] Add no-motion raised-surface board-region discovery with oriented
-  machine-space outlines, persisted previews, and KiCad dimension matching
+- [x] Add no-motion raised-surface object proposals with calibrated plate-axis
+  outlines, semantic fixture handling, ML-ready evidence crops, and KiCad
+  dimension matching
+- [ ] Add learned semantic segmentation with versioned datasets, calibrated
+  confidence, and machine/configuration holdout tests
 - [ ] Add package-template pose comparison and live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures

@@ -21,9 +21,12 @@ pub use v4l2_capture::*;
 
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use workspace_board_discovery::{
-    discover_workspace_boards, merge_workspace_height_maps, WorkspaceBoardDiscoveryArtifacts,
-    WORKSPACE_BOARD_DISCOVERY_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
-    WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+    build_workspace_discovery_context, discover_workspace_boards, discover_workspace_objects,
+    merge_workspace_height_maps, DeterministicWorkspaceObjectClassifier,
+    WorkspaceBoardDiscoveryArtifacts, WorkspaceCandidateEvidenceArtifact,
+    WorkspaceDiscoveryContext, WorkspaceObjectClassifier, WorkspaceObjectEvidence,
+    WorkspacePlateFrame, WorkspaceResolvedFixture, WORKSPACE_BOARD_DISCOVERY_ALGORITHM,
+    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
 };
 pub use workspace_height_map::{
     build_workspace_height_map, compose_workspace_height_mosaic,

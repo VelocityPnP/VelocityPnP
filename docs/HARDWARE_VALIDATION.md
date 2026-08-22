@@ -1606,6 +1606,31 @@ simulated daemon stopped normally after the artifacts and updated manifest
 were stored. Package-template comparison and local fiducial verification are
 still required before a candidate can become a board instance.
 
+### Plate-aligned semantic proposal replay
+
+On 2026-08-22, the same retained physical scan was replayed through
+`workspace_object_proposals.v2`. The daemon used simulation mode and opened no
+controller or camera. All eight raised components remained in the report as
+inventory evidence.
+
+The calibrated staging-plate proposal angle was 0.274 degrees. The calibrated
+build-plate angle was 0.184 degrees. All proposal edges now follow these plate
+axes; the two nozzle-bank fragments no longer have arbitrary PCA rotations.
+The fixed-fixture policy classified the datum PCB once, the two nozzle-bank
+fragments as tooling, and both bottom-camera-area fragments as fixed machine
+features. Their board likelihood is zero. The remaining three regions are the
+two feeder groups and the FTP PCB. With no imported board and no learned model,
+they correctly remain `unknown` and require review.
+
+Each proposal retained a plate-normalized image crop. Visual review found that
+the main feeder crop cleanly contains its parallel lanes and tape features. The
+FTP crop cleanly contains the PCB, mounting holes, and component field. These
+are suitable inputs for later labels and learned segmentation. The proposal
+preview is 3,261,911 bytes with SHA-256
+`b6f34f64fb62e68ccc8e3ad3cea6bf226fb81f2af818d52ef78cb07d1faa4792`.
+The report is 16,267 bytes with SHA-256
+`bd37acfbff67edc0d8797ff89acb02bf0d681edb0893cd97f1cfb253f4df3428`.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

@@ -189,4 +189,8 @@ export const api = {
     jsonPost<WorkspaceBoardDiscoveryReport>(
       `/workspace-scans/${scanId}/board-discovery`,
     ),
+  discoverWorkspaceObjects: (scanId: string) =>
+    jsonPost<WorkspaceBoardDiscoveryReport>(
+      `/workspace-scans/${scanId}/object-proposals`,
+    ),
 };
