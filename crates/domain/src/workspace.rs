@@ -396,6 +396,14 @@ pub enum WorkspaceInventoryObjectSource {
     BaselineReuse,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceChangeDetectionMode {
+    #[default]
+    SemanticProposals,
+    BaselineGuidedRaster,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceInventoryObject {
     pub inventory_index: u32,
@@ -436,11 +444,17 @@ pub struct WorkspaceChangeThresholds {
     pub unchanged_overlap_fraction: f64,
     pub maximum_unchanged_visual_difference: f64,
     pub refinement_margin_mm: f64,
+    #[serde(default)]
+    pub maximum_unchanged_raster_difference: f64,
+    #[serde(default)]
+    pub minimum_new_raster_region_area_mm2: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceChangeSetReport {
     pub algorithm_version: String,
+    #[serde(default)]
+    pub detection_mode: WorkspaceChangeDetectionMode,
     pub baseline_id: Uuid,
     pub baseline_scan_id: Uuid,
     pub observation_scan_id: Uuid,
@@ -460,6 +474,8 @@ pub struct WorkspaceChangeSetReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceChangeSetSummary {
     pub algorithm_version: String,
+    #[serde(default)]
+    pub detection_mode: WorkspaceChangeDetectionMode,
     pub baseline_id: Uuid,
     pub baseline_scan_id: Uuid,
     pub report_artifact_name: String,

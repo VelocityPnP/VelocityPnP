@@ -37,9 +37,11 @@ pub use workspace_height_map::{
     WORKSPACE_HEIGHT_CANDIDATE_STEP, WORKSPACE_HEIGHT_CELL_SIZE_MM,
 };
 pub use workspace_inventory::{
-    compare_workspace_observation, WorkspaceObservedObject, CHANGE_REFINEMENT_MARGIN_MM,
-    MAXIMUM_UNCHANGED_VISUAL_DIFFERENCE, MINIMUM_OBJECT_MATCH_OVERLAP, UNCHANGED_OBJECT_OVERLAP,
-    WORKSPACE_CHANGE_SET_ALGORITHM, WORKSPACE_CHANGE_SET_ARTIFACT,
+    compare_workspace_observation, compare_workspace_reconnaissance, WorkspaceObservedObject,
+    CHANGE_REFINEMENT_MARGIN_MM, MAXIMUM_UNCHANGED_RASTER_DIFFERENCE,
+    MAXIMUM_UNCHANGED_VISUAL_DIFFERENCE, MINIMUM_NEW_RASTER_REGION_AREA_MM2,
+    MINIMUM_OBJECT_MATCH_OVERLAP, UNCHANGED_OBJECT_OVERLAP, WORKSPACE_CHANGE_SET_ALGORITHM,
+    WORKSPACE_CHANGE_SET_ARTIFACT,
 };
 pub use workspace_mosaic::{
     build_workspace_mosaic, plan_workspace_scan, workspace_camera_reachable_region,

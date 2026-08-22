@@ -488,11 +488,10 @@ cargo run -p velocitypnp -- discover-objects FULL_SCAN_UUID
 cargo run -p velocitypnp -- set-workspace-baseline FULL_SCAN_UUID
 ```
 
-For later board or feeder changes, use a faster height-aware scan. Build its
-object proposals and compare them with the baseline:
+For later board or feeder changes, use a fast reconnaissance scan and compare
+it directly with the baseline:
 
 ```bash
-cargo run -p velocitypnp -- discover-objects FAST_SCAN_UUID
 cargo run -p velocitypnp -- workspace-changes FAST_SCAN_UUID
 ```
 
@@ -500,13 +499,21 @@ The API routes are `POST /workspace-scans/SCAN_UUID/inventory-baseline` and
 `POST /workspace-scans/SCAN_UUID/change-set`. The Python client provides
 `set_workspace_inventory_baseline()` and `compare_workspace_observation()`.
 
-The comparison uses calibrated machine regions, the semantic class, and the
-normalized image crop. It removes global luma changes before it compares the
-crops. A partial scan keeps baseline objects that are outside the observed
-region. A covered object can be added, removed, modified, or unchanged.
+For two height-aware semantic scans, the comparison uses calibrated machine
+regions, the semantic class, and the normalized image crop. For a raw
+reconnaissance scan, it uses the baseline object regions, both plate-projected
+mosaics, and the scan's seam-health regions. This baseline-guided mode can find
+changes before it makes a height map. It removes global luma changes before it
+compares image regions. A partial scan keeps baseline objects that are outside
+the observed region. A covered object can be added, modified, or unchanged.
+The raw pass calls a changed baseline object `modified`; refinement determines
+whether it moved, changed, or was removed.
+
 Changes to boards, feeders, unrecognized tooling, and unknown objects make
 bounded scan refinement targets. Known tooling, calibration, and fixed-machine
-fixtures do not make targets.
+fixtures do not make targets. The initial raw pass also ignores unmatched seam
+regions below 400 square millimeters. This suppresses the retained plate-grid
+noise, but it means that an isolated new small object needs a later detector.
 
 A baseline is compatible only with the same machine profile, calibration
 snapshot, and object-proposal algorithm. A geometry calibration change thus

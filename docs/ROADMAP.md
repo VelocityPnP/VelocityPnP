@@ -118,6 +118,8 @@ The project is organized by measurable gates rather than calendar estimates.
   dimension matching
 - [x] Add persistent inventory baselines, partial-observation change sets, and
   change-driven refinement regions
+- [x] Add baseline-guided raw reconnaissance comparison so changes can select
+  refinements before a new height map exists
 - [ ] Tune inventory change thresholds with unchanged scans and deliberate
   board and feeder changes on attached hardware
 - [ ] Add learned semantic segmentation with versioned datasets, calibrated

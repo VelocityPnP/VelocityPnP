@@ -653,6 +653,7 @@ export interface WorkspaceInventoryBaseline {
 
 export interface WorkspaceChangeSetReport {
   algorithm_version: string;
+  detection_mode: "semantic_proposals" | "baseline_guided_raster";
   baseline_id: string;
   baseline_scan_id: string;
   observation_scan_id: string;
@@ -684,6 +685,7 @@ export interface WorkspaceScanReport {
   } | null;
   change_set: {
     baseline_id: string;
+    detection_mode: "semantic_proposals" | "baseline_guided_raster";
     added_count: number;
     removed_count: number;
     modified_count: number;

@@ -57,10 +57,11 @@ use velocitypnp_vision::{
     apply_camera_controls, build_workspace_discovery_context, build_workspace_height_map,
     build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
     camera_sample_metrics, capture_gray_frame, capture_gray_frames, compare_workspace_observation,
-    compose_workspace_refinements, composite_workspace_camera_aperture, decode_gray_png,
-    detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
-    detect_installed_plate_hole, discover_workspace_objects, encode_gray_png, encode_rgb_png,
-    encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    compare_workspace_reconnaissance, compose_workspace_refinements,
+    composite_workspace_camera_aperture, decode_gray_png, detect_bright_fiducial_near,
+    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
+    discover_workspace_objects, encode_gray_png, encode_rgb_png, encode_rgba_png,
+    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
     fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
@@ -4731,6 +4732,30 @@ fn load_workspace_observed_objects(
         .collect()
 }
 
+fn load_workspace_raw_raster(
+    state: &AppState,
+    scan: &WorkspaceScanReport,
+) -> ApiResult<(GrayFrame, WorkspaceRasterTransform)> {
+    let transform = scan.raster_transform.ok_or_else(|| {
+        ApiError::bad_request("workspace scan has no machine-coordinate raster transform")
+    })?;
+    let artifact_name = scan.mosaic_artifact_name.as_deref().unwrap_or("mosaic.png");
+    let (media_type, data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace raw mosaic not found"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "workspace raw mosaic is not a PNG"
+        )));
+    }
+    Ok((
+        decode_gray_png(&data).map_err(ApiError::internal)?,
+        transform,
+    ))
+}
+
 fn latest_workspace_inventory_baseline(
     state: &AppState,
     profile_id: Option<&str>,
@@ -4844,15 +4869,35 @@ async fn build_workspace_change_set(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("workspace baseline scan not found"))?;
     let baseline_objects = load_workspace_observed_objects(&state, &baseline_scan)?;
-    let observation_objects = load_workspace_observed_objects(&state, &observation)?;
-    let report = compare_workspace_observation(
-        &baseline,
-        observation.id,
-        observation.region,
-        &baseline_objects,
-        &observation_objects,
-    )
-    .map_err(ApiError::internal)?;
+    let report = if observation.board_discovery.is_some() {
+        let observation_objects = load_workspace_observed_objects(&state, &observation)?;
+        compare_workspace_observation(
+            &baseline,
+            observation.id,
+            observation.region,
+            &baseline_objects,
+            &observation_objects,
+        )
+        .map_err(ApiError::internal)?
+    } else {
+        let seam_artifacts = reanalyze_retained_workspace_seams(&state, &observation).await?;
+        let (baseline_raster, baseline_transform) =
+            load_workspace_raw_raster(&state, &baseline_scan)?;
+        let (observation_raster, observation_transform) =
+            load_workspace_raw_raster(&state, &observation)?;
+        compare_workspace_reconnaissance(
+            &baseline,
+            observation.id,
+            observation.region,
+            &baseline_raster,
+            baseline_transform,
+            &observation_raster,
+            observation_transform,
+            &baseline_objects,
+            &seam_artifacts.report.target_regions,
+        )
+        .map_err(ApiError::internal)?
+    };
     let report_json = serde_json::to_vec_pretty(&report).map_err(ApiError::internal)?;
     persist_workspace_artifact(
         &state,
@@ -4864,6 +4909,7 @@ async fn build_workspace_change_set(
     .map_err(ApiError::internal)?;
     observation.change_set = Some(WorkspaceChangeSetSummary {
         algorithm_version: report.algorithm_version.clone(),
+        detection_mode: report.detection_mode,
         baseline_id: report.baseline_id,
         baseline_scan_id: report.baseline_scan_id,
         report_artifact_name: WORKSPACE_CHANGE_SET_ARTIFACT.into(),

@@ -1,18 +1,22 @@
 use crate::{resize_gray_frame, GrayFrame};
 use anyhow::{ensure, Result};
 use velocitypnp_domain::{
-    WorkspaceBoardCandidate, WorkspaceChangeSetReport, WorkspaceChangeThresholds,
-    WorkspaceInventoryBaseline, WorkspaceInventoryObject, WorkspaceInventoryObjectSource,
-    WorkspaceObjectChange, WorkspaceObjectChangeKind, WorkspaceObjectClass, WorkspaceScanRegion,
+    WorkspaceBoardCandidate, WorkspaceChangeDetectionMode, WorkspaceChangeSetReport,
+    WorkspaceChangeThresholds, WorkspaceInventoryBaseline, WorkspaceInventoryObject,
+    WorkspaceInventoryObjectSource, WorkspaceObjectChange, WorkspaceObjectChangeKind,
+    WorkspaceObjectClass, WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_CHANGE_SET_ALGORITHM: &str = "workspace_change_set.v1";
+pub const WORKSPACE_CHANGE_SET_ALGORITHM: &str = "workspace_change_set.v2";
 pub const WORKSPACE_CHANGE_SET_ARTIFACT: &str = "workspace-change-set.json";
 pub const MINIMUM_OBJECT_MATCH_OVERLAP: f64 = 0.25;
 pub const UNCHANGED_OBJECT_OVERLAP: f64 = 0.65;
 pub const MAXIMUM_UNCHANGED_VISUAL_DIFFERENCE: f64 = 0.10;
+pub const MAXIMUM_UNCHANGED_RASTER_DIFFERENCE: f64 = 0.04;
+pub const MINIMUM_NEW_RASTER_REGION_AREA_MM2: f64 = 400.0;
 pub const CHANGE_REFINEMENT_MARGIN_MM: f64 = 4.0;
 const COMPARISON_FRAME_SIZE: u32 = 96;
+const MINIMUM_RASTER_REGION_COVERAGE: f64 = 0.15;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceObservedObject {
@@ -33,6 +37,8 @@ pub fn compare_workspace_observation(
         unchanged_overlap_fraction: UNCHANGED_OBJECT_OVERLAP,
         maximum_unchanged_visual_difference: MAXIMUM_UNCHANGED_VISUAL_DIFFERENCE,
         refinement_margin_mm: CHANGE_REFINEMENT_MARGIN_MM,
+        maximum_unchanged_raster_difference: 0.0,
+        minimum_new_raster_region_area_mm2: 0.0,
     };
     let mut baseline_matched = vec![false; baseline_objects.len()];
     let mut changes = Vec::new();
@@ -195,6 +201,7 @@ pub fn compare_workspace_observation(
     }
     Ok(WorkspaceChangeSetReport {
         algorithm_version: WORKSPACE_CHANGE_SET_ALGORITHM.into(),
+        detection_mode: WorkspaceChangeDetectionMode::SemanticProposals,
         baseline_id: baseline.id,
         baseline_scan_id: baseline.scan_id,
         observation_scan_id,
@@ -207,6 +214,191 @@ pub fn compare_workspace_observation(
         changes,
         current_inventory: inventory,
         target_regions,
+        warnings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compare_workspace_reconnaissance(
+    baseline: &WorkspaceInventoryBaseline,
+    observation_scan_id: uuid::Uuid,
+    observation_region: WorkspaceScanRegion,
+    baseline_raster: &GrayFrame,
+    baseline_transform: WorkspaceRasterTransform,
+    observation_raster: &GrayFrame,
+    observation_transform: WorkspaceRasterTransform,
+    baseline_objects: &[WorkspaceObservedObject],
+    observation_regions: &[WorkspaceScanRegion],
+) -> Result<WorkspaceChangeSetReport> {
+    observation_region.validate().map_err(anyhow::Error::msg)?;
+    validate_raster_transform(baseline_transform)?;
+    validate_raster_transform(observation_transform)?;
+    let thresholds = WorkspaceChangeThresholds {
+        minimum_match_overlap_fraction: MINIMUM_OBJECT_MATCH_OVERLAP,
+        unchanged_overlap_fraction: UNCHANGED_OBJECT_OVERLAP,
+        maximum_unchanged_visual_difference: MAXIMUM_UNCHANGED_VISUAL_DIFFERENCE,
+        refinement_margin_mm: CHANGE_REFINEMENT_MARGIN_MM,
+        maximum_unchanged_raster_difference: MAXIMUM_UNCHANGED_RASTER_DIFFERENCE,
+        minimum_new_raster_region_area_mm2: MINIMUM_NEW_RASTER_REGION_AREA_MM2,
+    };
+    let mut matched_regions = vec![false; observation_regions.len()];
+    let mut changes = Vec::new();
+    let mut inventory = Vec::new();
+    let mut target_regions = Vec::new();
+
+    for prior in baseline_objects {
+        if !region_contains(observation_region, prior.candidate.region) {
+            changes.push(WorkspaceObjectChange {
+                change_index: 0,
+                kind: WorkspaceObjectChangeKind::ReusedBaseline,
+                baseline_candidate_index: Some(prior.candidate.candidate_index),
+                observation_candidate_index: None,
+                class: candidate_class(&prior.candidate),
+                known_fixture_id: prior.candidate.known_fixture_id.clone(),
+                region: prior.candidate.region,
+                overlap_fraction: None,
+                visual_difference: None,
+                refinement_required: false,
+                explanation: "the reconnaissance scan does not cover this baseline object".into(),
+            });
+            inventory.push(inventory_object(
+                baseline.scan_id,
+                &prior.candidate,
+                WorkspaceInventoryObjectSource::BaselineReuse,
+            ));
+            continue;
+        }
+        let baseline_crop =
+            crop_machine_region(baseline_raster, baseline_transform, prior.candidate.region)?;
+        let observation_crop = crop_machine_region(
+            observation_raster,
+            observation_transform,
+            prior.candidate.region,
+        )?;
+        let visual_difference = normalized_visual_difference(&baseline_crop, &observation_crop)?;
+        let matched_region = observation_regions
+            .iter()
+            .enumerate()
+            .map(|(index, region)| {
+                (
+                    index,
+                    intersection_area(*region, prior.candidate.region)
+                        / region_area(prior.candidate.region),
+                )
+            })
+            .filter(|(_, coverage)| *coverage >= MINIMUM_RASTER_REGION_COVERAGE)
+            .max_by(|first, second| first.1.total_cmp(&second.1));
+        if let Some((index, _)) = matched_region {
+            matched_regions[index] = true;
+        }
+        let modified = visual_difference > MAXIMUM_UNCHANGED_RASTER_DIFFERENCE;
+        let refinement_required = modified && needs_refinement(&prior.candidate);
+        if refinement_required {
+            let region = matched_region.map_or(prior.candidate.region, |(index, _)| {
+                union_region(prior.candidate.region, observation_regions[index])
+            });
+            target_regions.push(expand_and_clip_region(
+                region,
+                observation_region,
+                CHANGE_REFINEMENT_MARGIN_MM,
+            ));
+        }
+        changes.push(WorkspaceObjectChange {
+            change_index: 0,
+            kind: if modified {
+                WorkspaceObjectChangeKind::Modified
+            } else {
+                WorkspaceObjectChangeKind::Unchanged
+            },
+            baseline_candidate_index: Some(prior.candidate.candidate_index),
+            observation_candidate_index: matched_region.map(|(index, _)| index as u32),
+            class: candidate_class(&prior.candidate),
+            known_fixture_id: prior.candidate.known_fixture_id.clone(),
+            region: prior.candidate.region,
+            overlap_fraction: matched_region.map(|(_, coverage)| coverage),
+            visual_difference: Some(visual_difference),
+            refinement_required,
+            explanation: if modified {
+                "the plate-projected appearance changed within the baseline object region".into()
+            } else {
+                "the plate-projected appearance is stable within the baseline object region".into()
+            },
+        });
+        inventory.push(inventory_object(
+            baseline.scan_id,
+            &prior.candidate,
+            WorkspaceInventoryObjectSource::BaselineReuse,
+        ));
+    }
+
+    let mut ignored_small_regions = 0_u32;
+    for (index, region) in observation_regions.iter().copied().enumerate() {
+        if matched_regions[index] {
+            continue;
+        }
+        let area_mm2 = region_area(region);
+        if area_mm2 < MINIMUM_NEW_RASTER_REGION_AREA_MM2 {
+            ignored_small_regions += 1;
+            continue;
+        }
+        target_regions.push(expand_and_clip_region(
+            region,
+            observation_region,
+            CHANGE_REFINEMENT_MARGIN_MM,
+        ));
+        changes.push(WorkspaceObjectChange {
+            change_index: 0,
+            kind: WorkspaceObjectChangeKind::Added,
+            baseline_candidate_index: None,
+            observation_candidate_index: Some(index as u32),
+            class: WorkspaceObjectClass::Unknown,
+            known_fixture_id: None,
+            region,
+            overlap_fraction: None,
+            visual_difference: None,
+            refinement_required: true,
+            explanation: "a new reconnaissance seam region exceeds the review area".into(),
+        });
+        inventory.push(WorkspaceInventoryObject {
+            inventory_index: 0,
+            source: WorkspaceInventoryObjectSource::Observation,
+            source_scan_id: observation_scan_id,
+            source_candidate_index: index as u32,
+            class: WorkspaceObjectClass::Unknown,
+            classification_confidence: 0.0,
+            known_fixture_id: None,
+            region,
+            outline_machine_mm: axis_aligned_outline(region),
+        });
+    }
+    for (index, change) in changes.iter_mut().enumerate() {
+        change.change_index = index as u32;
+    }
+    for (index, object) in inventory.iter_mut().enumerate() {
+        object.inventory_index = index as u32;
+    }
+    let count = |kind| changes.iter().filter(|change| change.kind == kind).count() as u32;
+    let mut warnings = Vec::new();
+    if ignored_small_regions > 0 {
+        warnings.push(format!(
+            "{ignored_small_regions} unmatched small seam regions were below the new-object review area"
+        ));
+    }
+    Ok(WorkspaceChangeSetReport {
+        algorithm_version: WORKSPACE_CHANGE_SET_ALGORITHM.into(),
+        detection_mode: WorkspaceChangeDetectionMode::BaselineGuidedRaster,
+        baseline_id: baseline.id,
+        baseline_scan_id: baseline.scan_id,
+        observation_scan_id,
+        thresholds,
+        added_count: count(WorkspaceObjectChangeKind::Added),
+        removed_count: 0,
+        modified_count: count(WorkspaceObjectChangeKind::Modified),
+        unchanged_count: count(WorkspaceObjectChangeKind::Unchanged),
+        reused_baseline_count: count(WorkspaceObjectChangeKind::ReusedBaseline),
+        changes,
+        current_inventory: inventory,
+        target_regions: merge_regions(target_regions),
         warnings,
     })
 }
@@ -343,14 +535,80 @@ fn change_explanation(
     reasons.join("; ")
 }
 
+fn validate_raster_transform(transform: WorkspaceRasterTransform) -> Result<()> {
+    ensure!(
+        transform.top_left_x_mm.is_finite()
+            && transform.top_left_y_mm.is_finite()
+            && transform.x_mm_per_pixel.is_finite()
+            && transform.y_mm_per_pixel.is_finite()
+            && transform.x_mm_per_pixel > 0.0
+            && transform.y_mm_per_pixel < 0.0,
+        "workspace raster transform must use the overhead machine convention"
+    );
+    Ok(())
+}
+
+fn crop_machine_region(
+    frame: &GrayFrame,
+    transform: WorkspaceRasterTransform,
+    region: WorkspaceScanRegion,
+) -> Result<GrayFrame> {
+    region.validate().map_err(anyhow::Error::msg)?;
+    ensure!(
+        frame.pixels.len() == frame.width as usize * frame.height as usize,
+        "workspace raster buffer does not match its dimensions"
+    );
+    let x_min = ((region.x_min_mm - transform.top_left_x_mm) / transform.x_mm_per_pixel)
+        .floor()
+        .max(0.0) as u32;
+    let x_max = ((region.x_max_mm - transform.top_left_x_mm) / transform.x_mm_per_pixel)
+        .ceil()
+        .min(f64::from(frame.width)) as u32;
+    let y_min = ((region.y_max_mm - transform.top_left_y_mm) / transform.y_mm_per_pixel)
+        .floor()
+        .max(0.0) as u32;
+    let y_max = ((region.y_min_mm - transform.top_left_y_mm) / transform.y_mm_per_pixel)
+        .ceil()
+        .min(f64::from(frame.height)) as u32;
+    ensure!(
+        x_max > x_min && y_max > y_min,
+        "workspace object region is outside the raster"
+    );
+    let mut pixels = Vec::with_capacity((x_max - x_min) as usize * (y_max - y_min) as usize);
+    for y in y_min..y_max {
+        let start = y as usize * frame.width as usize + x_min as usize;
+        let end = start + (x_max - x_min) as usize;
+        pixels.extend_from_slice(&frame.pixels[start..end]);
+    }
+    Ok(GrayFrame {
+        width: x_max - x_min,
+        height: y_max - y_min,
+        pixels,
+    })
+}
+
+fn region_area(region: WorkspaceScanRegion) -> f64 {
+    (region.x_max_mm - region.x_min_mm).max(0.0) * (region.y_max_mm - region.y_min_mm).max(0.0)
+}
+
+fn intersection_area(first: WorkspaceScanRegion, second: WorkspaceScanRegion) -> f64 {
+    (first.x_max_mm.min(second.x_max_mm) - first.x_min_mm.max(second.x_min_mm)).max(0.0)
+        * (first.y_max_mm.min(second.y_max_mm) - first.y_min_mm.max(second.y_min_mm)).max(0.0)
+}
+
+fn axis_aligned_outline(region: WorkspaceScanRegion) -> Vec<[f64; 2]> {
+    vec![
+        [region.x_min_mm, region.y_min_mm],
+        [region.x_max_mm, region.y_min_mm],
+        [region.x_max_mm, region.y_max_mm],
+        [region.x_min_mm, region.y_max_mm],
+    ]
+}
+
 fn region_iou(first: WorkspaceScanRegion, second: WorkspaceScanRegion) -> f64 {
-    let width =
-        (first.x_max_mm.min(second.x_max_mm) - first.x_min_mm.max(second.x_min_mm)).max(0.0);
-    let height =
-        (first.y_max_mm.min(second.y_max_mm) - first.y_min_mm.max(second.y_min_mm)).max(0.0);
-    let intersection = width * height;
-    let first_area = (first.x_max_mm - first.x_min_mm) * (first.y_max_mm - first.y_min_mm);
-    let second_area = (second.x_max_mm - second.x_min_mm) * (second.y_max_mm - second.y_min_mm);
+    let intersection = intersection_area(first, second);
+    let first_area = region_area(first);
+    let second_area = region_area(second);
     let union = first_area + second_area - intersection;
     if union <= 0.0 {
         0.0
@@ -496,6 +754,25 @@ mod tests {
             x_max_mm: x_max,
             y_min_mm: y_min,
             y_max_mm: y_max,
+        }
+    }
+
+    fn raster(luma_offset: u8) -> GrayFrame {
+        GrayFrame {
+            width: 100,
+            height: 100,
+            pixels: (0..10_000)
+                .map(|index| luma_offset.saturating_add(((index % 100) + (index / 100)) as u8 / 2))
+                .collect(),
+        }
+    }
+
+    fn raster_transform() -> WorkspaceRasterTransform {
+        WorkspaceRasterTransform {
+            top_left_x_mm: 0.0,
+            top_left_y_mm: 100.0,
+            x_mm_per_pixel: 1.0,
+            y_mm_per_pixel: -1.0,
         }
     }
 
@@ -661,5 +938,75 @@ mod tests {
 
         assert_eq!(report.removed_count, 1);
         assert!(report.target_regions.is_empty());
+    }
+
+    #[test]
+    fn reconnaissance_reuses_stable_objects_and_filters_small_new_regions() {
+        let prior = candidate(
+            0,
+            region(10.0, 30.0, 20.0, 40.0),
+            WorkspaceObjectClass::Board,
+            None,
+            80,
+        );
+        let report = compare_workspace_reconnaissance(
+            &baseline(Uuid::new_v4()),
+            Uuid::new_v4(),
+            region(0.0, 100.0, 0.0, 100.0),
+            &raster(20),
+            raster_transform(),
+            &raster(60),
+            raster_transform(),
+            &[prior],
+            &[
+                region(8.0, 32.0, 18.0, 42.0),
+                region(50.0, 75.0, 50.0, 75.0),
+                region(80.0, 90.0, 80.0, 90.0),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.detection_mode,
+            WorkspaceChangeDetectionMode::BaselineGuidedRaster
+        );
+        assert_eq!(report.unchanged_count, 1);
+        assert_eq!(report.added_count, 1);
+        assert_eq!(report.target_regions, vec![region(46.0, 79.0, 46.0, 79.0)]);
+        assert_eq!(report.warnings.len(), 1);
+    }
+
+    #[test]
+    fn reconnaissance_detects_appearance_change_in_a_baseline_region() {
+        let prior = candidate(
+            0,
+            region(10.0, 30.0, 20.0, 40.0),
+            WorkspaceObjectClass::Feeder,
+            None,
+            80,
+        );
+        let baseline_raster = raster(20);
+        let mut observation_raster = raster(20);
+        for y in 60..80 {
+            for x in 10..30 {
+                observation_raster.pixels[y * 100 + x] = if (x + y) % 2 == 0 { 0 } else { 255 };
+            }
+        }
+        let report = compare_workspace_reconnaissance(
+            &baseline(Uuid::new_v4()),
+            Uuid::new_v4(),
+            region(0.0, 100.0, 0.0, 100.0),
+            &baseline_raster,
+            raster_transform(),
+            &observation_raster,
+            raster_transform(),
+            &[prior],
+            &[region(8.0, 32.0, 18.0, 42.0)],
+        )
+        .unwrap();
+
+        assert_eq!(report.modified_count, 1);
+        assert_eq!(report.target_regions.len(), 1);
+        assert!(report.changes[0].visual_difference.unwrap() > 0.04);
     }
 }

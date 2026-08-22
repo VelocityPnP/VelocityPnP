@@ -292,10 +292,11 @@ paths:
     post:
       operationId: buildWorkspaceChangeSet
       description: >-
-        Compares semantic objects with a compatible persistent baseline.
-        Objects outside a partial observation are reused. Changed non-machine
-        objects produce bounded refinement regions. This operation causes no
-        machine motion.
+        Compares semantic objects with a compatible persistent baseline. A raw
+        reconnaissance scan uses baseline regions, plate-projected rasters,
+        and seam-health regions before a new height map exists. Objects
+        outside a partial observation are reused. Changed non-machine objects
+        produce bounded refinement regions. This operation causes no motion.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -1635,6 +1636,7 @@ components:
       type: object
       required:
         - algorithm_version
+        - detection_mode
         - baseline_id
         - baseline_scan_id
         - report_artifact_name
@@ -1646,6 +1648,9 @@ components:
         - target_region_count
       properties:
         algorithm_version: { type: string }
+        detection_mode:
+          type: string
+          enum: [semantic_proposals, baseline_guided_raster]
         baseline_id: { type: string, format: uuid }
         baseline_scan_id: { type: string, format: uuid }
         report_artifact_name: { type: string }
@@ -1659,6 +1664,7 @@ components:
       type: object
       required:
         - algorithm_version
+        - detection_mode
         - baseline_id
         - baseline_scan_id
         - observation_scan_id
@@ -1674,6 +1680,9 @@ components:
         - warnings
       properties:
         algorithm_version: { type: string }
+        detection_mode:
+          type: string
+          enum: [semantic_proposals, baseline_guided_raster]
         baseline_id: { type: string, format: uuid }
         baseline_scan_id: { type: string, format: uuid }
         observation_scan_id: { type: string, format: uuid }
@@ -1684,11 +1693,15 @@ components:
             - unchanged_overlap_fraction
             - maximum_unchanged_visual_difference
             - refinement_margin_mm
+            - maximum_unchanged_raster_difference
+            - minimum_new_raster_region_area_mm2
           properties:
             minimum_match_overlap_fraction: { type: number, minimum: 0, maximum: 1 }
             unchanged_overlap_fraction: { type: number, minimum: 0, maximum: 1 }
             maximum_unchanged_visual_difference: { type: number, minimum: 0, maximum: 1 }
             refinement_margin_mm: { type: number, minimum: 0 }
+            maximum_unchanged_raster_difference: { type: number, minimum: 0, maximum: 1 }
+            minimum_new_raster_region_area_mm2: { type: number, minimum: 0 }
         added_count: { type: integer, minimum: 0 }
         removed_count: { type: integer, minimum: 0 }
         modified_count: { type: integer, minimum: 0 }

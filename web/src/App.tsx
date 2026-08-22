@@ -574,7 +574,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
         <button disabled={!selectedScan || !hasProposals || inventoryBusy} onClick={() => void compareInventory()}>Compare to baseline</button>
       </div>
       {baseline && <p>Baseline saved from scan <strong>{baseline.scan_id.slice(0, 8)}</strong>. Future compatible scans can reuse unchanged inventory.</p>}
-      {changes && <p><strong>{changes.added_count}</strong> added, <strong>{changes.removed_count}</strong> removed, <strong>{changes.modified_count}</strong> modified, and <strong>{changes.unchanged_count}</strong> unchanged. <strong>{changes.target_regions.length}</strong> regions need refinement.</p>}
+      {changes && <p>{pretty(changes.detection_mode)} found <strong>{changes.added_count}</strong> added, <strong>{changes.removed_count}</strong> removed, <strong>{changes.modified_count}</strong> modified, and <strong>{changes.unchanged_count}</strong> unchanged. <strong>{changes.target_regions.length}</strong> regions need refinement.</p>}
       {discovery && <div className="board-discovery-result">
         <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with semantic object proposals" />
         <div><p><strong>{discovery.candidates.length}</strong> raised-surface proposals. Known fixtures are purple, boards are green, feeders are blue, and unresolved objects are amber.</p>
