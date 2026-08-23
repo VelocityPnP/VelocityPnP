@@ -7,7 +7,10 @@ pub use motion::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
-use velocitypnp_domain::{BoardDesign, BoardSide, Feeder, Job, MachineProfile, Placement, Pose};
+use velocitypnp_domain::{
+    top_side_placement_rotation_deg, BoardDesign, BoardSide, Feeder, Job, MachineProfile,
+    Placement, Pose,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightReport {
@@ -90,7 +93,12 @@ pub fn plan_job(
             let Some(surface_z_mm) = instance.surface_z_mm else {
                 continue;
             };
-            let board_place = transformed_pose(placement.pose, transform, surface_z_mm + height_mm);
+            let board_place = transformed_pose(
+                placement.pose,
+                transform,
+                surface_z_mm + height_mm,
+                instance.side,
+            );
             if !profile.bounds.contains(Pose {
                 z_mm: profile.safe_z_mm,
                 ..board_place
@@ -147,16 +155,26 @@ pub fn placement_part_key(placement: &Placement) -> String {
         .unwrap_or_else(|| format!("{}:{}", placement.package, placement.value))
 }
 
-fn transformed_pose(design: Pose, transform: velocitypnp_domain::Transform2d, z_mm: f64) -> Pose {
+fn transformed_pose(
+    design: Pose,
+    transform: velocitypnp_domain::Transform2d,
+    z_mm: f64,
+    side: BoardSide,
+) -> Pose {
     let (x_mm, y_mm) = transform.apply(design.x_mm, design.y_mm);
-    let angle = design.rotation_deg.to_radians();
-    let x_axis = transform.matrix[0] * angle.cos() + transform.matrix[1] * angle.sin();
-    let y_axis = transform.matrix[3] * angle.cos() + transform.matrix[4] * angle.sin();
+    let rotation_deg = if side == BoardSide::Top {
+        top_side_placement_rotation_deg(transform, design.rotation_deg)
+    } else {
+        let angle = design.rotation_deg.to_radians();
+        let x_axis = transform.matrix[0] * angle.cos() + transform.matrix[1] * angle.sin();
+        let y_axis = transform.matrix[3] * angle.cos() + transform.matrix[4] * angle.sin();
+        y_axis.atan2(x_axis).to_degrees()
+    };
     Pose {
         x_mm,
         y_mm,
         z_mm,
-        rotation_deg: y_axis.atan2(x_axis).to_degrees(),
+        rotation_deg,
     }
 }
 
@@ -268,9 +286,36 @@ mod tests {
             },
             Transform2d::rigid(10.0, 20.0, 90.0),
             5.0,
+            BoardSide::Top,
         );
         assert!((transformed.x_mm - 10.0).abs() < 1e-9);
         assert!((transformed.y_mm - 21.0).abs() < 1e-9);
         assert!((transformed.rotation_deg - 135.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reflected_top_side_transform_keeps_kicad_rotation_convention() {
+        let bounds = velocitypnp_domain::BoardOutlineBounds {
+            min_x_mm: 0.0,
+            max_x_mm: 20.0,
+            min_y_mm: -10.0,
+            max_y_mm: 0.0,
+        };
+        let transform = velocitypnp_domain::top_side_board_transform(bounds, [100.0, 200.0], -2.0);
+        let transformed = transformed_pose(
+            Pose {
+                x_mm: 15.0,
+                y_mm: -8.0,
+                rotation_deg: 45.0,
+                ..Pose::ORIGIN
+            },
+            transform,
+            5.0,
+            BoardSide::Top,
+        );
+        assert!((transformed.rotation_deg - 43.0).abs() < 1e-9);
+        let expected = transform.apply(15.0, -8.0);
+        assert!((transformed.x_mm - expected.0).abs() < 1e-9);
+        assert!((transformed.y_mm - expected.1).abs() < 1e-9);
     }
 }

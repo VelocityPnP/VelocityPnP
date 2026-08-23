@@ -398,6 +398,44 @@ class ClientTests(unittest.TestCase):
             "/workspace-scans/scan/artifacts/workspace-change-set.json",
         )
 
+    def test_board_registration_requires_confirmation_and_returns_report(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.start_board_registration("scan", 0, "board", "lease")
+        send.assert_not_called()
+
+        started = {
+            "registration": {"id": "registration"},
+            "operation": {"id": "operation", "status": "succeeded"},
+        }
+        completed = {"id": "registration", "passed": True}
+        with patch.object(
+            client, "_request", side_effect=[started, completed],
+        ) as send:
+            with patch.object(client, "wait"):
+                report = client.register_board(
+                    "scan",
+                    2,
+                    "board",
+                    "lease",
+                    label="FTP panel",
+                    safety_checks_confirmed=True,
+                )
+        self.assertEqual(report, completed)
+        self.assertEqual(send.call_args_list[0].args, (
+            "POST",
+            "/workspace-scans/scan/board-registrations",
+            {
+                "lease_id": "lease",
+                "candidate_index": 2,
+                "board_id": "board",
+                "label": "FTP panel",
+                "sample_count": 3,
+                "confirmed_external_safety_checks": True,
+            },
+        ))
+
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
         layered_report = {

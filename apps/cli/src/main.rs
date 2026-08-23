@@ -112,6 +112,27 @@ enum Command {
         #[arg(long)]
         baseline: Option<Uuid>,
     },
+    RegisterBoard {
+        scan: Uuid,
+        #[arg(long)]
+        candidate: u32,
+        #[arg(long)]
+        board: Uuid,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value_t = 3)]
+        samples: u32,
+        /// Confirm a fixed PCB, level nozzles, a clear envelope, and reachable
+        /// power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    BoardRegistrations,
+    BoardRegistration {
+        registration: Uuid,
+    },
     CalibrationWorkflow,
     CalibrationArtifacts,
     NewCalibration {
@@ -466,6 +487,51 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::RegisterBoard {
+            scan,
+            candidate,
+            board,
+            label,
+            lease,
+            samples,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "board registration requires --confirm-safety-checks after inspecting the fixed PCB, level nozzles, travel envelope, and power isolation"
+                );
+            }
+            let started = post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/board-registrations"),
+                Some(json!({
+                    "lease_id": lease,
+                    "candidate_index": candidate,
+                    "board_id": board,
+                    "label": label,
+                    "sample_count": samples,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            let registration_id = started["registration"]["id"]
+                .as_str()
+                .context("board registration response did not contain a registration ID")?;
+            run_operation(&client, base, started["operation"].clone()).await?;
+            get(
+                &client,
+                &format!("{base}/board-registrations/{registration_id}"),
+            )
+            .await?
+        }
+        Command::BoardRegistrations => get(&client, &format!("{base}/board-registrations")).await?,
+        Command::BoardRegistration { registration } => {
+            get(
+                &client,
+                &format!("{base}/board-registrations/{registration}"),
+            )
+            .await?
+        }
         Command::Boards => get(&client, &format!("{base}/boards")).await?,
         Command::CalibrationWorkflow => {
             get(&client, &format!("{base}/calibration/workflow")).await?
@@ -817,6 +883,32 @@ mod tests {
         assert!(matches!(
             args.command,
             Command::DiscoverBoards { scan: parsed } if parsed == scan
+        ));
+
+        let board = Uuid::new_v4();
+        let lease = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "register-board",
+            &scan.to_string(),
+            "--candidate",
+            "2",
+            "--board",
+            &board.to_string(),
+            "--lease",
+            &lease.to_string(),
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::RegisterBoard {
+                scan: parsed_scan,
+                candidate: 2,
+                board: parsed_board,
+                lease: parsed_lease,
+                ..
+            } if parsed_scan == scan && parsed_board == board && parsed_lease == lease
         ));
 
         let args =

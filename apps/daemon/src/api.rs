@@ -24,27 +24,30 @@ use uuid::Uuid;
 use velocitypnp_domain::{
     calculate_vacuum_classification_thresholds, lumen_calibration_artifacts,
     lumen_calibration_workflow, summarize_visual_homing_validation, ApproachSide,
-    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BottomCameraMappingReport,
-    CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource,
-    CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot,
-    CalibrationStepId, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
-    CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, InspectionReport,
-    InspectionStatus, InstalledGeometryCalibrationReport, InstalledPlateGeometryReport,
-    InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job, JogTarget, LinearAxis,
-    LocalXyAxisDirectionReport, LocalXyAxisEstimate, LocalXyCompensationHoldout,
-    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, MachineProfile, MachineState,
-    NozzleHeightModel, NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation,
-    OperationStatus, PlanarCameraCalibrationReport, PlanarCameraCalibrationSample,
-    PlanarCameraModel, Pose, Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
+    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BoardInstance,
+    BoardRegistrationFiducialObservation, BoardRegistrationHypothesis, BoardRegistrationRun,
+    BoardSide, BottomCameraMappingReport, CalibrationArtifactId, CalibrationArtifactPlan,
+    CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase,
+    CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId, CameraProfile,
+    CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
+    HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus,
+    InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
+    InstalledPlateRegistrationReport, Job, JogTarget, LinearAxis, LocalXyAxisDirectionReport,
+    LocalXyAxisEstimate, LocalXyCompensationHoldout, LocalXyDirectionResponseReport,
+    LocalXyDirectionResponseSample, MachineProfile, MachineState, NozzleHeightModel,
+    NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus,
+    PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
+    Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
-    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
-    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
-    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
-    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
-    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
-    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
-    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
+    WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
+    WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary, WorkspaceChangeSetReport,
+    WorkspaceChangeSetSummary, WorkspaceHeightMapSummary, WorkspaceInventoryBaseline,
+    WorkspaceMosaicLayerReport, WorkspaceParallaxSummary, WorkspaceRasterTransform,
+    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
+    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
+    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
+    WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -58,15 +61,15 @@ use velocitypnp_vision::{
     build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
     camera_sample_metrics, capture_gray_frame, capture_gray_frames, compare_workspace_observation,
     compare_workspace_reconnaissance, compose_workspace_refinements,
-    composite_workspace_camera_aperture, decode_gray_png, detect_bright_fiducial_near,
-    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
-    discover_workspace_objects, encode_gray_png, encode_rgb_png, encode_rgba_png,
-    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
-    fit_planar_camera_model, interpolate_planar_camera_model, mean_nozzle_detection,
-    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, reanalyze_workspace_seam_health,
-    render_workspace_height_mosaic_with_consistency,
+    composite_workspace_camera_aperture, decode_gray_png, detect_board_fiducial_near,
+    detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
+    detect_installed_plate_hole, discover_workspace_objects, encode_gray_png, encode_rgb_png,
+    encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    fit_planar_camera_model, fit_top_side_board_registration, interpolate_planar_camera_model,
+    mean_nozzle_detection, measure_workspace_parallax, merge_workspace_height_maps,
+    monotonic_timestamp, plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing,
+    plan_workspace_scan, query_camera_controls, reanalyze_workspace_seam_health,
+    render_board_fiducial_evidence, render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
@@ -149,6 +152,13 @@ const WORKSPACE_SEAM_PREVIEW_ARTIFACT: &str = "mosaic-seam-health.png";
 const WORKSPACE_REFINED_MOSAIC_ARTIFACT: &str = "mosaic-refined.png";
 const WORKSPACE_REFINEMENT_QUALITY_ARTIFACT: &str = "refinement-quality.json";
 const WORKSPACE_REFINEMENT_QUALITY_PREVIEW_ARTIFACT: &str = "mosaic-refined-quality.png";
+const BOARD_REGISTRATION_SEARCH_RADIUS_MM: f64 = 2.5;
+const BOARD_REGISTRATION_FIDUCIAL_DIAMETER_MM: f64 = 1.0;
+const BOARD_REGISTRATION_FIDUCIAL_DIAMETER_TOLERANCE_MM: f64 = 0.45;
+const BOARD_REGISTRATION_MAX_CORRECTION_MM: f64 = 2.5;
+const BOARD_REGISTRATION_MAX_ROTATION_ERROR_DEG: f64 = 5.0;
+const BOARD_REGISTRATION_MAX_RESIDUAL_MM: f64 = 0.15;
+const BOARD_REGISTRATION_APPROACH_MM: f64 = 1.0;
 
 struct WorkspaceHeightArtifacts {
     map: WorkspaceHeightMap,
@@ -178,7 +188,48 @@ impl AppState {
         };
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
+        state.recover_interrupted_board_registrations();
         state
+    }
+
+    fn recover_interrupted_board_registrations(&self) {
+        let Ok(runs) = self.store.list_board_registrations() else {
+            tracing::error!("failed to inspect board registration runs during startup");
+            return;
+        };
+        for mut run in runs.into_iter().filter(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        }) {
+            let message = "daemon restarted before the board registration completed";
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.into());
+            run.updated_at = Utc::now();
+            if let Err(error) = self.store.put_board_registration(&run) {
+                tracing::error!(%error, registration_id = %run.id, "failed to recover board registration");
+            }
+            match self.store.get_operation(run.operation_id) {
+                Ok(Some(mut operation))
+                    if matches!(
+                        operation.status,
+                        OperationStatus::Pending | OperationStatus::Running
+                    ) =>
+                {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some(message.into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(%error, operation_id = %operation.id, "failed to recover board registration operation");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, "failed to inspect board registration operation")
+                }
+            }
+        }
     }
 
     fn recover_interrupted_calibration_runs(&self) {
@@ -365,6 +416,19 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspace-scans/{id}/change-set",
             post(build_workspace_change_set),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/board-registrations",
+            post(start_board_registration),
+        )
+        .route("/api/v1/board-registrations", get(list_board_registrations))
+        .route(
+            "/api/v1/board-registrations/{id}",
+            get(get_board_registration),
+        )
+        .route(
+            "/api/v1/board-registrations/{id}/artifacts/{name}",
+            get(get_board_registration_artifact),
         )
         .route(
             "/api/v1/workspace-inventory/baseline",
@@ -1236,6 +1300,7 @@ async fn start_workspace_scan(
         .ok_or_else(|| ApiError::bad_request("workspace scan requires a known machine pose"))?;
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
     let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
@@ -1325,6 +1390,27 @@ fn ensure_no_active_workspace_scans(state: &AppState) -> ApiResult<()> {
         return Err(ApiError::bad_request(format!(
             "workspace scan {} is already active",
             scan.id
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_no_active_board_registrations(state: &AppState) -> ApiResult<()> {
+    let active = state
+        .store
+        .list_board_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|registration| {
+            matches!(
+                registration.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        });
+    if let Some(registration) = active {
+        return Err(ApiError::bad_request(format!(
+            "board registration {} is already active",
+            registration.id
         )));
     }
     Ok(())
@@ -4071,6 +4157,7 @@ async fn start_workspace_refinement_batch(
         .ok_or_else(|| ApiError::bad_request("workspace refinement requires a known pose"))?;
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
     let parent = state
         .store
         .get_workspace_scan(parent_scan_id)
@@ -4749,6 +4836,697 @@ fn load_workspace_object_report(
         )));
     }
     Ok(report)
+}
+
+#[derive(Debug, Deserialize)]
+struct StartBoardRegistrationRequest {
+    lease_id: Uuid,
+    candidate_index: u32,
+    board_id: Uuid,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default = "default_board_registration_sample_count")]
+    sample_count: u32,
+    confirmed_external_safety_checks: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StartBoardRegistrationResponse {
+    registration: BoardRegistrationRun,
+    operation: Operation,
+}
+
+fn default_board_registration_sample_count() -> u32 {
+    3
+}
+
+async fn start_board_registration(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+    Json(body): Json<StartBoardRegistrationRequest>,
+) -> ApiResult<(StatusCode, Json<StartBoardRegistrationResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "board registration requires confirmation that the PCB is fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    if !(3..=5).contains(&body.sample_count) {
+        return Err(ApiError::bad_request(
+            "board registration sample_count must be between 3 and 5",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+        return Err(ApiError::bad_request(
+            "board registration requires a homed ready machine",
+        ));
+    }
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    let scan = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded || scan.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "board registration requires a successful scan from the active machine profile",
+        ));
+    }
+    let report = load_workspace_object_report(&state, &scan)?;
+    let candidate = report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.candidate_index == body.candidate_index)
+        .ok_or_else(|| ApiError::bad_request("workspace candidate was not found"))?;
+    let design_match = candidate
+        .design_matches
+        .iter()
+        .find(|design_match| design_match.board_id == body.board_id)
+        .filter(|design_match| {
+            design_match.registration_method
+                == velocitypnp_domain::WorkspaceBoardRegistrationMethod::VisualOutline
+        })
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "board registration requires a visual-outline match for the selected design",
+            )
+        })?;
+    let seed_center_x_mm = design_match
+        .center_x_mm
+        .ok_or_else(|| ApiError::bad_request("board match has no visual center X"))?;
+    let seed_center_y_mm = design_match
+        .center_y_mm
+        .ok_or_else(|| ApiError::bad_request("board match has no visual center Y"))?;
+    let board = state
+        .store
+        .get_board(body.board_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("board design not found"))?;
+    if board.outline_bounds.is_none() {
+        return Err(ApiError::bad_request(
+            "board registration requires usable Edge.Cuts bounds",
+        ));
+    }
+    let fiducial_count = board
+        .placements
+        .iter()
+        .filter(|placement| {
+            placement.enabled && placement.fiducial && placement.side == BoardSide::Top
+        })
+        .count();
+    if fiducial_count < 3 {
+        return Err(ApiError::bad_request(
+            "automatic board registration requires at least three enabled top-side fiducials",
+        ));
+    }
+    let (_, camera_model) = load_workspace_camera_model(&state, scan.calibration_id)?;
+    let camera_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let operation = Operation::pending("vision.board_registration");
+    let now = Utc::now();
+    let registration = BoardRegistrationRun {
+        id: Uuid::new_v4(),
+        operation_id: operation.id,
+        profile_id: state.profile.id.clone(),
+        calibration_id: scan.calibration_id,
+        source_scan_id: scan.id,
+        source_candidate_index: candidate.candidate_index,
+        board_id: board.id,
+        label: body.label.unwrap_or_else(|| board.name.clone()),
+        side: BoardSide::Top,
+        status: OperationStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        sample_count: body.sample_count,
+        seed_center_x_mm,
+        seed_center_y_mm,
+        seed_rotation_deg: design_match.rotation_deg,
+        hypotheses: Vec::new(),
+        selected_rotation_deg: None,
+        fit_residuals: None,
+        design_to_machine: None,
+        board_instance: None,
+        passed: false,
+        message: None,
+    };
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_board_registration(&registration)
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartBoardRegistrationResponse {
+        registration: registration.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_board_registration_task(
+            task_state,
+            registration,
+            board,
+            design_match,
+            camera_model,
+            camera_profile,
+            camera_path,
+            visual,
+            body.lease_id,
+        ),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_board_registration_task(
+    state: AppState,
+    mut run: BoardRegistrationRun,
+    board: BoardDesign,
+    design_match: WorkspaceBoardDesignMatch,
+    camera_model: PlanarCameraModel,
+    camera_profile: CameraProfile,
+    camera_path: String,
+    visual: VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    run.status = OperationStatus::Running;
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_board_registration(&run)
+        .map_err(|error| error.to_string())?;
+    let result = execute_board_registration(
+        &state,
+        &mut run,
+        &board,
+        &design_match,
+        &camera_model,
+        &camera_profile,
+        &camera_path,
+        &visual,
+        lease_id,
+    )
+    .await;
+    match result {
+        Ok(message) => {
+            run.status = OperationStatus::Succeeded;
+            run.passed = true;
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_board_registration(&run)
+                .map_err(|error| error.to_string())?;
+            Ok(Some(message))
+        }
+        Err(message) => {
+            run.status = OperationStatus::Failed;
+            run.passed = false;
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            if let Err(error) = state.store.put_board_registration(&run) {
+                tracing::error!(%error, registration_id = %run.id, "failed to persist rejected board registration");
+            }
+            Err(message)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_board_registration(
+    state: &AppState,
+    run: &mut BoardRegistrationRun,
+    board: &BoardDesign,
+    design_match: &WorkspaceBoardDesignMatch,
+    camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<String, String> {
+    let _motion_guard = state.workspace_scan_motion_lock.lock().await;
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "visual home before board registration failed: {}",
+            error.message
+        )
+    })?;
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let result = measure_board_registration(
+        state,
+        run,
+        board,
+        design_match,
+        camera_model,
+        camera_profile,
+        camera_path,
+        visual,
+        lease_id,
+    )
+    .await;
+    let return_result = state
+        .machine
+        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
+        .await;
+    let lights_result = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = return_result {
+        return Err(format!("board registration return move failed: {error}"));
+    }
+    if let Err(error) = lights_result {
+        return Err(format!("board registration light cleanup failed: {error}"));
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_board_registration(
+    state: &AppState,
+    run: &mut BoardRegistrationRun,
+    board: &BoardDesign,
+    design_match: &WorkspaceBoardDesignMatch,
+    camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<String, String> {
+    let bounds = board
+        .outline_bounds
+        .ok_or_else(|| "board has no Edge.Cuts bounds".to_string())?;
+    let mut fiducials = board
+        .placements
+        .iter()
+        .filter(|placement| {
+            placement.enabled && placement.fiducial && placement.side == BoardSide::Top
+        })
+        .collect::<Vec<_>>();
+    fiducials.sort_by(|left, right| left.reference.cmp(&right.reference));
+    let hypothesis_count = if design_match.orientation_ambiguous {
+        4
+    } else {
+        1
+    };
+    for orientation_index in 0..hypothesis_count {
+        let seed_rotation_deg =
+            normalize_angle_deg(design_match.rotation_deg + 90.0 * f64::from(orientation_index));
+        let seed_transform = velocitypnp_domain::top_side_board_transform(
+            bounds,
+            [run.seed_center_x_mm, run.seed_center_y_mm],
+            seed_rotation_deg,
+        );
+        let mut hypothesis = BoardRegistrationHypothesis {
+            orientation_index,
+            seed_rotation_deg,
+            observations: Vec::new(),
+            rejection_reason: None,
+        };
+        for fiducial in &fiducials {
+            match observe_board_fiducial(
+                state,
+                run.id,
+                orientation_index,
+                fiducial,
+                seed_transform,
+                camera_model,
+                camera_profile,
+                camera_path,
+                visual,
+                lease_id,
+                run.sample_count,
+            )
+            .await
+            {
+                Ok(observation) => hypothesis.observations.push(observation),
+                Err(message) => {
+                    hypothesis.rejection_reason = Some(message);
+                    break;
+                }
+            }
+        }
+        if hypothesis.rejection_reason.is_none() {
+            let design_points = hypothesis
+                .observations
+                .iter()
+                .map(|item| (item.design_x_mm, item.design_y_mm))
+                .collect::<Vec<_>>();
+            let measured_points = hypothesis
+                .observations
+                .iter()
+                .map(|item| (item.measured_x_mm, item.measured_y_mm))
+                .collect::<Vec<_>>();
+            let fit = fit_top_side_board_registration(bounds, &design_points, &measured_points)
+                .ok_or_else(|| "board fiducials did not produce a rigid transform".to_string())?;
+            let rotation_error = angle_difference_deg(fit.rotation_deg, seed_rotation_deg).abs();
+            if fit.residuals.max_mm > BOARD_REGISTRATION_MAX_RESIDUAL_MM {
+                hypothesis.rejection_reason = Some(format!(
+                    "fiducial fit residual {:.3} mm exceeds {:.3} mm",
+                    fit.residuals.max_mm, BOARD_REGISTRATION_MAX_RESIDUAL_MM,
+                ));
+            } else if rotation_error > BOARD_REGISTRATION_MAX_ROTATION_ERROR_DEG {
+                hypothesis.rejection_reason = Some(format!(
+                    "fitted rotation differs from the seed by {rotation_error:.3} degrees",
+                ));
+            } else if !board_transform_within_machine_bounds(
+                &state.profile,
+                bounds,
+                fit.design_to_machine,
+            ) {
+                hypothesis.rejection_reason =
+                    Some("registered board outline is outside machine bounds".into());
+            } else {
+                let board_instance = BoardInstance {
+                    id: Uuid::new_v4(),
+                    board_id: board.id,
+                    label: run.label.clone(),
+                    side: BoardSide::Top,
+                    design_to_machine: Some(fit.design_to_machine),
+                    surface_z_mm: None,
+                };
+                run.selected_rotation_deg = Some(fit.rotation_deg);
+                run.fit_residuals = Some(fit.residuals);
+                run.design_to_machine = Some(fit.design_to_machine);
+                run.board_instance = Some(board_instance);
+                run.hypotheses.push(hypothesis);
+                run.updated_at = Utc::now();
+                state
+                    .store
+                    .put_board_registration(run)
+                    .map_err(|error| error.to_string())?;
+                return Ok(format!(
+                    "Registered {} from {} fiducials at {:.3} degrees with {:.3} mm maximum residual; board surface Z remains unmeasured",
+                    board.name,
+                    design_points.len(),
+                    fit.rotation_deg,
+                    fit.residuals.max_mm,
+                ));
+            }
+        }
+        run.hypotheses.push(hypothesis);
+        run.updated_at = Utc::now();
+        state
+            .store
+            .put_board_registration(run)
+            .map_err(|error| error.to_string())?;
+    }
+    let reasons = run
+        .hypotheses
+        .iter()
+        .filter_map(|hypothesis| hypothesis.rejection_reason.as_deref())
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!(
+        "no board orientation passed local fiducial verification: {reasons}"
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn observe_board_fiducial(
+    state: &AppState,
+    registration_id: Uuid,
+    orientation_index: u32,
+    fiducial: &velocitypnp_domain::Placement,
+    seed_transform: velocitypnp_domain::Transform2d,
+    camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    lease_id: Uuid,
+    sample_count: u32,
+) -> Result<BoardRegistrationFiducialObservation, String> {
+    let predicted = seed_transform.apply(fiducial.pose.x_mm, fiducial.pose.y_mm);
+    let target = Pose {
+        x_mm: predicted.0,
+        y_mm: predicted.1,
+        z_mm: state.profile.safe_z_mm,
+        rotation_deg: 0.0,
+    };
+    if !state.profile.bounds.contains(target) {
+        return Err(format!(
+            "predicted {} position is outside machine bounds",
+            fiducial.reference
+        ));
+    }
+    state
+        .machine
+        .renew_lease(lease_id, 900)
+        .await
+        .map_err(|error| error.to_string())?;
+    let measured_pose = jog_board_registration_target(state, lease_id, target, visual).await?;
+    let scale_mm_per_px = camera_model
+        .local_mm_per_pixel(camera_model.center_x_px, camera_model.center_y_px)
+        .ok_or_else(|| "top-camera model has no local center scale".to_string())?;
+    let frames = capture_profiled_frames(state, camera_profile, camera_path, sample_count)
+        .await
+        .map_err(|error| error.message)?;
+    let expected = [camera_model.center_x_px, camera_model.center_y_px];
+    let search_radius_px = BOARD_REGISTRATION_SEARCH_RADIUS_MM / scale_mm_per_px;
+    let expected_diameter_px = BOARD_REGISTRATION_FIDUCIAL_DIAMETER_MM / scale_mm_per_px;
+    let diameter_tolerance_px = BOARD_REGISTRATION_FIDUCIAL_DIAMETER_TOLERANCE_MM / scale_mm_per_px;
+    let detections = frames
+        .iter()
+        .filter_map(|frame| {
+            detect_board_fiducial_near(
+                frame,
+                expected[0],
+                expected[1],
+                search_radius_px,
+                expected_diameter_px,
+                diameter_tolerance_px,
+            )
+        })
+        .collect::<Vec<_>>();
+    let required_detections = (2 * sample_count).div_ceil(3);
+    let detection = (detections.len() >= required_detections as usize)
+        .then(|| mean_fiducial_detection(&detections))
+        .flatten();
+    let artifact_name = format!(
+        "hypothesis-{orientation_index}-{}.png",
+        fiducial
+            .reference
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>(),
+    );
+    let evidence = render_board_fiducial_evidence(
+        frames
+            .last()
+            .ok_or_else(|| "top camera returned no board-registration frames".to_string())?,
+        expected,
+        detection,
+    );
+    let encoded = encode_rgb_png(&evidence).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_board_registration_artifact(registration_id, &artifact_name, "image/png", &encoded)
+        .map_err(|error| error.to_string())?;
+    let detection = detection.ok_or_else(|| {
+        format!(
+            "{} was detected in {} of {} frames",
+            fiducial.reference,
+            detections.len(),
+            sample_count,
+        )
+    })?;
+    let maximum_jitter_px = detections
+        .iter()
+        .map(|sample| (sample.x_px - detection.x_px).hypot(sample.y_px - detection.y_px))
+        .fold(0.0_f64, f64::max);
+    if maximum_jitter_px * scale_mm_per_px > BOARD_REGISTRATION_MAX_RESIDUAL_MM {
+        return Err(format!(
+            "{} center jitter {:.3} mm exceeds {:.3} mm",
+            fiducial.reference,
+            maximum_jitter_px * scale_mm_per_px,
+            BOARD_REGISTRATION_MAX_RESIDUAL_MM,
+        ));
+    }
+    let correction = camera_model
+        .correction_at(detection.x_px, detection.y_px)
+        .ok_or_else(|| {
+            format!(
+                "{} is outside the calibrated image region",
+                fiducial.reference
+            )
+        })?;
+    if correction[0].hypot(correction[1]) > BOARD_REGISTRATION_MAX_CORRECTION_MM {
+        return Err(format!(
+            "{} needs {:.3} mm correction, above the {:.3} mm seed bound",
+            fiducial.reference,
+            correction[0].hypot(correction[1]),
+            BOARD_REGISTRATION_MAX_CORRECTION_MM,
+        ));
+    }
+    Ok(BoardRegistrationFiducialObservation {
+        reference: fiducial.reference.clone(),
+        design_x_mm: fiducial.pose.x_mm,
+        design_y_mm: fiducial.pose.y_mm,
+        predicted_x_mm: predicted.0,
+        predicted_y_mm: predicted.1,
+        observed_x_px: detection.x_px,
+        observed_y_px: detection.y_px,
+        measured_x_mm: measured_pose.x_mm + correction[0],
+        measured_y_mm: measured_pose.y_mm + correction[1],
+        diameter_px: detection.diameter_px,
+        confidence: detection.confidence,
+        artifact_name,
+    })
+}
+
+async fn jog_board_registration_target(
+    state: &AppState,
+    lease_id: Uuid,
+    target: Pose,
+    visual: &VisualHomingProfile,
+) -> Result<Pose, String> {
+    let approach = Pose {
+        x_mm: target.x_mm - BOARD_REGISTRATION_APPROACH_MM,
+        y_mm: target.y_mm - BOARD_REGISTRATION_APPROACH_MM,
+        ..target
+    };
+    if state.profile.bounds.contains(approach) {
+        state
+            .machine
+            .jog(
+                lease_id,
+                JogTarget {
+                    x_mm: approach.x_mm,
+                    y_mm: approach.y_mm,
+                    z_mm: approach.z_mm,
+                    rotation_deg: None,
+                },
+                visual.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: target.x_mm,
+                y_mm: target.y_mm,
+                z_mm: target.z_mm,
+                rotation_deg: None,
+            },
+            visual.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn board_transform_within_machine_bounds(
+    profile: &MachineProfile,
+    bounds: velocitypnp_domain::BoardOutlineBounds,
+    transform: velocitypnp_domain::Transform2d,
+) -> bool {
+    [
+        (bounds.min_x_mm, bounds.min_y_mm),
+        (bounds.max_x_mm, bounds.min_y_mm),
+        (bounds.max_x_mm, bounds.max_y_mm),
+        (bounds.min_x_mm, bounds.max_y_mm),
+    ]
+    .into_iter()
+    .map(|point| transform.apply(point.0, point.1))
+    .all(|point| {
+        profile.bounds.contains(Pose {
+            x_mm: point.0,
+            y_mm: point.1,
+            z_mm: profile.safe_z_mm,
+            rotation_deg: 0.0,
+        })
+    })
+}
+
+fn normalize_angle_deg(angle_deg: f64) -> f64 {
+    (angle_deg + 180.0).rem_euclid(360.0) - 180.0
+}
+
+fn angle_difference_deg(first_deg: f64, second_deg: f64) -> f64 {
+    normalize_angle_deg(first_deg - second_deg)
+}
+
+async fn list_board_registrations(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "registrations": state
+            .store
+            .list_board_registrations()
+            .map_err(ApiError::internal)?,
+    })))
+}
+
+async fn get_board_registration(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<BoardRegistrationRun>> {
+    state
+        .store
+        .get_board_registration(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("board registration not found"))
+}
+
+async fn get_board_registration_artifact(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    let (media_type, data) = state
+        .store
+        .get_board_registration_artifact(id, &name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("board registration artifact not found"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(data))
+        .map_err(ApiError::internal)
 }
 
 fn load_workspace_observed_objects(
@@ -17363,6 +18141,44 @@ mod tests {
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("travel envelope"));
         assert!(!message.contains("tooling"));
+    }
+
+    #[tokio::test]
+    async fn board_registration_requires_external_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspace-scans/{}/board-registrations",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "candidate_index": 0,
+                            "board_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("PCB is fixed"));
+        assert!(message.contains("travel envelope"));
+    }
+
+    #[test]
+    fn board_registration_angle_difference_wraps_at_180_degrees() {
+        assert!((angle_difference_deg(-179.0, 179.0) - 2.0).abs() < 1e-9);
+        assert!((angle_difference_deg(179.0, -179.0) + 2.0).abs() < 1e-9);
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use crate::{Pose, Transform2d};
+use crate::{OperationStatus, Pose, Residuals, Transform2d};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -44,7 +44,7 @@ pub struct BoardOutlineBounds {
     pub max_y_mm: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardInstance {
     pub id: Uuid,
     pub board_id: Uuid,
@@ -52,6 +52,113 @@ pub struct BoardInstance {
     pub side: BoardSide,
     pub design_to_machine: Option<Transform2d>,
     pub surface_z_mm: Option<f64>,
+}
+
+/// One measured design fiducial used to register a physical board.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardRegistrationFiducialObservation {
+    pub reference: String,
+    pub design_x_mm: f64,
+    pub design_y_mm: f64,
+    pub predicted_x_mm: f64,
+    pub predicted_y_mm: f64,
+    pub observed_x_px: f64,
+    pub observed_y_px: f64,
+    pub measured_x_mm: f64,
+    pub measured_y_mm: f64,
+    pub diameter_px: f64,
+    pub confidence: f64,
+    pub artifact_name: String,
+}
+
+/// Evidence retained for one square-board orientation hypothesis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardRegistrationHypothesis {
+    pub orientation_index: u32,
+    pub seed_rotation_deg: f64,
+    #[serde(default)]
+    pub observations: Vec<BoardRegistrationFiducialObservation>,
+    #[serde(default)]
+    pub rejection_reason: Option<String>,
+}
+
+/// Persistent state and evidence for one automatic board-registration run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardRegistrationRun {
+    pub id: Uuid,
+    pub operation_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub source_scan_id: Uuid,
+    pub source_candidate_index: u32,
+    pub board_id: Uuid,
+    pub label: String,
+    pub side: BoardSide,
+    pub status: OperationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub sample_count: u32,
+    pub seed_center_x_mm: f64,
+    pub seed_center_y_mm: f64,
+    pub seed_rotation_deg: f64,
+    #[serde(default)]
+    pub hypotheses: Vec<BoardRegistrationHypothesis>,
+    #[serde(default)]
+    pub selected_rotation_deg: Option<f64>,
+    #[serde(default)]
+    pub fit_residuals: Option<Residuals>,
+    #[serde(default)]
+    pub design_to_machine: Option<Transform2d>,
+    #[serde(default)]
+    pub board_instance: Option<BoardInstance>,
+    #[serde(default)]
+    pub passed: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Builds the top-side design transform used by previews, registration, and
+/// job planning. KiCad Y increases toward the bottom of the board view, so
+/// this transform includes a reflection about the Edge.Cuts center.
+pub fn top_side_board_transform(
+    bounds: BoardOutlineBounds,
+    center_machine_mm: [f64; 2],
+    rotation_deg: f64,
+) -> Transform2d {
+    let center_x = 0.5 * (bounds.min_x_mm + bounds.max_x_mm);
+    let center_y = 0.5 * (bounds.min_y_mm + bounds.max_y_mm);
+    let angle = rotation_deg.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    Transform2d {
+        matrix: [
+            cos,
+            sin,
+            center_machine_mm[0] - cos * center_x - sin * center_y,
+            sin,
+            -cos,
+            center_machine_mm[1] - sin * center_x + cos * center_y,
+            0.0,
+            0.0,
+            1.0,
+        ],
+    }
+}
+
+/// Reflects a top-side design point into the right-handed registration frame.
+pub fn top_side_registration_point(bounds: BoardOutlineBounds, x_mm: f64, y_mm: f64) -> (f64, f64) {
+    let center_y = 0.5 * (bounds.min_y_mm + bounds.max_y_mm);
+    (x_mm, 2.0 * center_y - y_mm)
+}
+
+/// Returns the physical top-side footprint angle for a registered board.
+pub fn top_side_placement_rotation_deg(
+    design_to_machine: Transform2d,
+    placement_rotation_deg: f64,
+) -> f64 {
+    design_to_machine.matrix[3]
+        .atan2(design_to_machine.matrix[0])
+        .to_degrees()
+        + placement_rotation_deg
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

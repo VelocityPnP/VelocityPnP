@@ -1,6 +1,6 @@
 import type {
-  AutomatedCalibrationRun, BoardDesign, CalibrationArtifactId, CalibrationArtifactPlan,
-  CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
+  AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
+  CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
   Operation, SensorReading, VisualHomingResult, WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
@@ -193,6 +193,26 @@ export const api = {
     jsonPost<WorkspaceBoardDiscoveryReport>(
       `/workspace-scans/${scanId}/object-proposals`,
     ),
+  startBoardRegistration: (
+    scanId: string, candidateIndex: number, boardId: string, leaseId: string,
+    label?: string,
+  ) => jsonPost<{ registration: BoardRegistrationRun; operation: Operation }>(
+    `/workspace-scans/${scanId}/board-registrations`,
+    {
+      lease_id: leaseId,
+      candidate_index: candidateIndex,
+      board_id: boardId,
+      label,
+      sample_count: 3,
+      confirmed_external_safety_checks: true,
+    },
+  ),
+  boardRegistrations: async () =>
+    (await request<{ registrations: BoardRegistrationRun[] }>(
+      "/board-registrations",
+    )).registrations,
+  boardRegistration: (registrationId: string) =>
+    request<BoardRegistrationRun>(`/board-registrations/${registrationId}`),
   setWorkspaceInventoryBaseline: (scanId: string) =>
     jsonPost<WorkspaceInventoryBaseline>(
       `/workspace-scans/${scanId}/inventory-baseline`,

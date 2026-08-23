@@ -577,6 +577,66 @@ export interface BoardDesign {
   warnings: string[];
 }
 
+export interface BoardInstance {
+  id: string;
+  board_id: string;
+  label: string;
+  side: "top" | "bottom";
+  design_to_machine: { matrix: number[] } | null;
+  surface_z_mm: number | null;
+}
+
+export interface BoardRegistrationFiducialObservation {
+  reference: string;
+  design_x_mm: number;
+  design_y_mm: number;
+  predicted_x_mm: number;
+  predicted_y_mm: number;
+  observed_x_px: number;
+  observed_y_px: number;
+  measured_x_mm: number;
+  measured_y_mm: number;
+  diameter_px: number;
+  confidence: number;
+  artifact_name: string;
+}
+
+export interface BoardRegistrationRun {
+  id: string;
+  operation_id: string;
+  profile_id: string;
+  calibration_id: string;
+  source_scan_id: string;
+  source_candidate_index: number;
+  board_id: string;
+  label: string;
+  side: "top" | "bottom";
+  status: Operation["status"];
+  created_at: string;
+  updated_at: string;
+  sample_count: number;
+  seed_center_x_mm: number;
+  seed_center_y_mm: number;
+  seed_rotation_deg: number;
+  hypotheses: Array<{
+    orientation_index: number;
+    seed_rotation_deg: number;
+    observations: BoardRegistrationFiducialObservation[];
+    rejection_reason: string | null;
+  }>;
+  selected_rotation_deg: number | null;
+  fit_residuals: {
+    sample_count: number;
+    rms_mm: number;
+    p95_mm: number;
+    max_mm: number;
+  } | null;
+  design_to_machine: { matrix: number[] } | null;
+  board_instance: BoardInstance | null;
+  passed: boolean;
+  message: string | null;
+}
+
 export interface WorkspaceBoardDesignMatch {
   board_id: string;
   board_name: string;

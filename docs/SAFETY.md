@@ -13,6 +13,12 @@ Before homing or motion:
 6. Before runout calibration, make sure each nozzle tube is fully seated,
    follows its normal routing, and is not kinked or caught on another cable.
 
+Automatic board registration also requires the PCB to be fixed. The runner
+performs visual-refined homing before it visits any PCB feature. All board
+moves stay at safe Z, omit nozzle rotation, use the profile feed limit, and
+return to the visual-home seed. A failed fiducial hypothesis does not create a
+board instance.
+
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the
 attached firmware was observed moving X/Y toward zero before homing Z, which

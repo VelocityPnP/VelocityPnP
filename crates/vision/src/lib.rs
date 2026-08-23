@@ -2,6 +2,7 @@
 //! Linux camera capture remains separate so non-hardware tools do not need a
 //! V4L2 device.
 
+mod board_registration;
 mod opencv_backend;
 mod workspace_board_discovery;
 mod workspace_features;
@@ -21,6 +22,10 @@ mod v4l2_capture;
 #[cfg(all(feature = "native-v4l2", target_os = "linux"))]
 pub use v4l2_capture::*;
 
+pub use board_registration::{
+    detect_board_fiducial_near, fit_top_side_board_registration, render_board_fiducial_evidence,
+    BoardRegistrationFit,
+};
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use workspace_board_discovery::{
     build_workspace_discovery_context, discover_workspace_boards, discover_workspace_objects,

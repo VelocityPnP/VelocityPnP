@@ -120,11 +120,14 @@ The project is organized by measurable gates rather than calendar estimates.
   change-driven refinement regions
 - [x] Add baseline-guided raw reconnaissance comparison so changes can select
   refinements before a new height map exists
+- [x] Add scan-seeded automatic top-side board registration with square-board
+  orientation hypotheses, local KiCad fiducial measurements, evidence images,
+  and a residual-gated design-to-machine transform
 - [ ] Tune inventory change thresholds with unchanged scans and deliberate
   board and feeder changes on attached hardware
 - [ ] Add learned semantic segmentation with versioned datasets, calibrated
   confidence, and machine/configuration holdout tests
-- [ ] Add package-template pose comparison and live fiducial verification
+- [ ] Add package-template pose comparison after live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles

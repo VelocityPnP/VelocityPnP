@@ -296,6 +296,80 @@ class Client:
             {},
         )
 
+    def start_board_registration(
+        self,
+        scan_id: str | uuid.UUID,
+        candidate_index: int,
+        board_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        label: str | None = None,
+        sample_count: int = 3,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "board registration requires explicit confirmation that the PCB "
+                "is fixed, both nozzles are level, the envelope is clear, and "
+                "power isolation is reachable"
+            )
+        if candidate_index < 0:
+            raise ValueError("candidate_index must not be negative")
+        if not 3 <= sample_count <= 5:
+            raise ValueError("sample_count must be between 3 and 5")
+        return self._request(
+            "POST",
+            f"/workspace-scans/{scan_id}/board-registrations",
+            {
+                "lease_id": str(lease_id),
+                "candidate_index": candidate_index,
+                "board_id": str(board_id),
+                "label": label,
+                "sample_count": sample_count,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+
+    def register_board(
+        self,
+        scan_id: str | uuid.UUID,
+        candidate_index: int,
+        board_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        label: str | None = None,
+        sample_count: int = 3,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        started = self.start_board_registration(
+            scan_id,
+            candidate_index,
+            board_id,
+            lease_id,
+            label=label,
+            sample_count=sample_count,
+            safety_checks_confirmed=safety_checks_confirmed,
+        )
+        self.wait(started["operation"])
+        return self.board_registration(started["registration"]["id"])
+
+    def board_registrations(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/board-registrations")["registrations"]
+
+    def board_registration(
+        self, registration_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request("GET", f"/board-registrations/{registration_id}")
+
+    def board_registration_artifact(
+        self, registration_id: str | uuid.UUID, artifact_name: str,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/board-registrations/{registration_id}/artifacts/{artifact_name}",
+            "image/png",
+        )
+
     def set_workspace_inventory_baseline(
         self, scan_id: str | uuid.UUID,
     ) -> dict[str, Any]:

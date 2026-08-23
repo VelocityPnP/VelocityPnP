@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    AutomatedCalibrationRun, BoardDesign, CalibrationSnapshot, CameraProfile, CameraRole, Feeder,
-    InspectionReport, Job, MachineEvent, Operation, WorkspaceInventoryBaseline,
+    AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationSnapshot, CameraProfile,
+    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, WorkspaceInventoryBaseline,
     WorkspaceScanReport,
 };
 
@@ -80,6 +80,16 @@ impl Store {
             );
             INSERT OR IGNORE INTO schema_version(version, applied_at)
                 VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            CREATE TABLE IF NOT EXISTS board_registration_artifacts (
+                registration_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(registration_id, name)
+            );
+            INSERT OR IGNORE INTO schema_version(version, applied_at)
+                VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             "#,
         )?;
         Ok(())
@@ -95,6 +105,63 @@ impl Store {
 
     pub fn get_board(&self, id: Uuid) -> Result<Option<BoardDesign>> {
         self.get("board", id)
+    }
+
+    pub fn put_board_registration(&self, registration: &BoardRegistrationRun) -> Result<()> {
+        self.put("board_registration", registration.id, registration)
+    }
+
+    pub fn list_board_registrations(&self) -> Result<Vec<BoardRegistrationRun>> {
+        self.list("board_registration")
+    }
+
+    pub fn get_board_registration(&self, id: Uuid) -> Result<Option<BoardRegistrationRun>> {
+        self.get("board_registration", id)
+    }
+
+    pub fn put_board_registration_artifact(
+        &self,
+        registration_id: Uuid,
+        name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !name.is_empty(),
+            "board registration artifact name is empty"
+        );
+        anyhow::ensure!(
+            !media_type.is_empty(),
+            "board registration artifact media type is empty"
+        );
+        self.connection.lock().execute(
+            r#"INSERT INTO board_registration_artifacts(
+                 registration_id, name, media_type, data, created_at
+               ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ON CONFLICT(registration_id, name) DO UPDATE SET
+                 media_type = excluded.media_type,
+                 data = excluded.data,
+                 created_at = excluded.created_at"#,
+            params![registration_id.to_string(), name, media_type, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_board_registration_artifact(
+        &self,
+        registration_id: Uuid,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT media_type, data FROM board_registration_artifacts \
+                 WHERE registration_id = ?1 AND name = ?2",
+                params![registration_id.to_string(), name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn put_operation(&self, operation: &Operation) -> Result<()> {
@@ -494,6 +561,27 @@ mod tests {
 
         assert_eq!(
             store.get_calibration_artifact(run_id, "view.png").unwrap(),
+            Some(("image/png".into(), data.to_vec()))
+        );
+    }
+
+    #[test]
+    fn board_registration_artifact_round_trip_retains_evidence() {
+        let store = Store::memory().unwrap();
+        let registration_id = Uuid::new_v4();
+        let data = [9, 8, 7, 6];
+        store
+            .put_board_registration_artifact(
+                registration_id,
+                "hypothesis-0-fid1.png",
+                "image/png",
+                &data,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_board_registration_artifact(registration_id, "hypothesis-0-fid1.png")
+                .unwrap(),
             Some(("image/png".into(), data.to_vec()))
         );
     }

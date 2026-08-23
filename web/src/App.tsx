@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, waitForOperation } from "./api";
 import type {
-  AutomatedCalibrationRun, BoardDesign, CalibrationArtifactPlan, CalibrationSnapshot,
-  CalibrationStep, Device, MachineEvent, MachineStatus, Pose, SensorReading,
-  VisualHomingResult, WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport,
+  AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
+  CalibrationSnapshot, CalibrationStep, Device, MachineEvent, MachineStatus, Pose,
+  SensorReading, VisualHomingResult, WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
 import "./styles.css";
@@ -486,6 +486,8 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [baseline, setBaseline] = useState<WorkspaceInventoryBaseline | null>(null);
   const [changes, setChanges] = useState<WorkspaceChangeSetReport | null>(null);
+  const [registration, setRegistration] = useState<BoardRegistrationRun | null>(null);
+  const [registrationBusy, setRegistrationBusy] = useState(false);
   const [pcb, setPcb] = useState<File | null>(null);
   const [bom, setBom] = useState<File | null>(null);
   const load = useCallback(async () => {
@@ -549,6 +551,28 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       setInventoryBusy(false);
     }
   };
+  const registerBoard = async (candidate: WorkspaceBoardCandidate, boardId: string) => {
+    if (!selectedScan) return;
+    if (!window.confirm(
+      "Register this PCB from its KiCad fiducials? Confirm the PCB is fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable. The machine will visual-home, then move the top camera over each predicted board fiducial.",
+    )) return;
+    setRegistrationBusy(true); setError(null); setRegistration(null);
+    try {
+      const machine = await api.status();
+      const lease = machine.control_lease
+        ? await api.renewLease(machine.control_lease.id, 900)
+        : await api.lease("VelocityPnP board registration", 900);
+      const started = await api.startBoardRegistration(
+        selectedScan, candidate.candidate_index, boardId, lease.id,
+      );
+      await waitForOperation(started.operation);
+      setRegistration(await api.boardRegistration(started.registration.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRegistrationBusy(false);
+    }
+  };
   const selectedReport = scans.find((scan) => scan.id === selectedScan);
   const hasProposals = discovery !== null || selectedReport?.board_discovery != null;
   return <div className="boards-layout">
@@ -575,20 +599,27 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       </div>
       {baseline && <p>Baseline saved from scan <strong>{baseline.scan_id.slice(0, 8)}</strong>. Future compatible scans can reuse unchanged inventory.</p>}
       {changes && <p>{pretty(changes.detection_mode)} found <strong>{changes.added_count}</strong> added, <strong>{changes.removed_count}</strong> removed, <strong>{changes.modified_count}</strong> modified, and <strong>{changes.unchanged_count}</strong> unchanged. <strong>{changes.target_regions.length}</strong> regions need refinement.</p>}
+      {registration && <div className="run-result">
+        <p><strong>{registration.passed ? "Board registered" : "Registration failed"}</strong>{registration.selected_rotation_deg != null ? ` at ${registration.selected_rotation_deg.toFixed(3)}°` : ""}{registration.fit_residuals ? ` with ${registration.fit_residuals.max_mm.toFixed(3)} mm maximum residual` : ""}.</p>
+        <p>{registration.message}</p>
+        {registration.hypotheses.flatMap((hypothesis) => hypothesis.observations).map((observation) => <a key={`${registration.id}-${observation.artifact_name}`} href={`/api/v1/board-registrations/${registration.id}/artifacts/${observation.artifact_name}`} target="_blank" rel="noreferrer">{observation.reference} evidence</a>)}
+      </div>}
       {discovery && <div className="board-discovery-result">
         <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with semantic object proposals" />
         <div><p><strong>{discovery.candidates.length}</strong> raised-surface proposals. Known fixtures are purple, boards are green, feeders are blue, and unresolved objects are amber. Matched boards show enabled top-side placements in cyan and KiCad fiducials in yellow.</p>
           {discovery.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
-          <div className="candidate-list">{discovery.candidates.map((candidate) => <WorkspaceCandidateCard key={candidate.candidate_index} candidate={candidate} scanId={selectedScan} />)}</div>
+          <div className="candidate-list">{discovery.candidates.map((candidate) => <WorkspaceCandidateCard key={candidate.candidate_index} candidate={candidate} scanId={selectedScan} registering={registrationBusy} onRegister={registerBoard} />)}</div>
         </div>
       </div>}
     </section>
   </div>;
 }
 
-function WorkspaceCandidateCard({ candidate, scanId }: {
+function WorkspaceCandidateCard({ candidate, scanId, registering, onRegister }: {
   candidate: WorkspaceBoardCandidate;
   scanId: string;
+  registering: boolean;
+  onRegister: (candidate: WorkspaceBoardCandidate, boardId: string) => void;
 }) {
   const design = candidate.design_matches[0];
   const visualDesign = design?.registration_method === "visual_outline"
@@ -600,6 +631,7 @@ function WorkspaceCandidateCard({ candidate, scanId }: {
     {visualDesign && <span>Visual PCB at {visualDesign.center_x_mm!.toFixed(3)}, {visualDesign.center_y_mm!.toFixed(3)} mm · {visualDesign.rotation_deg.toFixed(3)}° · {visualDesign.dimension_error_mm.toFixed(3)} mm error · {((visualDesign.edge_support_fraction ?? 0) * 100).toFixed(0)}% edge support</span>}
     <span>{((candidate.classification?.confidence ?? 0) * 100).toFixed(0)}% class confidence{candidate.known_fixture_id ? ` · ${pretty(candidate.known_fixture_id)}` : design ? ` · ${design.board_name}` : " · review required"}{design?.orientation_ambiguous ? " · orientation needs fiducials" : ""}</span>
     {candidate.evidence_artifact_name && <a href={`/api/v1/workspace-scans/${scanId}/artifacts/${candidate.evidence_artifact_name}`} target="_blank" rel="noreferrer">View normalized evidence</a>}
+    {visualDesign && <button disabled={registering} onClick={() => onRegister(candidate, visualDesign.board_id)}>{registering ? "Registering…" : "Register from fiducials"}</button>}
   </div>;
 }
 

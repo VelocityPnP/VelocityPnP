@@ -494,10 +494,47 @@ orientation ticks in cyan and KiCad fiducials in yellow. These marks use the
 canonical outline orientation for diagnostic preview. They do not resolve a
 square board's orientation ambiguity.
 
-Classification is not accepted job registration: this stage does not create a
-`BoardInstance`, move the camera, compare package templates, resolve a symmetric
-outline, or accept a design-to-machine transform. Local fiducial and package
-verification is the next gate.
+Classification is not accepted job registration: this no-motion stage does not
+create a `BoardInstance`, move the camera, resolve a symmetric outline, or
+accept a design-to-machine transform. Use the local fiducial workflow below.
+Package-template verification remains a later gate.
+
+### Automatic board registration
+
+Register a visually matched board after the machine is homed and ready:
+
+```bash
+cargo run --release -p velocitypnp -- register-board SCAN_UUID \
+  --candidate 0 \
+  --board BOARD_UUID \
+  --lease LEASE_UUID \
+  --confirm-safety-checks
+```
+
+The API route is
+`POST /workspace-scans/SCAN_UUID/board-registrations`. The Python client
+provides `register_board()`. The web workspace candidate card provides the
+same guided action.
+
+The runner first performs visual-refined homing. It uses the visual PCB outline
+as a bounded seed and tests four 90-degree hypotheses when the outline is
+square. For each hypothesis, the top camera visits the predicted KiCad
+fiducials from a consistent negative X/Y approach. At least three enabled
+top-side fiducials are required. Each target must be stable in three to five
+frames and remain within the local camera-model and seed-correction bounds.
+
+The accepted fit maps reflected top-side KiCad coordinates into machine
+coordinates. The maximum fiducial residual must be at most 0.15 mm, the fitted
+angle must remain within 5 degrees of its seed hypothesis, and every board
+corner must remain inside machine bounds. An accepted run contains a
+`BoardInstance` with the design-to-machine transform. Board surface Z remains
+unset until a separate surface measurement passes.
+
+Registration runs and their evidence survive daemon restarts. Fetch them from
+`GET /board-registrations` and `GET /board-registrations/RUN_UUID`. Each
+attempted fiducial stores an annotated PNG under
+`GET /board-registrations/RUN_UUID/artifacts/ARTIFACT_NAME`; amber marks the
+expected optical center and green marks the measured feature.
 
 ### Persistent workspace inventory
 
