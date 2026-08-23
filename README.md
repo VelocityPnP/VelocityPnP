@@ -23,6 +23,7 @@ This repository contains the first working platform slice:
 - React operator UI with discovery, control, calibration and board import
 - persisted machine-executed calibration runs with progress and evidence
 - automatic reciprocal camera, N1/N2 offset, and nozzle-runout calibration
+- session-scoped fine XYZ homing from the visual datum and vacuum-contact pad
 - installed-target planar camera calibration and height-aware, occlusion-tolerant plate scans
 - calibrated top-camera workspace scanning with streaming survey mosaics,
   bounded OpenCV tile registration, explicit raster coordinates, measured

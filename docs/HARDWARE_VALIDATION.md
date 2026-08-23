@@ -1768,6 +1768,60 @@ measured capture time, the same scan should finish in about 17 minutes 37
 seconds. A later physical scan must confirm this estimate. Hardware scans now
 use the release daemon.
 
+### Fine XYZ home and automatic FTP PCB registration
+
+On 2026-08-23, the first registration trial exposed that the new workflow had
+performed coarse XYZ homing and visual X/Y refinement, but had not established
+a session Z datum. The daemon was stopped normally at safe Z before the trial
+continued. Interrupted registration `bc7d0580-b80a-49c8-89ba-26a8bc18b58b`
+was retained as failed. No emergency stop was used.
+
+Session fine home now combines visual X/Y refinement with a vacuum-contact Z
+reference. It identifies and centers the installed tip, centers the separate
+datum-board sealing target, searches 0.3 mm on either side of the stored
+contact without exceeding the profile safety interval, and limits the Z-only
+coordinate reset to 0.5 mm. Machine status records the calibration UUID.
+Coarse re-home, disconnect, fault, or emergency stop clears it. Physical
+workspace scans and board registration reject a missing or different UUID.
+
+N1 reached its established Z=3.0 lower bound without a qualifying transition.
+Its stored contact is Z=3.2, so non-repeatable stall homing leaves too little
+search margin on that side. The runner switched the pump off, retracted, and
+returned fault-free without applying a reset. N2/N24 has useful safe margin on
+both sides and is now the V3.0.4 default. It succeeded once with a +0.100 mm
+reset from controller Z59.100 to Z59.200. Two later runs reproduced contact at
+Z59.200 and applied zero correction. Final fine-home operation
+`c43af07a-d29f-46e1-a97f-c3be617935ef` succeeded.
+
+The first local-fiducial fit correctly rejected a 1.212 mm residual because the
+bright-component detector selected the printed `4` in `R40` instead of FID1.
+Its annotated frame showed the true concentric feature at the predicted
+center. The detector now limits bright candidates to one copper-pad diameter
+from the visual seed and falls back to an OpenCV circle fit of the footprint's
+3 mm mask opening. Replay of the retained frame found the true center near
+(627.5, 346.5) pixels. A generated regression frame covers textured copper and
+nearby bright print.
+
+The next fit measured all three fiducials consistently but rejected the board
+because its physical outline slightly overhangs the head travel limit. This
+mixed workspace occupancy with head motion. Registration now checks every
+camera target during acquisition and leaves later nozzle targets to their own
+planner bounds; it does not require an uncommanded PCB edge to be reachable by
+the head.
+
+Registration `56a5cb24-9b1f-415f-b308-f22473fb5069` then accepted the first
+orientation hypothesis. It measured all three KiCad fiducials, fit a board
+angle of -1.53398 degrees, and produced 0.04773 mm RMS and 0.06200 mm maximum
+residual. The accepted board instance is
+`88781f07-a28f-42cd-be01-f9bcb150cb6b`; its surface Z remains deliberately
+unset. The three annotated evidence PNGs are retained in SQLite and were also
+copied to `/tmp/velocitypnp-registration-final-fid1.png` through `fid3.png`.
+
+The machine returned to X=220.131, Y=190.271, Z=31.5, homed, ready, and
+fault-free before normal disconnect operation
+`8ff705ef-a418-41b8-90c0-fa4d5d50ba2a`. The final daemon state is disconnected,
+unhomed, and fault-free. No emergency stop was used.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

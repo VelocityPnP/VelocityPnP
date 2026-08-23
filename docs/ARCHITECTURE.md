@@ -43,8 +43,11 @@ after the guided board flip; it does not reuse a mirrored top-side guess.
 Visual homing first centers the profile-defined machine datum in the top
 camera, then resets the controller's current X/Y working coordinates to the
 datum's calibrated machine location. The reset is applied only after a second
-image passes the configured residual gate; Z and rotation coordinates remain
-controller-reported and untouched.
+image passes the configured residual gate. Session fine home then reproduces
+the validated N2 vacuum contact on the datum-board sealing target and applies
+a separately bounded Z-only reset. Machine status binds the resulting XYZ
+reference to one calibration UUID. Homing, disconnect, or fault clears that
+binding; physical precision scans and board registration require it.
 
 Job planning and motion planning are separate. The job planner produces
 logical feeder, board, and safe-Z poses. The motion planner owns the conversion

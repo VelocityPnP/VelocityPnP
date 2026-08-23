@@ -114,6 +114,15 @@ impl MachineDriver for SimulatorDriver {
         Ok(self.pose)
     }
 
+    async fn set_z_coordinate(&mut self, z_mm: f64) -> Result<Pose> {
+        self.require_connected()?;
+        if !z_mm.is_finite() {
+            bail!("simulator rejected non-finite Z coordinate reset");
+        }
+        self.pose.z_mm = z_mm;
+        Ok(self.pose)
+    }
+
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()> {
         self.require_connected()?;
         match actuator_id {

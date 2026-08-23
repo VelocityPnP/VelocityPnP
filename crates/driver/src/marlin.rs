@@ -349,6 +349,23 @@ impl MachineDriver for MarlinDriver {
         Ok(reported)
     }
 
+    async fn set_z_coordinate(&mut self, z_mm: f64) -> Result<Pose> {
+        let command = set_z_coordinate_command(z_mm)?;
+        self.command(&command, Duration::from_secs(5)).await?;
+        let reported = self
+            .reported_position()
+            .await
+            .context("reading position after Z coordinate reset")?
+            .primary_pose;
+        if (reported.z_mm - z_mm).abs() > 0.01 {
+            bail!(
+                "Z coordinate reset reported Z{:.3}, expected Z{z_mm:.3}",
+                reported.z_mm
+            );
+        }
+        Ok(reported)
+    }
+
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()> {
         for line in actuator_commands(actuator_id, enabled)? {
             if let Err(error) = self.command(line, Duration::from_secs(5)).await {
@@ -431,6 +448,13 @@ fn set_xy_coordinates_command(x_mm: f64, y_mm: f64) -> Result<String> {
         bail!("XY coordinate reset values must be finite");
     }
     Ok(format!("G92 X{x_mm:.4} Y{y_mm:.4}"))
+}
+
+fn set_z_coordinate_command(z_mm: f64) -> Result<String> {
+    if !z_mm.is_finite() {
+        bail!("Z coordinate reset value must be finite");
+    }
+    Ok(format!("G92 Z{z_mm:.4}"))
 }
 
 fn actuator_commands(actuator_id: &str, enabled: bool) -> Result<&'static [&'static str]> {
@@ -758,12 +782,14 @@ mod tests {
     }
 
     #[test]
-    fn xy_coordinate_reset_is_bounded_to_the_linear_axes() {
+    fn coordinate_resets_are_bounded_to_the_requested_linear_axes() {
         assert_eq!(
             set_xy_coordinates_command(220.131, 190.271).unwrap(),
             "G92 X220.1310 Y190.2710"
         );
         assert!(set_xy_coordinates_command(f64::NAN, 0.0).is_err());
+        assert_eq!(set_z_coordinate_command(3.2).unwrap(), "G92 Z3.2000");
+        assert!(set_z_coordinate_command(f64::NAN).is_err());
     }
 
     #[test]

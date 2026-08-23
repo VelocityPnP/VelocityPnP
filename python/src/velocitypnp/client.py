@@ -999,6 +999,33 @@ class Client:
             "vacuum_sensor_characterization"
         ][nozzle_id]
 
+    def fine_home(
+        self,
+        calibration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        nozzle_id: str = "N2",
+        *,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if nozzle_id not in {"N1", "N2"}:
+            raise ValueError("nozzle_id must be N1 or N2")
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "fine homing requires explicit confirmation that the datum board "
+                "and sealing target are clean and fixed, both nozzles are level, "
+                "the envelope is clear, and power isolation is reachable"
+            )
+        operation = self._request(
+            "POST",
+            f"/calibrations/{calibration_id}/fine-home",
+            {
+                "lease_id": str(lease_id),
+                "nozzle_id": nozzle_id,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        return self.wait(operation)
+
     def calibrate_xy_direction_response(
         self,
         calibration_id: str | uuid.UUID,

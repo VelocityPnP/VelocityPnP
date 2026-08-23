@@ -722,6 +722,33 @@ class ClientTests(unittest.TestCase):
             },
         ))
 
+    def test_fine_home_requires_confirmation_and_waits_for_completion(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.fine_home("calibration", "lease")
+            with self.assertRaisesRegex(ValueError, "N1 or N2"):
+                client.fine_home(
+                    "calibration", "lease", "N3", safety_checks_confirmed=True,
+                )
+        send.assert_not_called()
+
+        operation = {"id": "op", "status": "succeeded", "message": "fine homed"}
+        with patch.object(client, "_request", return_value=operation) as send:
+            result = client.fine_home(
+                "calibration", "lease", safety_checks_confirmed=True,
+            )
+        self.assertEqual(result, operation)
+        send.assert_called_once_with(
+            "POST",
+            "/calibrations/calibration/fine-home",
+            {
+                "lease_id": "lease",
+                "nozzle_id": "N2",
+                "confirmed_external_safety_checks": True,
+            },
+        )
+
     def test_xy_direction_response_requires_confirmation_and_returns_report(self):
         client = Client(timeout=1)
         with patch.object(client, "_request") as send:

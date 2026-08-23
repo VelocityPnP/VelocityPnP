@@ -201,6 +201,17 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    FineHome {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value = "N2")]
+        nozzle: String,
+        /// Confirm the fixed datum and sealing target are clean, both nozzles
+        /// are level, the envelope is clear, and power isolation is reachable.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
     VacuumCharacterize {
         calibration: Uuid,
         #[arg(long, env = "VELOCITYPNP_LEASE")]
@@ -684,6 +695,32 @@ async fn main() -> Result<()> {
             run_operation(&client, base, operation).await?;
             let snapshot = get(&client, &format!("{base}/calibrations/{calibration}")).await?;
             snapshot["values"]["vacuum_probe"][&nozzle].clone()
+        }
+        Command::FineHome {
+            calibration,
+            lease,
+            nozzle,
+            confirm_safety_checks,
+        } => {
+            if !matches!(nozzle.as_str(), "N1" | "N2") {
+                bail!("--nozzle must be N1 or N2");
+            }
+            if !confirm_safety_checks {
+                bail!(
+                    "fine homing requires --confirm-safety-checks after inspecting the datum board, sealing target, nozzles, envelope, and power isolation"
+                );
+            }
+            let operation = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/fine-home"),
+                Some(json!({
+                    "lease_id": lease,
+                    "nozzle_id": nozzle,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            run_operation(&client, base, operation).await?
         }
         Command::VacuumCharacterize {
             calibration,

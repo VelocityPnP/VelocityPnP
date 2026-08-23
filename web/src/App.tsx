@@ -34,7 +34,7 @@ export default function App() {
     void api.devices().then(setDevices).catch(() => undefined);
     const timer = window.setInterval(() => void refresh(), 1000);
     const source = new EventSource("/api/v1/events");
-    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.position", "machine.actuator", "machine.sensor", "machine.visual_home_applied", "machine.fault", "machine.emergency_stopped", "control.lease_acquired", "control.lease_renewed"];
+    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.position", "machine.actuator", "machine.sensor", "machine.visual_home_applied", "machine.fine_z_home_applied", "machine.fault", "machine.emergency_stopped", "control.lease_acquired", "control.lease_renewed"];
     for (const kind of kinds) {
       source.addEventListener(kind, (message) => {
         const event = message as MessageEvent;
@@ -291,6 +291,21 @@ function CalibrationPanel({ status, devices, setError }: {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const fineHome = async () => {
+    if (!active) return;
+    if (!window.confirm(
+      "Fine-home XYZ from the datum PCB? Confirm the board is fixed, the sealing target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is within reach. The machine will visually refine X/Y, identify and center N2, reproduce the validated vacuum contact, and apply a bounded Z coordinate reset.",
+    )) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = status.control_lease
+        ? await api.renewLease(status.control_lease.id, 900)
+        : await api.lease("VelocityPnP fine home", 900);
+      await waitForOperation(await api.fineHome(active.id, lease.id));
+      await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
   const characterizeVacuum = async (nozzleId: "N1" | "N2") => {
     if (!active) return;
     if (!window.confirm(
@@ -407,6 +422,7 @@ function CalibrationPanel({ status, devices, setError }: {
         <button className="secondary" disabled={starting || runActive} onClick={() => void createSnapshot()}>New revision</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N1")}>Probe N1 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N2")}>Probe N2 vacuum</button>
+        <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N1")} onClick={() => void fineHome()}>Fine-home XYZ</button>
         <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N1")} onClick={() => void characterizeVacuum("N1")}>Characterize N1 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N2")} onClick={() => void characterizeVacuum("N2")}>Characterize N2 vacuum</button>
         <button className="secondary" disabled={starting || runActive || !canCalibrateXyDirectionResponse} onClick={() => void calibrateXyDirectionResponse()}>Measure XY direction response</button>
@@ -415,6 +431,7 @@ function CalibrationPanel({ status, devices, setError }: {
         <button className="secondary" disabled={starting || runActive || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
       </>}
+      {active && status.calibration_revision === active.id && <div className="notice">Fine XYZ home is active for this calibration revision.</div>}
       {artifactPlan && <div className="run-result">
         <p>Selective plan: <strong>{artifactPlan.requires_motion ? `${artifactPlan.estimated_duration_seconds} s estimated motion` : "no motion"}</strong></p>
         {artifactPlan.items.filter((item) => item.action !== "reuse").map((item) =>

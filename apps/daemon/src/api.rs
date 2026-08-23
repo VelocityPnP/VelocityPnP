@@ -159,6 +159,8 @@ const BOARD_REGISTRATION_MAX_CORRECTION_MM: f64 = 2.5;
 const BOARD_REGISTRATION_MAX_ROTATION_ERROR_DEG: f64 = 5.0;
 const BOARD_REGISTRATION_MAX_RESIDUAL_MM: f64 = 0.15;
 const BOARD_REGISTRATION_APPROACH_MM: f64 = 1.0;
+const FINE_HOME_Z_SEARCH_CLEARANCE_MM: f64 = 0.3;
+const FINE_HOME_MAX_Z_CORRECTION_MM: f64 = 0.5;
 
 struct WorkspaceHeightArtifacts {
     map: WorkspaceHeightMap,
@@ -495,6 +497,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/calibrations/{id}/vacuum-characterization",
             post(start_vacuum_characterization),
         )
+        .route("/api/v1/calibrations/{id}/fine-home", post(start_fine_home))
         .route(
             "/api/v1/calibrations/{id}/xy-direction-response",
             post(start_local_xy_direction_response),
@@ -1294,6 +1297,12 @@ async fn start_workspace_scan(
         return Err(ApiError::bad_request(
             "workspace scan requires a homed ready machine",
         ));
+    }
+    if !status.simulated && status.calibration_revision != Some(body.specification.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "physical workspace scanning requires fine XYZ homing with calibration {}",
+            body.specification.calibration_id,
+        )));
     }
     let current_pose = status
         .pose
@@ -4152,6 +4161,12 @@ async fn start_workspace_refinement_batch(
             "workspace refinement requires a homed ready machine",
         ));
     }
+    if !status.simulated && status.calibration_revision != Some(body.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "physical workspace refinement requires fine XYZ homing with calibration {}",
+            body.calibration_id,
+        )));
+    }
     let current_pose = status
         .pose
         .ok_or_else(|| ApiError::bad_request("workspace refinement requires a known pose"))?;
@@ -4897,6 +4912,12 @@ async fn start_board_registration(
             "board registration requires a successful scan from the active machine profile",
         ));
     }
+    if !status.simulated && status.calibration_revision != Some(scan.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "board registration requires fine XYZ homing with calibration {}",
+            scan.calibration_id,
+        )));
+    }
     let report = load_workspace_object_report(&state, &scan)?;
     let candidate = report
         .candidates
@@ -5226,13 +5247,6 @@ async fn measure_board_registration(
                 hypothesis.rejection_reason = Some(format!(
                     "fitted rotation differs from the seed by {rotation_error:.3} degrees",
                 ));
-            } else if !board_transform_within_machine_bounds(
-                &state.profile,
-                bounds,
-                fit.design_to_machine,
-            ) {
-                hypothesis.rejection_reason =
-                    Some("registered board outline is outside machine bounds".into());
             } else {
                 let board_instance = BoardInstance {
                     id: Uuid::new_v4(),
@@ -5458,29 +5472,6 @@ async fn jog_board_registration_target(
         )
         .await
         .map_err(|error| error.to_string())
-}
-
-fn board_transform_within_machine_bounds(
-    profile: &MachineProfile,
-    bounds: velocitypnp_domain::BoardOutlineBounds,
-    transform: velocitypnp_domain::Transform2d,
-) -> bool {
-    [
-        (bounds.min_x_mm, bounds.min_y_mm),
-        (bounds.max_x_mm, bounds.min_y_mm),
-        (bounds.max_x_mm, bounds.max_y_mm),
-        (bounds.min_x_mm, bounds.max_y_mm),
-    ]
-    .into_iter()
-    .map(|point| transform.apply(point.0, point.1))
-    .all(|point| {
-        profile.bounds.contains(Pose {
-            x_mm: point.0,
-            y_mm: point.1,
-            z_mm: profile.safe_z_mm,
-            rotation_deg: 0.0,
-        })
-    })
 }
 
 fn normalize_angle_deg(angle_deg: f64) -> f64 {
@@ -6865,7 +6856,25 @@ struct PreparedVacuumProbe {
     height_model_has_working_plane_transfer: bool,
     alignment_nozzle_z_mm: f64,
     search: VacuumProbeSearch,
-    characterize: bool,
+    mode: VacuumOperationMode,
+    reference_contact_controller_z_mm: Option<f64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VacuumOperationMode {
+    CalibrationProbe,
+    Characterization,
+    FineHome,
+}
+
+impl VacuumOperationMode {
+    fn characterizes(self) -> bool {
+        self == Self::Characterization
+    }
+
+    fn fine_homes(self) -> bool {
+        self == Self::FineHome
+    }
 }
 
 struct CalibratedHeadReference {
@@ -7000,7 +7009,13 @@ async fn start_vacuum_probe(
     Path(calibration_id): Path<Uuid>,
     Json(body): Json<StartVacuumProbeRequest>,
 ) -> ApiResult<(StatusCode, Json<Operation>)> {
-    start_vacuum_operation(state, calibration_id, body, false).await
+    start_vacuum_operation(
+        state,
+        calibration_id,
+        body,
+        VacuumOperationMode::CalibrationProbe,
+    )
+    .await
 }
 
 async fn start_vacuum_characterization(
@@ -7008,14 +7023,28 @@ async fn start_vacuum_characterization(
     Path(calibration_id): Path<Uuid>,
     Json(body): Json<StartVacuumProbeRequest>,
 ) -> ApiResult<(StatusCode, Json<Operation>)> {
-    start_vacuum_operation(state, calibration_id, body, true).await
+    start_vacuum_operation(
+        state,
+        calibration_id,
+        body,
+        VacuumOperationMode::Characterization,
+    )
+    .await
+}
+
+async fn start_fine_home(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartVacuumProbeRequest>,
+) -> ApiResult<(StatusCode, Json<Operation>)> {
+    start_vacuum_operation(state, calibration_id, body, VacuumOperationMode::FineHome).await
 }
 
 async fn start_vacuum_operation(
     state: AppState,
     calibration_id: Uuid,
     body: StartVacuumProbeRequest,
-    characterize: bool,
+    mode: VacuumOperationMode,
 ) -> ApiResult<(StatusCode, Json<Operation>)> {
     if !body.confirmed_external_safety_checks {
         return Err(ApiError::bad_request(
@@ -7055,7 +7084,7 @@ async fn start_vacuum_operation(
             "vacuum probing requires a homed ready machine",
         ));
     }
-    let required_capability = if characterize {
+    let required_capability = if mode.characterizes() {
         "vacuum_sensor_characterization"
     } else {
         "vacuum_probe_calibration"
@@ -7086,7 +7115,7 @@ async fn start_vacuum_operation(
         ApiError::bad_request("active profile does not define vacuum calibration")
     })?;
     probe.validate().map_err(ApiError::bad_request)?;
-    let characterization_profile = if characterize {
+    let characterization_profile = if mode.characterizes() {
         let profile = state
             .profile
             .vacuum_characterization
@@ -7119,7 +7148,7 @@ async fn start_vacuum_operation(
             "vacuum probing requires a current per-nozzle runtime tip transform",
         ));
     }
-    let prior_contact = if characterize {
+    let prior_contact = if mode.characterizes() || mode.fine_homes() {
         let contact_artifact = CalibrationArtifactId::vacuum_contact(&body.nozzle_id)
             .ok_or_else(|| ApiError::bad_request("unknown nozzle for active machine profile"))?;
         if !crate::calibration_artifacts::artifact_tree_is_current(
@@ -7128,7 +7157,7 @@ async fn start_vacuum_operation(
             contact_artifact,
         ) {
             return Err(ApiError::bad_request(
-                "vacuum characterization requires a current successful contact probe",
+                "this operation requires a current successful contact probe",
             ));
         }
         let report: VacuumProbeReport = serde_json::from_value(
@@ -7138,13 +7167,23 @@ async fn start_vacuum_operation(
         .map_err(|_| ApiError::bad_request("stored vacuum contact report is invalid"))?;
         if !report.passed || report.contact_nozzle_z_mm.is_none() {
             return Err(ApiError::bad_request(
-                "vacuum characterization requires a successful contact probe",
+                "this operation requires a successful contact probe",
             ));
         }
         Some(report)
     } else {
         None
     };
+    if mode.fine_homes()
+        && prior_contact
+            .as_ref()
+            .and_then(|report| report.contact_controller_z_mm)
+            .is_none()
+    {
+        return Err(ApiError::bad_request(
+            "fine home requires a stored controller Z contact reference",
+        ));
+    }
     let sensor_id = match nozzle.nozzle_id.as_str() {
         "N1" => "vacuum_1",
         "N2" => "vacuum_2",
@@ -7187,6 +7226,10 @@ async fn start_vacuum_operation(
         .as_ref()
         .and_then(|report| report.contact_nozzle_z_mm)
     {
+        Some(contact_z_mm) if mode.fine_homes() => (
+            (contact_z_mm + FINE_HOME_Z_SEARCH_CLEARANCE_MM).min(probe.search_start_nozzle_z_mm),
+            (contact_z_mm - FINE_HOME_Z_SEARCH_CLEARANCE_MM).max(probe.search_end_nozzle_z_mm),
+        ),
         Some(contact_z_mm) => (
             (contact_z_mm
                 + characterization_profile
@@ -7268,12 +7311,15 @@ async fn start_vacuum_operation(
         height_model_has_working_plane_transfer,
         alignment_nozzle_z_mm,
         search,
-        characterize,
+        mode,
+        reference_contact_controller_z_mm: prior_contact
+            .as_ref()
+            .and_then(|report| report.contact_controller_z_mm),
     };
-    let operation_kind = if characterize {
-        "calibration.vacuum_characterization"
-    } else {
-        "calibration.vacuum_probe"
+    let operation_kind = match mode {
+        VacuumOperationMode::CalibrationProbe => "calibration.vacuum_probe",
+        VacuumOperationMode::Characterization => "calibration.vacuum_characterization",
+        VacuumOperationMode::FineHome => "machine.fine_home",
     };
     spawn_operation(state, operation_kind, async move {
         execute_vacuum_probe(task_state, prepared).await
@@ -7428,8 +7474,10 @@ async fn execute_vacuum_probe(
         height_model_has_working_plane_transfer,
         alignment_nozzle_z_mm,
         search,
-        characterize,
+        mode,
+        reference_contact_controller_z_mm,
     } = prepared;
+    let characterize = mode.characterizes();
     state
         .machine
         .disable_actuator(sensor_id.clone())
@@ -7653,6 +7701,42 @@ async fn execute_vacuum_probe(
     } else {
         None
     };
+    let fine_home_contact = if mode.fine_homes() {
+        let contact = contact.as_ref().ok_or_else(|| {
+            "fine home did not reproduce contact in the bounded datum interval".to_string()
+        });
+        match contact {
+            Ok(contact) => {
+                let reference_z_mm = reference_contact_controller_z_mm.ok_or_else(|| {
+                    "stored vacuum contact has no controller Z reference".to_string()
+                })?;
+                let correction_mm = reference_z_mm - contact.controller_z_mm;
+                if correction_mm.abs() > FINE_HOME_MAX_Z_CORRECTION_MM {
+                    let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+                    let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+                    return Err(append_vacuum_probe_cleanup_errors(
+                        format!(
+                            "fine Z correction {correction_mm:.3} mm exceeds the {FINE_HOME_MAX_Z_CORRECTION_MM:.3} mm bound",
+                        ),
+                        restore_result,
+                        vacuum_off_result,
+                    ));
+                }
+                Some((reference_z_mm, contact.controller_z_mm, correction_mm))
+            }
+            Err(error) => {
+                let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+                let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+                return Err(append_vacuum_probe_cleanup_errors(
+                    error,
+                    restore_result,
+                    vacuum_off_result,
+                ));
+            }
+        }
+    } else {
+        None
+    };
     // Stop vacuum before any retract or lateral return. This bounds pump-on
     // time and prevents a sealed reference board from being lifted.
     let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
@@ -7667,9 +7751,23 @@ async fn execute_vacuum_probe(
     } else {
         Ok(Vec::new())
     };
+    vacuum_off_result
+        .as_ref()
+        .map_err(|error| format!("vacuum probe cleanup failed: {error}"))?;
+    if let Some((reference_z_mm, _, _)) = fine_home_contact {
+        state
+            .machine
+            .apply_fine_z_homing_offset(
+                lease_id,
+                reference_z_mm,
+                calibration_id,
+                FINE_HOME_MAX_Z_CORRECTION_MM,
+            )
+            .await
+            .map_err(|error| format!("fine Z coordinate reset failed: {error}"))?;
+    }
     let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
     restore_result.map_err(|error| format!("vacuum probe restore failed: {error}"))?;
-    vacuum_off_result.map_err(|error| format!("vacuum probe cleanup failed: {error}"))?;
     let release_raw_values =
         release_raw_values.map_err(|error| format!("vacuum release sampling failed: {error}"))?;
     let open_nozzle_median_raw_value = median_raw(&open_nozzle_raw_values)
@@ -7711,7 +7809,9 @@ async fn execute_vacuum_probe(
         passed: contact.is_some(),
         observed_at: Utc::now(),
     };
-    persist_vacuum_probe_report(&state, calibration_id, &report)?;
+    if !mode.fine_homes() {
+        persist_vacuum_probe_report(&state, calibration_id, &report)?;
+    }
     if let Some(sealed_raw_values) = characterization_values {
         let characterization = build_vacuum_characterization_report(
             &report,
@@ -7728,6 +7828,12 @@ async fn execute_vacuum_probe(
             characterization.tip_id,
             characterization.median_signal_delta_counts,
             characterization.robust_distribution_gap_counts,
+        )));
+    }
+    if let Some((reference_z_mm, observed_z_mm, correction_mm)) = fine_home_contact {
+        return Ok(Some(format!(
+            "Fine homed XYZ with {} {}; datum contact Z{observed_z_mm:.3} was reset to Z{reference_z_mm:.3} ({correction_mm:+.3} mm)",
+            report.nozzle_id, report.tip_id,
         )));
     }
     Ok(Some(match contact {
@@ -18191,6 +18297,35 @@ mod tests {
                         "/api/v1/calibrations/{}/vacuum-probe",
                         Uuid::new_v4()
                     ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sealing target"));
+    }
+
+    #[tokio::test]
+    async fn fine_home_requires_datum_board_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/calibrations/{}/fine-home", Uuid::new_v4()))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({

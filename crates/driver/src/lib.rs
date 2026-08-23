@@ -38,6 +38,9 @@ pub trait MachineDriver: Send {
         bail!("driver does not support independent nozzle rotation")
     }
     async fn set_xy_coordinates(&mut self, x_mm: f64, y_mm: f64) -> Result<Pose>;
+    async fn set_z_coordinate(&mut self, _z_mm: f64) -> Result<Pose> {
+        bail!("driver does not support Z coordinate reset")
+    }
     async fn actuate(&mut self, actuator_id: &str, enabled: bool) -> Result<()>;
     async fn read_sensor(&mut self, sensor_id: &str) -> Result<i64>;
     async fn emergency_stop(&mut self) -> Result<()>;

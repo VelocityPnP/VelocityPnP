@@ -13,8 +13,15 @@ Before homing or motion:
 6. Before runout calibration, make sure each nozzle tube is fully seated,
    follows its normal routing, and is not kinked or caught on another cable.
 
+Precision scanning and board registration require a session fine XYZ home for
+the selected calibration. Fine home uses the fixed datum PCB: the top camera
+refines X/Y, then N2 reproduces the validated vacuum contact on the separate
+sealing target. The Z search stays within 0.3 mm of the stored contact and the
+coordinate correction is limited to 0.5 mm. Vacuum switches off before
+retraction. Coarse re-home, disconnect, or fault invalidates the fine home.
+
 Automatic board registration also requires the PCB to be fixed. The runner
-performs visual-refined homing before it visits any PCB feature. All board
+rechecks visual-refined X/Y before it visits any PCB feature. All board
 moves stay at safe Z, omit nozzle rotation, use the profile feed limit, and
 return to the visual-home seed. A failed fiducial hypothesis does not create a
 board instance.

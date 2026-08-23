@@ -501,7 +501,8 @@ Package-template verification remains a later gate.
 
 ### Automatic board registration
 
-Register a visually matched board after the machine is homed and ready:
+Register a visually matched board after the machine is coarse-homed and the
+scan calibration is active as the session fine-home revision:
 
 ```bash
 cargo run --release -p velocitypnp -- register-board SCAN_UUID \
@@ -516,7 +517,8 @@ The API route is
 provides `register_board()`. The web workspace candidate card provides the
 same guided action.
 
-The runner first performs visual-refined homing. It uses the visual PCB outline
+Physical registration rejects a coarse-only home. The runner rechecks
+visual-refined X/Y homing, then uses the visual PCB outline
 as a bounded seed and tests four 90-degree hypotheses when the outline is
 square. For each hypothesis, the top camera visits the predicted KiCad
 fiducials from a consistent negative X/Y approach. At least three enabled
@@ -524,11 +526,12 @@ top-side fiducials are required. Each target must be stable in three to five
 frames and remain within the local camera-model and seed-correction bounds.
 
 The accepted fit maps reflected top-side KiCad coordinates into machine
-coordinates. The maximum fiducial residual must be at most 0.15 mm, the fitted
-angle must remain within 5 degrees of its seed hypothesis, and every board
-corner must remain inside machine bounds. An accepted run contains a
-`BoardInstance` with the design-to-machine transform. Board surface Z remains
-unset until a separate surface measurement passes.
+coordinates. The maximum fiducial residual must be at most 0.15 mm and the
+fitted angle must remain within 5 degrees of its seed hypothesis. The board
+outline may overhang head travel; every commanded camera and nozzle target is
+checked separately against the applicable motion bounds. An accepted run
+contains a `BoardInstance` with the design-to-machine transform. Board surface
+Z remains unset until a separate surface measurement passes.
 
 Registration runs and their evidence survive daemon restarts. Fetch them from
 `GET /board-registrations` and `GET /board-registrations/RUN_UUID`. Each
@@ -798,6 +801,27 @@ uses a fresh frame; the final correction distance must pass the profile limit
 in millimetres before the profile-defined XY-only coordinate reset is sent.
 Pixel error remains diagnostic evidence. Z and both nozzle angles are never
 included in that reset.
+
+Visual X/Y alone does not authorize precision motion. After coarse `G28`, use
+the validated datum-board contact artifact to establish the complete session
+XYZ reference:
+
+```bash
+velocitypnp fine-home CALIBRATION_UUID \
+  --lease "$VELOCITYPNP_LEASE" --confirm-safety-checks
+```
+
+Fine home visually refines X/Y, identifies and centers the installed N2 tip,
+centers the separate sealing target, and reproduces vacuum contact within
+0.3 mm of the stored safe contact. It then applies a Z-only coordinate reset;
+the correction is limited to 0.5 mm. The active calibration UUID is recorded
+in machine status. Coarse re-home, disconnect, fault, or emergency stop clears
+it. Physical workspace scans, refinements, and board registration reject a
+missing or different fine-home revision.
+
+N2 is the V3.0.4 default because its stored contact has useful bounded travel
+on both sides after non-repeatable stall homing. N1 remains selectable, but its
+contact is close to the profile's established lower safety limit.
 
 Local X/Y direction response is a separate automatic capture. It reuses the
 current top-camera working-plane map, performs one live visual home, and ends

@@ -146,6 +146,12 @@ export const api = {
       nozzle_id: nozzleId,
       confirmed_external_safety_checks: true,
     }),
+  fineHome: (snapshotId: string, leaseId: string, nozzleId: "N1" | "N2" = "N2") =>
+    jsonPost<Operation>(`/calibrations/${snapshotId}/fine-home`, {
+      lease_id: leaseId,
+      nozzle_id: nozzleId,
+      confirmed_external_safety_checks: true,
+    }),
   characterizeVacuum: (
     snapshotId: string, leaseId: string, nozzleId: "N1" | "N2",
   ) => jsonPost<Operation>(`/calibrations/${snapshotId}/vacuum-characterization`, {

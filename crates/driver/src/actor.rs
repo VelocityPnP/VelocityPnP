@@ -191,6 +191,23 @@ impl MachineHandle {
         .await
     }
 
+    pub async fn apply_fine_z_homing_offset(
+        &self,
+        lease_id: Uuid,
+        z_mm: f64,
+        calibration_revision: Uuid,
+        maximum_correction_mm: f64,
+    ) -> Result<Pose> {
+        request(&self.tx, |reply| Command::ApplyFineZHomingOffset {
+            lease_id,
+            z_mm,
+            calibration_revision,
+            maximum_correction_mm,
+            reply,
+        })
+        .await
+    }
+
     pub async fn emergency_stop(&self) -> Result<()> {
         // This reaches a blocking physical driver before the serialized actor
         // can dequeue the explicit state-transition command.
@@ -274,6 +291,13 @@ enum Command {
         lease_id: Uuid,
         reply: oneshot::Sender<Result<Pose>>,
     },
+    ApplyFineZHomingOffset {
+        lease_id: Uuid,
+        z_mm: f64,
+        calibration_revision: Uuid,
+        maximum_correction_mm: f64,
+        reply: oneshot::Sender<Result<Pose>>,
+    },
     EmergencyStop {
         reply: oneshot::Sender<Result<()>>,
     },
@@ -305,6 +329,7 @@ impl MachineActor {
                         s.homed = false;
                         s.pose = None;
                         s.control_lease = None;
+                        s.calibration_revision = None;
                     });
                     self.emit("machine.disconnected", json!({}));
                     let _ = reply.send(result);
@@ -395,6 +420,23 @@ impl MachineActor {
                 Command::ApplyVisualHomingOffset { lease_id, reply } => {
                     let _ = reply.send(self.apply_visual_homing_offset(lease_id).await);
                 }
+                Command::ApplyFineZHomingOffset {
+                    lease_id,
+                    z_mm,
+                    calibration_revision,
+                    maximum_correction_mm,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        self.apply_fine_z_homing_offset(
+                            lease_id,
+                            z_mm,
+                            calibration_revision,
+                            maximum_correction_mm,
+                        )
+                        .await,
+                    );
+                }
                 Command::EmergencyStop { reply } => {
                     let result = self.driver.emergency_stop().await;
                     self.emergency_flag.store(false, Ordering::Release);
@@ -403,6 +445,7 @@ impl MachineActor {
                         s.state = MachineState::EStopped;
                         s.homed = false;
                         s.control_lease = None;
+                        s.calibration_revision = None;
                     });
                     self.emit("machine.emergency_stopped", json!({}));
                     let _ = reply.send(result);
@@ -421,6 +464,7 @@ impl MachineActor {
                 self.update(|s| {
                     s.state = MachineState::Preflight;
                     s.fault = None;
+                    s.calibration_revision = None;
                 });
                 self.emit("machine.connected", json!({"firmware": firmware}));
                 Ok(firmware)
@@ -489,6 +533,7 @@ impl MachineActor {
                     s.state = MachineState::Ready;
                     s.homed = true;
                     s.pose = Some(pose);
+                    s.calibration_revision = None;
                 });
                 self.emit("machine.homing_completed", json!({"pose": pose}));
                 Ok(pose)
@@ -810,6 +855,51 @@ impl MachineActor {
         }
     }
 
+    async fn apply_fine_z_homing_offset(
+        &mut self,
+        lease_id: Uuid,
+        z_mm: f64,
+        calibration_revision: Uuid,
+        maximum_correction_mm: f64,
+    ) -> Result<Pose> {
+        let status = self.status();
+        status.assert_lease(lease_id, Utc::now())?;
+        if status.state != MachineState::Ready || !status.homed {
+            bail!("fine Z homing offset requires a homed ready machine");
+        }
+        let current = status.pose.context("fine Z homing requires a known pose")?;
+        if !z_mm.is_finite()
+            || !maximum_correction_mm.is_finite()
+            || maximum_correction_mm <= 0.0
+            || (z_mm - current.z_mm).abs() > maximum_correction_mm
+        {
+            bail!("fine Z homing correction exceeds its configured bound");
+        }
+        if !self.profile.bounds.contains(Pose { z_mm, ..current }) {
+            bail!("fine Z homing coordinate is outside machine bounds");
+        }
+        match self.driver.set_z_coordinate(z_mm).await {
+            Ok(pose) => {
+                self.update(|status| {
+                    status.pose = Some(pose);
+                    status.calibration_revision = Some(calibration_revision);
+                });
+                self.emit(
+                    "machine.fine_z_home_applied",
+                    json!({
+                        "pose": pose,
+                        "calibration_revision": calibration_revision,
+                    }),
+                );
+                Ok(pose)
+            }
+            Err(error) => {
+                self.set_fault("fine_z_home_offset_failed", error.to_string(), true);
+                Err(error)
+            }
+        }
+    }
+
     fn status(&self) -> MachineStatus {
         self.status_tx.borrow().clone()
     }
@@ -841,6 +931,7 @@ impl MachineActor {
             s.homed = false;
             s.fault = Some(fault.clone());
             s.control_lease = None;
+            s.calibration_revision = None;
         });
         self.emit("machine.fault", json!({"fault": fault}));
     }
@@ -1138,6 +1229,45 @@ mod tests {
         assert_eq!(pose.x_mm, expected.fiducial_x_mm);
         assert_eq!(pose.y_mm, expected.fiducial_y_mm);
         assert_eq!(pose.z_mm, 31.5);
+    }
+
+    #[tokio::test]
+    async fn fine_z_home_is_bounded_and_scoped_to_the_calibration_revision() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile,
+        );
+        handle.connect().await.unwrap();
+        handle.complete_preflight(true).await.unwrap();
+        let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
+        handle.home(lease.id, true).await.unwrap();
+        handle
+            .jog(
+                lease.id,
+                JogTarget {
+                    x_mm: 0.0,
+                    y_mm: 0.0,
+                    z_mm: 3.3,
+                    rotation_deg: None,
+                },
+                60.0,
+            )
+            .await
+            .unwrap();
+        let revision = Uuid::new_v4();
+        let pose = handle
+            .apply_fine_z_homing_offset(lease.id, 3.2, revision, 0.5)
+            .await
+            .unwrap();
+        assert_eq!(pose.z_mm, 3.2);
+        assert_eq!(handle.status().calibration_revision, Some(revision));
+        assert!(handle
+            .apply_fine_z_homing_offset(lease.id, 4.0, revision, 0.5)
+            .await
+            .is_err());
+        handle.home(lease.id, true).await.unwrap();
+        assert_eq!(handle.status().calibration_revision, None);
     }
 
     struct FailingDisableDriver {

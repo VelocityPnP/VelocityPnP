@@ -41,6 +41,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Tune V3 sensorless homing with bounded per-axis procedures
 - [x] Implement bounded primary-datum detection, correction, and XY reset
 - [x] Validate both pixel-to-axis signs and measure primary-datum refinement
+- [x] Add session-scoped fine XYZ homing from visual X/Y and bounded vacuum
+  contact, and require it for physical precision scans and board registration
 - [x] Persist a first-class initial calibration runner with API, CLI, Python,
   and guided web progress
 - [x] Remove operator-entered calibration metrics from the supported workflow
