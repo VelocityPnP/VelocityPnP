@@ -454,7 +454,7 @@ The equivalent API is
 `discover_workspace_objects(scan_id)`. The operation uses an accepted refined
 mosaic when present. Otherwise, it uses the height-corrected mosaic.
 
-The `workspace_object_proposals.v4` policy selects known height-map cells above
+The `workspace_object_proposals.v5` policy selects known height-map cells above
 the installed-plate plane. It joins nearby evidence and rejects small isolated
 height noise, including regions below 100 square millimeters. Each proposal
 rectangle is parallel and perpendicular to its

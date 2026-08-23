@@ -167,9 +167,12 @@ fn parse_footprint(expr: &SExpr) -> Result<Placement> {
         .skip(1)
         .filter_map(SExpr::atom)
         .collect::<Vec<_>>();
-    let enabled = !attributes
-        .iter()
-        .any(|attribute| matches!(*attribute, "exclude_from_pos_files" | "dnp" | "board_only"));
+    let enabled = !attributes.iter().any(|attribute| {
+        matches!(
+            *attribute,
+            "exclude_from_pos_files" | "dnp" | "board_only" | "through_hole"
+        )
+    });
     let lower_package = package.to_ascii_lowercase();
     let fiducial =
         reference.to_ascii_uppercase().starts_with("FID") || lower_package.contains("fiducial");
@@ -472,6 +475,9 @@ mod tests {
         (footprint "Fiducial:Fiducial_1mm_Mask2mm"
           (layer "B.Cu") (at 5 7) (property "Reference" "FID1")
           (property "Value" "Fiducial") (attr smd exclude_from_pos_files))
+        (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02"
+          (layer "F.Cu") (at 2 4) (property "Reference" "J1")
+          (property "Value" "Header") (attr through_hole))
         (gr_rect (start 0 0) (end 50 30) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts")))
     "#;
 
@@ -479,12 +485,14 @@ mod tests {
     fn imports_placements_sides_attributes_and_dimensions() {
         let board = import_board(BOARD, "test").unwrap();
         assert_eq!(board.source_version, Some(20240108));
-        assert_eq!(board.placements.len(), 2);
+        assert_eq!(board.placements.len(), 3);
         assert_eq!(board.placements[0].reference, "R1");
         assert_eq!(board.placements[0].pose.rotation_deg, 90.0);
         assert_eq!(board.placements[1].side, BoardSide::Bottom);
         assert!(board.placements[1].fiducial);
         assert!(!board.placements[1].enabled);
+        assert_eq!(board.placements[2].reference, "J1");
+        assert!(!board.placements[2].enabled);
         assert_eq!(board.width_mm, Some(50.0));
         assert_eq!(board.height_mm, Some(30.0));
         assert_eq!(

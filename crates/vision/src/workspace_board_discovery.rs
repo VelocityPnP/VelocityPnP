@@ -12,7 +12,7 @@ use velocitypnp_domain::{
     WorkspaceObjectClassification, WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v4";
+pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v5";
 pub const WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT: &str = "board-discovery.json";
 pub const WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT: &str = "mosaic-board-candidates.png";
 
@@ -988,7 +988,6 @@ fn board_design_matches(
                     candidate_outline_machine_mm,
                     candidate_width_mm,
                     candidate_height_mm,
-                    candidate_rotation_deg,
                     design_width_mm,
                     design_height_mm,
                 )
@@ -1059,7 +1058,6 @@ fn visual_board_design_match(
     candidate_outline_machine_mm: &[[f64; 2]],
     candidate_width_mm: f64,
     candidate_height_mm: f64,
-    candidate_rotation_deg: f64,
     design_width_mm: f64,
     design_height_mm: f64,
 ) -> Option<WorkspaceBoardDesignMatch> {
@@ -1069,12 +1067,12 @@ fn visual_board_design_match(
     let x_mm_per_pixel = candidate_width_mm / f64::from(crop.width);
     let y_mm_per_pixel = candidate_height_mm / f64::from(crop.height);
     let orientations = [
-        (design_width_mm, design_height_mm, 0.0),
-        (design_height_mm, design_width_mm, 90.0),
+        (design_width_mm, design_height_mm, 1_usize),
+        (design_height_mm, design_width_mm, 3_usize),
     ];
     orientations
         .into_iter()
-        .filter_map(|(width_mm, height_mm, rotation_offset_deg)| {
+        .filter_map(|(width_mm, height_mm, design_x_corner)| {
             let fit = features.fit_rectangular_outline(
                 width_mm,
                 height_mm,
@@ -1087,17 +1085,20 @@ fn visual_board_design_match(
                 .map(|point| crop_pixel_to_machine(*point, crop, candidate_outline_machine_mm))
                 .collect::<Vec<_>>();
             let center = crop_pixel_to_machine(fit.center_px, crop, candidate_outline_machine_mm);
-            let relative_rotation_deg =
+            let design_x_axis =
+                subtract(outline_machine_mm[design_x_corner], outline_machine_mm[0]);
+            let measured_rotation_deg = design_x_axis[1].atan2(design_x_axis[0]).to_degrees();
+            let rotation_deg =
                 if dimensions_are_orientation_ambiguous(design_width_mm, design_height_mm) {
-                    normalize_quarter_turn(fit.rotation_deg + rotation_offset_deg)
+                    normalize_quarter_turn(measured_rotation_deg)
                 } else {
-                    fit.rotation_deg + rotation_offset_deg
+                    normalize_angle(measured_rotation_deg)
                 };
             Some(WorkspaceBoardDesignMatch {
                 board_id: board.id,
                 board_name: board.name.clone(),
                 registration_method: WorkspaceBoardRegistrationMethod::VisualOutline,
-                rotation_deg: normalize_angle(candidate_rotation_deg + relative_rotation_deg),
+                rotation_deg,
                 dimension_error_mm: fit.dimension_error_mm,
                 dimension_error_fraction: fit.dimension_error_fraction,
                 confidence: fit.confidence,
@@ -1293,7 +1294,9 @@ fn draw_board_design_details(
             draw_circle(preview, center_px, 5.0, [255, 220, 40]);
             draw_cross(preview, center_px, 3.0, [255, 220, 40]);
         } else if placement.enabled {
-            let angle = (design_match.rotation_deg + placement.pose.rotation_deg).to_radians();
+            let angle =
+                kicad_rotation_to_machine(design_match.rotation_deg, placement.pose.rotation_deg)
+                    .to_radians();
             let direction = [angle.cos(), angle.sin()];
             let normal = [-direction[1], direction[0]];
             let start = machine_to_pixel(
@@ -1337,12 +1340,16 @@ fn design_point_to_machine(
     let axis_y = [-angle.sin(), angle.cos()];
     let local = [
         point_mm[0] - design_center[0],
-        point_mm[1] - design_center[1],
+        design_center[1] - point_mm[1],
     ];
     [
         center_machine_mm[0] + local[0] * axis_x[0] + local[1] * axis_y[0],
         center_machine_mm[1] + local[0] * axis_x[1] + local[1] * axis_y[1],
     ]
+}
+
+fn kicad_rotation_to_machine(board_rotation_deg: f64, placement_rotation_deg: f64) -> f64 {
+    board_rotation_deg - placement_rotation_deg
 }
 
 fn machine_to_pixel(transform: WorkspaceRasterTransform, x_mm: f64, y_mm: f64) -> [f64; 2] {
@@ -1529,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn design_points_project_about_the_edge_cuts_center() {
+    fn kicad_design_points_reflect_y_about_the_edge_cuts_center() {
         let bounds = velocitypnp_domain::BoardOutlineBounds {
             min_x_mm: 10.0,
             max_x_mm: 50.0,
@@ -1541,8 +1548,13 @@ mod tests {
         assert!((center[1] - 200.0).abs() < 1e-9);
 
         let corner = design_point_to_machine([50.0, -10.0], bounds, [100.0, 200.0], 90.0);
-        assert!((corner[0] - 90.0).abs() < 1e-9);
+        assert!((corner[0] - 110.0).abs() < 1e-9);
         assert!((corner[1] - 220.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn kicad_footprint_rotation_reflects_into_machine_coordinates() {
+        assert_eq!(kicad_rotation_to_machine(2.0, 47.0), -45.0);
     }
 
     #[test]

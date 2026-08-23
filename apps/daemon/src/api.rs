@@ -14407,7 +14407,6 @@ fn same_board_revision(existing: &BoardDesign, imported: &BoardDesign) -> bool {
                     && existing.package == imported.package
                     && existing.side == imported.side
                     && existing.pose == imported.pose
-                    && existing.enabled == imported.enabled
                     && existing.fiducial == imported.fiducial
                     && existing.properties == imported.properties
             })
@@ -14937,12 +14936,22 @@ mod tests {
                 min_y_mm: -20.0,
                 max_y_mm: 0.0,
             }),
-            placements: Vec::new(),
+            placements: vec![velocitypnp_domain::Placement {
+                reference: "J1".into(),
+                value: "Header".into(),
+                package: "PinHeader".into(),
+                side: velocitypnp_domain::BoardSide::Top,
+                pose: Pose::ORIGIN,
+                enabled: false,
+                fiducial: false,
+                properties: BTreeMap::new(),
+            }],
             warnings: Vec::new(),
         };
         let mut legacy = imported.clone();
         legacy.id = Uuid::new_v4();
         legacy.outline_bounds = None;
+        legacy.placements[0].enabled = true;
         assert!(same_board_revision(&legacy, &imported));
 
         legacy.width_mm = Some(11.0);
