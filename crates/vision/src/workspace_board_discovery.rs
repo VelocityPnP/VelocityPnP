@@ -1349,7 +1349,7 @@ fn design_point_to_machine(
 }
 
 fn kicad_rotation_to_machine(board_rotation_deg: f64, placement_rotation_deg: f64) -> f64 {
-    board_rotation_deg - placement_rotation_deg
+    board_rotation_deg + placement_rotation_deg
 }
 
 fn machine_to_pixel(transform: WorkspaceRasterTransform, x_mm: f64, y_mm: f64) -> [f64; 2] {
@@ -1553,8 +1553,9 @@ mod tests {
     }
 
     #[test]
-    fn kicad_footprint_rotation_reflects_into_machine_coordinates() {
-        assert_eq!(kicad_rotation_to_machine(2.0, 47.0), -45.0);
+    fn kicad_footprint_rotation_composes_with_the_board_angle() {
+        assert_eq!(kicad_rotation_to_machine(2.0, 47.0), 49.0);
+        assert_eq!(kicad_rotation_to_machine(-2.0, -45.0), -47.0);
     }
 
     #[test]
