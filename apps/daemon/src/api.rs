@@ -14371,8 +14371,46 @@ async fn import_kicad_board(
             ));
         }
     }
+    let existing_id = state
+        .store
+        .list_boards()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|existing| same_board_revision(existing, &board))
+        .map(|existing| existing.id);
+    if let Some(existing_id) = existing_id {
+        board.id = existing_id;
+    }
     state.store.put_board(&board).map_err(ApiError::internal)?;
-    Ok((StatusCode::CREATED, Json(board)))
+    let status = if existing_id.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(board)))
+}
+
+fn same_board_revision(existing: &BoardDesign, imported: &BoardDesign) -> bool {
+    existing.name == imported.name
+        && existing.source_format == imported.source_format
+        && existing.source_version == imported.source_version
+        && existing.width_mm == imported.width_mm
+        && existing.height_mm == imported.height_mm
+        && existing.placements.len() == imported.placements.len()
+        && existing
+            .placements
+            .iter()
+            .zip(&imported.placements)
+            .all(|(existing, imported)| {
+                existing.reference == imported.reference
+                    && existing.value == imported.value
+                    && existing.package == imported.package
+                    && existing.side == imported.side
+                    && existing.pose == imported.pose
+                    && existing.enabled == imported.enabled
+                    && existing.fiducial == imported.fiducial
+                    && existing.properties == imported.properties
+            })
 }
 
 async fn list_boards(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -14883,6 +14921,33 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
     use velocitypnp_driver::SimulatorDriver;
+
+    #[test]
+    fn reimport_recognizes_a_legacy_copy_of_the_same_board() {
+        let imported = BoardDesign {
+            id: Uuid::new_v4(),
+            name: "fixture".into(),
+            source_format: "kicad_pcb".into(),
+            source_version: Some(20240108),
+            width_mm: Some(10.0),
+            height_mm: Some(20.0),
+            outline_bounds: Some(velocitypnp_domain::BoardOutlineBounds {
+                min_x_mm: 5.0,
+                max_x_mm: 15.0,
+                min_y_mm: -20.0,
+                max_y_mm: 0.0,
+            }),
+            placements: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let mut legacy = imported.clone();
+        legacy.id = Uuid::new_v4();
+        legacy.outline_bounds = None;
+        assert!(same_board_revision(&legacy, &imported));
+
+        legacy.width_mm = Some(11.0);
+        assert!(!same_board_revision(&legacy, &imported));
+    }
 
     #[test]
     fn camera_capture_retry_recovers_a_transient_open_failure() {
@@ -16388,6 +16453,7 @@ mod tests {
                 source_version: Some(20240108),
                 width_mm: Some(20.0),
                 height_mm: Some(12.0),
+                outline_bounds: None,
                 placements: Vec::new(),
                 warnings: Vec::new(),
             })

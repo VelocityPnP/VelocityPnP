@@ -200,6 +200,7 @@ mod tests {
             source_version: None,
             width_mm: Some(20.0),
             height_mm: Some(10.0),
+            outline_bounds: None,
             placements: vec![Placement {
                 reference: "R1".into(),
                 value: "10k".into(),

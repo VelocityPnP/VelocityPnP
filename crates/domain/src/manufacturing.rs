@@ -30,8 +30,18 @@ pub struct BoardDesign {
     pub source_version: Option<u32>,
     pub width_mm: Option<f64>,
     pub height_mm: Option<f64>,
+    #[serde(default)]
+    pub outline_bounds: Option<BoardOutlineBounds>,
     pub placements: Vec<Placement>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BoardOutlineBounds {
+    pub min_x_mm: f64,
+    pub max_x_mm: f64,
+    pub min_y_mm: f64,
+    pub max_y_mm: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

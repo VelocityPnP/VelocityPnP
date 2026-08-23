@@ -489,10 +489,15 @@ artifact as lineage.
 The scan stores `board-discovery.json`, `mosaic-board-candidates.png`, and one
 normalized evidence crop per proposal. Green outlines are boards, blue outlines
 are feeders, purple outlines are known fixtures, and amber outlines need more
-evidence. Classification is not accepted job registration: this stage does
-not create a `BoardInstance`, move the camera, compare package templates,
-resolve a symmetric outline, or accept a design-to-machine transform. Local
-fiducial and package verification is the next gate.
+evidence. A visually matched board also projects enabled top-side placement
+orientation ticks in cyan and KiCad fiducials in yellow. These marks use the
+canonical outline orientation for diagnostic preview. They do not resolve a
+square board's orientation ambiguity.
+
+Classification is not accepted job registration: this stage does not create a
+`BoardInstance`, move the camera, compare package templates, resolve a symmetric
+outline, or accept a design-to-machine transform. Local fiducial and package
+verification is the next gate.
 
 ### Persistent workspace inventory
 

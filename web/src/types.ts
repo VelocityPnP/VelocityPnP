@@ -567,6 +567,12 @@ export interface BoardDesign {
   source_version: number | null;
   width_mm: number | null;
   height_mm: number | null;
+  outline_bounds: {
+    min_x_mm: number;
+    max_x_mm: number;
+    min_y_mm: number;
+    max_y_mm: number;
+  } | null;
   placements: Array<{ reference: string; side: "top" | "bottom"; enabled: boolean; fiducial: boolean }>;
   warnings: string[];
 }

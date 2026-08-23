@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use uuid::Uuid;
-use velocitypnp_domain::{BoardDesign, BoardSide, Placement, Pose};
+use velocitypnp_domain::{BoardDesign, BoardOutlineBounds, BoardSide, Placement, Pose};
 
 #[derive(Debug, Clone, PartialEq)]
 enum SExpr {
@@ -71,7 +71,9 @@ pub fn import_board(source: &str, name: &str) -> Result<BoardDesign> {
     }
 
     let edge_points = collect_edge_points(&root);
-    let (width_mm, height_mm) = dimensions(&edge_points);
+    let outline_bounds = outline_bounds(&edge_points);
+    let width_mm = outline_bounds.map(|bounds| bounds.max_x_mm - bounds.min_x_mm);
+    let height_mm = outline_bounds.map(|bounds| bounds.max_y_mm - bounds.min_y_mm);
     if edge_points.is_empty() {
         warnings.push(
             "No usable Edge.Cuts geometry was found; board fit must be confirmed manually".into(),
@@ -88,6 +90,7 @@ pub fn import_board(source: &str, name: &str) -> Result<BoardDesign> {
         source_version,
         width_mm,
         height_mm,
+        outline_bounds,
         placements,
         warnings,
     })
@@ -312,9 +315,9 @@ fn collect_coordinates(expr: &SExpr, points: &mut Vec<(f64, f64)>) {
     }
 }
 
-fn dimensions(points: &[(f64, f64)]) -> (Option<f64>, Option<f64>) {
+fn outline_bounds(points: &[(f64, f64)]) -> Option<BoardOutlineBounds> {
     if points.is_empty() {
-        return (None, None);
+        return None;
     }
     let (mut min_x, mut max_x, mut min_y, mut max_y) = (
         f64::INFINITY,
@@ -328,7 +331,12 @@ fn dimensions(points: &[(f64, f64)]) -> (Option<f64>, Option<f64>) {
         min_y = min_y.min(y);
         max_y = max_y.max(y);
     }
-    (Some(max_x - min_x), Some(max_y - min_y))
+    Some(BoardOutlineBounds {
+        min_x_mm: min_x,
+        max_x_mm: max_x,
+        min_y_mm: min_y,
+        max_y_mm: max_y,
+    })
 }
 
 fn second_atom(expr: &SExpr) -> Option<&str> {
@@ -479,6 +487,15 @@ mod tests {
         assert!(!board.placements[1].enabled);
         assert_eq!(board.width_mm, Some(50.0));
         assert_eq!(board.height_mm, Some(30.0));
+        assert_eq!(
+            board.outline_bounds,
+            Some(BoardOutlineBounds {
+                min_x_mm: 0.0,
+                max_x_mm: 50.0,
+                min_y_mm: 0.0,
+                max_y_mm: 30.0,
+            })
+        );
     }
 
     #[test]

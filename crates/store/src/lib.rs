@@ -424,6 +424,7 @@ mod tests {
             source_version: Some(20240108),
             width_mm: Some(10.0),
             height_mm: Some(20.0),
+            outline_bounds: None,
             placements: vec![],
             warnings: vec![],
         };

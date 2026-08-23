@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{ensure, Result};
 use std::collections::VecDeque;
 use velocitypnp_domain::{
-    BoardDesign, InstalledPlateGeometryReport, InstalledPlateRole, MachineProfile,
+    BoardDesign, BoardSide, InstalledPlateGeometryReport, InstalledPlateRole, MachineProfile,
     WorkspaceBoardCandidate, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
     WorkspaceBoardHeightSource, WorkspaceBoardRegistrationMethod, WorkspaceCameraApertureSummary,
     WorkspaceClassificationEvidence, WorkspaceFixtureAnchor, WorkspaceObjectClass,
@@ -497,7 +497,8 @@ pub fn discover_workspace_objects(
         candidates,
         warnings,
     };
-    let preview = board_candidate_preview(mosaic, raster_transform, &report.candidates);
+    let preview =
+        board_candidate_preview(mosaic, raster_transform, &report.candidates, board_designs);
     Ok(WorkspaceBoardDiscoveryArtifacts {
         report,
         preview,
@@ -1197,6 +1198,7 @@ fn board_candidate_preview(
     mosaic: &GrayFrame,
     transform: WorkspaceRasterTransform,
     candidates: &[WorkspaceBoardCandidate],
+    board_designs: &[BoardDesign],
 ) -> RgbFrame {
     let mut pixels = Vec::with_capacity(mosaic.pixels.len() * 3);
     for luma in &mosaic.pixels {
@@ -1247,9 +1249,100 @@ fn board_candidate_preview(
                 let second = machine_to_pixel(transform, second[0], second[1]);
                 draw_line(&mut preview, first, second, color);
             }
+            if class == WorkspaceObjectClass::Board {
+                if let Some(board) = board_designs
+                    .iter()
+                    .find(|board| board.id == design_match.board_id)
+                {
+                    draw_board_design_details(&mut preview, transform, board, design_match);
+                }
+            }
         }
     }
     preview
+}
+
+fn draw_board_design_details(
+    preview: &mut RgbFrame,
+    transform: WorkspaceRasterTransform,
+    board: &BoardDesign,
+    design_match: &WorkspaceBoardDesignMatch,
+) {
+    let Some(bounds) = board.outline_bounds else {
+        return;
+    };
+    let (Some(center_x_mm), Some(center_y_mm)) =
+        (design_match.center_x_mm, design_match.center_y_mm)
+    else {
+        return;
+    };
+    let center_machine_mm = [center_x_mm, center_y_mm];
+    for placement in board
+        .placements
+        .iter()
+        .filter(|placement| placement.side == BoardSide::Top)
+    {
+        let center = design_point_to_machine(
+            [placement.pose.x_mm, placement.pose.y_mm],
+            bounds,
+            center_machine_mm,
+            design_match.rotation_deg,
+        );
+        let center_px = machine_to_pixel(transform, center[0], center[1]);
+        if placement.fiducial {
+            draw_circle(preview, center_px, 5.0, [255, 220, 40]);
+            draw_cross(preview, center_px, 3.0, [255, 220, 40]);
+        } else if placement.enabled {
+            let angle = (design_match.rotation_deg + placement.pose.rotation_deg).to_radians();
+            let direction = [angle.cos(), angle.sin()];
+            let normal = [-direction[1], direction[0]];
+            let start = machine_to_pixel(
+                transform,
+                center[0] - 0.65 * direction[0],
+                center[1] - 0.65 * direction[1],
+            );
+            let end = machine_to_pixel(
+                transform,
+                center[0] + 0.65 * direction[0],
+                center[1] + 0.65 * direction[1],
+            );
+            let cross_start = machine_to_pixel(
+                transform,
+                center[0] - 0.25 * normal[0],
+                center[1] - 0.25 * normal[1],
+            );
+            let cross_end = machine_to_pixel(
+                transform,
+                center[0] + 0.25 * normal[0],
+                center[1] + 0.25 * normal[1],
+            );
+            draw_line(preview, start, end, [20, 235, 245]);
+            draw_line(preview, cross_start, cross_end, [20, 235, 245]);
+        }
+    }
+}
+
+fn design_point_to_machine(
+    point_mm: [f64; 2],
+    bounds: velocitypnp_domain::BoardOutlineBounds,
+    center_machine_mm: [f64; 2],
+    rotation_deg: f64,
+) -> [f64; 2] {
+    let design_center = [
+        0.5 * (bounds.min_x_mm + bounds.max_x_mm),
+        0.5 * (bounds.min_y_mm + bounds.max_y_mm),
+    ];
+    let angle = rotation_deg.to_radians();
+    let axis_x = [angle.cos(), angle.sin()];
+    let axis_y = [-angle.sin(), angle.cos()];
+    let local = [
+        point_mm[0] - design_center[0],
+        point_mm[1] - design_center[1],
+    ];
+    [
+        center_machine_mm[0] + local[0] * axis_x[0] + local[1] * axis_y[0],
+        center_machine_mm[1] + local[0] * axis_x[1] + local[1] * axis_y[1],
+    ]
 }
 
 fn machine_to_pixel(transform: WorkspaceRasterTransform, x_mm: f64, y_mm: f64) -> [f64; 2] {
@@ -1283,6 +1376,38 @@ fn draw_line(frame: &mut RgbFrame, start: [f64; 2], end: [f64; 2], color: [u8; 3
                 frame.pixels[index..index + 3].copy_from_slice(&color);
             }
         }
+    }
+}
+
+fn draw_cross(frame: &mut RgbFrame, center: [f64; 2], radius: f64, color: [u8; 3]) {
+    draw_line(
+        frame,
+        [center[0] - radius, center[1]],
+        [center[0] + radius, center[1]],
+        color,
+    );
+    draw_line(
+        frame,
+        [center[0], center[1] - radius],
+        [center[0], center[1] + radius],
+        color,
+    );
+}
+
+fn draw_circle(frame: &mut RgbFrame, center: [f64; 2], radius: f64, color: [u8; 3]) {
+    let segments = 32_u32;
+    for segment in 0..segments {
+        let first_angle = std::f64::consts::TAU * f64::from(segment) / f64::from(segments);
+        let second_angle = std::f64::consts::TAU * f64::from(segment + 1) / f64::from(segments);
+        let first = [
+            center[0] + radius * first_angle.cos(),
+            center[1] + radius * first_angle.sin(),
+        ];
+        let second = [
+            center[0] + radius * second_angle.cos(),
+            center[1] + radius * second_angle.sin(),
+        ];
+        draw_line(frame, first, second, color);
     }
 }
 
@@ -1397,9 +1522,27 @@ mod tests {
             source_version: Some(20240108),
             width_mm: Some(width_mm),
             height_mm: Some(height_mm),
+            outline_bounds: None,
             placements: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn design_points_project_about_the_edge_cuts_center() {
+        let bounds = velocitypnp_domain::BoardOutlineBounds {
+            min_x_mm: 10.0,
+            max_x_mm: 50.0,
+            min_y_mm: -30.0,
+            max_y_mm: -10.0,
+        };
+        let center = design_point_to_machine([30.0, -20.0], bounds, [100.0, 200.0], 90.0);
+        assert!((center[0] - 100.0).abs() < 1e-9);
+        assert!((center[1] - 200.0).abs() < 1e-9);
+
+        let corner = design_point_to_machine([50.0, -10.0], bounds, [100.0, 200.0], 90.0);
+        assert!((corner[0] - 90.0).abs() < 1e-9);
+        assert!((corner[1] - 220.0).abs() < 1e-9);
     }
 
     #[test]
