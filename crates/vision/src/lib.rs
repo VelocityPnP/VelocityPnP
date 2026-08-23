@@ -4,6 +4,7 @@
 
 mod opencv_backend;
 mod workspace_board_discovery;
+mod workspace_features;
 mod workspace_height_map;
 mod workspace_inventory;
 mod workspace_mosaic;

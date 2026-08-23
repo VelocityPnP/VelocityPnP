@@ -808,7 +808,7 @@ mod tests {
             scan_id,
             profile_id: "profile".into(),
             calibration_id: Uuid::new_v4(),
-            proposal_algorithm_version: "workspace_object_proposals.v3".into(),
+            proposal_algorithm_version: "workspace_object_proposals.v4".into(),
             activated_at: chrono::Utc::now(),
             supersedes_baseline_id: None,
         }

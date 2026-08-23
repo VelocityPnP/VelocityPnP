@@ -454,19 +454,28 @@ The equivalent API is
 `discover_workspace_objects(scan_id)`. The operation uses an accepted refined
 mosaic when present. Otherwise, it uses the height-corrected mosaic.
 
-The `workspace_object_proposals.v3` policy selects known height-map cells above
+The `workspace_object_proposals.v4` policy selects known height-map cells above
 the installed-plate plane. It joins nearby evidence and rejects small isolated
 height noise, including regions below 100 square millimeters. Each proposal
 rectangle is parallel and perpendicular to its
 calibrated plate axes. Its enclosing machine-axis rectangle is the region that
-the scan planner can refine. Actual board rotation is left for later image and
-KiCad registration.
+the scan planner can refine.
+
+For imported boards with usable Edge.Cuts dimensions, OpenCV line evidence
+fits the design rectangle inside that coarse region. This removes clamps and
+plate margin from the board measurement. A design match records its visual
+outline, center, angle, edge support, and dimension error in machine
+coordinates. A square or nearly square outline keeps
+`orientation_ambiguous=true`; local fiducials must resolve its design
+orientation before job setup.
 
 The semantic classifier is a replaceable interface. The initial deterministic
 classifier combines known-fixture overlap, plate role, raised-surface geometry,
-and KiCad dimensions. Weak or conflicting evidence produces `unknown`; the
-policy does not force a feeder or board label. A future learned classifier will
-receive the same normalized image crop and metadata. Each crop is retained as
+KiCad dimensions, visual outline fits, and repeated parallel feeder tracks.
+The staging-plate prior and feeder-track evidence combine only when both are
+present. Weak or conflicting evidence produces `unknown`; the policy does not
+force a feeder or board label. A future learned classifier will receive the
+same normalized image crop and metadata. Each crop is retained as
 `object-evidence-NNN.png` so operator corrections can become labeled training
 data.
 
@@ -480,10 +489,10 @@ artifact as lineage.
 The scan stores `board-discovery.json`, `mosaic-board-candidates.png`, and one
 normalized evidence crop per proposal. Green outlines are boards, blue outlines
 are feeders, purple outlines are known fixtures, and amber outlines need more
-evidence. Classification is not board registration: this stage does not
-create a `BoardInstance`, move the camera, compare package templates, or accept
-a design-to-machine transform. Local fiducial and package verification is the
-next gate.
+evidence. Classification is not accepted job registration: this stage does
+not create a `BoardInstance`, move the camera, compare package templates,
+resolve a symmetric outline, or accept a design-to-machine transform. Local
+fiducial and package verification is the next gate.
 
 ### Persistent workspace inventory
 

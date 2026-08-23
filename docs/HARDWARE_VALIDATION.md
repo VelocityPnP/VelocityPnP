@@ -1690,6 +1690,48 @@ released the controller before the daemon was rebuilt for no-motion replay.
 The final daemon state is disconnected, unhomed, and fault-free. No emergency
 stop was used.
 
+### No-motion PCB and feeder recognition
+
+On 2026-08-22, the official LumenPnP V3.0.4 FTP KiCad board was imported as
+`Opulo FTP PCB REV00`. The importer read a 75-by-75 mm Edge.Cuts outline and
+90 placements without warnings. The attached machine stayed disconnected.
+
+`workspace_object_proposals.v4` kept the coarse proposal rectangles parallel
+to each calibrated plate. It then used OpenCV line evidence to fit imported
+board dimensions inside each crop. This separates a PCB from clamps and plate
+margin. The refined full-workspace replay found the FTP PCB inside its former
+92.17-by-104.03 mm raised region. The fitted result was:
+
+| Field | Value |
+| --- | ---: |
+| Center X | 394.879 mm |
+| Center Y | 259.003 mm |
+| Canonical angle | 0.455 degrees |
+| Dimension error | 0.041 mm |
+| Edge support | 95.8 percent |
+| Match confidence | 0.9984 |
+
+The proposal stores the 75 mm visual outline separately from the coarse scan
+region. The board is square, so the result correctly marks its design
+orientation as ambiguous. It is not yet an accepted job transform.
+
+The deterministic classifier also found repeated long parallel tracks in the
+two unknown staging-plate regions. With the independent staging-plate prior,
+it classified both as feeders at 0.9624 and 0.8870 confidence. The datum PCB,
+nozzle bank, and bottom camera guard kept their fixture classes. No raised
+region remained unknown.
+
+The cropped changed-board scan independently fit the same 75 mm design at
+X=395.469, Y=258.930 mm and 1.980 degrees. Its dimension error was 0.009 mm,
+edge support was 94.1 percent, and confidence was 0.9997. Relative to the
+baseline fit, this measures a 1.525-degree rotation and a 0.595 mm center
+translation. This agrees with the operator report that the board was rotated
+clockwise with a smaller shift.
+
+The final preview draws the coarse build-region envelope in muted green and
+the fitted PCB outline in bright green. Replay used retained artifacts only.
+It opened no controller or camera and caused no motion.
+
 ### Height reconstruction throughput
 
 The rotated-PCB refinement exposed a post-capture bottleneck. Scan
@@ -1735,3 +1777,4 @@ use the release daemon.
 - [Opulo LumenPnP V3.0.4 OpenPnP machine profile](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml)
 - [Opulo LumenPnP V3.0.4 datum PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/datum/datum.kicad_pcb)
 - [Opulo LumenPnP V3.0.4 staging plate](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/staging-plate/staging-plate.kicad_pcb)
+- [Opulo LumenPnP V3.0.4 FTP PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/ftp/ftp.kicad_pcb)

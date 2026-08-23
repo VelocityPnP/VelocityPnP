@@ -1,3 +1,4 @@
+use crate::workspace_features::{detect_workspace_line_features, WorkspaceLineFeatures};
 use crate::{
     GrayFrame, RgbFrame, WorkspaceHeightCell, WorkspaceHeightCellSource, WorkspaceHeightMap,
 };
@@ -6,12 +7,12 @@ use std::collections::VecDeque;
 use velocitypnp_domain::{
     BoardDesign, InstalledPlateGeometryReport, InstalledPlateRole, MachineProfile,
     WorkspaceBoardCandidate, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
-    WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary, WorkspaceClassificationEvidence,
-    WorkspaceFixtureAnchor, WorkspaceObjectClass, WorkspaceObjectClassification,
-    WorkspaceRasterTransform, WorkspaceScanRegion,
+    WorkspaceBoardHeightSource, WorkspaceBoardRegistrationMethod, WorkspaceCameraApertureSummary,
+    WorkspaceClassificationEvidence, WorkspaceFixtureAnchor, WorkspaceObjectClass,
+    WorkspaceObjectClassification, WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v3";
+pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v4";
 pub const WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT: &str = "board-discovery.json";
 pub const WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT: &str = "mosaic-board-candidates.png";
 
@@ -87,7 +88,7 @@ pub struct DeterministicWorkspaceObjectClassifier;
 
 impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
     fn classifier_id(&self) -> &str {
-        "deterministic_workspace_evidence.v1"
+        "deterministic_workspace_evidence.v2"
     }
 
     fn classify(&self, evidence: WorkspaceObjectEvidence<'_>) -> WorkspaceObjectClassification {
@@ -147,22 +148,55 @@ impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
                 .into(),
         });
         if let Some(design_match) = candidate.design_matches.first() {
+            let (source, explanation) = match design_match.registration_method {
+                WorkspaceBoardRegistrationMethod::VisualOutline => (
+                    format!("kicad_visual_outline:{}", design_match.board_id),
+                    format!(
+                        "a visual rectangle fits {} within {:.3} mm with {:.1}% edge support",
+                        design_match.board_name,
+                        design_match.dimension_error_mm,
+                        design_match.edge_support_fraction.unwrap_or_default() * 100.0,
+                    ),
+                ),
+                WorkspaceBoardRegistrationMethod::CandidateDimensions => (
+                    format!("kicad_dimensions:{}", design_match.board_id),
+                    format!(
+                        "plate-aligned dimensions differ from {} by {:.3} mm",
+                        design_match.board_name, design_match.dimension_error_mm
+                    ),
+                ),
+            };
             observations.push(WorkspaceClassificationEvidence {
-                source: format!("kicad_dimensions:{}", design_match.board_id),
+                source,
                 suggested_class: WorkspaceObjectClass::Board,
                 confidence: design_match.confidence,
-                explanation: format!(
-                    "plate-aligned dimensions differ from {} by {:.3} mm",
-                    design_match.board_name, design_match.dimension_error_mm
-                ),
+                explanation,
             });
+        }
+        if candidate.plate_role == Some(InstalledPlateRole::Staging) {
+            if let Ok(features) = detect_workspace_line_features(evidence.normalized_crop) {
+                if let Some(tracks) = features.parallel_tracks() {
+                    let confidence = 1.0 - (1.0 - 0.55) * (1.0 - tracks.confidence);
+                    observations.push(WorkspaceClassificationEvidence {
+                        source: "staging_parallel_feeder_tracks".into(),
+                        suggested_class: WorkspaceObjectClass::Feeder,
+                        confidence,
+                        explanation: format!(
+                            "the staging-plate region has {} long parallel tracks covering {:.1}% of their axis and {:.1}% of its width",
+                            tracks.track_count,
+                            tracks.mean_length_fraction * 100.0,
+                            tracks.transverse_span_fraction * 100.0,
+                        ),
+                    });
+                }
+            }
         }
 
         let strongest = observations
             .iter()
             .filter(|item| item.suggested_class != WorkspaceObjectClass::Unknown)
             .max_by(|first, second| first.confidence.total_cmp(&second.confidence));
-        let (class, confidence, review_required) = strongest
+        let (class, confidence, mut review_required) = strongest
             .filter(|item| item.confidence >= 0.75)
             .map_or((WorkspaceObjectClass::Unknown, 0.5, true), |item| {
                 (
@@ -171,6 +205,16 @@ impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
                     item.confidence < 0.90,
                 )
             });
+        if class == WorkspaceObjectClass::Board
+            && candidate
+                .design_matches
+                .first()
+                .is_some_and(|design_match| {
+                    design_match.orientation_ambiguous || candidate.design_matches.len() > 1
+                })
+        {
+            review_required = true;
+        }
         WorkspaceObjectClassification {
             class,
             confidence,
@@ -731,6 +775,14 @@ fn candidate_from_component(
         (count * height_map.cell_size_mm.powi(2) / (width_mm * height_mm)).clamp(0.0, 1.0);
     let texture_energy_luma = region_texture_energy(mosaic, raster_transform, region);
     let known_fixture = best_fixture_match(&cells, &context.fixtures);
+    let crop = normalized_evidence_crop(
+        mosaic,
+        raster_transform,
+        &outline_machine_mm,
+        width_mm,
+        height_mm,
+    );
+    let line_features = detect_workspace_line_features(&crop).ok();
     let mut design_matches = if known_fixture.is_some() {
         Vec::new()
     } else {
@@ -739,6 +791,9 @@ fn candidate_from_component(
             width_mm,
             height_mm,
             rotation_rad.to_degrees(),
+            &crop,
+            &outline_machine_mm,
+            line_features.as_ref(),
         )
     };
     design_matches.truncate(MAXIMUM_DESIGN_MATCHES);
@@ -763,13 +818,6 @@ fn candidate_from_component(
         board_likelihood = 0.0;
     }
 
-    let crop = normalized_evidence_crop(
-        mosaic,
-        raster_transform,
-        &outline_machine_mm,
-        width_mm,
-        height_mm,
-    );
     let mut candidate = WorkspaceBoardCandidate {
         candidate_index: 0,
         region,
@@ -920,6 +968,9 @@ fn board_design_matches(
     candidate_width_mm: f64,
     candidate_height_mm: f64,
     candidate_rotation_deg: f64,
+    crop: &GrayFrame,
+    candidate_outline_machine_mm: &[[f64; 2]],
+    line_features: Option<&WorkspaceLineFeatures>,
 ) -> Vec<WorkspaceBoardDesignMatch> {
     let mut matches = board_designs
         .iter()
@@ -928,6 +979,19 @@ fn board_design_matches(
             if design_width_mm <= 0.0 || design_height_mm <= 0.0 {
                 return None;
             }
+            let visual = line_features.and_then(|features| {
+                visual_board_design_match(
+                    board,
+                    features,
+                    crop,
+                    candidate_outline_machine_mm,
+                    candidate_width_mm,
+                    candidate_height_mm,
+                    candidate_rotation_deg,
+                    design_width_mm,
+                    design_height_mm,
+                )
+            });
             let orientations = [
                 (design_width_mm, design_height_mm, candidate_rotation_deg),
                 (
@@ -954,22 +1018,129 @@ fn board_design_matches(
             let width_tolerance = 4.0_f64.max(width * 0.20);
             let height_tolerance = 4.0_f64.max(height * 0.20);
             if width_error > width_tolerance || height_error > height_tolerance {
-                return None;
+                return visual;
             }
             let normalized_error =
                 0.5 * (width_error / width_tolerance + height_error / height_tolerance);
-            Some(WorkspaceBoardDesignMatch {
+            let dimension_match = WorkspaceBoardDesignMatch {
                 board_id: board.id,
                 board_name: board.name.clone(),
+                registration_method: WorkspaceBoardRegistrationMethod::CandidateDimensions,
                 rotation_deg: normalize_angle(rotation_deg),
                 dimension_error_mm: width_error.hypot(height_error),
                 dimension_error_fraction,
                 confidence: (1.0 - normalized_error).clamp(0.0, 1.0),
-            })
+                center_x_mm: None,
+                center_y_mm: None,
+                outline_machine_mm: Vec::new(),
+                edge_support_fraction: None,
+                orientation_ambiguous: dimensions_are_orientation_ambiguous(
+                    design_width_mm,
+                    design_height_mm,
+                ),
+            };
+            Some(
+                visual
+                    .filter(|visual| visual.confidence > dimension_match.confidence)
+                    .unwrap_or(dimension_match),
+            )
         })
         .collect::<Vec<_>>();
     matches.sort_by(|first, second| second.confidence.total_cmp(&first.confidence));
     matches
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visual_board_design_match(
+    board: &BoardDesign,
+    features: &WorkspaceLineFeatures,
+    crop: &GrayFrame,
+    candidate_outline_machine_mm: &[[f64; 2]],
+    candidate_width_mm: f64,
+    candidate_height_mm: f64,
+    candidate_rotation_deg: f64,
+    design_width_mm: f64,
+    design_height_mm: f64,
+) -> Option<WorkspaceBoardDesignMatch> {
+    if candidate_outline_machine_mm.len() != 4 || crop.width == 0 || crop.height == 0 {
+        return None;
+    }
+    let x_mm_per_pixel = candidate_width_mm / f64::from(crop.width);
+    let y_mm_per_pixel = candidate_height_mm / f64::from(crop.height);
+    let orientations = [
+        (design_width_mm, design_height_mm, 0.0),
+        (design_height_mm, design_width_mm, 90.0),
+    ];
+    orientations
+        .into_iter()
+        .filter_map(|(width_mm, height_mm, rotation_offset_deg)| {
+            let fit = features.fit_rectangular_outline(
+                width_mm,
+                height_mm,
+                x_mm_per_pixel,
+                y_mm_per_pixel,
+            )?;
+            let outline_machine_mm = fit
+                .corners_px
+                .iter()
+                .map(|point| crop_pixel_to_machine(*point, crop, candidate_outline_machine_mm))
+                .collect::<Vec<_>>();
+            let center = crop_pixel_to_machine(fit.center_px, crop, candidate_outline_machine_mm);
+            let relative_rotation_deg =
+                if dimensions_are_orientation_ambiguous(design_width_mm, design_height_mm) {
+                    normalize_quarter_turn(fit.rotation_deg + rotation_offset_deg)
+                } else {
+                    fit.rotation_deg + rotation_offset_deg
+                };
+            Some(WorkspaceBoardDesignMatch {
+                board_id: board.id,
+                board_name: board.name.clone(),
+                registration_method: WorkspaceBoardRegistrationMethod::VisualOutline,
+                rotation_deg: normalize_angle(candidate_rotation_deg + relative_rotation_deg),
+                dimension_error_mm: fit.dimension_error_mm,
+                dimension_error_fraction: fit.dimension_error_fraction,
+                confidence: fit.confidence,
+                center_x_mm: Some(center[0]),
+                center_y_mm: Some(center[1]),
+                outline_machine_mm,
+                edge_support_fraction: Some(fit.edge_support_fraction),
+                orientation_ambiguous: dimensions_are_orientation_ambiguous(
+                    design_width_mm,
+                    design_height_mm,
+                ),
+            })
+        })
+        .max_by(|first, second| first.confidence.total_cmp(&second.confidence))
+}
+
+fn crop_pixel_to_machine(
+    pixel: [f64; 2],
+    crop: &GrayFrame,
+    candidate_outline_machine_mm: &[[f64; 2]],
+) -> [f64; 2] {
+    let origin = candidate_outline_machine_mm[0];
+    let x_edge = subtract(candidate_outline_machine_mm[1], origin);
+    let y_edge = subtract(candidate_outline_machine_mm[3], origin);
+    let x_fraction = pixel[0] / f64::from(crop.width);
+    let y_fraction = pixel[1] / f64::from(crop.height);
+    [
+        origin[0] + x_fraction * x_edge[0] + y_fraction * y_edge[0],
+        origin[1] + x_fraction * x_edge[1] + y_fraction * y_edge[1],
+    ]
+}
+
+fn dimensions_are_orientation_ambiguous(width_mm: f64, height_mm: f64) -> bool {
+    (width_mm - height_mm).abs() / width_mm.max(height_mm) <= 0.05
+}
+
+fn normalize_quarter_turn(mut angle_deg: f64) -> f64 {
+    while angle_deg >= 45.0 {
+        angle_deg -= 90.0;
+    }
+    while angle_deg < -45.0 {
+        angle_deg += 90.0;
+    }
+    angle_deg
 }
 
 fn dimension_error(
@@ -1037,12 +1208,16 @@ fn board_candidate_preview(
         pixels,
     };
     for candidate in candidates {
-        let color = match candidate
+        let class = candidate
             .classification
             .as_ref()
             .map(|classification| classification.class)
-            .unwrap_or_default()
-        {
+            .unwrap_or_default();
+        let visual_outline = candidate.design_matches.first().filter(|design_match| {
+            design_match.registration_method == WorkspaceBoardRegistrationMethod::VisualOutline
+                && design_match.outline_machine_mm.len() >= 3
+        });
+        let color = match class {
             WorkspaceObjectClass::Board => [55, 230, 135],
             WorkspaceObjectClass::Feeder => [45, 190, 255],
             WorkspaceObjectClass::ToolingStation => [190, 95, 255],
@@ -1050,13 +1225,28 @@ fn board_candidate_preview(
             WorkspaceObjectClass::FixedMachineFeature => [120, 120, 255],
             WorkspaceObjectClass::Unknown => [255, 174, 45],
         };
+        let proposal_color = if visual_outline.is_some() {
+            [120, 155, 120]
+        } else {
+            color
+        };
         for index in 0..candidate.outline_machine_mm.len() {
             let first = candidate.outline_machine_mm[index];
             let second =
                 candidate.outline_machine_mm[(index + 1) % candidate.outline_machine_mm.len()];
             let first = machine_to_pixel(transform, first[0], first[1]);
             let second = machine_to_pixel(transform, second[0], second[1]);
-            draw_line(&mut preview, first, second, color);
+            draw_line(&mut preview, first, second, proposal_color);
+        }
+        if let Some(design_match) = visual_outline {
+            for index in 0..design_match.outline_machine_mm.len() {
+                let first = design_match.outline_machine_mm[index];
+                let second = design_match.outline_machine_mm
+                    [(index + 1) % design_match.outline_machine_mm.len()];
+                let first = machine_to_pixel(transform, first[0], first[1]);
+                let second = machine_to_pixel(transform, second[0], second[1]);
+                draw_line(&mut preview, first, second, color);
+            }
         }
     }
     preview

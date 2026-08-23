@@ -3,8 +3,8 @@ import { api, waitForOperation } from "./api";
 import type {
   AutomatedCalibrationRun, BoardDesign, CalibrationArtifactPlan, CalibrationSnapshot,
   CalibrationStep, Device, MachineEvent, MachineStatus, Pose, SensorReading,
-  VisualHomingResult, WorkspaceBoardDiscoveryReport, WorkspaceChangeSetReport,
-  WorkspaceInventoryBaseline, WorkspaceScanReport,
+  VisualHomingResult, WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport,
+  WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
 import "./styles.css";
 
@@ -579,10 +579,27 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
         <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with semantic object proposals" />
         <div><p><strong>{discovery.candidates.length}</strong> raised-surface proposals. Known fixtures are purple, boards are green, feeders are blue, and unresolved objects are amber.</p>
           {discovery.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
-          <div className="candidate-list">{discovery.candidates.map((candidate) => <div key={candidate.candidate_index}><strong>{pretty(candidate.classification?.class ?? "unknown")} {candidate.candidate_index + 1}</strong><span>{candidate.width_mm.toFixed(1)} × {candidate.height_mm.toFixed(1)} mm at {candidate.center_x_mm.toFixed(1)}, {candidate.center_y_mm.toFixed(1)}{candidate.plate_role ? ` · ${pretty(candidate.plate_role)} plate` : ""}</span><span>{((candidate.classification?.confidence ?? 0) * 100).toFixed(0)}% class confidence{candidate.known_fixture_id ? ` · ${pretty(candidate.known_fixture_id)}` : candidate.design_matches[0] ? ` · ${candidate.design_matches[0].board_name}` : " · review required"}</span>{candidate.evidence_artifact_name && <a href={`/api/v1/workspace-scans/${selectedScan}/artifacts/${candidate.evidence_artifact_name}`} target="_blank" rel="noreferrer">View normalized evidence</a>}</div>)}</div>
+          <div className="candidate-list">{discovery.candidates.map((candidate) => <WorkspaceCandidateCard key={candidate.candidate_index} candidate={candidate} scanId={selectedScan} />)}</div>
         </div>
       </div>}
     </section>
+  </div>;
+}
+
+function WorkspaceCandidateCard({ candidate, scanId }: {
+  candidate: WorkspaceBoardCandidate;
+  scanId: string;
+}) {
+  const design = candidate.design_matches[0];
+  const visualDesign = design?.registration_method === "visual_outline"
+    && design.center_x_mm != null
+    && design.center_y_mm != null ? design : null;
+  return <div>
+    <strong>{pretty(candidate.classification?.class ?? "unknown")} {candidate.candidate_index + 1}</strong>
+    <span>Proposal {candidate.width_mm.toFixed(1)} × {candidate.height_mm.toFixed(1)} mm at {candidate.center_x_mm.toFixed(1)}, {candidate.center_y_mm.toFixed(1)}{candidate.plate_role ? ` · ${pretty(candidate.plate_role)} plate` : ""}</span>
+    {visualDesign && <span>Visual PCB at {visualDesign.center_x_mm!.toFixed(3)}, {visualDesign.center_y_mm!.toFixed(3)} mm · {visualDesign.rotation_deg.toFixed(3)}° · {visualDesign.dimension_error_mm.toFixed(3)} mm error · {((visualDesign.edge_support_fraction ?? 0) * 100).toFixed(0)}% edge support</span>}
+    <span>{((candidate.classification?.confidence ?? 0) * 100).toFixed(0)}% class confidence{candidate.known_fixture_id ? ` · ${pretty(candidate.known_fixture_id)}` : design ? ` · ${design.board_name}` : " · review required"}{design?.orientation_ambiguous ? " · orientation needs fiducials" : ""}</span>
+    {candidate.evidence_artifact_name && <a href={`/api/v1/workspace-scans/${scanId}/artifacts/${candidate.evidence_artifact_name}`} target="_blank" rel="noreferrer">View normalized evidence</a>}
   </div>;
 }
 

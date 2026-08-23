@@ -263,10 +263,30 @@ pub struct WorkspaceRefinementCompositeSummary {
 pub struct WorkspaceBoardDesignMatch {
     pub board_id: Uuid,
     pub board_name: String,
+    #[serde(default)]
+    pub registration_method: WorkspaceBoardRegistrationMethod,
     pub rotation_deg: f64,
     pub dimension_error_mm: f64,
     pub dimension_error_fraction: f64,
     pub confidence: f64,
+    #[serde(default)]
+    pub center_x_mm: Option<f64>,
+    #[serde(default)]
+    pub center_y_mm: Option<f64>,
+    #[serde(default)]
+    pub outline_machine_mm: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub edge_support_fraction: Option<f64>,
+    #[serde(default)]
+    pub orientation_ambiguous: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceBoardRegistrationMethod {
+    #[default]
+    CandidateDimensions,
+    VisualOutline,
 }
 
 /// A semantic class for one observed workspace region.

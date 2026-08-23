@@ -574,10 +574,16 @@ export interface BoardDesign {
 export interface WorkspaceBoardDesignMatch {
   board_id: string;
   board_name: string;
+  registration_method: "candidate_dimensions" | "visual_outline";
   rotation_deg: number;
   dimension_error_mm: number;
   dimension_error_fraction: number;
   confidence: number;
+  center_x_mm: number | null;
+  center_y_mm: number | null;
+  outline_machine_mm: Array<[number, number]>;
+  edge_support_fraction: number | null;
+  orientation_ambiguous: boolean;
 }
 
 export type WorkspaceObjectClass =
