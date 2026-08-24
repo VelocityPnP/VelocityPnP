@@ -438,7 +438,11 @@ fn infer_tape_width(track: &SprocketTrack, tracks: &[SprocketTrack]) -> Option<f
             (nearest_separation - multiple * width).abs() <= 1.25
         })
         .collect::<Vec<_>>();
-    (candidates.len() == 1).then_some(candidates[0])
+    if candidates.len() == 1 {
+        candidates.first().copied()
+    } else {
+        None
+    }
 }
 
 fn choose_pick_centerline(
@@ -978,5 +982,25 @@ mod tests {
 
         assert!(result.proposals.is_empty());
         assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn unresolved_track_spacing_does_not_index_an_empty_width_set() {
+        let tracks = vec![
+            SprocketTrack {
+                cross_mm: 2.0,
+                circles: Vec::new(),
+                residual_p95_mm: 0.1,
+                confidence: 0.8,
+            },
+            SprocketTrack {
+                cross_mm: 7.0,
+                circles: Vec::new(),
+                residual_p95_mm: 0.1,
+                confidence: 0.8,
+            },
+        ];
+
+        assert_eq!(infer_tape_width(&tracks[0], &tracks), None);
     }
 }

@@ -454,7 +454,7 @@ The equivalent API is
 `discover_workspace_objects(scan_id)`. The operation uses an accepted refined
 mosaic when present. Otherwise, it uses the height-corrected mosaic.
 
-The `workspace_object_proposals.v5` policy selects known height-map cells above
+The `workspace_object_proposals.v6` policy selects known height-map cells above
 the installed-plate plane. It joins nearby evidence and rejects small isolated
 height noise, including regions below 100 square millimeters. Each proposal
 rectangle is parallel and perpendicular to its
@@ -478,6 +478,12 @@ force a feeder or board label. A future learned classifier will receive the
 same normalized image crop and metadata. Each crop is retained as
 `object-evidence-NNN.png` so operator corrections can become labeled training
 data.
+
+A staging-plate region with at least 0.65 confidence from repeated parallel
+tracks is routed to the strip-feeder specialist as a review-required feeder
+candidate. This lower routing threshold does not activate a feeder. Known
+fixtures return before this rule, and the specialist must still find an
+EIA-481 sprocket lattice.
 
 The V3.0.4 profile supplies the source-derived datum-PCB outline and an
 installed nozzle-bank envelope. The detected bottom-camera aperture supplies a

@@ -1841,6 +1841,52 @@ centerline offset, resolves a 2 mm component pitch, and persists an inactive
 draft. Isolated round features do not form a lane. A new focused scan and live
 camera holdout remain required before the roadmap validation item can pass.
 
+### Physical strip-feeder vision holdout
+
+On 2026-08-24, a host reboot cleared the stuck top-camera USB stream. Direct
+V4L2 captures and daemon captures then succeeded for both machine cameras. A
+new persistent calibration completed five visual-home cycles, head geometry,
+local direction response, both vacuum contacts and characterizations, both
+planar camera models, and installed plate geometry. N1 characterization needed
+one bounded contact reprobe; N2 and the N1 retry passed. Fine XYZ home with
+N2 reproduced the stored contact with a zero Z correction.
+
+Focused survey `b501d9fb-3d92-4cf7-881a-98c94d57d9b3` covered staging-plate
+X=90 to 135 mm and Y=105 to 195 mm. It used 60 percent overlap, 0.10
+mm/pixel output, 1,200 mm/min motion, and transient source retention. It
+captured all 296 tiles and completed in 315.7 seconds. Reconstruction retained
+9,221,572 bytes and produced a 23-by-45 height map with 869 measured, 96
+inferred, and 70 unknown cells. The corrected mosaic clearly shows four
+carrier-tape lanes.
+
+The first physical replay found four parallel tracks but left the region
+unknown because its 0.662 feeder score did not meet the generic 0.75 class
+threshold. Policy `workspace_object_proposals.v6` now lets a staging-plate
+parallel-track score of at least 0.65 route a review candidate to the
+sprocket-lattice specialist. Known fixtures still return first, and the
+specialist still rejects a crop without an EIA-481 lattice. The same retained
+scan then classified candidate 0 as a review-required feeder.
+
+The first specialist replay exposed an eager `then_some(candidates[0])`
+evaluation when adjacent track spacing matched no standard tape width. It
+panicked before producing a report. A safe single-item check and regression
+test now keep unresolved widths in review. No controller was connected during
+either replay.
+
+The fixed physical replay found five sprocket lattices. Proposal 0 passed the
+image draft gate with 18 centers, a 0.111 mm sprocket-pitch residual, 12 mm
+tape width, 2 mm pocket pitch, and 0.931 confidence. Its preview places the
+detected holes on the left tape and the calculated centerline on its pockets.
+The four weaker proposals remain review-required. Inactive draft
+`4eefa2fd-11e1-45a8-8ec6-5c2140920922` stores proposal 0 without guessing a
+part identity or orientation. Pickup Z, occupied-pocket selection, and a live
+camera holdout remain unset, so the roadmap validation item remains open.
+
+The machine returned to the visual datum after the scan. Normal disconnect
+operation `0521c42e-8b3c-44bd-99d4-3bb3903194d3` switched outputs off,
+released control, and cleared runtime homing before the daemon rebuild. No
+emergency stop was used.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

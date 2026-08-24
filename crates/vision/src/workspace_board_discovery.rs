@@ -13,7 +13,7 @@ use velocitypnp_domain::{
     WorkspaceObjectClassification, WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v5";
+pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v6";
 pub const WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT: &str = "board-discovery.json";
 pub const WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT: &str = "mosaic-board-candidates.png";
 
@@ -89,7 +89,7 @@ pub struct DeterministicWorkspaceObjectClassifier;
 
 impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
     fn classifier_id(&self) -> &str {
-        "deterministic_workspace_evidence.v2"
+        "deterministic_workspace_evidence.v3"
     }
 
     fn classify(&self, evidence: WorkspaceObjectEvidence<'_>) -> WorkspaceObjectClassification {
@@ -193,19 +193,8 @@ impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
             }
         }
 
-        let strongest = observations
-            .iter()
-            .filter(|item| item.suggested_class != WorkspaceObjectClass::Unknown)
-            .max_by(|first, second| first.confidence.total_cmp(&second.confidence));
-        let (class, confidence, mut review_required) = strongest
-            .filter(|item| item.confidence >= 0.75)
-            .map_or((WorkspaceObjectClass::Unknown, 0.5, true), |item| {
-                (
-                    item.suggested_class,
-                    item.confidence,
-                    item.confidence < 0.90,
-                )
-            });
+        let (class, confidence, mut review_required) =
+            resolve_workspace_classification(&observations);
         if class == WorkspaceObjectClass::Board
             && candidate
                 .design_matches
@@ -224,6 +213,34 @@ impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
             evidence: observations,
         }
     }
+}
+
+fn resolve_workspace_classification(
+    observations: &[WorkspaceClassificationEvidence],
+) -> (WorkspaceObjectClass, f64, bool) {
+    let strongest = observations
+        .iter()
+        .filter(|item| item.suggested_class != WorkspaceObjectClass::Unknown)
+        .max_by(|first, second| first.confidence.total_cmp(&second.confidence));
+    let Some(strongest) = strongest else {
+        return (WorkspaceObjectClass::Unknown, 0.5, true);
+    };
+    let minimum_confidence = if strongest.source == "staging_parallel_feeder_tracks" {
+        // This is a routing decision into the sprocket-lattice specialist, not
+        // feeder activation. Known fixtures have already returned above, and
+        // the specialist still rejects crops without an EIA-481 lattice.
+        0.65
+    } else {
+        0.75
+    };
+    if strongest.confidence < minimum_confidence {
+        return (WorkspaceObjectClass::Unknown, 0.5, true);
+    }
+    (
+        strongest.suggested_class,
+        strongest.confidence,
+        strongest.confidence < 0.90,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1545,6 +1562,50 @@ mod tests {
                 -45.0,
             ),
             -47.0,
+        );
+    }
+
+    #[test]
+    fn staging_tracks_route_a_review_candidate_to_feeder_vision() {
+        let observations = vec![
+            WorkspaceClassificationEvidence {
+                source: "plate_role_prior".into(),
+                suggested_class: WorkspaceObjectClass::Feeder,
+                confidence: 0.55,
+                explanation: String::new(),
+            },
+            WorkspaceClassificationEvidence {
+                source: "raised_surface_geometry".into(),
+                suggested_class: WorkspaceObjectClass::Board,
+                confidence: 0.44,
+                explanation: String::new(),
+            },
+            WorkspaceClassificationEvidence {
+                source: "staging_parallel_feeder_tracks".into(),
+                suggested_class: WorkspaceObjectClass::Feeder,
+                confidence: 0.66,
+                explanation: String::new(),
+            },
+        ];
+
+        assert_eq!(
+            resolve_workspace_classification(&observations),
+            (WorkspaceObjectClass::Feeder, 0.66, true)
+        );
+    }
+
+    #[test]
+    fn generic_weak_geometry_remains_unknown() {
+        let observations = vec![WorkspaceClassificationEvidence {
+            source: "raised_surface_geometry".into(),
+            suggested_class: WorkspaceObjectClass::Board,
+            confidence: 0.74,
+            explanation: String::new(),
+        }];
+
+        assert_eq!(
+            resolve_workspace_classification(&observations),
+            (WorkspaceObjectClass::Unknown, 0.5, true)
         );
     }
 
