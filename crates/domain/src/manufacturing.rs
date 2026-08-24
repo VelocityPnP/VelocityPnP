@@ -207,6 +207,51 @@ pub enum Feeder {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StripFeederRegistrationStatus {
+    VisionDraft,
+    LiveValidationRequired,
+    Ready,
+}
+
+/// Persistent feeder setup state derived from retained workspace evidence.
+///
+/// `Ready` is reserved for a later live camera and pickup-Z workflow. Creating
+/// a draft cannot create or enable a production `Feeder`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederRegistration {
+    pub id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub source_scan_id: Uuid,
+    pub source_candidate_index: u32,
+    pub source_proposal_index: u32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub status: StripFeederRegistrationStatus,
+    pub name: String,
+    #[serde(default)]
+    pub part_key: Option<String>,
+    #[serde(default)]
+    pub part_rotation_deg: Option<f64>,
+    pub tape_width_mm: f64,
+    pub tape_pitch_mm: f64,
+    pub tape_rotation_deg: f64,
+    pub pick_centerline_machine_mm: [[f64; 2]; 2],
+    pub pocket_centers_machine_mm: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub selected_pocket_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub pickup_z_mm: Option<f64>,
+    #[serde(default)]
+    pub active_feeder_id: Option<Uuid>,
+    pub vision_confidence: f64,
+    pub vision_review_required: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 impl Feeder {
     pub fn id(&self) -> Uuid {
         match self {

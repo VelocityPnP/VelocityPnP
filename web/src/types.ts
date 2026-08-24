@@ -702,6 +702,60 @@ export interface WorkspaceBoardCandidate {
   design_matches: WorkspaceBoardDesignMatch[];
 }
 
+export interface StripFeederLaneProposal {
+  proposal_index: number;
+  tape_rotation_deg: number;
+  sprocket_pitch_mm: number;
+  sprocket_pitch_residual_p95_mm: number;
+  sprocket_center_count: number;
+  sprocket_centers_machine_mm: Array<[number, number]>;
+  tape_width_mm: number | null;
+  component_pitch_mm: number | null;
+  pick_centerline_machine_mm: [[number, number], [number, number]] | null;
+  pocket_centers_machine_mm: Array<[number, number]>;
+  confidence: number;
+  review_required: boolean;
+  findings: string[];
+}
+
+export interface StripFeederVisionReport {
+  algorithm_version: string;
+  source_scan_id: string;
+  source_candidate_index: number;
+  source_artifact_name: string;
+  report_artifact_name: string;
+  preview_artifact_name: string;
+  created_at: string;
+  proposals: StripFeederLaneProposal[];
+  warnings: string[];
+}
+
+export interface StripFeederRegistration {
+  id: string;
+  profile_id: string;
+  calibration_id: string;
+  source_scan_id: string;
+  source_candidate_index: number;
+  source_proposal_index: number;
+  created_at: string;
+  updated_at: string;
+  status: "vision_draft" | "live_validation_required" | "ready";
+  name: string;
+  part_key: string | null;
+  part_rotation_deg: number | null;
+  tape_width_mm: number;
+  tape_pitch_mm: number;
+  tape_rotation_deg: number;
+  pick_centerline_machine_mm: [[number, number], [number, number]];
+  pocket_centers_machine_mm: Array<[number, number]>;
+  selected_pocket_machine_mm: [number, number] | null;
+  pickup_z_mm: number | null;
+  active_feeder_id: string | null;
+  vision_confidence: number;
+  vision_review_required: boolean;
+  findings: string[];
+}
+
 export interface WorkspaceBoardDiscoveryReport {
   algorithm_version: string;
   source_mosaic_artifact_name: string;

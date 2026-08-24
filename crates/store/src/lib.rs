@@ -7,8 +7,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationSnapshot, CameraProfile,
-    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, WorkspaceInventoryBaseline,
-    WorkspaceScanReport,
+    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, StripFeederRegistration,
+    WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -341,6 +341,24 @@ impl Store {
 
     pub fn list_feeders(&self) -> Result<Vec<Feeder>> {
         self.list("feeder")
+    }
+
+    pub fn put_strip_feeder_registration(
+        &self,
+        registration: &StripFeederRegistration,
+    ) -> Result<()> {
+        self.put("strip_feeder_registration", registration.id, registration)
+    }
+
+    pub fn list_strip_feeder_registrations(&self) -> Result<Vec<StripFeederRegistration>> {
+        self.list("strip_feeder_registration")
+    }
+
+    pub fn get_strip_feeder_registration(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StripFeederRegistration>> {
+        self.get("strip_feeder_registration", id)
     }
 
     pub fn put_job(&self, job: &Job) -> Result<()> {

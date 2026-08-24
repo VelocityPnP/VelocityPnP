@@ -1822,6 +1822,25 @@ fault-free before normal disconnect operation
 `8ff705ef-a418-41b8-90c0-fa4d5d50ba2a`. The final daemon state is disconnected,
 unhomed, and fault-free. No emergency stop was used.
 
+### Strip-feeder vision software gate after host restart
+
+On 2026-08-23, the host restarted after it became unresponsive. The previous
+workspace database and image artifacts were in temporary storage and are not
+available for feeder replay. The persistent project database contains no scan
+entities. No result from the synthetic feeder tests is recorded as physical
+validation.
+
+After the restart, Linux found the REV4 controller at `ttyACM0`, the top PnP
+camera at `video2`, and the bottom PnP camera at `video0`. The VelocityPnP
+daemon was not running, so the first API device request correctly failed with
+connection refused. No controller was opened and no motion occurred.
+
+The no-motion software gate passes synthetic 8 mm tape-bank coverage. It finds
+three independent 4 mm sprocket lattices, uses the EIA-481-C 3.5 mm pocket
+centerline offset, resolves a 2 mm component pitch, and persists an inactive
+draft. Isolated round features do not form a lane. A new focused scan and live
+camera holdout remain required before the roadmap validation item can pass.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
@@ -1832,3 +1851,4 @@ unhomed, and fault-free. No emergency stop was used.
 - [Opulo LumenPnP V3.0.4 datum PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/datum/datum.kicad_pcb)
 - [Opulo LumenPnP V3.0.4 staging plate](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/staging-plate/staging-plate.kicad_pcb)
 - [Opulo LumenPnP V3.0.4 FTP PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/ftp/ftp.kicad_pcb)
+- [ANSI/EIA-481-C carrier-tape dimensions](https://community.nxp.com/pwmxy87654/attachments/pwmxy87654/kinetis/37830/1/EIA-481-2003.pdf)

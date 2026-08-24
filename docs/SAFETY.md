@@ -26,6 +26,12 @@ moves stay at safe Z, omit nozzle rotation, use the profile feed limit, and
 return to the visual-home seed. A failed fiducial hypothesis does not create a
 board instance.
 
+Retained-image strip-feeder analysis causes no machine motion and does not
+require homing. It can store a setup draft, but the draft has no pickup Z,
+selected occupied pocket, or active feeder ID. The job planner cannot consume
+it as a production feeder. A later live camera and bounded pickup-Z workflow
+must validate it before activation.
+
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the
 attached firmware was observed moving X/Y toward zero before homing Z, which
@@ -133,6 +139,7 @@ primary sources before changing a hardware profile:
 - https://docs.opulo.io/byop/testing/actuator-check/
 - https://docs.opulo.io/misc/calibration/4-homing-fiducial/
 - https://docs.opulo.io/misc/photon/
+- https://community.nxp.com/pwmxy87654/attachments/pwmxy87654/kinetis/37830/1/EIA-481-2003.pdf
 
 Even source-backed values require non-moving actuator tests and conservative
 motion validation on each physical machine before production use.

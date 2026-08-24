@@ -4,6 +4,7 @@
 
 mod board_registration;
 mod opencv_backend;
+mod strip_feeder;
 mod workspace_board_discovery;
 mod workspace_features;
 mod workspace_height_map;
@@ -27,6 +28,10 @@ pub use board_registration::{
     BoardRegistrationFit,
 };
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
+pub use strip_feeder::{
+    analyze_strip_feeder_candidate, StripFeederVisionArtifacts, STRIP_FEEDER_SPROCKET_PITCH_MM,
+    STRIP_FEEDER_VISION_ALGORITHM,
+};
 pub use workspace_board_discovery::{
     build_workspace_discovery_context, discover_workspace_boards, discover_workspace_objects,
     merge_workspace_height_maps, DeterministicWorkspaceObjectClassifier,

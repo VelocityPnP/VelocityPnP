@@ -274,6 +274,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WorkspaceBoardDiscoveryReport" }
+  /workspace-scans/{id}/strip-feeder-vision:
+    post:
+      operationId: buildStripFeederVision
+      description: >-
+        Detects carrier-tape sprocket lattices, plate-aligned tape axes,
+        standard tape width, and component-pocket pitch in one retained feeder
+        candidate. The result is draft evidence. It does not cause motion or
+        create an active feeder.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [candidate_index]
+              properties:
+                candidate_index: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Retained no-motion strip-feeder vision evidence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripFeederVisionReport" }
   /workspace-scans/{id}/inventory-baseline:
     post:
       operationId: activateWorkspaceInventoryBaseline
@@ -974,6 +999,58 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
       responses:
         "201": { description: Stored feeder, content: { application/json: { schema: { type: object } } } }
+  /strip-feeder-registrations:
+    get:
+      operationId: listStripFeederRegistrations
+      responses:
+        "200":
+          description: Persistent feeder setup drafts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [registrations]
+                properties:
+                  registrations:
+                    type: array
+                    items: { $ref: "#/components/schemas/StripFeederRegistration" }
+    post:
+      operationId: createStripFeederRegistration
+      description: >-
+        Stores one measured lane as a feeder setup draft. This operation does
+        not cause motion and cannot create an active production feeder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scan_id, candidate_index, proposal_index]
+              properties:
+                scan_id: { type: string, format: uuid }
+                candidate_index: { type: integer, minimum: 0 }
+                proposal_index: { type: integer, minimum: 0 }
+                name: { type: [string, "null"] }
+                part_key: { type: [string, "null"] }
+                part_rotation_deg: { type: [number, "null"] }
+      responses:
+        "201":
+          description: Stored feeder setup draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripFeederRegistration" }
+  /strip-feeder-registrations/{id}:
+    get:
+      operationId: getStripFeederRegistration
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Persistent feeder setup draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripFeederRegistration" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /jobs:
     get:
       operationId: listJobs
@@ -1931,6 +2008,144 @@ components:
         - calibration_fixture
         - fixed_machine_feature
         - unknown
+    StripFeederVisionReport:
+      type: object
+      required:
+        - algorithm_version
+        - source_scan_id
+        - source_candidate_index
+        - source_artifact_name
+        - report_artifact_name
+        - preview_artifact_name
+        - created_at
+        - proposals
+        - warnings
+      properties:
+        algorithm_version: { type: string }
+        source_scan_id: { type: string, format: uuid }
+        source_candidate_index: { type: integer, minimum: 0 }
+        source_artifact_name: { type: string }
+        report_artifact_name: { type: string }
+        preview_artifact_name: { type: string }
+        created_at: { type: string, format: date-time }
+        proposals:
+          type: array
+          items: { $ref: "#/components/schemas/StripFeederLaneProposal" }
+        warnings:
+          type: array
+          items: { type: string }
+    StripFeederLaneProposal:
+      type: object
+      required:
+        - proposal_index
+        - tape_rotation_deg
+        - sprocket_pitch_mm
+        - sprocket_pitch_residual_p95_mm
+        - sprocket_center_count
+        - sprocket_centers_machine_mm
+        - tape_width_mm
+        - component_pitch_mm
+        - pick_centerline_machine_mm
+        - pocket_centers_machine_mm
+        - confidence
+        - review_required
+        - findings
+      properties:
+        proposal_index: { type: integer, minimum: 0 }
+        tape_rotation_deg: { type: number }
+        sprocket_pitch_mm: { type: number, exclusiveMinimum: 0 }
+        sprocket_pitch_residual_p95_mm: { type: number, minimum: 0 }
+        sprocket_center_count: { type: integer, minimum: 3 }
+        sprocket_centers_machine_mm:
+          type: array
+          minItems: 3
+          items: { $ref: "#/components/schemas/Point2d" }
+        tape_width_mm: { type: [number, "null"], exclusiveMinimum: 0 }
+        component_pitch_mm: { type: [number, "null"], exclusiveMinimum: 0 }
+        pick_centerline_machine_mm:
+          oneOf:
+            - type: array
+              minItems: 2
+              maxItems: 2
+              items: { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        pocket_centers_machine_mm:
+          type: array
+          items: { $ref: "#/components/schemas/Point2d" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        review_required: { type: boolean }
+        findings:
+          type: array
+          items: { type: string }
+    StripFeederRegistration:
+      type: object
+      required:
+        - id
+        - profile_id
+        - calibration_id
+        - source_scan_id
+        - source_candidate_index
+        - source_proposal_index
+        - created_at
+        - updated_at
+        - status
+        - name
+        - part_key
+        - part_rotation_deg
+        - tape_width_mm
+        - tape_pitch_mm
+        - tape_rotation_deg
+        - pick_centerline_machine_mm
+        - pocket_centers_machine_mm
+        - selected_pocket_machine_mm
+        - pickup_z_mm
+        - active_feeder_id
+        - vision_confidence
+        - vision_review_required
+        - findings
+      properties:
+        id: { type: string, format: uuid }
+        profile_id: { type: string }
+        calibration_id: { type: string, format: uuid }
+        source_scan_id: { type: string, format: uuid }
+        source_candidate_index: { type: integer, minimum: 0 }
+        source_proposal_index: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        status:
+          type: string
+          enum: [vision_draft, live_validation_required, ready]
+        name: { type: string }
+        part_key: { type: [string, "null"] }
+        part_rotation_deg: { type: [number, "null"] }
+        tape_width_mm: { type: number, exclusiveMinimum: 0 }
+        tape_pitch_mm: { type: number, exclusiveMinimum: 0 }
+        tape_rotation_deg: { type: number }
+        pick_centerline_machine_mm:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/Point2d" }
+        pocket_centers_machine_mm:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/Point2d" }
+        selected_pocket_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        pickup_z_mm: { type: [number, "null"] }
+        active_feeder_id: { type: [string, "null"], format: uuid }
+        vision_confidence: { type: number, minimum: 0, maximum: 1 }
+        vision_review_required: { type: boolean }
+        findings:
+          type: array
+          items: { type: string }
+    Point2d:
+      type: array
+      minItems: 2
+      maxItems: 2
+      items: { type: number }
     WorkspaceBoardDesignMatch:
       type: object
       required:

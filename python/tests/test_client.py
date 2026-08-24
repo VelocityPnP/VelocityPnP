@@ -335,6 +335,55 @@ class ClientTests(unittest.TestCase):
             "POST", "/workspace-scans/scan/object-proposals", {},
         )
 
+        feeder_report = {"algorithm_version": "strip_feeder_vision.v1"}
+        with patch.object(client, "_request", return_value=feeder_report) as send:
+            self.assertEqual(
+                client.analyze_strip_feeder("scan", 2), feeder_report,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/workspace-scans/scan/strip-feeder-vision",
+            {"candidate_index": 2},
+        )
+        with self.assertRaises(ValueError):
+            client.analyze_strip_feeder("scan", -1)
+
+        draft = {"id": "draft", "status": "vision_draft"}
+        with patch.object(client, "_request", return_value=draft) as send:
+            self.assertEqual(
+                client.create_strip_feeder_draft(
+                    "scan", 2, 1, name="R strip", part_key="R0603:10k",
+                    part_rotation_deg=90.0,
+                ),
+                draft,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/strip-feeder-registrations",
+            {
+                "scan_id": "scan",
+                "candidate_index": 2,
+                "proposal_index": 1,
+                "name": "R strip",
+                "part_key": "R0603:10k",
+                "part_rotation_deg": 90.0,
+            },
+        )
+        with self.assertRaises(ValueError):
+            client.create_strip_feeder_draft("scan", 0, -1)
+
+        with patch.object(
+            client, "_request", return_value={"registrations": [draft]},
+        ) as send:
+            self.assertEqual(client.strip_feeder_drafts(), [draft])
+        send.assert_called_once_with("GET", "/strip-feeder-registrations")
+
+        with patch.object(client, "_request", return_value=draft) as send:
+            self.assertEqual(client.strip_feeder_draft("draft"), draft)
+        send.assert_called_once_with(
+            "GET", "/strip-feeder-registrations/draft",
+        )
+
         with patch.object(client, "_request", return_value=report) as send:
             self.assertEqual(
                 client.workspace_board_discovery_report("scan"), report,
@@ -363,6 +412,18 @@ class ClientTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             client.workspace_object_evidence("scan", -1)
+
+        with patch.object(client, "_request_bytes", return_value=b"preview") as send:
+            self.assertEqual(
+                client.strip_feeder_vision_preview("scan", 2), b"preview",
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/workspace-scans/scan/artifacts/strip-feeder-vision-002.png",
+            "image/png",
+        )
+        with self.assertRaises(ValueError):
+            client.strip_feeder_vision_preview("scan", -1)
 
         baseline = {"id": "baseline", "scan_id": "scan"}
         with patch.object(client, "_request", return_value=baseline) as send:

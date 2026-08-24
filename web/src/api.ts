@@ -2,7 +2,8 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, SensorReading, VisualHomingResult, WorkspaceBoardDiscoveryReport,
+  Operation, SensorReading, StripFeederRegistration, StripFeederVisionReport, VisualHomingResult,
+  WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
 
@@ -199,6 +200,24 @@ export const api = {
     jsonPost<WorkspaceBoardDiscoveryReport>(
       `/workspace-scans/${scanId}/object-proposals`,
     ),
+  analyzeStripFeeder: (scanId: string, candidateIndex: number) =>
+    jsonPost<StripFeederVisionReport>(
+      `/workspace-scans/${scanId}/strip-feeder-vision`,
+      { candidate_index: candidateIndex },
+    ),
+  createStripFeederDraft: (
+    scanId: string, candidateIndex: number, proposalIndex: number,
+    partKey?: string, partRotationDeg?: number,
+  ) => jsonPost<StripFeederRegistration>(
+    "/strip-feeder-registrations",
+    {
+      scan_id: scanId,
+      candidate_index: candidateIndex,
+      proposal_index: proposalIndex,
+      part_key: partKey || null,
+      part_rotation_deg: partRotationDeg ?? null,
+    },
+  ),
   startBoardRegistration: (
     scanId: string, candidateIndex: number, boardId: string, leaseId: string,
     label?: string,

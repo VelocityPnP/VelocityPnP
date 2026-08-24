@@ -296,6 +296,59 @@ class Client:
             {},
         )
 
+    def analyze_strip_feeder(
+        self, scan_id: str | uuid.UUID, candidate_index: int,
+    ) -> dict[str, Any]:
+        """Measure strip-feeder lanes from retained workspace evidence.
+
+        This operation causes no machine motion and does not activate a
+        feeder.
+        """
+        if candidate_index < 0:
+            raise ValueError("candidate_index must not be negative")
+        return self._request(
+            "POST",
+            f"/workspace-scans/{scan_id}/strip-feeder-vision",
+            {"candidate_index": candidate_index},
+        )
+
+    def create_strip_feeder_draft(
+        self,
+        scan_id: str | uuid.UUID,
+        candidate_index: int,
+        proposal_index: int,
+        *,
+        name: str | None = None,
+        part_key: str | None = None,
+        part_rotation_deg: float | None = None,
+    ) -> dict[str, Any]:
+        if candidate_index < 0 or proposal_index < 0:
+            raise ValueError("candidate and proposal indexes must not be negative")
+        return self._request(
+            "POST",
+            "/strip-feeder-registrations",
+            {
+                "scan_id": str(scan_id),
+                "candidate_index": candidate_index,
+                "proposal_index": proposal_index,
+                "name": name,
+                "part_key": part_key,
+                "part_rotation_deg": part_rotation_deg,
+            },
+        )
+
+    def strip_feeder_drafts(self) -> list[dict[str, Any]]:
+        return self._request(
+            "GET", "/strip-feeder-registrations",
+        )["registrations"]
+
+    def strip_feeder_draft(
+        self, registration_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET", f"/strip-feeder-registrations/{registration_id}",
+        )
+
     def start_board_registration(
         self,
         scan_id: str | uuid.UUID,
@@ -432,6 +485,18 @@ class Client:
             "GET",
             f"/workspace-scans/{scan_id}/artifacts/"
             f"object-evidence-{candidate_index:03}.png",
+            "image/png",
+        )
+
+    def strip_feeder_vision_preview(
+        self, scan_id: str | uuid.UUID, candidate_index: int,
+    ) -> bytes:
+        if candidate_index < 0:
+            raise ValueError("candidate_index must not be negative")
+        return self._request_bytes(
+            "GET",
+            f"/workspace-scans/{scan_id}/artifacts/"
+            f"strip-feeder-vision-{candidate_index:03}.png",
             "image/png",
         )
 

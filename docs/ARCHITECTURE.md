@@ -70,9 +70,10 @@ Physical job execution remains disabled.
 ## Persistence and reproducibility
 
 SQLite stores versioned JSON documents for boards, board registrations,
-feeders, jobs, operations, inspection reports, calibration snapshots, and
-calibration runs. Board-registration evidence images use a dedicated artifact
-table. An
+strip-feeder setup drafts, active feeders, jobs, operations, inspection
+reports, calibration snapshots, and calibration runs. Board-registration
+evidence images use a dedicated artifact table. Workspace scan artifacts hold
+the feeder-lane report and preview with their source image. An
 append-only event journal records machine state changes and operation results.
 Calibration runs persist their phase, automatic checks, camera evidence,
 per-cycle samples, rejection reason, and report after every meaningful stage.

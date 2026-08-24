@@ -104,6 +104,25 @@ enum Command {
     DiscoverObjects {
         scan: Uuid,
     },
+    AnalyzeStripFeeder {
+        scan: Uuid,
+        #[arg(long)]
+        candidate: u32,
+    },
+    SaveStripFeederDraft {
+        scan: Uuid,
+        #[arg(long)]
+        candidate: u32,
+        #[arg(long)]
+        proposal: u32,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        part_key: Option<String>,
+        #[arg(long)]
+        part_rotation: Option<f64>,
+    },
+    StripFeederDrafts,
     SetWorkspaceBaseline {
         scan: Uuid,
     },
@@ -481,6 +500,39 @@ async fn main() -> Result<()> {
                 Some(json!({})),
             )
             .await?
+        }
+        Command::AnalyzeStripFeeder { scan, candidate } => {
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/strip-feeder-vision"),
+                Some(json!({"candidate_index": candidate})),
+            )
+            .await?
+        }
+        Command::SaveStripFeederDraft {
+            scan,
+            candidate,
+            proposal,
+            name,
+            part_key,
+            part_rotation,
+        } => {
+            post(
+                &client,
+                &format!("{base}/strip-feeder-registrations"),
+                Some(json!({
+                    "scan_id": scan,
+                    "candidate_index": candidate,
+                    "proposal_index": proposal,
+                    "name": name,
+                    "part_key": part_key,
+                    "part_rotation_deg": part_rotation,
+                })),
+            )
+            .await?
+        }
+        Command::StripFeederDrafts => {
+            get(&client, &format!("{base}/strip-feeder-registrations")).await?
         }
         Command::SetWorkspaceBaseline { scan } => {
             post(

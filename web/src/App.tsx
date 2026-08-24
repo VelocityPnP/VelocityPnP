@@ -3,8 +3,9 @@ import { api, waitForOperation } from "./api";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
   CalibrationSnapshot, CalibrationStep, Device, MachineEvent, MachineStatus, Pose,
-  SensorReading, VisualHomingResult, WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport,
-  WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
+  SensorReading, StripFeederRegistration, StripFeederVisionReport, VisualHomingResult,
+  WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport, WorkspaceChangeSetReport,
+  WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
 import "./styles.css";
 
@@ -505,6 +506,11 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
   const [changes, setChanges] = useState<WorkspaceChangeSetReport | null>(null);
   const [registration, setRegistration] = useState<BoardRegistrationRun | null>(null);
   const [registrationBusy, setRegistrationBusy] = useState(false);
+  const [feederVision, setFeederVision] = useState<StripFeederVisionReport | null>(null);
+  const [feederVisionBusy, setFeederVisionBusy] = useState(false);
+  const [feederDraft, setFeederDraft] = useState<StripFeederRegistration | null>(null);
+  const [feederPartKey, setFeederPartKey] = useState("");
+  const [feederPartRotation, setFeederPartRotation] = useState("");
   const [pcb, setPcb] = useState<File | null>(null);
   const [bom, setBom] = useState<File | null>(null);
   const load = useCallback(async () => {
@@ -590,6 +596,41 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       setRegistrationBusy(false);
     }
   };
+  const analyzeStripFeeder = async (candidate: WorkspaceBoardCandidate) => {
+    if (!selectedScan) return;
+    setFeederVisionBusy(true); setError(null); setFeederVision(null); setFeederDraft(null);
+    try {
+      setFeederVision(await api.analyzeStripFeeder(
+        selectedScan, candidate.candidate_index,
+      ));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setFeederVisionBusy(false);
+    }
+  };
+  const saveStripFeederDraft = async (proposalIndex: number) => {
+    if (!selectedScan || !feederVision) return;
+    const rotation = feederPartRotation.trim() === ""
+      ? undefined : Number(feederPartRotation);
+    if (rotation !== undefined && !Number.isFinite(rotation)) {
+      setError("Part rotation must be a number."); return;
+    }
+    setFeederVisionBusy(true); setError(null); setFeederDraft(null);
+    try {
+      setFeederDraft(await api.createStripFeederDraft(
+        selectedScan,
+        feederVision.source_candidate_index,
+        proposalIndex,
+        feederPartKey.trim() || undefined,
+        rotation,
+      ));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setFeederVisionBusy(false);
+    }
+  };
   const selectedReport = scans.find((scan) => scan.id === selectedScan);
   const hasProposals = discovery !== null || selectedReport?.board_discovery != null;
   return <div className="boards-layout">
@@ -606,7 +647,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       <div className="card-heading"><div><p className="eyebrow">Workspace inventory</p><h2>Analyze workspace objects</h2></div>{scans.length > 0 && <span className="count">{scans.length}</span>}</div>
       <p>Select a completed height-aware scan. Plate-aligned proposals use known fixtures and retain uncertain objects for later classification. Analysis causes no machine motion.</p>
       <div className="board-discovery-controls">
-        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); setChanges(null); }}>
+        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); setChanges(null); setFeederVision(null); setFeederDraft(null); }}>
           {scans.length === 0 && <option value="">No eligible scans</option>}
           {scans.map((scan) => <option key={scan.id} value={scan.id}>{new Date(scan.updated_at).toLocaleString()} · {pretty(scan.mode)}{scan.board_discovery ? ` · ${scan.board_discovery.candidate_count} prior candidates` : ""}</option>)}
         </select>
@@ -621,22 +662,32 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
         <p>{registration.message}</p>
         {registration.hypotheses.flatMap((hypothesis) => hypothesis.observations).map((observation) => <a key={`${registration.id}-${observation.artifact_name}`} href={`/api/v1/board-registrations/${registration.id}/artifacts/${observation.artifact_name}`} target="_blank" rel="noreferrer">{observation.reference} evidence</a>)}
       </div>}
+      {feederVision && <div className="run-result">
+        <p><strong>{feederVision.proposals.length} strip lanes found</strong> in feeder proposal {feederVision.source_candidate_index + 1}. Yellow circles are sprocket detections, cyan lines are proposed pickup centerlines, and green marks are pocket-grid hypotheses.</p>
+        <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/${feederVision.preview_artifact_name}`} alt="Strip feeder lane analysis" />
+        <div className="board-discovery-controls"><input value={feederPartKey} onChange={(event) => setFeederPartKey(event.target.value)} placeholder="Part key (optional)" /><input value={feederPartRotation} onChange={(event) => setFeederPartRotation(event.target.value)} placeholder="Part rotation ° (optional)" /></div>
+        {feederVision.proposals.map((proposal) => <div key={proposal.proposal_index}><p>Lane {proposal.proposal_index + 1}: <strong>{proposal.tape_width_mm?.toFixed(0) ?? "unknown"} mm tape</strong>; {proposal.component_pitch_mm?.toFixed(0) ?? "unknown"} mm component pitch; {proposal.sprocket_center_count} sprocket holes; {proposal.sprocket_pitch_residual_p95_mm.toFixed(3)} mm lattice p95; {(proposal.confidence * 100).toFixed(0)}% confidence{proposal.review_required ? "; review required" : "; draft gate passed"}.</p><button disabled={feederVisionBusy || proposal.tape_width_mm == null || proposal.component_pitch_mm == null || proposal.pick_centerline_machine_mm == null} onClick={() => void saveStripFeederDraft(proposal.proposal_index)}>Save lane as draft</button></div>)}
+        {feederDraft && <p><strong>{feederDraft.name} saved</strong> as {pretty(feederDraft.status)}. Live pocket occupancy and pickup Z are still required.</p>}
+        {feederVision.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
+      </div>}
       {discovery && <div className="board-discovery-result">
         <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with semantic object proposals" />
         <div><p><strong>{discovery.candidates.length}</strong> raised-surface proposals. Known fixtures are purple, boards are green, feeders are blue, and unresolved objects are amber. Matched boards show enabled top-side placements in cyan and KiCad fiducials in yellow.</p>
           {discovery.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
-          <div className="candidate-list">{discovery.candidates.map((candidate) => <WorkspaceCandidateCard key={candidate.candidate_index} candidate={candidate} scanId={selectedScan} registering={registrationBusy} onRegister={registerBoard} />)}</div>
+          <div className="candidate-list">{discovery.candidates.map((candidate) => <WorkspaceCandidateCard key={candidate.candidate_index} candidate={candidate} scanId={selectedScan} registering={registrationBusy} analyzingFeeder={feederVisionBusy} onRegister={registerBoard} onAnalyzeFeeder={analyzeStripFeeder} />)}</div>
         </div>
       </div>}
     </section>
   </div>;
 }
 
-function WorkspaceCandidateCard({ candidate, scanId, registering, onRegister }: {
+function WorkspaceCandidateCard({ candidate, scanId, registering, analyzingFeeder, onRegister, onAnalyzeFeeder }: {
   candidate: WorkspaceBoardCandidate;
   scanId: string;
   registering: boolean;
+  analyzingFeeder: boolean;
   onRegister: (candidate: WorkspaceBoardCandidate, boardId: string) => void;
+  onAnalyzeFeeder: (candidate: WorkspaceBoardCandidate) => void;
 }) {
   const design = candidate.design_matches[0];
   const visualDesign = design?.registration_method === "visual_outline"
@@ -649,6 +700,7 @@ function WorkspaceCandidateCard({ candidate, scanId, registering, onRegister }: 
     <span>{((candidate.classification?.confidence ?? 0) * 100).toFixed(0)}% class confidence{candidate.known_fixture_id ? ` · ${pretty(candidate.known_fixture_id)}` : design ? ` · ${design.board_name}` : " · review required"}{design?.orientation_ambiguous ? " · orientation needs fiducials" : ""}</span>
     {candidate.evidence_artifact_name && <a href={`/api/v1/workspace-scans/${scanId}/artifacts/${candidate.evidence_artifact_name}`} target="_blank" rel="noreferrer">View normalized evidence</a>}
     {visualDesign && <button disabled={registering} onClick={() => onRegister(candidate, visualDesign.board_id)}>{registering ? "Registering…" : "Register from fiducials"}</button>}
+    {candidate.classification?.class === "feeder" && !candidate.known_fixture_id && <button disabled={analyzingFeeder} onClick={() => onAnalyzeFeeder(candidate)}>{analyzingFeeder ? "Analyzing…" : "Analyze strip lanes"}</button>}
   </div>;
 }
 

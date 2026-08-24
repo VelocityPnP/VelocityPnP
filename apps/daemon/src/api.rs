@@ -37,17 +37,18 @@ use velocitypnp_domain::{
     LocalXyDirectionResponseSample, MachineProfile, MachineState, NozzleHeightModel,
     NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
-    Residuals, SensorReading, VacuumProbeReport, VacuumProbeSample,
+    Residuals, SensorReading, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederVisionReport, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
     WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
     WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary, WorkspaceChangeSetReport,
     WorkspaceChangeSetSummary, WorkspaceHeightMapSummary, WorkspaceInventoryBaseline,
-    WorkspaceMosaicLayerReport, WorkspaceParallaxSummary, WorkspaceRasterTransform,
-    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
-    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
-    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
-    WorkspaceSurfaceModel,
+    WorkspaceMosaicLayerReport, WorkspaceObjectClass, WorkspaceParallaxSummary,
+    WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
+    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -57,10 +58,10 @@ use velocitypnp_planner::{
 };
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    apply_camera_controls, build_workspace_discovery_context, build_workspace_height_map,
-    build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
-    camera_sample_metrics, capture_gray_frame, capture_gray_frames, compare_workspace_observation,
-    compare_workspace_reconnaissance, compose_workspace_refinements,
+    analyze_strip_feeder_candidate, apply_camera_controls, build_workspace_discovery_context,
+    build_workspace_height_map, build_workspace_mosaic, calibrate_bottom_camera_mapping,
+    calibrate_camera_ray_transfer, camera_sample_metrics, capture_gray_frame, capture_gray_frames,
+    compare_workspace_observation, compare_workspace_reconnaissance, compose_workspace_refinements,
     composite_workspace_camera_aperture, decode_gray_png, detect_board_fiducial_near,
     detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
     detect_installed_plate_hole, discover_workspace_objects, encode_gray_png, encode_rgb_png,
@@ -84,9 +85,10 @@ use velocitypnp_vision::{
     WorkspaceSeamHealthReport, WorkspaceSeamStatus, MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA,
     MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO, MAX_WORKSPACE_SURFACE_FRACTION,
     MIN_REFINEMENT_COMPOSITE_COVERAGE, MIN_REFINEMENT_TEXTURE_RETENTION_RATIO,
-    MIN_WORKSPACE_SURFACE_FRACTION, WORKSPACE_BOARD_DISCOVERY_ALGORITHM,
-    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
-    WORKSPACE_CHANGE_SET_ARTIFACT, WORKSPACE_HEIGHT_CANDIDATE_STEP,
+    MIN_WORKSPACE_SURFACE_FRACTION, STRIP_FEEDER_VISION_ALGORITHM,
+    WORKSPACE_BOARD_DISCOVERY_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
+    WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT, WORKSPACE_CHANGE_SET_ARTIFACT,
+    WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -412,6 +414,10 @@ pub fn router(state: AppState) -> Router {
             post(build_workspace_board_discovery),
         )
         .route(
+            "/api/v1/workspace-scans/{id}/strip-feeder-vision",
+            post(build_strip_feeder_vision),
+        )
+        .route(
             "/api/v1/workspace-scans/{id}/inventory-baseline",
             post(activate_workspace_inventory_baseline),
         )
@@ -524,6 +530,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/boards/{id}", get(get_board))
         .route("/api/v1/import/openpnp", post(import_openpnp_config))
         .route("/api/v1/feeders", get(list_feeders).post(put_feeder))
+        .route(
+            "/api/v1/strip-feeder-registrations",
+            get(list_strip_feeder_registrations).post(create_strip_feeder_registration),
+        )
+        .route(
+            "/api/v1/strip-feeder-registrations/{id}",
+            get(get_strip_feeder_registration),
+        )
         .route("/api/v1/jobs", get(list_jobs).post(put_job))
         .route("/api/v1/jobs/{id}/plan", get(get_job_plan))
         .route("/api/v1/jobs/{id}/simulate", post(simulate_job))
@@ -4851,6 +4865,256 @@ fn load_workspace_object_report(
         )));
     }
     Ok(report)
+}
+
+#[derive(Debug, Deserialize)]
+struct BuildStripFeederVisionRequest {
+    candidate_index: u32,
+}
+
+async fn build_strip_feeder_vision(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+    Json(body): Json<BuildStripFeederVisionRequest>,
+) -> ApiResult<Json<StripFeederVisionReport>> {
+    let mut scan = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "strip feeder vision requires a successful workspace scan",
+        ));
+    }
+    let object_report = load_workspace_object_report(&state, &scan)?;
+    let candidate = object_report
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.candidate_index == body.candidate_index)
+        .ok_or_else(|| ApiError::not_found("workspace feeder candidate not found"))?;
+    if candidate.known_fixture_id.is_some()
+        || candidate
+            .classification
+            .as_ref()
+            .is_none_or(|classification| classification.class != WorkspaceObjectClass::Feeder)
+    {
+        return Err(ApiError::bad_request(
+            "strip feeder vision requires a non-fixture feeder candidate",
+        ));
+    }
+    let source_artifact_name = candidate
+        .evidence_artifact_name
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("feeder candidate has no normalized evidence"))?;
+    let (media_type, data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &source_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("feeder candidate evidence not found"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "feeder candidate evidence is not a PNG"
+        )));
+    }
+    let analysis = tokio::task::spawn_blocking(move || {
+        let crop = decode_gray_png(&data)?;
+        analyze_strip_feeder_candidate(&crop, &candidate)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    let report_artifact_name = format!("strip-feeder-vision-{:03}.json", body.candidate_index);
+    let preview_artifact_name = format!("strip-feeder-vision-{:03}.png", body.candidate_index);
+    let report = StripFeederVisionReport {
+        algorithm_version: STRIP_FEEDER_VISION_ALGORITHM.into(),
+        source_scan_id: scan.id,
+        source_candidate_index: body.candidate_index,
+        source_artifact_name,
+        report_artifact_name: report_artifact_name.clone(),
+        preview_artifact_name: preview_artifact_name.clone(),
+        created_at: Utc::now(),
+        proposals: analysis.proposals,
+        warnings: analysis.warnings,
+    };
+    let report_json = serde_json::to_vec_pretty(&report).map_err(ApiError::internal)?;
+    let preview_png = encode_rgb_png(&analysis.preview).map_err(ApiError::internal)?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        &report_artifact_name,
+        "application/json",
+        &report_json,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        &preview_artifact_name,
+        "image/png",
+        &preview_png,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    scan.updated_at = Utc::now();
+    persist_workspace_manifest(&state, &mut scan)
+        .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    Ok(Json(report))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateStripFeederRegistrationRequest {
+    scan_id: Uuid,
+    candidate_index: u32,
+    proposal_index: u32,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    part_key: Option<String>,
+    #[serde(default)]
+    part_rotation_deg: Option<f64>,
+}
+
+async fn create_strip_feeder_registration(
+    State(state): State<AppState>,
+    Json(body): Json<CreateStripFeederRegistrationRequest>,
+) -> ApiResult<(StatusCode, Json<StripFeederRegistration>)> {
+    let scan = state
+        .store
+        .get_workspace_scan(body.scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "strip feeder registration requires a successful workspace scan",
+        ));
+    }
+    if body
+        .part_rotation_deg
+        .is_some_and(|rotation| !rotation.is_finite())
+    {
+        return Err(ApiError::bad_request("part rotation must be finite"));
+    }
+    let artifact_name = format!("strip-feeder-vision-{:03}.json", body.candidate_index);
+    let (media_type, data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder vision report not found"))?;
+    if media_type != "application/json" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "strip feeder vision report is not JSON"
+        )));
+    }
+    let vision: StripFeederVisionReport =
+        serde_json::from_slice(&data).map_err(ApiError::internal)?;
+    if vision.algorithm_version != STRIP_FEEDER_VISION_ALGORITHM
+        || vision.source_scan_id != scan.id
+        || vision.source_candidate_index != body.candidate_index
+    {
+        return Err(ApiError::bad_request(
+            "strip feeder vision report is stale or incompatible",
+        ));
+    }
+    let proposal = vision
+        .proposals
+        .into_iter()
+        .find(|proposal| proposal.proposal_index == body.proposal_index)
+        .ok_or_else(|| ApiError::not_found("strip feeder lane proposal not found"))?;
+    let tape_width_mm = proposal.tape_width_mm.ok_or_else(|| {
+        ApiError::bad_request("strip feeder tape width needs review before draft creation")
+    })?;
+    let tape_pitch_mm = proposal.component_pitch_mm.ok_or_else(|| {
+        ApiError::bad_request("strip feeder component pitch needs review before draft creation")
+    })?;
+    let pick_centerline_machine_mm = proposal.pick_centerline_machine_mm.ok_or_else(|| {
+        ApiError::bad_request("strip feeder pick centerline needs review before draft creation")
+    })?;
+    if proposal.pocket_centers_machine_mm.is_empty() {
+        return Err(ApiError::bad_request(
+            "strip feeder proposal has no pocket-center hypotheses",
+        ));
+    }
+    let part_key = body
+        .part_key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let name = body
+        .name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "Strip feeder {}-{}",
+                body.candidate_index + 1,
+                body.proposal_index + 1,
+            )
+        });
+    let status =
+        if part_key.is_some() && body.part_rotation_deg.is_some() && !proposal.review_required {
+            StripFeederRegistrationStatus::LiveValidationRequired
+        } else {
+            StripFeederRegistrationStatus::VisionDraft
+        };
+    let mut findings = proposal.findings;
+    if part_key.is_none() {
+        findings.push("part identity is not assigned".into());
+    }
+    if body.part_rotation_deg.is_none() {
+        findings.push("part orientation is not assigned".into());
+    }
+    findings.push("live pocket occupancy and pickup Z are not measured".into());
+    let now = Utc::now();
+    let registration = StripFeederRegistration {
+        id: Uuid::new_v4(),
+        profile_id: scan.profile_id,
+        calibration_id: scan.calibration_id,
+        source_scan_id: scan.id,
+        source_candidate_index: body.candidate_index,
+        source_proposal_index: body.proposal_index,
+        created_at: now,
+        updated_at: now,
+        status,
+        name,
+        part_key,
+        part_rotation_deg: body.part_rotation_deg,
+        tape_width_mm,
+        tape_pitch_mm,
+        tape_rotation_deg: proposal.tape_rotation_deg,
+        pick_centerline_machine_mm,
+        pocket_centers_machine_mm: proposal.pocket_centers_machine_mm,
+        selected_pocket_machine_mm: None,
+        pickup_z_mm: None,
+        active_feeder_id: None,
+        vision_confidence: proposal.confidence,
+        vision_review_required: proposal.review_required,
+        findings,
+    };
+    state
+        .store
+        .put_strip_feeder_registration(&registration)
+        .map_err(ApiError::internal)?;
+    Ok((StatusCode::CREATED, Json(registration)))
+}
+
+async fn list_strip_feeder_registrations(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "registrations": state
+            .store
+            .list_strip_feeder_registrations()
+            .map_err(ApiError::internal)?,
+    })))
+}
+
+async fn get_strip_feeder_registration(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<StripFeederRegistration>> {
+    state
+        .store
+        .get_strip_feeder_registration(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -17388,6 +17652,195 @@ mod tests {
                 .retained_artifact_bytes,
             retained,
         );
+    }
+
+    #[tokio::test]
+    async fn strip_feeder_vision_persists_no_motion_lane_evidence() {
+        let state = test_state();
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        scan.status = WorkspaceScanStatus::Succeeded;
+        scan.board_discovery = Some(WorkspaceBoardDiscoverySummary {
+            algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
+            source_mosaic_artifact_name: "mosaic.png".into(),
+            report_artifact_name: WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT.into(),
+            preview_artifact_name: WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT.into(),
+            candidate_count: 1,
+            matched_candidate_count: 0,
+            board_design_count: 0,
+            height_source_count: 1,
+        });
+        state.store.put_workspace_scan(&scan).unwrap();
+        let candidate = velocitypnp_domain::WorkspaceBoardCandidate {
+            candidate_index: 0,
+            region: WorkspaceScanRegion {
+                x_min_mm: 100.0,
+                x_max_mm: 124.0,
+                y_min_mm: 40.0,
+                y_max_mm: 104.0,
+            },
+            outline_machine_mm: vec![[100.0, 104.0], [124.0, 104.0], [124.0, 40.0], [100.0, 40.0]],
+            plate_id: Some("staging".into()),
+            plate_role: Some(velocitypnp_domain::InstalledPlateRole::Staging),
+            center_x_mm: 112.0,
+            center_y_mm: 72.0,
+            width_mm: 24.0,
+            height_mm: 64.0,
+            rotation_deg: 0.0,
+            evidence_cell_count: 64,
+            measured_cell_fraction: 1.0,
+            mean_surface_fraction: 0.5,
+            mean_height_confidence: 0.9,
+            fill_fraction: 0.8,
+            texture_energy_luma: 30.0,
+            board_likelihood: 0.2,
+            classification: Some(velocitypnp_domain::WorkspaceObjectClassification {
+                class: WorkspaceObjectClass::Feeder,
+                confidence: 0.95,
+                classifier_id: "test".into(),
+                review_required: false,
+                evidence: Vec::new(),
+            }),
+            known_fixture_id: None,
+            evidence_artifact_name: Some("object-evidence-000.png".into()),
+            design_matches: Vec::new(),
+        };
+        let object_report = WorkspaceBoardDiscoveryReport {
+            algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
+            source_mosaic_artifact_name: "mosaic.png".into(),
+            height_sources: vec![WorkspaceBoardHeightSource {
+                scan_id: scan.id,
+                artifact_name: "surface-height-map.json".into(),
+            }],
+            installed_plate_fraction: 1.0,
+            raised_surface_max_fraction: 0.875,
+            board_design_count: 0,
+            candidates: vec![candidate],
+            warnings: Vec::new(),
+        };
+        let width = 240_u32;
+        let height = 640_u32;
+        let mut crop = GrayFrame {
+            width,
+            height,
+            pixels: vec![105; (width * height) as usize],
+        };
+        for sprocket_x_mm in [3.0_f64, 11.0, 19.0] {
+            let sprocket_x = (sprocket_x_mm * 10.0).round() as i32;
+            let pocket_x = ((sprocket_x_mm + 3.5) * 10.0).round() as i32;
+            for y_mm in (2..63).step_by(4) {
+                paint_test_disc(
+                    &mut crop,
+                    sprocket_x,
+                    (f64::from(y_mm) * 10.0).round() as i32,
+                    7,
+                    235,
+                );
+            }
+            for y_mm in (1..64).step_by(2) {
+                paint_test_disc(
+                    &mut crop,
+                    pocket_x,
+                    (f64::from(y_mm) * 10.0).round() as i32,
+                    5,
+                    if y_mm % 4 == 1 { 35 } else { 175 },
+                );
+            }
+        }
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+                "application/json",
+                &serde_json::to_vec(&object_report).unwrap(),
+            )
+            .unwrap();
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                "object-evidence-000.png",
+                "image/png",
+                &encode_gray_png(&crop).unwrap(),
+            )
+            .unwrap();
+
+        let report = build_strip_feeder_vision(
+            State(state.clone()),
+            Path(scan.id),
+            Json(BuildStripFeederVisionRequest { candidate_index: 0 }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(report.proposals.len(), 3);
+        assert!(report
+            .proposals
+            .iter()
+            .all(|proposal| proposal.tape_width_mm == Some(8.0)));
+        for name in [
+            "strip-feeder-vision-000.json",
+            "strip-feeder-vision-000.png",
+            "manifest.json",
+        ] {
+            assert!(state
+                .store
+                .get_workspace_scan_artifact(scan.id, name)
+                .unwrap()
+                .is_some());
+        }
+
+        let (status, Json(registration)) = create_strip_feeder_registration(
+            State(state.clone()),
+            Json(CreateStripFeederRegistrationRequest {
+                scan_id: scan.id,
+                candidate_index: 0,
+                proposal_index: 1,
+                name: Some("R0603 strip".into()),
+                part_key: Some("R0603:10k".into()),
+                part_rotation_deg: Some(90.0),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(registration.name, "R0603 strip");
+        assert_eq!(registration.part_key.as_deref(), Some("R0603:10k"));
+        assert_eq!(registration.tape_width_mm, 8.0);
+        assert_eq!(registration.tape_pitch_mm, 2.0);
+        assert!(registration.selected_pocket_machine_mm.is_none());
+        assert!(registration.pickup_z_mm.is_none());
+        assert!(registration.active_feeder_id.is_none());
+        assert_eq!(
+            state
+                .store
+                .get_strip_feeder_registration(registration.id)
+                .unwrap()
+                .unwrap(),
+            registration,
+        );
+    }
+
+    fn paint_test_disc(
+        frame: &mut GrayFrame,
+        center_x: i32,
+        center_y: i32,
+        radius: i32,
+        value: u8,
+    ) {
+        for y in center_y - radius..=center_y + radius {
+            for x in center_x - radius..=center_x + radius {
+                if x >= 0
+                    && y >= 0
+                    && x < frame.width as i32
+                    && y < frame.height as i32
+                    && (x - center_x).pow(2) + (y - center_y).pow(2) <= radius.pow(2)
+                {
+                    frame.pixels[(y as u32 * frame.width + x as u32) as usize] = value;
+                }
+            }
+        }
     }
 
     #[test]

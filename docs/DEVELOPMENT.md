@@ -499,6 +499,48 @@ create a `BoardInstance`, move the camera, resolve a symmetric outline, or
 accept a design-to-machine transform. Use the local fiducial workflow below.
 Package-template verification remains a later gate.
 
+### Strip-feeder vision drafts
+
+Analyze a semantic feeder proposal from its retained normalized crop:
+
+```bash
+cargo run -p velocitypnp -- analyze-strip-feeder SCAN_UUID --candidate 0
+```
+
+The API route is
+`POST /workspace-scans/SCAN_UUID/strip-feeder-vision`. The Python client uses
+`analyze_strip_feeder()`. This operation causes no motion. It rejects known
+fixtures and candidates that are not classified as feeders.
+
+OpenCV contour measurements find 1.5 mm sprocket-hole candidates. At least
+three features must fit the 4 mm carrier-tape lattice. The crop basis comes
+from the installed plate, so tape axes stay parallel or perpendicular to the
+calibrated plate axes. Adjacent sprocket tracks support standard 8, 12, 16,
+and 24 mm tape-width hypotheses. The EIA-481-C `F` dimensions place their
+pocket centerlines 3.5, 5.5, 7.5, and 11.5 mm from the sprocket row. Image
+periodicity supplies a 2, 4, 8, 12, or 16 mm component-pocket pitch
+hypothesis. Weak or ambiguous geometry stays in review state.
+
+The scan retains `strip-feeder-vision-NNN.json` and
+`strip-feeder-vision-NNN.png`. Yellow circles show sprocket candidates. Cyan
+lines show pickup-centerline hypotheses. Green marks show the pocket grid.
+The web workspace card exposes the same analysis.
+
+A measured lane can be stored as an inactive draft:
+
+```bash
+cargo run -p velocitypnp -- save-strip-feeder-draft SCAN_UUID \
+  --candidate 0 --proposal 0 \
+  --part-key 'R_0603:10k' --part-rotation 90
+```
+
+The corresponding API is `POST /strip-feeder-registrations`. The Python
+client uses `create_strip_feeder_draft()`. A draft records source lineage,
+tape geometry, pocket hypotheses, optional part identity, and optional part
+orientation. It does not create an active `Feeder`. Pickup Z, the next occupied
+pocket, and a live camera holdout remain unset. Physical indexing and pickup
+validation are the next hardware gate.
+
 ### Automatic board registration
 
 Register a visually matched board after the machine is coarse-homed and the

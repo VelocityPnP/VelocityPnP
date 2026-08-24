@@ -387,6 +387,48 @@ pub struct WorkspaceBoardDiscoverySummary {
     pub height_source_count: u32,
 }
 
+/// A measured carrier-tape lane in one feeder workspace proposal.
+///
+/// This is vision evidence, not an active feeder. Pickup Z, part identity,
+/// pocket occupancy, and a live camera holdout remain required before the
+/// lane can become a production feeder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederLaneProposal {
+    pub proposal_index: u32,
+    pub tape_rotation_deg: f64,
+    pub sprocket_pitch_mm: f64,
+    pub sprocket_pitch_residual_p95_mm: f64,
+    pub sprocket_center_count: u32,
+    pub sprocket_centers_machine_mm: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub tape_width_mm: Option<f64>,
+    #[serde(default)]
+    pub component_pitch_mm: Option<f64>,
+    #[serde(default)]
+    pub pick_centerline_machine_mm: Option<[[f64; 2]; 2]>,
+    #[serde(default)]
+    pub pocket_centers_machine_mm: Vec<[f64; 2]>,
+    pub confidence: f64,
+    pub review_required: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// No-motion feeder-lane analysis retained with a workspace scan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederVisionReport {
+    pub algorithm_version: String,
+    pub source_scan_id: Uuid,
+    pub source_candidate_index: u32,
+    pub source_artifact_name: String,
+    pub report_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub created_at: DateTime<Utc>,
+    pub proposals: Vec<StripFeederLaneProposal>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceInventoryBaseline {
     pub id: Uuid,

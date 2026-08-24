@@ -35,6 +35,7 @@ This repository contains the first working platform slice:
   imported KiCad dimension matching
 - automatic top-side PCB registration from scan seeds and local KiCad
   fiducials, with persisted visual evidence and residual-gated transforms
+- no-motion strip-feeder lane measurement and persistent, inactive setup drafts
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

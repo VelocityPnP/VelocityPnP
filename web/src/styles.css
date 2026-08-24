@@ -119,6 +119,7 @@ h3 { font-size: 15px; margin: 3px 0 7px; }
 .calibration-checks .check-failed { border-color: #7d453f; }
 .calibration-checks .check-failed > span { color: #f28d82; }
 .run-result { padding: 8px; background: #101d18; border-radius: 6px; }
+.run-result > img { display: block; width: min(100%, 720px); margin: 8px 0; border: 1px solid var(--line); border-radius: 7px; }
 .workflow { display: grid; gap: 8px; }
 .workflow-step { display: grid; grid-template-columns: 48px 1fr 100px; align-items: center; gap: 16px; min-height: 105px; border: 1px solid var(--line); background: #121a18; border-radius: 10px; padding: 15px; }
 .workflow-index { color: #57655f; font: 17px "DM Mono", monospace; text-align: center; }
