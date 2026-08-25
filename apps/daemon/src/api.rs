@@ -5002,6 +5002,7 @@ async fn build_strip_feeder_vision(
         preview_artifact_name: preview_artifact_name.clone(),
         created_at: Utc::now(),
         proposals: analysis.proposals,
+        rejected_lattices: analysis.rejected_lattices,
         warnings: analysis.warnings,
     };
     let report_json = serde_json::to_vec_pretty(&report).map_err(ApiError::internal)?;
@@ -18273,8 +18274,8 @@ mod tests {
                     &mut crop,
                     pocket_x,
                     (f64::from(y_mm) * 10.0).round() as i32,
-                    5,
-                    if y_mm % 4 == 1 { 35 } else { 175 },
+                    6,
+                    if y_mm % 4 == 1 { 35 } else { 45 },
                 );
             }
         }
@@ -18307,6 +18308,10 @@ mod tests {
         .0;
 
         assert_eq!(report.proposals.len(), 3);
+        assert_eq!(report.rejected_lattices.len(), 3);
+        assert!(report.rejected_lattices.iter().all(|rejected| {
+            (rejected.offset_mm - 3.5).abs() <= 0.1 && rejected.reason.contains("pocket centerline")
+        }));
         assert!(report
             .proposals
             .iter()

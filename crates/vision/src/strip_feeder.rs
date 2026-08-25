@@ -6,10 +6,11 @@ use opencv::imgproc;
 use std::f64::consts::PI;
 use velocitypnp_domain::{
     PlanarCameraModel, Pose, StripFeederLaneProposal, StripFeederLiveHoldoutReport,
-    StripFeederRegistration, StripPocketOccupancy, WorkspaceBoardCandidate,
+    StripFeederRegistration, StripFeederRejectedLattice, StripPocketOccupancy,
+    WorkspaceBoardCandidate,
 };
 
-pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v1";
+pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v2";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
@@ -26,6 +27,8 @@ const SPROCKET_DIAMETER_MAX_MM: f64 = 2.2;
 const SPROCKET_TRACK_TOLERANCE_MM: f64 = 0.75;
 const SPROCKET_LATTICE_TOLERANCE_MM: f64 = 0.45;
 const MINIMUM_SPROCKETS_PER_TRACK: usize = 3;
+const EIGHT_MM_POCKET_CENTER_OFFSET_MM: f64 = 3.5;
+const POCKET_ROW_PAIR_TOLERANCE_MM: f64 = 0.45;
 const STANDARD_TAPE_WIDTHS_MM: [f64; 4] = [8.0, 12.0, 16.0, 24.0];
 const STANDARD_COMPONENT_PITCHES_MM: [f64; 5] = [2.0, 4.0, 8.0, 12.0, 16.0];
 // EIA-481-C Table 2 dimension F is 3.5, 5.5, 7.5, and 11.5 mm for
@@ -35,6 +38,7 @@ const POCKET_CENTERLINE_EDGE_REMAINDER_MM: f64 = 0.5;
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripFeederVisionArtifacts {
     pub proposals: Vec<StripFeederLaneProposal>,
+    pub rejected_lattices: Vec<StripFeederRejectedLattice>,
     pub preview: RgbFrame,
     pub warnings: Vec<String>,
 }
@@ -57,6 +61,13 @@ struct SprocketTrack {
     circles: Vec<CircleFeature>,
     residual_p95_mm: f64,
     confidence: f64,
+    paired_pocket_centerline_mm: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct SuppressedPocketTrack {
+    track: SprocketTrack,
+    paired_sprocket_cross_mm: f64,
 }
 
 /// Finds repeated carrier-tape sprocket holes in one normalized feeder crop.
@@ -88,13 +99,14 @@ pub fn analyze_strip_feeder_candidate(
     } else {
         (candidate.height_mm, candidate.width_mm)
     };
-    let tracks = build_sprocket_tracks(
+    let detected_tracks = build_sprocket_tracks(
         &circles,
         crop,
         candidate.width_mm,
         candidate.height_mm,
         long_is_y,
     );
+    let (tracks, suppressed_tracks) = resolve_pocket_row_competitors(detected_tracks);
     let mut proposals = tracks
         .iter()
         .enumerate()
@@ -129,6 +141,12 @@ pub fn analyze_strip_feeder_candidate(
             circles.len()
         ));
     }
+    if !suppressed_tracks.is_empty() {
+        warnings.push(format!(
+            "{} 4 mm lattices were rejected as 8 mm tape pocket-center rows",
+            suppressed_tracks.len(),
+        ));
+    }
     let review_count = proposals
         .iter()
         .filter(|proposal| proposal.review_required)
@@ -143,9 +161,21 @@ pub fn analyze_strip_feeder_candidate(
             "pickup Z, part identity, pocket occupancy, and a live holdout are not measured".into(),
         );
     }
-    let preview = render_preview(crop, candidate, long_is_y, &circles, &proposals);
+    let rejected_lattices = suppressed_tracks
+        .iter()
+        .map(|suppressed| rejected_lattice(suppressed, candidate, long_is_y, along_length_mm))
+        .collect::<Vec<_>>();
+    let preview = render_preview(
+        crop,
+        candidate,
+        long_is_y,
+        &circles,
+        &proposals,
+        &suppressed_tracks,
+    );
     Ok(StripFeederVisionArtifacts {
         proposals,
+        rejected_lattices,
         preview,
         warnings,
     })
@@ -885,6 +915,78 @@ fn build_sprocket_tracks(
         .collect()
 }
 
+/// Separates an 8 mm tape's sprocket row from a circular component-pocket row.
+///
+/// Both rows can repeat at 4 mm. They cannot both be sprocket rows because
+/// their 3.5 mm separation is smaller than the narrowest carrier tape. The
+/// stronger circular lattice is retained as the sprocket row. The weaker row
+/// remains explicit rejected evidence and supplies the pocket centerline.
+fn resolve_pocket_row_competitors(
+    mut tracks: Vec<SprocketTrack>,
+) -> (Vec<SprocketTrack>, Vec<SuppressedPocketTrack>) {
+    let mut pairs = Vec::new();
+    for first in 0..tracks.len() {
+        for second in first + 1..tracks.len() {
+            let separation = (tracks[first].cross_mm - tracks[second].cross_mm).abs();
+            let residual = (separation - EIGHT_MM_POCKET_CENTER_OFFSET_MM).abs();
+            if residual <= POCKET_ROW_PAIR_TOLERANCE_MM {
+                pairs.push((
+                    first,
+                    second,
+                    residual,
+                    tracks[first].confidence.max(tracks[second].confidence),
+                ));
+            }
+        }
+    }
+    pairs.sort_by(|first, second| {
+        second
+            .3
+            .total_cmp(&first.3)
+            .then_with(|| first.2.total_cmp(&second.2))
+    });
+
+    let mut claimed = vec![false; tracks.len()];
+    let mut rejected = vec![false; tracks.len()];
+    let mut suppressed = Vec::new();
+    for (first, second, _, _) in pairs {
+        if claimed[first] || claimed[second] {
+            continue;
+        }
+        let (sprocket, pocket) = if compare_track_quality(&tracks[first], &tracks[second]).is_ge() {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        claimed[sprocket] = true;
+        claimed[pocket] = true;
+        rejected[pocket] = true;
+        tracks[sprocket].paired_pocket_centerline_mm = Some(tracks[pocket].cross_mm);
+        suppressed.push(SuppressedPocketTrack {
+            track: tracks[pocket].clone(),
+            paired_sprocket_cross_mm: tracks[sprocket].cross_mm,
+        });
+    }
+
+    let mut accepted = tracks
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, track)| (!rejected[index]).then_some(track))
+        .collect::<Vec<_>>();
+    accepted.sort_by(|first, second| first.cross_mm.total_cmp(&second.cross_mm));
+    suppressed.sort_by(|first, second| first.track.cross_mm.total_cmp(&second.track.cross_mm));
+    (accepted, suppressed)
+}
+
+fn compare_track_quality(first: &SprocketTrack, second: &SprocketTrack) -> std::cmp::Ordering {
+    first
+        .confidence
+        .total_cmp(&second.confidence)
+        .then_with(|| first.circles.len().cmp(&second.circles.len()))
+        .then_with(|| second.residual_p95_mm.total_cmp(&first.residual_p95_mm))
+        .then_with(|| second.cross_mm.total_cmp(&first.cross_mm))
+}
+
 fn fit_sprocket_track(cluster: Vec<(f64, f64, CircleFeature)>) -> Option<SprocketTrack> {
     if cluster.len() < MINIMUM_SPROCKETS_PER_TRACK {
         return None;
@@ -937,6 +1039,7 @@ fn fit_sprocket_track(cluster: Vec<(f64, f64, CircleFeature)>) -> Option<Sprocke
         residual_p95_mm,
         confidence: (0.45 * detection_confidence + 0.35 * inlier_fraction + 0.20 * residual_score)
             .clamp(0.0, 1.0),
+        paired_pocket_centerline_mm: None,
     })
 }
 
@@ -951,15 +1054,26 @@ fn lane_proposal(
     cross_length_mm: f64,
     along_length_mm: f64,
 ) -> StripFeederLaneProposal {
-    let tape_width_mm = infer_tape_width(track, tracks);
+    let tape_width_mm = track
+        .paired_pocket_centerline_mm
+        .map(|_| 8.0)
+        .or_else(|| infer_tape_width(track, tracks));
     let mut findings = Vec::new();
+    if track.paired_pocket_centerline_mm.is_some() {
+        findings.push(
+            "8 mm tape width and pocket side were resolved from the paired 3.5 mm pocket row"
+                .into(),
+        );
+    }
     if tape_width_mm.is_none() {
         findings.push(
             "tape width is unresolved because no standard adjacent lane spacing was found".into(),
         );
     }
-    let centerline = tape_width_mm.and_then(|width_mm| {
-        choose_pick_centerline(crop, track.cross_mm, width_mm, cross_length_mm, long_is_y)
+    let centerline = track.paired_pocket_centerline_mm.or_else(|| {
+        tape_width_mm.and_then(|width_mm| {
+            choose_pick_centerline(crop, track.cross_mm, width_mm, cross_length_mm, long_is_y)
+        })
     });
     if centerline.is_none() && tape_width_mm.is_some() {
         findings.push("both pocket-centerline sides have similar image support".into());
@@ -1053,6 +1167,43 @@ fn lane_proposal(
         confidence,
         review_required,
         findings,
+    }
+}
+
+fn rejected_lattice(
+    suppressed: &SuppressedPocketTrack,
+    candidate: &WorkspaceBoardCandidate,
+    long_is_y: bool,
+    along_length_mm: f64,
+) -> StripFeederRejectedLattice {
+    let pocket_cross_mm = suppressed.track.cross_mm;
+    let sprocket_cross_mm = suppressed.paired_sprocket_cross_mm;
+    let offset_mm = (pocket_cross_mm - sprocket_cross_mm).abs();
+    StripFeederRejectedLattice {
+        centerline_machine_mm: [
+            local_axis_to_machine(pocket_cross_mm, 0.0, candidate, long_is_y),
+            local_axis_to_machine(
+                pocket_cross_mm,
+                along_length_mm,
+                candidate,
+                long_is_y,
+            ),
+        ],
+        paired_sprocket_centerline_machine_mm: [
+            local_axis_to_machine(sprocket_cross_mm, 0.0, candidate, long_is_y),
+            local_axis_to_machine(
+                sprocket_cross_mm,
+                along_length_mm,
+                candidate,
+                long_is_y,
+            ),
+        ],
+        offset_mm,
+        center_count: suppressed.track.circles.len() as u32,
+        confidence: suppressed.track.confidence,
+        reason: format!(
+            "the weaker 4 mm lattice is {offset_mm:.3} mm from a stronger sprocket row and matches an 8 mm tape pocket centerline",
+        ),
     }
 }
 
@@ -1313,9 +1464,10 @@ fn proposal_cross_position(
 fn render_preview(
     crop: &GrayFrame,
     candidate: &WorkspaceBoardCandidate,
-    _long_is_y: bool,
+    long_is_y: bool,
     circles: &[CircleFeature],
     proposals: &[StripFeederLaneProposal],
+    suppressed_tracks: &[SuppressedPocketTrack],
 ) -> RgbFrame {
     let mut pixels = Vec::with_capacity(crop.pixels.len() * 3);
     for luma in &crop.pixels {
@@ -1328,6 +1480,28 @@ fn render_preview(
     };
     for circle in circles {
         draw_circle(&mut preview, circle.center_px, 4.0, [255, 215, 45]);
+    }
+    for suppressed in suppressed_tracks {
+        for circle in &suppressed.track.circles {
+            draw_circle(&mut preview, circle.center_px, 5.0, [245, 65, 75]);
+        }
+        let cross_pixels = if long_is_y {
+            f64::from(crop.width)
+        } else {
+            f64::from(crop.height)
+        };
+        let cross_length_mm = if long_is_y {
+            candidate.width_mm
+        } else {
+            candidate.height_mm
+        };
+        let cross_px = suppressed.track.cross_mm / cross_length_mm * cross_pixels;
+        let line = if long_is_y {
+            ([cross_px, 0.0], [cross_px, f64::from(crop.height - 1)])
+        } else {
+            ([0.0, cross_px], [f64::from(crop.width - 1), cross_px])
+        };
+        draw_line(&mut preview, line.0, line.1, [245, 65, 75]);
     }
     for proposal in proposals {
         if let Some(line) = proposal.pick_centerline_machine_mm {
@@ -1548,8 +1722,8 @@ mod tests {
                     height,
                     pocket_x,
                     (f64::from(y_mm) * px_per_mm).round() as i32,
-                    5,
-                    if y_mm % 4 == 1 { 35 } else { 175 },
+                    6,
+                    if y_mm % 4 == 1 { 35 } else { 45 },
                 );
             }
         }
@@ -1597,6 +1771,15 @@ mod tests {
             assert!(proposal.pick_centerline_machine_mm.is_some());
             assert!(!proposal.pocket_centers_machine_mm.is_empty());
         }
+        assert_eq!(result.rejected_lattices.len(), 3);
+        assert!(result.rejected_lattices.iter().all(|rejected| {
+            (rejected.offset_mm - EIGHT_MM_POCKET_CENTER_OFFSET_MM).abs() <= 0.1
+                && rejected.reason.contains("pocket centerline")
+        }));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("3 4 mm lattices were rejected")));
         assert_eq!(result.preview.width, 240);
         assert_eq!(result.preview.height, 640);
     }
@@ -1625,12 +1808,14 @@ mod tests {
                 circles: Vec::new(),
                 residual_p95_mm: 0.1,
                 confidence: 0.8,
+                paired_pocket_centerline_mm: None,
             },
             SprocketTrack {
                 cross_mm: 7.0,
                 circles: Vec::new(),
                 residual_p95_mm: 0.1,
                 confidence: 0.8,
+                paired_pocket_centerline_mm: None,
             },
         ];
 

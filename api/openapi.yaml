@@ -2075,6 +2075,7 @@ components:
         - preview_artifact_name
         - created_at
         - proposals
+        - rejected_lattices
         - warnings
       properties:
         algorithm_version: { type: string }
@@ -2087,9 +2088,36 @@ components:
         proposals:
           type: array
           items: { $ref: "#/components/schemas/StripFeederLaneProposal" }
+        rejected_lattices:
+          type: array
+          items: { $ref: "#/components/schemas/StripFeederRejectedLattice" }
         warnings:
           type: array
           items: { type: string }
+    StripFeederRejectedLattice:
+      type: object
+      required:
+        - centerline_machine_mm
+        - paired_sprocket_centerline_machine_mm
+        - offset_mm
+        - center_count
+        - confidence
+        - reason
+      properties:
+        centerline_machine_mm:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/Point2d" }
+        paired_sprocket_centerline_machine_mm:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { $ref: "#/components/schemas/Point2d" }
+        offset_mm: { type: number, minimum: 0 }
+        center_count: { type: integer, minimum: 3 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        reason: { type: string }
     StripFeederLaneProposal:
       type: object
       required:

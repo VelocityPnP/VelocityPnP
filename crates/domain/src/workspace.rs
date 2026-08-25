@@ -414,6 +414,17 @@ pub struct StripFeederLaneProposal {
     pub findings: Vec<String>,
 }
 
+/// One repeated circular-feature row rejected as a component-pocket lattice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederRejectedLattice {
+    pub centerline_machine_mm: [[f64; 2]; 2],
+    pub paired_sprocket_centerline_machine_mm: [[f64; 2]; 2],
+    pub offset_mm: f64,
+    pub center_count: u32,
+    pub confidence: f64,
+    pub reason: String,
+}
+
 /// No-motion feeder-lane analysis retained with a workspace scan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederVisionReport {
@@ -425,6 +436,8 @@ pub struct StripFeederVisionReport {
     pub preview_artifact_name: String,
     pub created_at: DateTime<Utc>,
     pub proposals: Vec<StripFeederLaneProposal>,
+    #[serde(default)]
+    pub rejected_lattices: Vec<StripFeederRejectedLattice>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }

@@ -1950,6 +1950,36 @@ used. Final normal disconnect
 `463b9f5e-cb3f-4668-9367-5546b2729810` succeeded. Pickup-Z and indexing
 validation keep the combined roadmap item open.
 
+### Strip-feeder pocket-row rejection replay
+
+On 2026-08-25, version 2 of the strip-feeder specialist was replayed against
+the three retained physical feeder scans. The controller stayed disconnected.
+The replay caused no machine motion.
+
+The detector now pairs 4 mm lattices that are 3.5 plus or minus 0.45 mm apart.
+This separation is less than the width of standard carrier tape, so both rows
+cannot be sprocket rows. The stronger row stays as the sprocket row. The weaker
+row is kept as rejected component-pocket evidence. It also resolves the pickup
+side and 8 mm tape width for the pair.
+
+The left scan rejected the pocket row paired with the X=126.70 mm sprocket
+row. Its local fitted offset was 3.595 mm. The right scan rejected the rows
+paired with the X=148.77 and X=159.83 mm sprocket rows. Their fitted offsets
+were 3.476 and 3.226 mm. Preview artifacts
+`/tmp/velocitypnp-left-strip-v2.png` and
+`/tmp/velocitypnp-right-strip-v2.png` show rejected rows in red.
+
+After scan-overlap deduplication, all eight real rows remain at X=82.24,
+93.35, 104.41, 115.58, 126.70, 137.69, 148.77, and 159.83 mm. All three prior
+false proposals are rejected. Candidate recall is 8 of 8 and candidate
+precision is 8 of 8 for this retained physical data. The three paired lanes
+also resolve as 8 mm tape with a 4 mm component pitch.
+
+The X=104.41 and X=115.58 mm rows still require review. Both resolve as 12 mm
+tape, but their two possible pocket sides have similar image support. This
+result does not complete an automatic eight-lane setup. Pickup-Z and indexing
+validation remain open.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

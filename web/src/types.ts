@@ -727,7 +727,17 @@ export interface StripFeederVisionReport {
   preview_artifact_name: string;
   created_at: string;
   proposals: StripFeederLaneProposal[];
+  rejected_lattices: StripFeederRejectedLattice[];
   warnings: string[];
+}
+
+export interface StripFeederRejectedLattice {
+  centerline_machine_mm: [[number, number], [number, number]];
+  paired_sprocket_centerline_machine_mm: [[number, number], [number, number]];
+  offset_mm: number;
+  center_count: number;
+  confidence: number;
+  reason: string;
 }
 
 export interface StripFeederRegistration {

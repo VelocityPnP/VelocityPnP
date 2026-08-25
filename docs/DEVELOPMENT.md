@@ -529,10 +529,19 @@ pocket centerlines 3.5, 5.5, 7.5, and 11.5 mm from the sprocket row. Image
 periodicity supplies a 2, 4, 8, 12, or 16 mm component-pocket pitch
 hypothesis. Weak or ambiguous geometry stays in review state.
 
+Circular component pockets can also form a 4 mm lattice. Version 2 pairs two
+candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
+the separation is less than the width of standard carrier tape. The stronger
+row stays as the sprocket row. The weaker row becomes rejected pocket evidence
+and gives the exact pickup side for 8 mm tape. Unpaired or ambiguous rows stay
+in review state.
+
 The scan retains `strip-feeder-vision-NNN.json` and
 `strip-feeder-vision-NNN.png`. Yellow circles show sprocket candidates. Cyan
-lines show pickup-centerline hypotheses. Green marks show the pocket grid.
-The web workspace card exposes the same analysis.
+lines show pickup-centerline hypotheses. Green marks show the pocket grid. Red
+lines and circles show rejected component-pocket lattices. The JSON report
+keeps each rejected row, its paired sprocket row, offset, feature count,
+confidence, and reason. The web workspace card exposes the same analysis.
 
 A measured lane can be stored as an inactive draft:
 
