@@ -349,6 +349,54 @@ class Client:
             "GET", f"/strip-feeder-registrations/{registration_id}",
         )
 
+    def start_strip_feeder_live_holdout(
+        self,
+        registration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        pocket_index: int | None = None,
+        sample_count: int = 3,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Start a fresh top-camera check of one feeder draft."""
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "live pocket holdout requires explicit confirmation that the "
+                "tape is fixed, both nozzles are level, the envelope is clear, "
+                "and power isolation is reachable"
+            )
+        if pocket_index is not None and pocket_index < 0:
+            raise ValueError("pocket_index must not be negative")
+        if not 3 <= sample_count <= 5:
+            raise ValueError("sample_count must be between 3 and 5")
+        return self._request(
+            "POST",
+            f"/strip-feeder-registrations/{registration_id}/live-holdouts",
+            {
+                "lease_id": str(lease_id),
+                "pocket_index": pocket_index,
+                "sample_count": sample_count,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+
+    def strip_feeder_live_holdout(
+        self, holdout_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET", f"/strip-feeder-live-holdouts/{holdout_id}",
+        )
+
+    def strip_feeder_live_holdout_preview(
+        self, holdout_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/strip-feeder-live-holdouts/{holdout_id}/artifacts/"
+            "live-pocket-holdout.png",
+            "image/png",
+        )
+
     def start_board_registration(
         self,
         scan_id: str | uuid.UUID,

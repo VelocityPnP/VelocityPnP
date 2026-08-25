@@ -516,7 +516,9 @@ cargo run -p velocitypnp -- analyze-strip-feeder SCAN_UUID --candidate 0
 The API route is
 `POST /workspace-scans/SCAN_UUID/strip-feeder-vision`. The Python client uses
 `analyze_strip_feeder()`. This operation causes no motion. It rejects known
-fixtures and candidates that are not classified as feeders.
+fixtures. It accepts a feeder classification, or an unknown staging-plate
+candidate that has feeder evidence. The specialist must still find a carrier
+tape lattice before a usable draft can be stored.
 
 OpenCV contour measurements find 1.5 mm sprocket-hole candidates. At least
 three features must fit the 4 mm carrier-tape lattice. The crop basis comes
@@ -543,9 +545,34 @@ cargo run -p velocitypnp -- save-strip-feeder-draft SCAN_UUID \
 The corresponding API is `POST /strip-feeder-registrations`. The Python
 client uses `create_strip_feeder_draft()`. A draft records source lineage,
 tape geometry, pocket hypotheses, optional part identity, and optional part
-orientation. It does not create an active `Feeder`. Pickup Z, the next occupied
-pocket, and a live camera holdout remain unset. Physical indexing and pickup
-validation are the next hardware gate.
+orientation. It does not create an active `Feeder`.
+
+Run a fresh top-camera holdout after coarse and fine XYZ home:
+
+```bash
+cargo run --release -p velocitypnp -- live-strip-feeder-holdout \
+  DRAFT_UUID --lease LEASE_UUID --confirm-safety-checks
+```
+
+The API route is
+`POST /strip-feeder-registrations/DRAFT_UUID/live-holdouts`. The Python client
+uses `start_strip_feeder_live_holdout()`. The machine visual-homes, then makes
+a five-pose safe-Z sweep across the middle pocket and both possible sprocket
+rows. The two views on each sprocket row are 4 mm before and after the predicted
+pocket. It captures three locked top-camera frames at each pose. This gives
+about 14 mm of combined tape coverage despite the narrow calibrated top-camera
+field. The vision worker rectifies all captures into the draft tape basis with
+the calibrated planar camera model. It then checks the 4 mm sprocket lattice,
+local line angle, pocket phase, bounded XY correction, and occupied-component
+image support.
+
+The persistent report gives predicted and measured machine coordinates. Its
+PNG marks expected sprocket lines in yellow, the expected pocket centerline in
+cyan, the measured sprocket line in magenta, detected holes in yellow, and
+measured pocket centers in green. A passed result selects a measured occupied
+pocket in the draft. It does not lower a nozzle, index tape, measure pickup Z,
+or create an active `Feeder`. Pickup-Z and indexing validation remain the next
+hardware gates.
 
 ### Automatic board registration
 

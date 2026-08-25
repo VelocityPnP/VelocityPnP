@@ -3,7 +3,8 @@ import { api, waitForOperation } from "./api";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
   CalibrationSnapshot, CalibrationStep, Device, MachineEvent, MachineStatus, Pose,
-  SensorReading, StripFeederRegistration, StripFeederVisionReport, VisualHomingResult,
+  SensorReading, StripFeederLiveHoldoutRun, StripFeederRegistration,
+  StripFeederVisionReport, VisualHomingResult,
   WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport, WorkspaceChangeSetReport,
   WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
@@ -509,6 +510,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
   const [feederVision, setFeederVision] = useState<StripFeederVisionReport | null>(null);
   const [feederVisionBusy, setFeederVisionBusy] = useState(false);
   const [feederDraft, setFeederDraft] = useState<StripFeederRegistration | null>(null);
+  const [feederHoldout, setFeederHoldout] = useState<StripFeederLiveHoldoutRun | null>(null);
   const [feederPartKey, setFeederPartKey] = useState("");
   const [feederPartRotation, setFeederPartRotation] = useState("");
   const [pcb, setPcb] = useState<File | null>(null);
@@ -598,7 +600,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
   };
   const analyzeStripFeeder = async (candidate: WorkspaceBoardCandidate) => {
     if (!selectedScan) return;
-    setFeederVisionBusy(true); setError(null); setFeederVision(null); setFeederDraft(null);
+    setFeederVisionBusy(true); setError(null); setFeederVision(null); setFeederDraft(null); setFeederHoldout(null);
     try {
       setFeederVision(await api.analyzeStripFeeder(
         selectedScan, candidate.candidate_index,
@@ -631,6 +633,30 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       setFeederVisionBusy(false);
     }
   };
+  const runStripFeederHoldout = async () => {
+    if (!feederDraft) return;
+    if (!window.confirm(
+      "Run a fresh top-camera pocket check? Confirm the tape is fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable. The machine will visual-home and make a short safe-Z camera sweep around one predicted pocket. It will not lower a nozzle or index tape.",
+    )) return;
+    setFeederVisionBusy(true); setError(null); setFeederHoldout(null);
+    try {
+      const machine = await api.status();
+      const lease = machine.control_lease
+        ? await api.renewLease(machine.control_lease.id, 900)
+        : await api.lease("VelocityPnP strip feeder holdout", 900);
+      const started = await api.startStripFeederLiveHoldout(
+        feederDraft.id, lease.id,
+      );
+      try { await waitForOperation(started.operation); } catch { /* Load retained rejection. */ }
+      const holdout = await api.stripFeederLiveHoldout(started.holdout.id);
+      setFeederHoldout(holdout);
+      setFeederDraft(await api.stripFeederDraft(feederDraft.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setFeederVisionBusy(false);
+    }
+  };
   const selectedReport = scans.find((scan) => scan.id === selectedScan);
   const hasProposals = discovery !== null || selectedReport?.board_discovery != null;
   return <div className="boards-layout">
@@ -647,7 +673,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       <div className="card-heading"><div><p className="eyebrow">Workspace inventory</p><h2>Analyze workspace objects</h2></div>{scans.length > 0 && <span className="count">{scans.length}</span>}</div>
       <p>Select a completed height-aware scan. Plate-aligned proposals use known fixtures and retain uncertain objects for later classification. Analysis causes no machine motion.</p>
       <div className="board-discovery-controls">
-        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); setChanges(null); setFeederVision(null); setFeederDraft(null); }}>
+        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); setChanges(null); setFeederVision(null); setFeederDraft(null); setFeederHoldout(null); }}>
           {scans.length === 0 && <option value="">No eligible scans</option>}
           {scans.map((scan) => <option key={scan.id} value={scan.id}>{new Date(scan.updated_at).toLocaleString()} · {pretty(scan.mode)}{scan.board_discovery ? ` · ${scan.board_discovery.candidate_count} prior candidates` : ""}</option>)}
         </select>
@@ -667,7 +693,8 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
         <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/${feederVision.preview_artifact_name}`} alt="Strip feeder lane analysis" />
         <div className="board-discovery-controls"><input value={feederPartKey} onChange={(event) => setFeederPartKey(event.target.value)} placeholder="Part key (optional)" /><input value={feederPartRotation} onChange={(event) => setFeederPartRotation(event.target.value)} placeholder="Part rotation ° (optional)" /></div>
         {feederVision.proposals.map((proposal) => <div key={proposal.proposal_index}><p>Lane {proposal.proposal_index + 1}: <strong>{proposal.tape_width_mm?.toFixed(0) ?? "unknown"} mm tape</strong>; {proposal.component_pitch_mm?.toFixed(0) ?? "unknown"} mm component pitch; {proposal.sprocket_center_count} sprocket holes; {proposal.sprocket_pitch_residual_p95_mm.toFixed(3)} mm lattice p95; {(proposal.confidence * 100).toFixed(0)}% confidence{proposal.review_required ? "; review required" : "; draft gate passed"}.</p><button disabled={feederVisionBusy || proposal.tape_width_mm == null || proposal.component_pitch_mm == null || proposal.pick_centerline_machine_mm == null} onClick={() => void saveStripFeederDraft(proposal.proposal_index)}>Save lane as draft</button></div>)}
-        {feederDraft && <p><strong>{feederDraft.name} saved</strong> as {pretty(feederDraft.status)}. Live pocket occupancy and pickup Z are still required.</p>}
+        {feederDraft && <div><p><strong>{feederDraft.name} saved</strong> as {pretty(feederDraft.status)}. Live pocket occupancy and pickup Z are still required.</p><button disabled={feederVisionBusy} onClick={() => void runStripFeederHoldout()}>{feederVisionBusy ? "Checking…" : "Run live pocket holdout"}</button></div>}
+        {feederHoldout?.report && <div><p><strong>{feederHoldout.report.passed ? "Live holdout passed" : "Live holdout rejected"}</strong>: {feederHoldout.report.sprocket_center_count} sprocket centers, {feederHoldout.report.correction_magnitude_mm.toFixed(3)} mm local correction, {pretty(feederHoldout.report.occupancy)} at {(feederHoldout.report.occupancy_confidence * 100).toFixed(0)}% confidence.</p><a href={`/api/v1/strip-feeder-live-holdouts/${feederHoldout.id}/artifacts/${feederHoldout.report.artifact_name}`} target="_blank" rel="noreferrer">View live holdout evidence</a>{feederHoldout.report.findings.map((finding) => <p key={finding}>{finding}</p>)}</div>}
         {feederVision.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
       </div>}
       {discovery && <div className="board-discovery-result">

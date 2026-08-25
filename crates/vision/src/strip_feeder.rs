@@ -4,10 +4,22 @@ use anyhow::{ensure, Result};
 use opencv::core::{self, Mat, Point, Point2f, Size, Vector};
 use opencv::imgproc;
 use std::f64::consts::PI;
-use velocitypnp_domain::{StripFeederLaneProposal, WorkspaceBoardCandidate};
+use velocitypnp_domain::{
+    PlanarCameraModel, Pose, StripFeederLaneProposal, StripFeederLiveHoldoutReport,
+    StripFeederRegistration, StripPocketOccupancy, WorkspaceBoardCandidate,
+};
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v1";
+pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
+
+const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
+const LIVE_HOLDOUT_ALONG_SPAN_MM: f64 = 20.0;
+const LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL: f64 = 0.04;
+const LIVE_HOLDOUT_TRACK_TOLERANCE_MM: f64 = 1.25;
+const LIVE_HOLDOUT_MAX_CORRECTION_MM: f64 = 1.5;
+const LIVE_HOLDOUT_MAX_ROTATION_DEG: f64 = 3.0;
+const LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM: f64 = 0.35;
 
 const SPROCKET_DIAMETER_MIN_MM: f64 = 1.2;
 const SPROCKET_DIAMETER_MAX_MM: f64 = 2.2;
@@ -25,6 +37,12 @@ pub struct StripFeederVisionArtifacts {
     pub proposals: Vec<StripFeederLaneProposal>,
     pub preview: RgbFrame,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripFeederLiveHoldoutArtifacts {
+    pub report: StripFeederLiveHoldoutReport,
+    pub preview: RgbFrame,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +149,619 @@ pub fn analyze_strip_feeder_candidate(
         preview,
         warnings,
     })
+}
+
+/// Checks one retained feeder lane in a fresh top-camera observation.
+///
+/// The image is first rectified into the draft tape basis. The check then
+/// measures the sprocket line, pocket phase, and central pocket image support.
+pub fn analyze_live_strip_feeder_holdout(
+    frames: &[GrayFrame],
+    camera_poses: &[Pose],
+    camera_model: &PlanarCameraModel,
+    registration: &StripFeederRegistration,
+    predicted_pocket_machine_mm: [f64; 2],
+    artifact_name: &str,
+) -> Result<StripFeederLiveHoldoutArtifacts> {
+    ensure!(
+        !frames.is_empty(),
+        "live feeder holdout has no camera frames"
+    );
+    ensure!(
+        frames.len() == camera_poses.len(),
+        "live feeder holdout frame poses do not match frames"
+    );
+    let first = &frames[0];
+    ensure!(
+        first.width >= 64
+            && first.height >= 64
+            && first.pixels.len() == first.width as usize * first.height as usize,
+        "live feeder holdout camera frame is invalid"
+    );
+    ensure!(
+        frames.iter().all(|frame| {
+            frame.width == first.width
+                && frame.height == first.height
+                && frame.pixels.len() == first.pixels.len()
+        }),
+        "live feeder holdout camera frames changed dimensions"
+    );
+    ensure!(
+        camera_model.role == velocitypnp_domain::CameraRole::TopCamera,
+        "live feeder holdout requires a top-camera planar model"
+    );
+    ensure!(
+        camera_poses.iter().all(|pose| pose.finite()),
+        "live feeder holdout camera pose is invalid"
+    );
+    ensure!(
+        registration.tape_width_mm.is_finite()
+            && registration.tape_width_mm >= 8.0
+            && registration.tape_pitch_mm.is_finite()
+            && registration.tape_pitch_mm >= 2.0,
+        "live feeder holdout registration geometry is invalid"
+    );
+    ensure!(
+        registration
+            .pick_centerline_machine_mm
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+            && predicted_pocket_machine_mm
+                .iter()
+                .all(|value| value.is_finite()),
+        "live feeder holdout target is invalid"
+    );
+
+    let along = normalized(subtract(
+        registration.pick_centerline_machine_mm[1],
+        registration.pick_centerline_machine_mm[0],
+    ))
+    .ok_or_else(|| anyhow::anyhow!("live feeder holdout centerline has no direction"))?;
+    let cross = [-along[1], along[0]];
+    let cross_span_mm = registration.tape_width_mm + 2.0 * LIVE_HOLDOUT_CROSS_MARGIN_MM;
+    let crop = rectify_live_tape_frames(
+        frames,
+        camera_poses,
+        camera_model,
+        predicted_pocket_machine_mm,
+        cross,
+        along,
+        cross_span_mm,
+        LIVE_HOLDOUT_ALONG_SPAN_MM,
+    )?;
+    let circles = detect_sprocket_circles(&crop, cross_span_mm, LIVE_HOLDOUT_ALONG_SPAN_MM)?;
+    let tracks = build_sprocket_tracks(
+        &circles,
+        &crop,
+        cross_span_mm,
+        LIVE_HOLDOUT_ALONG_SPAN_MM,
+        true,
+    );
+    let center_cross_mm = cross_span_mm * 0.5;
+    let center_along_mm = LIVE_HOLDOUT_ALONG_SPAN_MM * 0.5;
+    let sprocket_offset_mm = registration.tape_width_mm * 0.5 - POCKET_CENTERLINE_EDGE_REMAINDER_MM;
+    let expected_tracks = [
+        center_cross_mm - sprocket_offset_mm,
+        center_cross_mm + sprocket_offset_mm,
+    ];
+    let matched = tracks
+        .iter()
+        .flat_map(|track| {
+            expected_tracks
+                .iter()
+                .map(move |expected| (track, *expected, (track.cross_mm - expected).abs()))
+        })
+        .filter(|(_, _, distance)| *distance <= LIVE_HOLDOUT_TRACK_TOLERANCE_MM)
+        .min_by(|first, second| {
+            first
+                .2
+                .total_cmp(&second.2)
+                .then_with(|| second.0.confidence.total_cmp(&first.0.confidence))
+        });
+
+    let mut findings = Vec::new();
+    let Some((track, expected_track_cross_mm, _)) = matched else {
+        if tracks.is_empty() {
+            findings.push(format!(
+                "{} sprocket-sized live features did not form the required three-hole 4 mm lattice",
+                circles.len(),
+            ));
+        } else {
+            findings.push(format!(
+                "no live sprocket line was found within {LIVE_HOLDOUT_TRACK_TOLERANCE_MM:.2} mm of the draft",
+            ));
+        }
+        let preview = render_live_holdout_preview(
+            &crop,
+            &circles,
+            None,
+            expected_tracks,
+            center_cross_mm,
+            &[],
+            None,
+        );
+        return Ok(StripFeederLiveHoldoutArtifacts {
+            report: failed_live_holdout_report(
+                predicted_pocket_machine_mm,
+                artifact_name,
+                findings,
+            ),
+            preview,
+        });
+    };
+
+    let local_centers = track
+        .circles
+        .iter()
+        .map(|circle| {
+            [
+                (circle.center_px[0] + 0.5) / f64::from(crop.width) * cross_span_mm,
+                (circle.center_px[1] + 0.5) / f64::from(crop.height) * LIVE_HOLDOUT_ALONG_SPAN_MM,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let (actual_track_cross_mm, track_slope) =
+        fit_cross_over_along(&local_centers).unwrap_or((track.cross_mm, 0.0));
+    let rotation_correction_deg = track_slope.atan().to_degrees();
+    let cross_delta_mm = actual_track_cross_mm - expected_track_cross_mm;
+    let live_centerline_cross_mm = center_cross_mm + cross_delta_mm;
+    let (phase_mm, periodicity_confidence) = estimate_known_component_phase(
+        &crop,
+        live_centerline_cross_mm,
+        cross_span_mm,
+        LIVE_HOLDOUT_ALONG_SPAN_MM,
+        registration.tape_pitch_mm,
+    )
+    .unwrap_or((center_along_mm, 0.0));
+    let along_delta_mm =
+        nearest_periodic_delta(phase_mm, registration.tape_pitch_mm, center_along_mm);
+    let correction = add(scale(cross, cross_delta_mm), scale(along, along_delta_mm));
+    let correction_magnitude_mm = correction[0].hypot(correction[1]);
+    let mut visible_pockets = Vec::new();
+    let first_index =
+        ((1.0 - center_along_mm - along_delta_mm) / registration.tape_pitch_mm).ceil() as i32;
+    let last_index = ((LIVE_HOLDOUT_ALONG_SPAN_MM - 1.0 - center_along_mm - along_delta_mm)
+        / registration.tape_pitch_mm)
+        .floor() as i32;
+    for index in first_index..=last_index {
+        let along_mm =
+            center_along_mm + along_delta_mm + f64::from(index) * registration.tape_pitch_mm;
+        let evidence = pocket_occupancy_evidence(
+            &crop,
+            live_centerline_cross_mm,
+            along_mm,
+            cross_span_mm,
+            LIVE_HOLDOUT_ALONG_SPAN_MM,
+            registration.tape_pitch_mm,
+        );
+        visible_pockets.push((index, along_mm, evidence));
+    }
+    let selected = visible_pockets
+        .iter()
+        .max_by(|first, second| first.2.total_cmp(&second.2));
+    let occupancy_confidence = selected.map_or(0.0, |item| item.2);
+    let occupancy = if occupancy_confidence >= 0.42 {
+        StripPocketOccupancy::Occupied
+    } else if occupancy_confidence <= 0.16 {
+        StripPocketOccupancy::Empty
+    } else {
+        StripPocketOccupancy::Uncertain
+    };
+    let selected_index = selected.map_or(0, |item| item.0);
+    let selected_along_mm = selected.map_or(center_along_mm + along_delta_mm, |item| item.1);
+    let selected_predicted = add(
+        predicted_pocket_machine_mm,
+        scale(
+            along,
+            f64::from(selected_index) * registration.tape_pitch_mm,
+        ),
+    );
+    let selected_machine = add(selected_predicted, correction);
+
+    let geometry_passed = track.circles.len() >= MINIMUM_SPROCKETS_PER_TRACK
+        && track.residual_p95_mm <= LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM
+        && correction_magnitude_mm <= LIVE_HOLDOUT_MAX_CORRECTION_MM
+        && rotation_correction_deg.abs() <= LIVE_HOLDOUT_MAX_ROTATION_DEG
+        && periodicity_confidence >= 0.15;
+    if correction_magnitude_mm > LIVE_HOLDOUT_MAX_CORRECTION_MM {
+        findings.push(format!(
+            "local correction {correction_magnitude_mm:.3} mm exceeds {LIVE_HOLDOUT_MAX_CORRECTION_MM:.3} mm",
+        ));
+    }
+    if rotation_correction_deg.abs() > LIVE_HOLDOUT_MAX_ROTATION_DEG {
+        findings.push(format!(
+            "local rotation correction {rotation_correction_deg:.3} degrees exceeds {LIVE_HOLDOUT_MAX_ROTATION_DEG:.3} degrees",
+        ));
+    }
+    if track.residual_p95_mm > LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM {
+        findings.push(format!(
+            "sprocket pitch residual {:.3} mm exceeds {:.3} mm",
+            track.residual_p95_mm, LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM,
+        ));
+    }
+    if periodicity_confidence < 0.15 {
+        findings.push("the live pocket phase has weak periodic image support".into());
+    }
+    if occupancy != StripPocketOccupancy::Occupied {
+        findings.push("no pocket has strong occupied-component image support".into());
+    }
+    let passed = geometry_passed && occupancy == StripPocketOccupancy::Occupied;
+    if passed {
+        findings
+            .push("fresh sprocket geometry and one occupied pocket passed the live holdout".into());
+    }
+    let correction_score =
+        (1.0 - correction_magnitude_mm / LIVE_HOLDOUT_MAX_CORRECTION_MM).clamp(0.0, 1.0);
+    let residual_score =
+        (1.0 - track.residual_p95_mm / LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM).clamp(0.0, 1.0);
+    let confidence = (0.30 * track.confidence
+        + 0.20 * residual_score
+        + 0.20 * periodicity_confidence.clamp(0.0, 1.0)
+        + 0.20 * occupancy_confidence
+        + 0.10 * correction_score)
+        .clamp(0.0, 1.0);
+    let preview_pockets = visible_pockets
+        .iter()
+        .map(|item| [live_centerline_cross_mm, item.1])
+        .collect::<Vec<_>>();
+    let preview = render_live_holdout_preview(
+        &crop,
+        &circles,
+        Some((actual_track_cross_mm, track_slope)),
+        expected_tracks,
+        center_cross_mm,
+        &preview_pockets,
+        Some([live_centerline_cross_mm, selected_along_mm]),
+    );
+    Ok(StripFeederLiveHoldoutArtifacts {
+        report: StripFeederLiveHoldoutReport {
+            algorithm_version: STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM.into(),
+            predicted_pocket_machine_mm: selected_predicted,
+            measured_pocket_machine_mm: Some(selected_machine),
+            correction_x_mm: correction[0],
+            correction_y_mm: correction[1],
+            correction_magnitude_mm,
+            rotation_correction_deg,
+            sprocket_center_count: track.circles.len() as u32,
+            sprocket_pitch_residual_p95_mm: track.residual_p95_mm,
+            occupancy,
+            occupancy_confidence,
+            confidence,
+            passed,
+            artifact_name: artifact_name.into(),
+            findings,
+        },
+        preview,
+    })
+}
+
+fn failed_live_holdout_report(
+    predicted_pocket_machine_mm: [f64; 2],
+    artifact_name: &str,
+    findings: Vec<String>,
+) -> StripFeederLiveHoldoutReport {
+    StripFeederLiveHoldoutReport {
+        algorithm_version: STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM.into(),
+        predicted_pocket_machine_mm,
+        measured_pocket_machine_mm: None,
+        correction_x_mm: 0.0,
+        correction_y_mm: 0.0,
+        correction_magnitude_mm: 0.0,
+        rotation_correction_deg: 0.0,
+        sprocket_center_count: 0,
+        sprocket_pitch_residual_p95_mm: 0.0,
+        occupancy: StripPocketOccupancy::Uncertain,
+        occupancy_confidence: 0.0,
+        confidence: 0.0,
+        passed: false,
+        artifact_name: artifact_name.into(),
+        findings,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rectify_live_tape_frames(
+    frames: &[GrayFrame],
+    camera_poses: &[Pose],
+    model: &PlanarCameraModel,
+    center_machine_mm: [f64; 2],
+    cross_axis: [f64; 2],
+    along_axis: [f64; 2],
+    cross_span_mm: f64,
+    along_span_mm: f64,
+) -> Result<GrayFrame> {
+    let width = (cross_span_mm / LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL).round() as u32;
+    let height = (along_span_mm / LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL).round() as u32;
+    ensure!(
+        width >= 64 && height >= 64,
+        "live feeder rectified crop is too small"
+    );
+    let mut pixels = vec![0_u8; (width * height) as usize];
+    let mut samples = Vec::with_capacity(frames.len());
+    for y in 0..height {
+        let along_mm =
+            (f64::from(y) + 0.5) / f64::from(height) * along_span_mm - along_span_mm * 0.5;
+        for x in 0..width {
+            let cross_mm =
+                (f64::from(x) + 0.5) / f64::from(width) * cross_span_mm - cross_span_mm * 0.5;
+            let machine = add(
+                center_machine_mm,
+                add(scale(cross_axis, cross_mm), scale(along_axis, along_mm)),
+            );
+            samples.clear();
+            let mut best_center_distance = f64::INFINITY;
+            for (frame, camera_pose) in frames.iter().zip(camera_poses) {
+                let desired = [machine[0] - camera_pose.x_mm, machine[1] - camera_pose.y_mm];
+                let Some(pixel) = invert_camera_correction(model, desired) else {
+                    continue;
+                };
+                if pixel[0] < model.supported_min_x_px
+                    || pixel[0] > model.supported_max_x_px
+                    || pixel[1] < model.supported_min_y_px
+                    || pixel[1] > model.supported_max_y_px
+                    || pixel[0] >= f64::from(frame.width.saturating_sub(1))
+                    || pixel[1] >= f64::from(frame.height.saturating_sub(1))
+                {
+                    continue;
+                }
+                let center_distance =
+                    (pixel[0] - model.center_x_px).hypot(pixel[1] - model.center_y_px);
+                if center_distance < best_center_distance - 0.5 {
+                    best_center_distance = center_distance;
+                    samples.clear();
+                    samples.push(bilinear_luma(frame, pixel[0], pixel[1]));
+                } else if (center_distance - best_center_distance).abs() <= 0.5 {
+                    samples.push(bilinear_luma(frame, pixel[0], pixel[1]));
+                }
+            }
+            if !samples.is_empty() {
+                samples.sort_unstable();
+                pixels[(y * width + x) as usize] = samples[samples.len() / 2];
+            }
+        }
+    }
+    Ok(GrayFrame {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn invert_camera_correction(model: &PlanarCameraModel, desired: [f64; 2]) -> Option<[f64; 2]> {
+    let mut pixel = [model.center_x_px, model.center_y_px];
+    for _ in 0..6 {
+        let current = model.correction_at(pixel[0], pixel[1])?;
+        let error = [desired[0] - current[0], desired[1] - current[1]];
+        if error[0].hypot(error[1]) < 0.002 {
+            break;
+        }
+        let x = model.correction_at(pixel[0] + 1.0, pixel[1])?;
+        let y = model.correction_at(pixel[0], pixel[1] + 1.0)?;
+        let jacobian = [
+            [x[0] - current[0], y[0] - current[0]],
+            [x[1] - current[1], y[1] - current[1]],
+        ];
+        let determinant = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
+        if determinant.abs() <= 1e-9 {
+            return None;
+        }
+        pixel[0] += (error[0] * jacobian[1][1] - error[1] * jacobian[0][1]) / determinant;
+        pixel[1] += (jacobian[0][0] * error[1] - jacobian[1][0] * error[0]) / determinant;
+    }
+    (pixel[0] >= 0.0 && pixel[1] >= 0.0).then_some(pixel)
+}
+
+fn bilinear_luma(frame: &GrayFrame, x: f64, y: f64) -> u8 {
+    if x < 0.0
+        || y < 0.0
+        || x >= f64::from(frame.width.saturating_sub(1))
+        || y >= f64::from(frame.height.saturating_sub(1))
+    {
+        return 0;
+    }
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let fx = x - f64::from(x0);
+    let fy = y - f64::from(y0);
+    let sample = |sample_x: u32, sample_y: u32| {
+        f64::from(frame.pixels[(sample_y * frame.width + sample_x) as usize])
+    };
+    let top = sample(x0, y0) * (1.0 - fx) + sample(x0 + 1, y0) * fx;
+    let bottom = sample(x0, y0 + 1) * (1.0 - fx) + sample(x0 + 1, y0 + 1) * fx;
+    (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
+}
+
+fn fit_cross_over_along(points: &[[f64; 2]]) -> Option<(f64, f64)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let mean_cross = points.iter().map(|point| point[0]).sum::<f64>() / points.len() as f64;
+    let mean_along = points.iter().map(|point| point[1]).sum::<f64>() / points.len() as f64;
+    let numerator = points
+        .iter()
+        .map(|point| (point[1] - mean_along) * (point[0] - mean_cross))
+        .sum::<f64>();
+    let denominator = points
+        .iter()
+        .map(|point| (point[1] - mean_along).powi(2))
+        .sum::<f64>();
+    let slope = (denominator > 1e-9).then_some(numerator / denominator)?;
+    let center_cross = mean_cross + slope * (LIVE_HOLDOUT_ALONG_SPAN_MM * 0.5 - mean_along);
+    Some((center_cross, slope))
+}
+
+fn estimate_known_component_phase(
+    crop: &GrayFrame,
+    cross_mm: f64,
+    cross_span_mm: f64,
+    along_span_mm: f64,
+    pitch_mm: f64,
+) -> Option<(f64, f64)> {
+    let center = (cross_mm / cross_span_mm * f64::from(crop.width)).round() as i32;
+    let half_band = ((0.9 / cross_span_mm * f64::from(crop.width)).ceil() as i32).max(1);
+    let mut profile = Vec::with_capacity(crop.height as usize);
+    for y in 0..crop.height as i32 {
+        let mut values = Vec::new();
+        for x in center - half_band..=center + half_band {
+            if x >= 0 && x < crop.width as i32 {
+                values.push(f64::from(
+                    crop.pixels[(y as u32 * crop.width + x as u32) as usize],
+                ));
+            }
+        }
+        let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / values.len().max(1) as f64;
+        profile.push(variance.sqrt());
+    }
+    let mm_per_pixel = along_span_mm / f64::from(crop.height);
+    let lag = (pitch_mm / mm_per_pixel).round() as usize;
+    let confidence = periodicity_score(&profile, lag)?.clamp(0.0, 1.0);
+    let phase_px = strongest_profile_phase(&profile, lag);
+    Some((phase_px as f64 * mm_per_pixel, confidence))
+}
+
+fn nearest_periodic_delta(phase_mm: f64, pitch_mm: f64, expected_mm: f64) -> f64 {
+    let nearest_index = ((expected_mm - phase_mm) / pitch_mm).round();
+    phase_mm + nearest_index * pitch_mm - expected_mm
+}
+
+fn pocket_occupancy_evidence(
+    crop: &GrayFrame,
+    cross_mm: f64,
+    along_mm: f64,
+    cross_span_mm: f64,
+    along_span_mm: f64,
+    pitch_mm: f64,
+) -> f64 {
+    let center_x = cross_mm / cross_span_mm * f64::from(crop.width);
+    let center_y = along_mm / along_span_mm * f64::from(crop.height);
+    let mm_per_pixel =
+        0.5 * (cross_span_mm / f64::from(crop.width) + along_span_mm / f64::from(crop.height));
+    let radius_px = (pitch_mm.min(3.0) * 0.38 / mm_per_pixel).max(4.0);
+    let ring_radius_px = radius_px * 1.7;
+    let mut core = Vec::new();
+    let mut ring = Vec::new();
+    let mut edge_sum = 0.0;
+    let mut edge_count = 0_u32;
+    let x_min = (center_x - ring_radius_px).floor().max(1.0) as i32;
+    let x_max = (center_x + ring_radius_px)
+        .ceil()
+        .min(f64::from(crop.width - 2)) as i32;
+    let y_min = (center_y - ring_radius_px).floor().max(1.0) as i32;
+    let y_max = (center_y + ring_radius_px)
+        .ceil()
+        .min(f64::from(crop.height - 2)) as i32;
+    for y in y_min..=y_max {
+        for x in x_min..=x_max {
+            let distance = (f64::from(x) - center_x).hypot(f64::from(y) - center_y);
+            let value = f64::from(crop.pixels[(y as u32 * crop.width + x as u32) as usize]);
+            if distance <= radius_px {
+                core.push(value);
+                let left = crop.pixels[(y as u32 * crop.width + x as u32 - 1) as usize];
+                let right = crop.pixels[(y as u32 * crop.width + x as u32 + 1) as usize];
+                let top = crop.pixels[((y as u32 - 1) * crop.width + x as u32) as usize];
+                let bottom = crop.pixels[((y as u32 + 1) * crop.width + x as u32) as usize];
+                edge_sum +=
+                    0.5 * (f64::from(left.abs_diff(right)) + f64::from(top.abs_diff(bottom)));
+                edge_count += 1;
+            } else if distance <= ring_radius_px {
+                ring.push(value);
+            }
+        }
+    }
+    if core.is_empty() || ring.is_empty() {
+        return 0.0;
+    }
+    let statistics = |values: &[f64]| {
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / values.len() as f64;
+        (mean, variance.sqrt())
+    };
+    let (core_mean, core_deviation) = statistics(&core);
+    let (ring_mean, _) = statistics(&ring);
+    let contrast = (core_mean - ring_mean).abs();
+    let edge = edge_sum / f64::from(edge_count.max(1));
+    (0.40 * (core_deviation / 35.0).clamp(0.0, 1.0)
+        + 0.35 * (contrast / 30.0).clamp(0.0, 1.0)
+        + 0.25 * (edge / 24.0).clamp(0.0, 1.0))
+    .clamp(0.0, 1.0)
+}
+
+fn render_live_holdout_preview(
+    crop: &GrayFrame,
+    circles: &[CircleFeature],
+    measured_track: Option<(f64, f64)>,
+    expected_tracks_mm: [f64; 2],
+    expected_centerline_mm: f64,
+    pockets_mm: &[[f64; 2]],
+    selected_mm: Option<[f64; 2]>,
+) -> RgbFrame {
+    let mut pixels = Vec::with_capacity(crop.pixels.len() * 3);
+    for luma in &crop.pixels {
+        pixels.extend_from_slice(&[*luma, *luma, *luma]);
+    }
+    let mut frame = RgbFrame {
+        width: crop.width,
+        height: crop.height,
+        pixels,
+    };
+    let to_px = |point: [f64; 2]| {
+        [
+            point[0] / (f64::from(crop.width) * LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL)
+                * f64::from(crop.width),
+            point[1] / (f64::from(crop.height) * LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL)
+                * f64::from(crop.height),
+        ]
+    };
+    for cross_mm in expected_tracks_mm {
+        draw_line(
+            &mut frame,
+            to_px([cross_mm, 0.0]),
+            to_px([cross_mm, LIVE_HOLDOUT_ALONG_SPAN_MM]),
+            [255, 190, 40],
+        );
+    }
+    draw_line(
+        &mut frame,
+        to_px([expected_centerline_mm, 0.0]),
+        to_px([expected_centerline_mm, LIVE_HOLDOUT_ALONG_SPAN_MM]),
+        [30, 220, 245],
+    );
+    if let Some((cross_mm, slope)) = measured_track {
+        draw_line(
+            &mut frame,
+            to_px([cross_mm - slope * LIVE_HOLDOUT_ALONG_SPAN_MM * 0.5, 0.0]),
+            to_px([
+                cross_mm + slope * LIVE_HOLDOUT_ALONG_SPAN_MM * 0.5,
+                LIVE_HOLDOUT_ALONG_SPAN_MM,
+            ]),
+            [225, 60, 235],
+        );
+    }
+    for circle in circles {
+        draw_circle(&mut frame, circle.center_px, 5.0, [255, 215, 45]);
+    }
+    for pocket in pockets_mm {
+        draw_cross(&mut frame, to_px(*pocket), 4.0, [50, 235, 120]);
+    }
+    if let Some(selected) = selected_mm {
+        draw_circle(&mut frame, to_px(selected), 10.0, [50, 235, 120]);
+    }
+    frame
+}
+
+fn normalized(value: [f64; 2]) -> Option<[f64; 2]> {
+    let length = value[0].hypot(value[1]);
+    (length.is_finite() && length > 1e-9).then(|| scale(value, 1.0 / length))
 }
 
 fn detect_sprocket_circles(
@@ -847,9 +1478,11 @@ fn dot(first: [f64; 2], second: [f64; 2]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
     use velocitypnp_domain::{
-        InstalledPlateRole, WorkspaceObjectClass, WorkspaceObjectClassification,
-        WorkspaceScanRegion,
+        CameraRole, InstalledPlateRole, PlanarCameraModelKind, StripFeederRegistrationStatus,
+        WorkspaceObjectClass, WorkspaceObjectClassification, WorkspaceScanRegion,
     };
 
     fn candidate() -> WorkspaceBoardCandidate {
@@ -1002,5 +1635,96 @@ mod tests {
         ];
 
         assert_eq!(infer_tape_width(&tracks[0], &tracks), None);
+    }
+
+    #[test]
+    fn live_holdout_rectifies_the_camera_and_selects_an_occupied_pocket() {
+        let width = 500_u32;
+        let height = 500_u32;
+        let mut pixels = vec![105_u8; (width * height) as usize];
+        for y_mm in (-8_i32..=8).step_by(4) {
+            paint_disc(&mut pixels, width, height, 163, 250 + y_mm * 25, 18, 235);
+        }
+        for y_mm in (-8_i32..=8).step_by(2) {
+            paint_disc(
+                &mut pixels,
+                width,
+                height,
+                250,
+                250 + y_mm * 25,
+                11,
+                if y_mm == 0 { 25 } else { 165 },
+            );
+        }
+        let frame = GrayFrame {
+            width,
+            height,
+            pixels,
+        };
+        let model = PlanarCameraModel {
+            role: CameraRole::TopCamera,
+            center_x_px: 250.0,
+            center_y_px: 250.0,
+            normalization_x_px: 250.0,
+            normalization_y_px: 250.0,
+            correction_x_coefficients_mm: [10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            correction_y_coefficients_mm: [0.0, -10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            supported_min_x_px: 0.0,
+            supported_max_x_px: 499.0,
+            supported_min_y_px: 0.0,
+            supported_max_y_px: 499.0,
+            kind: PlanarCameraModelKind::Affine,
+        };
+        let now = Utc::now();
+        let registration = StripFeederRegistration {
+            id: Uuid::new_v4(),
+            profile_id: "test".into(),
+            calibration_id: Uuid::new_v4(),
+            source_scan_id: Uuid::new_v4(),
+            source_candidate_index: 0,
+            source_proposal_index: 0,
+            created_at: now,
+            updated_at: now,
+            status: StripFeederRegistrationStatus::VisionDraft,
+            name: "test tape".into(),
+            part_key: None,
+            part_rotation_deg: None,
+            tape_width_mm: 8.0,
+            tape_pitch_mm: 2.0,
+            tape_rotation_deg: -90.0,
+            pick_centerline_machine_mm: [[112.0, 82.0], [112.0, 62.0]],
+            pocket_centers_machine_mm: (0..11)
+                .map(|index| [112.0, 82.0 - f64::from(index) * 2.0])
+                .collect(),
+            selected_pocket_machine_mm: None,
+            pickup_z_mm: None,
+            active_feeder_id: None,
+            latest_live_holdout_id: None,
+            vision_confidence: 0.9,
+            vision_review_required: false,
+            findings: Vec::new(),
+        };
+        let pose = Pose {
+            x_mm: 112.0,
+            y_mm: 72.0,
+            z_mm: 20.0,
+            rotation_deg: 0.0,
+        };
+        let result = analyze_live_strip_feeder_holdout(
+            &[frame.clone(), frame.clone(), frame],
+            &[pose, pose, pose],
+            &model,
+            &registration,
+            [112.0, 72.0],
+            "holdout.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!(result.report.sprocket_center_count >= 3);
+        assert_eq!(result.report.occupancy, StripPocketOccupancy::Occupied);
+        assert!(result.report.correction_magnitude_mm < 0.15);
+        assert_eq!(result.preview.width, 350);
+        assert_eq!(result.preview.height, 500);
     }
 }

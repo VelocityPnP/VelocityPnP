@@ -2,7 +2,8 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, SensorReading, StripFeederRegistration, StripFeederVisionReport, VisualHomingResult,
+  Operation, SensorReading, StripFeederLiveHoldoutRun, StripFeederRegistration,
+  StripFeederVisionReport, VisualHomingResult,
   WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
@@ -218,6 +219,25 @@ export const api = {
       part_rotation_deg: partRotationDeg ?? null,
     },
   ),
+  startStripFeederLiveHoldout: (
+    registrationId: string, leaseId: string,
+  ) => jsonPost<{ holdout: StripFeederLiveHoldoutRun; operation: Operation }>(
+    `/strip-feeder-registrations/${registrationId}/live-holdouts`,
+    {
+      lease_id: leaseId,
+      pocket_index: null,
+      sample_count: 3,
+      confirmed_external_safety_checks: true,
+    },
+  ),
+  stripFeederLiveHoldout: (holdoutId: string) =>
+    request<StripFeederLiveHoldoutRun>(
+      `/strip-feeder-live-holdouts/${holdoutId}`,
+    ),
+  stripFeederDraft: (registrationId: string) =>
+    request<StripFeederRegistration>(
+      `/strip-feeder-registrations/${registrationId}`,
+    ),
   startBoardRegistration: (
     scanId: string, candidateIndex: number, boardId: string, leaseId: string,
     label?: string,

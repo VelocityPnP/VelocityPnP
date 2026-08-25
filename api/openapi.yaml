@@ -280,8 +280,10 @@ paths:
       description: >-
         Detects carrier-tape sprocket lattices, plate-aligned tape axes,
         standard tape width, and component-pocket pitch in one retained feeder
-        candidate. The result is draft evidence. It does not cause motion or
-        create an active feeder.
+        candidate. A non-fixture unknown staging candidate can enter the
+        specialist when its classification contains feeder evidence. The
+        result is draft evidence. It does not cause motion or create an active
+        feeder.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -1050,6 +1052,60 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StripFeederRegistration" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /strip-feeder-registrations/{id}/live-holdouts:
+    post:
+      operationId: startStripFeederLiveHoldout
+      description: >-
+        Visual-homes, makes a short safe-Z camera sweep around one predicted
+        pocket and both possible sprocket rows, and measures fresh sprocket
+        geometry, local tape correction, and pocket occupancy. It does not
+        lower a nozzle or index tape.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, confirmed_external_safety_checks]
+              properties:
+                lease_id: { type: string, format: uuid }
+                pocket_index: { type: [integer, "null"], minimum: 0 }
+                sample_count: { type: integer, minimum: 3, maximum: 5, default: 3 }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202":
+          description: Live pocket holdout accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [holdout, operation]
+                properties:
+                  holdout: { $ref: "#/components/schemas/StripFeederLiveHoldoutRun" }
+                  operation: { $ref: "#/components/schemas/Operation" }
+  /strip-feeder-live-holdouts/{id}:
+    get:
+      operationId: getStripFeederLiveHoldout
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Persistent live pocket holdout
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripFeederLiveHoldoutRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /strip-feeder-live-holdouts/{id}/artifacts/{name}:
+    get:
+      operationId: getStripFeederLiveHoldoutArtifact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Annotated live holdout evidence }
         "404": { $ref: "#/components/responses/NotFound" }
   /jobs:
     get:
@@ -2100,6 +2156,7 @@ components:
         - selected_pocket_machine_mm
         - pickup_z_mm
         - active_feeder_id
+        - latest_live_holdout_id
         - vision_confidence
         - vision_review_required
         - findings
@@ -2136,11 +2193,82 @@ components:
             - type: "null"
         pickup_z_mm: { type: [number, "null"] }
         active_feeder_id: { type: [string, "null"], format: uuid }
+        latest_live_holdout_id: { type: [string, "null"], format: uuid }
         vision_confidence: { type: number, minimum: 0, maximum: 1 }
         vision_review_required: { type: boolean }
         findings:
           type: array
           items: { type: string }
+    StripFeederLiveHoldoutReport:
+      type: object
+      required:
+        - algorithm_version
+        - predicted_pocket_machine_mm
+        - measured_pocket_machine_mm
+        - correction_x_mm
+        - correction_y_mm
+        - correction_magnitude_mm
+        - rotation_correction_deg
+        - sprocket_center_count
+        - sprocket_pitch_residual_p95_mm
+        - occupancy
+        - occupancy_confidence
+        - confidence
+        - passed
+        - artifact_name
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        predicted_pocket_machine_mm: { $ref: "#/components/schemas/Point2d" }
+        measured_pocket_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        correction_x_mm: { type: number }
+        correction_y_mm: { type: number }
+        correction_magnitude_mm: { type: number, minimum: 0 }
+        rotation_correction_deg: { type: number }
+        sprocket_center_count: { type: integer, minimum: 0 }
+        sprocket_pitch_residual_p95_mm: { type: number, minimum: 0 }
+        occupancy: { type: string, enum: [occupied, empty, uncertain] }
+        occupancy_confidence: { type: number, minimum: 0, maximum: 1 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        passed: { type: boolean }
+        artifact_name: { type: string }
+        findings:
+          type: array
+          items: { type: string }
+    StripFeederLiveHoldoutRun:
+      type: object
+      required:
+        - id
+        - operation_id
+        - registration_id
+        - profile_id
+        - calibration_id
+        - status
+        - created_at
+        - updated_at
+        - sample_count
+        - predicted_pocket_machine_mm
+        - report
+        - message
+      properties:
+        id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        registration_id: { type: string, format: uuid }
+        profile_id: { type: string }
+        calibration_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, running, succeeded, failed, cancelled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        sample_count: { type: integer, minimum: 3, maximum: 5 }
+        predicted_pocket_machine_mm: { $ref: "#/components/schemas/Point2d" }
+        report:
+          oneOf:
+            - { $ref: "#/components/schemas/StripFeederLiveHoldoutReport" }
+            - type: "null"
+        message: { type: [string, "null"] }
     Point2d:
       type: array
       minItems: 2

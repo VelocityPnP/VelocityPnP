@@ -123,6 +123,22 @@ enum Command {
         part_rotation: Option<f64>,
     },
     StripFeederDrafts,
+    LiveStripFeederHoldout {
+        registration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long)]
+        pocket: Option<u32>,
+        #[arg(long, default_value_t = 3)]
+        samples: u32,
+        /// Confirm fixed tape, level nozzles, a clear envelope, and reachable
+        /// power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    StripFeederHoldout {
+        holdout: Uuid,
+    },
     SetWorkspaceBaseline {
         scan: Uuid,
     },
@@ -533,6 +549,32 @@ async fn main() -> Result<()> {
         }
         Command::StripFeederDrafts => {
             get(&client, &format!("{base}/strip-feeder-registrations")).await?
+        }
+        Command::LiveStripFeederHoldout {
+            registration,
+            lease,
+            pocket,
+            samples,
+            confirm_safety_checks,
+        } => {
+            post(
+                &client,
+                &format!("{base}/strip-feeder-registrations/{registration}/live-holdouts"),
+                Some(json!({
+                    "lease_id": lease,
+                    "pocket_index": pocket,
+                    "sample_count": samples,
+                    "confirmed_external_safety_checks": confirm_safety_checks,
+                })),
+            )
+            .await?
+        }
+        Command::StripFeederHoldout { holdout } => {
+            get(
+                &client,
+                &format!("{base}/strip-feeder-live-holdouts/{holdout}"),
+            )
+            .await?
         }
         Command::SetWorkspaceBaseline { scan } => {
             post(

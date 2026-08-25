@@ -7,8 +7,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationSnapshot, CameraProfile,
-    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, StripFeederRegistration,
-    WorkspaceInventoryBaseline, WorkspaceScanReport,
+    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, StripFeederLiveHoldoutRun,
+    StripFeederRegistration, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -90,6 +90,16 @@ impl Store {
             );
             INSERT OR IGNORE INTO schema_version(version, applied_at)
                 VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            CREATE TABLE IF NOT EXISTS strip_feeder_holdout_artifacts (
+                holdout_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(holdout_id, name)
+            );
+            INSERT OR IGNORE INTO schema_version(version, applied_at)
+                VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             "#,
         )?;
         Ok(())
@@ -361,6 +371,66 @@ impl Store {
         self.get("strip_feeder_registration", id)
     }
 
+    pub fn put_strip_feeder_live_holdout(&self, run: &StripFeederLiveHoldoutRun) -> Result<()> {
+        self.put("strip_feeder_live_holdout", run.id, run)
+    }
+
+    pub fn list_strip_feeder_live_holdouts(&self) -> Result<Vec<StripFeederLiveHoldoutRun>> {
+        self.list("strip_feeder_live_holdout")
+    }
+
+    pub fn get_strip_feeder_live_holdout(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StripFeederLiveHoldoutRun>> {
+        self.get("strip_feeder_live_holdout", id)
+    }
+
+    pub fn put_strip_feeder_holdout_artifact(
+        &self,
+        holdout_id: Uuid,
+        name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !name.is_empty(),
+            "strip feeder holdout artifact name is empty"
+        );
+        anyhow::ensure!(
+            !media_type.is_empty(),
+            "strip feeder holdout artifact media type is empty"
+        );
+        self.connection.lock().execute(
+            r#"INSERT INTO strip_feeder_holdout_artifacts(
+                 holdout_id, name, media_type, data, created_at
+               ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ON CONFLICT(holdout_id, name) DO UPDATE SET
+                 media_type = excluded.media_type,
+                 data = excluded.data,
+                 created_at = excluded.created_at"#,
+            params![holdout_id.to_string(), name, media_type, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_strip_feeder_holdout_artifact(
+        &self,
+        holdout_id: Uuid,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT media_type, data FROM strip_feeder_holdout_artifacts \
+                 WHERE holdout_id = ?1 AND name = ?2",
+                params![holdout_id.to_string(), name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn put_job(&self, job: &Job) -> Result<()> {
         self.put("job", job.id, job)
     }
@@ -599,6 +669,27 @@ mod tests {
         assert_eq!(
             store
                 .get_board_registration_artifact(registration_id, "hypothesis-0-fid1.png")
+                .unwrap(),
+            Some(("image/png".into(), data.to_vec()))
+        );
+    }
+
+    #[test]
+    fn strip_feeder_holdout_artifact_round_trip_retains_evidence() {
+        let store = Store::memory().unwrap();
+        let holdout_id = Uuid::new_v4();
+        let data = [6, 5, 4, 3];
+        store
+            .put_strip_feeder_holdout_artifact(
+                holdout_id,
+                "live-pocket-holdout.png",
+                "image/png",
+                &data,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_strip_feeder_holdout_artifact(holdout_id, "live-pocket-holdout.png")
                 .unwrap(),
             Some(("image/png".into(), data.to_vec()))
         );

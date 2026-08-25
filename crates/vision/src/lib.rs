@@ -29,7 +29,9 @@ pub use board_registration::{
 };
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use strip_feeder::{
-    analyze_strip_feeder_candidate, StripFeederVisionArtifacts, STRIP_FEEDER_SPROCKET_PITCH_MM,
+    analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate,
+    StripFeederLiveHoldoutArtifacts, StripFeederVisionArtifacts,
+    STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM, STRIP_FEEDER_SPROCKET_PITCH_MM,
     STRIP_FEEDER_VISION_ALGORITHM,
 };
 pub use workspace_board_discovery::{

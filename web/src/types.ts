@@ -751,9 +751,43 @@ export interface StripFeederRegistration {
   selected_pocket_machine_mm: [number, number] | null;
   pickup_z_mm: number | null;
   active_feeder_id: string | null;
+  latest_live_holdout_id: string | null;
   vision_confidence: number;
   vision_review_required: boolean;
   findings: string[];
+}
+
+export interface StripFeederLiveHoldoutReport {
+  algorithm_version: string;
+  predicted_pocket_machine_mm: [number, number];
+  measured_pocket_machine_mm: [number, number] | null;
+  correction_x_mm: number;
+  correction_y_mm: number;
+  correction_magnitude_mm: number;
+  rotation_correction_deg: number;
+  sprocket_center_count: number;
+  sprocket_pitch_residual_p95_mm: number;
+  occupancy: "occupied" | "empty" | "uncertain";
+  occupancy_confidence: number;
+  confidence: number;
+  passed: boolean;
+  artifact_name: string;
+  findings: string[];
+}
+
+export interface StripFeederLiveHoldoutRun {
+  id: string;
+  operation_id: string;
+  registration_id: string;
+  profile_id: string;
+  calibration_id: string;
+  status: Operation["status"];
+  created_at: string;
+  updated_at: string;
+  sample_count: number;
+  predicted_pocket_machine_mm: [number, number];
+  report: StripFeederLiveHoldoutReport | null;
+  message: string | null;
 }
 
 export interface WorkspaceBoardDiscoveryReport {

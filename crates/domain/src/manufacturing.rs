@@ -215,6 +215,58 @@ pub enum StripFeederRegistrationStatus {
     Ready,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StripPocketOccupancy {
+    Occupied,
+    Empty,
+    Uncertain,
+}
+
+/// One fresh top-camera check of a retained strip-feeder draft.
+///
+/// The holdout measures local tape position and selects a visible occupied
+/// pocket. It does not measure pickup Z, lower a nozzle, or index the tape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederLiveHoldoutReport {
+    pub algorithm_version: String,
+    pub predicted_pocket_machine_mm: [f64; 2],
+    #[serde(default)]
+    pub measured_pocket_machine_mm: Option<[f64; 2]>,
+    pub correction_x_mm: f64,
+    pub correction_y_mm: f64,
+    pub correction_magnitude_mm: f64,
+    pub rotation_correction_deg: f64,
+    pub sprocket_center_count: u32,
+    pub sprocket_pitch_residual_p95_mm: f64,
+    pub occupancy: StripPocketOccupancy,
+    pub occupancy_confidence: f64,
+    pub confidence: f64,
+    pub passed: bool,
+    pub artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Persistent operation state for one live strip-feeder holdout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederLiveHoldoutRun {
+    pub id: Uuid,
+    pub operation_id: Uuid,
+    pub registration_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub status: crate::OperationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub sample_count: u32,
+    pub predicted_pocket_machine_mm: [f64; 2],
+    #[serde(default)]
+    pub report: Option<StripFeederLiveHoldoutReport>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// Persistent feeder setup state derived from retained workspace evidence.
 ///
 /// `Ready` is reserved for a later live camera and pickup-Z workflow. Creating
@@ -246,6 +298,8 @@ pub struct StripFeederRegistration {
     pub pickup_z_mm: Option<f64>,
     #[serde(default)]
     pub active_feeder_id: Option<Uuid>,
+    #[serde(default)]
+    pub latest_live_holdout_id: Option<Uuid>,
     pub vision_confidence: f64,
     pub vision_review_required: bool,
     #[serde(default)]

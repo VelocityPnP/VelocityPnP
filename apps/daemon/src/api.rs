@@ -37,8 +37,8 @@ use velocitypnp_domain::{
     LocalXyDirectionResponseSample, MachineProfile, MachineState, NozzleHeightModel,
     NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
-    Residuals, SensorReading, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederVisionReport, VacuumProbeReport, VacuumProbeSample,
+    Residuals, SensorReading, StripFeederLiveHoldoutRun, StripFeederRegistration,
+    StripFeederRegistrationStatus, StripFeederVisionReport, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
     WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
@@ -58,10 +58,11 @@ use velocitypnp_planner::{
 };
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    analyze_strip_feeder_candidate, apply_camera_controls, build_workspace_discovery_context,
-    build_workspace_height_map, build_workspace_mosaic, calibrate_bottom_camera_mapping,
-    calibrate_camera_ray_transfer, camera_sample_metrics, capture_gray_frame, capture_gray_frames,
-    compare_workspace_observation, compare_workspace_reconnaissance, compose_workspace_refinements,
+    analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate, apply_camera_controls,
+    build_workspace_discovery_context, build_workspace_height_map, build_workspace_mosaic,
+    calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer, camera_sample_metrics,
+    capture_gray_frame, capture_gray_frames, compare_workspace_observation,
+    compare_workspace_reconnaissance, compose_workspace_refinements,
     composite_workspace_camera_aperture, decode_gray_png, detect_board_fiducial_near,
     detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
     detect_installed_plate_hole, discover_workspace_objects, encode_gray_png, encode_rgb_png,
@@ -193,7 +194,48 @@ impl AppState {
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
         state.recover_interrupted_board_registrations();
+        state.recover_interrupted_strip_feeder_holdouts();
         state
+    }
+
+    fn recover_interrupted_strip_feeder_holdouts(&self) {
+        let Ok(runs) = self.store.list_strip_feeder_live_holdouts() else {
+            tracing::error!("failed to inspect strip feeder holdouts during startup");
+            return;
+        };
+        for mut run in runs.into_iter().filter(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        }) {
+            let message = "daemon restarted before the strip feeder holdout completed";
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.into());
+            run.updated_at = Utc::now();
+            if let Err(error) = self.store.put_strip_feeder_live_holdout(&run) {
+                tracing::error!(%error, holdout_id = %run.id, "failed to recover strip feeder holdout");
+            }
+            match self.store.get_operation(run.operation_id) {
+                Ok(Some(mut operation))
+                    if matches!(
+                        operation.status,
+                        OperationStatus::Pending | OperationStatus::Running
+                    ) =>
+                {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some(message.into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(%error, operation_id = %operation.id, "failed to recover strip feeder holdout operation");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, "failed to inspect strip feeder holdout operation")
+                }
+            }
+        }
     }
 
     fn recover_interrupted_board_registrations(&self) {
@@ -537,6 +579,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/strip-feeder-registrations/{id}",
             get(get_strip_feeder_registration),
+        )
+        .route(
+            "/api/v1/strip-feeder-registrations/{id}/live-holdouts",
+            post(start_strip_feeder_live_holdout),
+        )
+        .route(
+            "/api/v1/strip-feeder-live-holdouts/{id}",
+            get(get_strip_feeder_live_holdout),
+        )
+        .route(
+            "/api/v1/strip-feeder-live-holdouts/{id}/artifacts/{name}",
+            get(get_strip_feeder_live_holdout_artifact),
         )
         .route("/api/v1/jobs", get(list_jobs).post(put_job))
         .route("/api/v1/jobs/{id}/plan", get(get_job_plan))
@@ -4872,6 +4926,24 @@ struct BuildStripFeederVisionRequest {
     candidate_index: u32,
 }
 
+fn permits_strip_feeder_vision(candidate: &velocitypnp_domain::WorkspaceBoardCandidate) -> bool {
+    if candidate.known_fixture_id.is_some() {
+        return false;
+    }
+    candidate
+        .classification
+        .as_ref()
+        .is_some_and(|classification| {
+            classification.class == WorkspaceObjectClass::Feeder
+                || (candidate.plate_role == Some(velocitypnp_domain::InstalledPlateRole::Staging)
+                    && classification.class == WorkspaceObjectClass::Unknown
+                    && classification.evidence.iter().any(|evidence| {
+                        evidence.suggested_class == WorkspaceObjectClass::Feeder
+                            && evidence.confidence >= 0.5
+                    }))
+        })
+}
+
 async fn build_strip_feeder_vision(
     State(state): State<AppState>,
     Path(scan_id): Path<Uuid>,
@@ -4893,14 +4965,9 @@ async fn build_strip_feeder_vision(
         .into_iter()
         .find(|candidate| candidate.candidate_index == body.candidate_index)
         .ok_or_else(|| ApiError::not_found("workspace feeder candidate not found"))?;
-    if candidate.known_fixture_id.is_some()
-        || candidate
-            .classification
-            .as_ref()
-            .is_none_or(|classification| classification.class != WorkspaceObjectClass::Feeder)
-    {
+    if !permits_strip_feeder_vision(&candidate) {
         return Err(ApiError::bad_request(
-            "strip feeder vision requires a non-fixture feeder candidate",
+            "strip feeder vision requires feeder evidence on a non-fixture candidate",
         ));
     }
     let source_artifact_name = candidate
@@ -5085,6 +5152,7 @@ async fn create_strip_feeder_registration(
         selected_pocket_machine_mm: None,
         pickup_z_mm: None,
         active_feeder_id: None,
+        latest_live_holdout_id: None,
         vision_confidence: proposal.confidence,
         vision_review_required: proposal.review_required,
         findings,
@@ -5115,6 +5183,465 @@ async fn get_strip_feeder_registration(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))
+}
+
+#[derive(Debug, Deserialize)]
+struct StartStripFeederLiveHoldoutRequest {
+    lease_id: Uuid,
+    #[serde(default)]
+    pocket_index: Option<u32>,
+    #[serde(default = "default_strip_feeder_holdout_sample_count")]
+    sample_count: u32,
+    confirmed_external_safety_checks: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StartStripFeederLiveHoldoutResponse {
+    holdout: StripFeederLiveHoldoutRun,
+    operation: Operation,
+}
+
+fn default_strip_feeder_holdout_sample_count() -> u32 {
+    3
+}
+
+const STRIP_FEEDER_HOLDOUT_ALONG_OFFSET_MM: f64 = 4.0;
+
+fn strip_feeder_holdout_capture_targets(
+    registration: &StripFeederRegistration,
+    predicted_pocket_machine_mm: [f64; 2],
+    safe_z_mm: f64,
+) -> ApiResult<Vec<Pose>> {
+    let direction = [
+        registration.pick_centerline_machine_mm[1][0]
+            - registration.pick_centerline_machine_mm[0][0],
+        registration.pick_centerline_machine_mm[1][1]
+            - registration.pick_centerline_machine_mm[0][1],
+    ];
+    let length = direction[0].hypot(direction[1]);
+    if !length.is_finite() || length <= 1e-9 {
+        return Err(ApiError::bad_request(
+            "strip feeder draft centerline has no direction",
+        ));
+    }
+    let along = [direction[0] / length, direction[1] / length];
+    let cross = [-along[1], along[0]];
+    let sprocket_offset_mm = registration.tape_width_mm * 0.5 - 0.5;
+    if !sprocket_offset_mm.is_finite() || sprocket_offset_mm <= 0.0 {
+        return Err(ApiError::bad_request(
+            "strip feeder draft tape width is invalid",
+        ));
+    }
+    let pose = |cross_mm: f64, along_mm: f64| Pose {
+        x_mm: predicted_pocket_machine_mm[0] + cross[0] * cross_mm + along[0] * along_mm,
+        y_mm: predicted_pocket_machine_mm[1] + cross[1] * cross_mm + along[1] * along_mm,
+        z_mm: safe_z_mm,
+        rotation_deg: 0.0,
+    };
+    Ok(vec![
+        pose(-sprocket_offset_mm, -STRIP_FEEDER_HOLDOUT_ALONG_OFFSET_MM),
+        pose(-sprocket_offset_mm, STRIP_FEEDER_HOLDOUT_ALONG_OFFSET_MM),
+        pose(0.0, 0.0),
+        pose(sprocket_offset_mm, STRIP_FEEDER_HOLDOUT_ALONG_OFFSET_MM),
+        pose(sprocket_offset_mm, -STRIP_FEEDER_HOLDOUT_ALONG_OFFSET_MM),
+    ])
+}
+
+async fn start_strip_feeder_live_holdout(
+    State(state): State<AppState>,
+    Path(registration_id): Path<Uuid>,
+    Json(body): Json<StartStripFeederLiveHoldoutRequest>,
+) -> ApiResult<(StatusCode, Json<StartStripFeederLiveHoldoutResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "live pocket holdout requires confirmation that the tape is fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    if !(3..=5).contains(&body.sample_count) {
+        return Err(ApiError::bad_request(
+            "live pocket holdout sample_count must be between 3 and 5",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+        return Err(ApiError::bad_request(
+            "live pocket holdout requires a homed ready machine",
+        ));
+    }
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    let registration = state
+        .store
+        .get_strip_feeder_registration(registration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
+    if registration.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "live pocket holdout registration uses a different machine profile",
+        ));
+    }
+    if !status.simulated && status.calibration_revision != Some(registration.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "live pocket holdout requires fine XYZ homing with calibration {}",
+            registration.calibration_id,
+        )));
+    }
+    if registration.pocket_centers_machine_mm.is_empty() {
+        return Err(ApiError::bad_request(
+            "strip feeder registration has no pocket hypotheses",
+        ));
+    }
+    let pocket_index = body
+        .pocket_index
+        .map(|index| index as usize)
+        .unwrap_or(registration.pocket_centers_machine_mm.len() / 2);
+    let predicted_pocket_machine_mm = registration
+        .pocket_centers_machine_mm
+        .get(pocket_index)
+        .copied()
+        .ok_or_else(|| ApiError::bad_request("live pocket index is outside the draft"))?;
+    let capture_targets = strip_feeder_holdout_capture_targets(
+        &registration,
+        predicted_pocket_machine_mm,
+        state.profile.safe_z_mm,
+    )?;
+    if capture_targets
+        .iter()
+        .any(|target| !state.profile.bounds.contains(*target))
+    {
+        return Err(ApiError::bad_request(
+            "live pocket holdout capture sweep is outside machine bounds",
+        ));
+    }
+    let (_, camera_model) = load_workspace_camera_model(&state, registration.calibration_id)?;
+    let camera_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let operation = Operation::pending("vision.strip_feeder_live_holdout");
+    let now = Utc::now();
+    let holdout = StripFeederLiveHoldoutRun {
+        id: Uuid::new_v4(),
+        operation_id: operation.id,
+        registration_id,
+        profile_id: state.profile.id.clone(),
+        calibration_id: registration.calibration_id,
+        status: OperationStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        sample_count: body.sample_count,
+        predicted_pocket_machine_mm,
+        report: None,
+        message: None,
+    };
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_strip_feeder_live_holdout(&holdout)
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartStripFeederLiveHoldoutResponse {
+        holdout: holdout.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_strip_feeder_live_holdout_task(
+            task_state,
+            holdout,
+            registration,
+            camera_model,
+            camera_profile,
+            camera_path,
+            visual,
+            body.lease_id,
+        ),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+fn ensure_no_active_strip_feeder_holdouts(state: &AppState) -> ApiResult<()> {
+    let active = state
+        .store
+        .list_strip_feeder_live_holdouts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .any(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        });
+    if active {
+        return Err(ApiError::bad_request(
+            "a strip feeder live holdout is already active",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_strip_feeder_live_holdout_task(
+    state: AppState,
+    mut run: StripFeederLiveHoldoutRun,
+    mut registration: StripFeederRegistration,
+    camera_model: PlanarCameraModel,
+    camera_profile: CameraProfile,
+    camera_path: String,
+    visual: VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    run.status = OperationStatus::Running;
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_strip_feeder_live_holdout(&run)
+        .map_err(|error| error.to_string())?;
+    let result = execute_strip_feeder_live_holdout(
+        &state,
+        &run,
+        &registration,
+        &camera_model,
+        &camera_profile,
+        &camera_path,
+        &visual,
+        lease_id,
+    )
+    .await;
+    match result {
+        Ok(report) => {
+            let message = if report.passed {
+                format!(
+                    "Live pocket holdout passed with {} sprocket centers, {:.3} mm correction, and {:.0}% occupancy confidence",
+                    report.sprocket_center_count,
+                    report.correction_magnitude_mm,
+                    report.occupancy_confidence * 100.0,
+                )
+            } else {
+                format!(
+                    "Live pocket holdout rejected the draft: {}",
+                    report.findings.join("; "),
+                )
+            };
+            run.status = if report.passed {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            };
+            run.report = Some(report.clone());
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_strip_feeder_live_holdout(&run)
+                .map_err(|error| error.to_string())?;
+            registration.latest_live_holdout_id = Some(run.id);
+            if report.passed {
+                registration.selected_pocket_machine_mm = report.measured_pocket_machine_mm;
+                registration.findings.retain(|finding| {
+                    !finding.contains("live pocket occupancy") && !finding.contains("live holdout")
+                });
+                registration.findings.push(
+                    "live pocket position and occupancy passed; pickup Z remains unmeasured".into(),
+                );
+                if registration.part_key.is_some() && registration.part_rotation_deg.is_some() {
+                    registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
+                }
+            }
+            registration.updated_at = Utc::now();
+            state
+                .store
+                .put_strip_feeder_registration(&registration)
+                .map_err(|error| error.to_string())?;
+            if report.passed {
+                Ok(Some(message))
+            } else {
+                Err(message)
+            }
+        }
+        Err(message) => {
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            if let Err(error) = state.store.put_strip_feeder_live_holdout(&run) {
+                tracing::error!(%error, holdout_id = %run.id, "failed to persist rejected strip feeder holdout");
+            }
+            Err(message)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_strip_feeder_live_holdout(
+    state: &AppState,
+    run: &StripFeederLiveHoldoutRun,
+    registration: &StripFeederRegistration,
+    camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<velocitypnp_domain::StripFeederLiveHoldoutReport, String> {
+    let _motion_guard = state.workspace_scan_motion_lock.lock().await;
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "visual home before live pocket holdout failed: {}",
+            error.message
+        )
+    })?;
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let measurement = measure_strip_feeder_live_holdout(
+        state,
+        run,
+        registration,
+        camera_model,
+        camera_profile,
+        camera_path,
+        visual,
+        lease_id,
+    )
+    .await;
+    let return_result = state
+        .machine
+        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
+        .await;
+    let lights_result = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = return_result {
+        return Err(format!("live pocket holdout return move failed: {error}"));
+    }
+    if let Err(error) = lights_result {
+        return Err(format!("live pocket holdout light cleanup failed: {error}"));
+    }
+    measurement
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_strip_feeder_live_holdout(
+    state: &AppState,
+    run: &StripFeederLiveHoldoutRun,
+    registration: &StripFeederRegistration,
+    camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<velocitypnp_domain::StripFeederLiveHoldoutReport, String> {
+    let targets = strip_feeder_holdout_capture_targets(
+        registration,
+        run.predicted_pocket_machine_mm,
+        state.profile.safe_z_mm,
+    )
+    .map_err(|error| error.message)?;
+    state
+        .machine
+        .renew_lease(lease_id, 900)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut frames = Vec::with_capacity(targets.len() * run.sample_count as usize);
+    let mut camera_poses = Vec::with_capacity(frames.capacity());
+    for target in targets {
+        let measured_pose = jog_board_registration_target(state, lease_id, target, visual).await?;
+        let captured =
+            capture_profiled_frames(state, camera_profile, camera_path, run.sample_count)
+                .await
+                .map_err(|error| error.message)?;
+        camera_poses.extend(std::iter::repeat_n(measured_pose, captured.len()));
+        frames.extend(captured);
+    }
+    let registration = registration.clone();
+    let camera_model = camera_model.clone();
+    let predicted = run.predicted_pocket_machine_mm;
+    let analysis = tokio::task::spawn_blocking(move || {
+        analyze_live_strip_feeder_holdout(
+            &frames,
+            &camera_poses,
+            &camera_model,
+            &registration,
+            predicted,
+            "live-pocket-holdout.png",
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    let encoded = encode_rgb_png(&analysis.preview).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_strip_feeder_holdout_artifact(
+            run.id,
+            &analysis.report.artifact_name,
+            "image/png",
+            &encoded,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(analysis.report)
+}
+
+async fn get_strip_feeder_live_holdout(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<StripFeederLiveHoldoutRun>> {
+    state
+        .store
+        .get_strip_feeder_live_holdout(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("strip feeder live holdout not found"))
+}
+
+async fn get_strip_feeder_live_holdout_artifact(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    let (media_type, data) = state
+        .store
+        .get_strip_feeder_holdout_artifact(id, &name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder live holdout artifact not found"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(data))
+        .map_err(ApiError::internal)
 }
 
 #[derive(Debug, Deserialize)]
@@ -17655,7 +18182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strip_feeder_vision_persists_no_motion_lane_evidence() {
+    async fn strip_feeder_vision_accepts_staging_prior_and_persists_lane_evidence() {
         let state = test_state();
         let mut scan = test_workspace_scan(Uuid::new_v4());
         scan.status = WorkspaceScanStatus::Succeeded;
@@ -17694,11 +18221,16 @@ mod tests {
             texture_energy_luma: 30.0,
             board_likelihood: 0.2,
             classification: Some(velocitypnp_domain::WorkspaceObjectClassification {
-                class: WorkspaceObjectClass::Feeder,
-                confidence: 0.95,
+                class: WorkspaceObjectClass::Unknown,
+                confidence: 0.5,
                 classifier_id: "test".into(),
-                review_required: false,
-                evidence: Vec::new(),
+                review_required: true,
+                evidence: vec![velocitypnp_domain::WorkspaceClassificationEvidence {
+                    source: "plate_role_prior".into(),
+                    suggested_class: WorkspaceObjectClass::Feeder,
+                    confidence: 0.55,
+                    explanation: "the region is on the calibrated staging plate".into(),
+                }],
             }),
             known_fixture_id: None,
             evidence_artifact_name: Some("object-evidence-000.png".into()),
@@ -18731,6 +19263,36 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("PCB is fixed"));
+        assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn strip_feeder_holdout_requires_external_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/strip-feeder-registrations/{}/live-holdouts",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("tape is fixed"));
         assert!(message.contains("travel envelope"));
     }
 

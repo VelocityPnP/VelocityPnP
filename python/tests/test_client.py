@@ -384,6 +384,60 @@ class ClientTests(unittest.TestCase):
             "GET", "/strip-feeder-registrations/draft",
         )
 
+        started_holdout = {
+            "holdout": {"id": "holdout"},
+            "operation": {"id": "operation"},
+        }
+        with patch.object(
+            client, "_request", return_value=started_holdout,
+        ) as send:
+            self.assertEqual(
+                client.start_strip_feeder_live_holdout(
+                    "draft", "lease", pocket_index=4, sample_count=5,
+                    safety_checks_confirmed=True,
+                ),
+                started_holdout,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/strip-feeder-registrations/draft/live-holdouts",
+            {
+                "lease_id": "lease",
+                "pocket_index": 4,
+                "sample_count": 5,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_live_holdout("draft", "lease")
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_live_holdout(
+                "draft", "lease", pocket_index=-1,
+                safety_checks_confirmed=True,
+            )
+
+        holdout = {"id": "holdout", "status": "succeeded"}
+        with patch.object(client, "_request", return_value=holdout) as send:
+            self.assertEqual(
+                client.strip_feeder_live_holdout("holdout"), holdout,
+            )
+        send.assert_called_once_with(
+            "GET", "/strip-feeder-live-holdouts/holdout",
+        )
+        with patch.object(
+            client, "_request_bytes", return_value=b"holdout",
+        ) as send:
+            self.assertEqual(
+                client.strip_feeder_live_holdout_preview("holdout"),
+                b"holdout",
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/strip-feeder-live-holdouts/holdout/artifacts/"
+            "live-pocket-holdout.png",
+            "image/png",
+        )
+
         with patch.object(client, "_request", return_value=report) as send:
             self.assertEqual(
                 client.workspace_board_discovery_report("scan"), report,

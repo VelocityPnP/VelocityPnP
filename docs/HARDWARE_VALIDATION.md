@@ -1887,6 +1887,69 @@ operation `0521c42e-8b3c-44bd-99d4-3bb3903194d3` switched outputs off,
 released control, and cleared runtime homing before the daemon rebuild. No
 emergency stop was used.
 
+The operator later clarified that the focused region held six populated
+component strips, not five. Thus, the five image proposals were candidate
+lattices and did not prove five distinct populated strips. Two more strips
+were then installed.
+
+On 2026-08-25, the operator located all eight strip feeders between staging
+plate columns 11 and 16. Survey
+`7c7fedcf-d4ca-4da2-a697-41f6cb05264e` repeated X=90 to 135 mm and showed
+only four real lanes. The 15 mm plate pitch showed that the region ended near
+column 14; this was a scan-region error, not a detector recall result.
+
+Fast reconnaissance `85255974-f066-42b0-80c5-050404fa84ee` covered X=70 to
+275 mm and Y=105 to 195 mm. It captured 195 tiles in 235.5 seconds at 0.20
+mm/pixel. Its plate-plane mosaic showed all eight tapes. Reconnaissance has no
+height map, so it did not run the height-based object proposal stage.
+
+The existing X=90 to 135 mm scan was retained. Right extension
+`9e705141-e5fd-4512-89ab-476f91dc984d` covered X=130 to 175 mm with 296
+tiles in 320.9 seconds. Left extension
+`ab8edbf4-8645-4c2b-a68b-0a0226d38223` covered X=75 to 100 mm with 148
+tiles in 201.2 seconds. Both used 60 percent overlap, 0.10 mm/pixel, and
+transient source retention. This avoided a 666-tile repeat of the full bank.
+
+The general detector left the narrow left extension unknown, even though its
+staging-plate prior suggested a feeder. The no-motion strip specialist now
+accepts this uncertain candidate for analysis. It still rejects known
+fixtures, and draft creation still requires measured tape geometry.
+
+After overlap deduplication, the specialist found the eight real sprocket rows
+at machine X=82.24, 93.35, 104.41, 115.58, 126.70, 137.69, 148.77, and
+159.83 mm. Thus, candidate recall was 8 of 8. It also proposed three component
+pocket rows at X=130.24, 152.22, and 163.29 mm. Candidate precision was 8 of
+11, and five real lanes still needed review because the image-only tape-width
+or pocket-side choice was unresolved. This is not yet an eight-lane automatic
+setup pass.
+
+The recovered X=82.24 mm lane passed the image gate with 17 sprocket centers,
+a 0.142 mm pitch residual, 12 mm tape width, 2 mm pocket pitch, and 0.924
+confidence. Draft `6392fddd-11d4-4007-917e-dfe5e6eed0fb` stored this lane
+without a part identity or orientation.
+
+Live holdout `330b7ebe-5cba-4071-a07e-23cf5f58cc50` first rejected the
+draft. Its evidence showed both sprocket rows aligned with their expected
+lines, but the plus-or-minus 2 mm camera sweep exposed only two holes per row.
+The three-hole lattice gate therefore had insufficient coverage. The camera
+sweep was increased to plus-or-minus 4 mm along the tape. The 1.25 mm track
+tolerance was not changed. Failure reporting now distinguishes insufficient
+lattice coverage from a track-position error.
+
+After normal controller disconnect, daemon restart, coarse XYZ home, and fine
+XYZ home, holdout `46b0638e-55b4-4710-98fc-189c9cd6956e` passed. It measured
+four sprocket centers with a 0.0431 mm pitch residual. The measured correction
+was X=-0.0342 mm and Y=+0.5599 mm, with 0.5609 mm magnitude and -0.4516 degree
+rotation. It selected occupied pocket X=87.7757 mm and Y=157.4994 mm with
+93.6 percent occupancy confidence. Total holdout confidence was 0.753.
+
+Both fine-home runs reproduced datum contact Z=59.200 mm and reset it to
+Z=59.100 mm. Each holdout returned to the visual datum. No nozzle was lowered,
+no vacuum output was used, no tape was indexed, and no emergency stop was
+used. Final normal disconnect
+`463b9f5e-cb3f-4668-9367-5546b2729810` succeeded. Pickup-Z and indexing
+validation keep the combined roadmap item open.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
