@@ -767,6 +767,7 @@ mod tests {
             seam_health: None,
             refinement_composite: None,
             board_discovery: None,
+            strip_feeder_inventory: None,
             change_set: None,
             warnings: vec![],
             failure: None,

@@ -523,13 +523,21 @@ tape lattice before a usable draft can be stored.
 OpenCV contour measurements find 1.5 mm sprocket-hole candidates. At least
 three features must fit the 4 mm carrier-tape lattice. The crop basis comes
 from the installed plate, so tape axes stay parallel or perpendicular to the
-calibrated plate axes. Adjacent sprocket tracks support standard 8, 12, 16,
-and 24 mm tape-width hypotheses. The EIA-481-C `F` dimensions place their
-pocket centerlines 3.5, 5.5, 7.5, and 11.5 mm from the sprocket row. Image
-periodicity supplies a 2, 4, 8, 12, or 16 mm component-pocket pitch
-hypothesis. Weak or ambiguous geometry stays in review state.
+calibrated plate axes. Neighboring sprocket rows describe feeder placement;
+they do not describe tape width. Version 3 instead tests component evidence
+at the EIA-481-C `F` offsets for standard 8, 12, 16, and 24 mm tape. It
+selects the common bank direction from the strongest lanes.
 
-Circular component pockets can also form a 4 mm lattice. Version 2 pairs two
+Rectangular component contours estimate visible part size. A constrained
+lattice fit selects a 2, 4, 8, 12, or 16 mm component pitch while penalizing
+unsupported subharmonics. Lane-local brightness classes, anchored by measured
+component contours, classify each observed feed position as occupied, empty,
+or uncertain. Counts cover only the visible tape extent. Part size is a
+visible-outline estimate, not a package or part-identity result.
+
+candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
+Circular component pockets can also form a 4 mm lattice. The detector pairs
+two candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
 candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
 the separation is less than the width of standard carrier tape. The stronger
 row stays as the sprocket row. The weaker row becomes rejected pocket evidence
@@ -538,10 +546,27 @@ in review state.
 
 The scan retains `strip-feeder-vision-NNN.json` and
 `strip-feeder-vision-NNN.png`. Yellow circles show sprocket candidates. Cyan
-lines show pickup-centerline hypotheses. Green marks show the pocket grid. Red
-lines and circles show rejected component-pocket lattices. The JSON report
-keeps each rejected row, its paired sprocket row, offset, feature count,
-confidence, and reason. The web workspace card exposes the same analysis.
+lines show pickup-centerline hypotheses. Green boxes show detected components.
+Red marks show absent feed positions and rejected component-pocket lattices.
+The JSON report keeps component outlines, size, pitch, occupancy, counts, and
+rejected-row evidence. The web workspace card exposes the same analysis.
+
+Combine overlapping focused scans on one workspace mosaic:
+
+```bash
+cargo run -p velocitypnp -- build-strip-feeder-inventory WORKSPACE_SCAN \
+  --source LEFT_SCAN:0 --source CENTER_SCAN:0 --source RIGHT_SCAN:0
+```
+
+The API route is
+`POST /workspace-scans/SCAN_UUID/strip-feeder-inventory`. The Python client
+uses `build_strip_feeder_inventory()`. Compatible source scans must use the
+same profile and calibration. The operation deduplicates overlapping lanes
+and stores `strip-feeder-inventory.json` and
+`mosaic-strip-feeder-inventory.png` on the workspace scan. Cyan polygons mark
+strip bounds. Green polygons mark present component outlines. Red marks show
+absent feed positions; amber marks show uncertain positions. This operation
+causes no motion.
 
 A measured lane can be stored as an inactive draft:
 

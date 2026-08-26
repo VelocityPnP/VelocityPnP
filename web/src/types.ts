@@ -713,9 +713,25 @@ export interface StripFeederLaneProposal {
   component_pitch_mm: number | null;
   pick_centerline_machine_mm: [[number, number], [number, number]] | null;
   pocket_centers_machine_mm: Array<[number, number]>;
+  component_size_mm: [number, number] | null;
+  pocket_observations: StripFeederPocketObservation[];
+  present_count: number;
+  absent_count: number;
+  uncertain_count: number;
   confidence: number;
   review_required: boolean;
   findings: string[];
+}
+
+export type StripPocketOccupancy = "occupied" | "empty" | "uncertain";
+
+export interface StripFeederPocketObservation {
+  pocket_index: number;
+  center_machine_mm: [number, number];
+  occupancy: StripPocketOccupancy;
+  confidence: number;
+  component_outline_machine_mm: Array<[number, number]>;
+  component_size_mm: [number, number] | null;
 }
 
 export interface StripFeederVisionReport {
@@ -738,6 +754,30 @@ export interface StripFeederRejectedLattice {
   center_count: number;
   confidence: number;
   reason: string;
+}
+
+export interface StripFeederInventoryReport {
+  algorithm_version: string;
+  workspace_scan_id: string;
+  source_mosaic_artifact_name: string;
+  report_artifact_name: string;
+  preview_artifact_name: string;
+  created_at: string;
+  source_scan_ids: string[];
+  lane_count: number;
+  populated_lane_count: number;
+  present_count: number;
+  absent_count: number;
+  uncertain_count: number;
+  lanes: Array<{
+    inventory_index: number;
+    source_scan_id: string;
+    source_candidate_index: number;
+    source_proposal_index: number;
+    strip_outline_machine_mm: Array<[number, number]>;
+    proposal: StripFeederLaneProposal;
+  }>;
+  warnings: string[];
 }
 
 export interface StripFeederRegistration {
@@ -852,6 +892,16 @@ export interface WorkspaceScanReport {
     algorithm_version: string;
     candidate_count: number;
     matched_candidate_count: number;
+  } | null;
+  strip_feeder_inventory: {
+    algorithm_version: string;
+    report_artifact_name: string;
+    preview_artifact_name: string;
+    lane_count: number;
+    populated_lane_count: number;
+    present_count: number;
+    absent_count: number;
+    uncertain_count: number;
   } | null;
   change_set: {
     baseline_id: string;

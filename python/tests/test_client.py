@@ -348,6 +348,29 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.analyze_strip_feeder("scan", -1)
 
+        inventory = {"lane_count": 2, "present_count": 10}
+        with patch.object(client, "_request", return_value=inventory) as send:
+            self.assertEqual(
+                client.build_strip_feeder_inventory(
+                    "workspace", [("left", 0), ("right", 2)],
+                ),
+                inventory,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/workspace-scans/workspace/strip-feeder-inventory",
+            {
+                "evidence_sources": [
+                    {"scan_id": "left", "candidate_index": 0},
+                    {"scan_id": "right", "candidate_index": 2},
+                ],
+            },
+        )
+        with self.assertRaises(ValueError):
+            client.build_strip_feeder_inventory("workspace", [])
+        with self.assertRaises(ValueError):
+            client.build_strip_feeder_inventory("workspace", [("scan", -1)])
+
         draft = {"id": "draft", "status": "vision_draft"}
         with patch.object(client, "_request", return_value=draft) as send:
             self.assertEqual(

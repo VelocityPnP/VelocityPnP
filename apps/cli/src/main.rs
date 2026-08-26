@@ -109,6 +109,12 @@ enum Command {
         #[arg(long)]
         candidate: u32,
     },
+    BuildStripFeederInventory {
+        scan: Uuid,
+        /// Repeated SCAN_UUID:CANDIDATE_INDEX feeder evidence source.
+        #[arg(long = "source", required = true)]
+        sources: Vec<String>,
+    },
     SaveStripFeederDraft {
         scan: Uuid,
         #[arg(long)]
@@ -522,6 +528,32 @@ async fn main() -> Result<()> {
                 &client,
                 &format!("{base}/workspace-scans/{scan}/strip-feeder-vision"),
                 Some(json!({"candidate_index": candidate})),
+            )
+            .await?
+        }
+        Command::BuildStripFeederInventory { scan, sources } => {
+            let evidence_sources = sources
+                .iter()
+                .map(|source| {
+                    let (scan_id, candidate_index) = source.split_once(':').with_context(|| {
+                        format!(
+                            "invalid feeder source {source}; expected SCAN_UUID:CANDIDATE_INDEX"
+                        )
+                    })?;
+                    Ok(json!({
+                        "scan_id": scan_id.parse::<Uuid>().with_context(|| {
+                            format!("invalid feeder source scan UUID {scan_id}")
+                        })?,
+                        "candidate_index": candidate_index.parse::<u32>().with_context(|| {
+                            format!("invalid feeder candidate index {candidate_index}")
+                        })?,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/strip-feeder-inventory"),
+                Some(json!({"evidence_sources": evidence_sources})),
             )
             .await?
         }
@@ -1072,6 +1104,24 @@ mod tests {
                 scan: parsed_scan,
                 baseline: Some(parsed_baseline),
             } if parsed_scan == scan && parsed_baseline == baseline
+        ));
+
+        let evidence = Uuid::new_v4();
+        let source = format!("{evidence}:2");
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "build-strip-feeder-inventory",
+            &scan.to_string(),
+            "--source",
+            &source,
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::BuildStripFeederInventory {
+                scan: parsed_scan,
+                sources,
+            } if parsed_scan == scan && sources == vec![source]
         ));
     }
 }

@@ -85,6 +85,8 @@ The project is organized by measurable gates rather than calendar estimates.
   bounds checks, and simulator consumption of current local direction vectors
 - [x] Add no-motion strip-feeder lane proposals and persistent setup drafts
   from retained workspace evidence
+- [x] Measure visible strip population, part pitch, part outline size, and
+  present/absent feed-position counts across compatible focused scans
 - [ ] Validate vision-assisted strip setup and indexing
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware

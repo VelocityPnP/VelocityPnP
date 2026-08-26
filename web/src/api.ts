@@ -3,7 +3,7 @@ import type {
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
   Operation, SensorReading, StripFeederLiveHoldoutRun, StripFeederRegistration,
-  StripFeederVisionReport, VisualHomingResult,
+  StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
   WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
 } from "./types";
@@ -206,6 +206,13 @@ export const api = {
       `/workspace-scans/${scanId}/strip-feeder-vision`,
       { candidate_index: candidateIndex },
     ),
+  buildStripFeederInventory: (
+    scanId: string,
+    evidenceSources: Array<{ scan_id: string; candidate_index: number }>,
+  ) => jsonPost<StripFeederInventoryReport>(
+    `/workspace-scans/${scanId}/strip-feeder-inventory`,
+    { evidence_sources: evidenceSources },
+  ),
   createStripFeederDraft: (
     scanId: string, candidateIndex: number, proposalIndex: number,
     partKey?: string, partRotationDeg?: number,

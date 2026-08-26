@@ -389,9 +389,9 @@ pub struct WorkspaceBoardDiscoverySummary {
 
 /// A measured carrier-tape lane in one feeder workspace proposal.
 ///
-/// This is vision evidence, not an active feeder. Pickup Z, part identity,
-/// pocket occupancy, and a live camera holdout remain required before the
-/// lane can become a production feeder.
+/// This is retained vision evidence, not an active feeder. Pickup Z, part
+/// identity, and a fresh live camera holdout remain required before the lane
+/// can become a production feeder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederLaneProposal {
     pub proposal_index: u32,
@@ -408,10 +408,33 @@ pub struct StripFeederLaneProposal {
     pub pick_centerline_machine_mm: Option<[[f64; 2]; 2]>,
     #[serde(default)]
     pub pocket_centers_machine_mm: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub component_size_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub pocket_observations: Vec<StripFeederPocketObservation>,
+    #[serde(default)]
+    pub present_count: u32,
+    #[serde(default)]
+    pub absent_count: u32,
+    #[serde(default)]
+    pub uncertain_count: u32,
     pub confidence: f64,
     pub review_required: bool,
     #[serde(default)]
     pub findings: Vec<String>,
+}
+
+/// One detected component or empty feed position in carrier tape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederPocketObservation {
+    pub pocket_index: u32,
+    pub center_machine_mm: [f64; 2],
+    pub occupancy: crate::StripPocketOccupancy,
+    pub confidence: f64,
+    #[serde(default)]
+    pub component_outline_machine_mm: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub component_size_mm: Option<[f64; 2]>,
 }
 
 /// One repeated circular-feature row rejected as a component-pocket lattice.
@@ -440,6 +463,47 @@ pub struct StripFeederVisionReport {
     pub rejected_lattices: Vec<StripFeederRejectedLattice>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederInventoryLane {
+    pub inventory_index: u32,
+    pub source_scan_id: Uuid,
+    pub source_candidate_index: u32,
+    pub source_proposal_index: u32,
+    pub strip_outline_machine_mm: Vec<[f64; 2]>,
+    pub proposal: StripFeederLaneProposal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederInventoryReport {
+    pub algorithm_version: String,
+    pub workspace_scan_id: Uuid,
+    pub source_mosaic_artifact_name: String,
+    pub report_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub created_at: DateTime<Utc>,
+    pub source_scan_ids: Vec<Uuid>,
+    pub lane_count: u32,
+    pub populated_lane_count: u32,
+    pub present_count: u32,
+    pub absent_count: u32,
+    pub uncertain_count: u32,
+    pub lanes: Vec<StripFeederInventoryLane>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederInventorySummary {
+    pub algorithm_version: String,
+    pub report_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub lane_count: u32,
+    pub populated_lane_count: u32,
+    pub present_count: u32,
+    pub absent_count: u32,
+    pub uncertain_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -693,6 +757,8 @@ pub struct WorkspaceScanReport {
     pub refinement_composite: Option<WorkspaceRefinementCompositeSummary>,
     #[serde(default)]
     pub board_discovery: Option<WorkspaceBoardDiscoverySummary>,
+    #[serde(default)]
+    pub strip_feeder_inventory: Option<StripFeederInventorySummary>,
     #[serde(default)]
     pub change_set: Option<WorkspaceChangeSetSummary>,
     pub warnings: Vec<String>,

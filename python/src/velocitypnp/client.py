@@ -312,6 +312,30 @@ class Client:
             {"candidate_index": candidate_index},
         )
 
+    def build_strip_feeder_inventory(
+        self,
+        workspace_scan_id: str | uuid.UUID,
+        evidence_sources: list[tuple[str | uuid.UUID, int]],
+    ) -> dict[str, Any]:
+        """Combine feeder evidence and annotate one workspace mosaic."""
+        if not evidence_sources:
+            raise ValueError("evidence_sources must not be empty")
+        if any(candidate_index < 0 for _, candidate_index in evidence_sources):
+            raise ValueError("candidate indexes must not be negative")
+        return self._request(
+            "POST",
+            f"/workspace-scans/{workspace_scan_id}/strip-feeder-inventory",
+            {
+                "evidence_sources": [
+                    {
+                        "scan_id": str(scan_id),
+                        "candidate_index": candidate_index,
+                    }
+                    for scan_id, candidate_index in evidence_sources
+                ],
+            },
+        )
+
     def create_strip_feeder_draft(
         self,
         scan_id: str | uuid.UUID,

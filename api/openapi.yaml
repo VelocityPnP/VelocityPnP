@@ -301,6 +301,36 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StripFeederVisionReport" }
+  /workspace-scans/{id}/strip-feeder-inventory:
+    post:
+      operationId: buildStripFeederInventory
+      description: >-
+        Combines retained strip-feeder vision reports from compatible focused
+        scans. It deduplicates overlapping lanes and annotates strip outlines,
+        measured component outlines, and present, absent, or uncertain feed
+        positions on this workspace scan's mosaic. This operation causes no
+        machine motion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [evidence_sources]
+              properties:
+                evidence_sources:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "#/components/schemas/StripFeederInventoryEvidenceSource"
+      responses:
+        "200":
+          description: Combined feeder population inventory and overlay
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripFeederInventoryReport" }
   /workspace-scans/{id}/inventory-baseline:
     post:
       operationId: activateWorkspaceInventoryBaseline
@@ -1584,6 +1614,10 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceBoardDiscoverySummary"
             - type: "null"
+        strip_feeder_inventory:
+          oneOf:
+            - $ref: "#/components/schemas/StripFeederInventorySummary"
+            - type: "null"
         change_set:
           oneOf:
             - $ref: "#/components/schemas/WorkspaceChangeSetSummary"
@@ -2131,6 +2165,11 @@ components:
         - component_pitch_mm
         - pick_centerline_machine_mm
         - pocket_centers_machine_mm
+        - component_size_mm
+        - pocket_observations
+        - present_count
+        - absent_count
+        - uncertain_count
         - confidence
         - review_required
         - findings
@@ -2156,11 +2195,129 @@ components:
         pocket_centers_machine_mm:
           type: array
           items: { $ref: "#/components/schemas/Point2d" }
+        component_size_mm:
+          oneOf:
+            - $ref: "#/components/schemas/Point2d"
+            - type: "null"
+        pocket_observations:
+          type: array
+          items: { $ref: "#/components/schemas/StripFeederPocketObservation" }
+        present_count: { type: integer, minimum: 0 }
+        absent_count: { type: integer, minimum: 0 }
+        uncertain_count: { type: integer, minimum: 0 }
         confidence: { type: number, minimum: 0, maximum: 1 }
         review_required: { type: boolean }
         findings:
           type: array
           items: { type: string }
+    StripFeederPocketObservation:
+      type: object
+      required:
+        - pocket_index
+        - center_machine_mm
+        - occupancy
+        - confidence
+        - component_outline_machine_mm
+        - component_size_mm
+      properties:
+        pocket_index: { type: integer, minimum: 0 }
+        center_machine_mm: { $ref: "#/components/schemas/Point2d" }
+        occupancy:
+          type: string
+          enum: [occupied, empty, uncertain]
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        component_outline_machine_mm:
+          type: array
+          maxItems: 4
+          items: { $ref: "#/components/schemas/Point2d" }
+        component_size_mm:
+          oneOf:
+            - $ref: "#/components/schemas/Point2d"
+            - type: "null"
+    StripFeederInventoryEvidenceSource:
+      type: object
+      required: [scan_id, candidate_index]
+      properties:
+        scan_id: { type: string, format: uuid }
+        candidate_index: { type: integer, minimum: 0 }
+    StripFeederInventoryLane:
+      type: object
+      required:
+        - inventory_index
+        - source_scan_id
+        - source_candidate_index
+        - source_proposal_index
+        - strip_outline_machine_mm
+        - proposal
+      properties:
+        inventory_index: { type: integer, minimum: 0 }
+        source_scan_id: { type: string, format: uuid }
+        source_candidate_index: { type: integer, minimum: 0 }
+        source_proposal_index: { type: integer, minimum: 0 }
+        strip_outline_machine_mm:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/Point2d" }
+        proposal: { $ref: "#/components/schemas/StripFeederLaneProposal" }
+    StripFeederInventoryReport:
+      type: object
+      required:
+        - algorithm_version
+        - workspace_scan_id
+        - source_mosaic_artifact_name
+        - report_artifact_name
+        - preview_artifact_name
+        - created_at
+        - source_scan_ids
+        - lane_count
+        - populated_lane_count
+        - present_count
+        - absent_count
+        - uncertain_count
+        - lanes
+        - warnings
+      properties:
+        algorithm_version: { type: string }
+        workspace_scan_id: { type: string, format: uuid }
+        source_mosaic_artifact_name: { type: string }
+        report_artifact_name: { type: string }
+        preview_artifact_name: { type: string }
+        created_at: { type: string, format: date-time }
+        source_scan_ids:
+          type: array
+          items: { type: string, format: uuid }
+        lane_count: { type: integer, minimum: 0 }
+        populated_lane_count: { type: integer, minimum: 0 }
+        present_count: { type: integer, minimum: 0 }
+        absent_count: { type: integer, minimum: 0 }
+        uncertain_count: { type: integer, minimum: 0 }
+        lanes:
+          type: array
+          items: { $ref: "#/components/schemas/StripFeederInventoryLane" }
+        warnings:
+          type: array
+          items: { type: string }
+    StripFeederInventorySummary:
+      type: object
+      required:
+        - algorithm_version
+        - report_artifact_name
+        - preview_artifact_name
+        - lane_count
+        - populated_lane_count
+        - present_count
+        - absent_count
+        - uncertain_count
+      properties:
+        algorithm_version: { type: string }
+        report_artifact_name: { type: string }
+        preview_artifact_name: { type: string }
+        lane_count: { type: integer, minimum: 0 }
+        populated_lane_count: { type: integer, minimum: 0 }
+        present_count: { type: integer, minimum: 0 }
+        absent_count: { type: integer, minimum: 0 }
+        uncertain_count: { type: integer, minimum: 0 }
     StripFeederRegistration:
       type: object
       required:

@@ -37,8 +37,9 @@ use velocitypnp_domain::{
     LocalXyDirectionResponseSample, MachineProfile, MachineState, NozzleHeightModel,
     NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
-    Residuals, SensorReading, StripFeederLiveHoldoutRun, StripFeederRegistration,
-    StripFeederRegistrationStatus, StripFeederVisionReport, VacuumProbeReport, VacuumProbeSample,
+    Residuals, SensorReading, StripFeederInventoryReport, StripFeederInventorySummary,
+    StripFeederLiveHoldoutRun, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederVisionReport, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
     WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
@@ -59,9 +60,9 @@ use velocitypnp_planner::{
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
     analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate, apply_camera_controls,
-    build_workspace_discovery_context, build_workspace_height_map, build_workspace_mosaic,
-    calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer, camera_sample_metrics,
-    capture_gray_frame, capture_gray_frames, compare_workspace_observation,
+    build_strip_feeder_inventory, build_workspace_discovery_context, build_workspace_height_map,
+    build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
+    camera_sample_metrics, capture_gray_frame, capture_gray_frames, compare_workspace_observation,
     compare_workspace_reconnaissance, compose_workspace_refinements,
     composite_workspace_camera_aperture, decode_gray_png, detect_board_fiducial_near,
     detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
@@ -86,10 +87,10 @@ use velocitypnp_vision::{
     WorkspaceSeamHealthReport, WorkspaceSeamStatus, MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA,
     MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO, MAX_WORKSPACE_SURFACE_FRACTION,
     MIN_REFINEMENT_COMPOSITE_COVERAGE, MIN_REFINEMENT_TEXTURE_RETENTION_RATIO,
-    MIN_WORKSPACE_SURFACE_FRACTION, STRIP_FEEDER_VISION_ALGORITHM,
-    WORKSPACE_BOARD_DISCOVERY_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
-    WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT, WORKSPACE_CHANGE_SET_ARTIFACT,
-    WORKSPACE_HEIGHT_CANDIDATE_STEP,
+    MIN_WORKSPACE_SURFACE_FRACTION, STRIP_FEEDER_INVENTORY_ALGORITHM,
+    STRIP_FEEDER_VISION_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_ALGORITHM,
+    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+    WORKSPACE_CHANGE_SET_ARTIFACT, WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -458,6 +459,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspace-scans/{id}/strip-feeder-vision",
             post(build_strip_feeder_vision),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/strip-feeder-inventory",
+            post(build_strip_feeder_inventory_report),
         )
         .route(
             "/api/v1/workspace-scans/{id}/inventory-baseline",
@@ -1558,6 +1563,7 @@ fn pending_workspace_scan(
         seam_health: None,
         refinement_composite: None,
         board_discovery: None,
+        strip_feeder_inventory: None,
         change_set: None,
         warnings: estimate.warnings.clone(),
         failure: None,
@@ -5027,6 +5033,167 @@ async fn build_strip_feeder_vision(
     persist_workspace_manifest(&state, &mut scan)
         .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
     Ok(Json(report))
+}
+
+const STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT: &str = "strip-feeder-inventory.json";
+const STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT: &str = "mosaic-strip-feeder-inventory.png";
+
+#[derive(Debug, Deserialize)]
+struct BuildStripFeederInventoryRequest {
+    evidence_sources: Vec<StripFeederInventoryEvidenceSourceRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StripFeederInventoryEvidenceSourceRequest {
+    scan_id: Uuid,
+    candidate_index: u32,
+}
+
+async fn build_strip_feeder_inventory_report(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+    Json(body): Json<BuildStripFeederInventoryRequest>,
+) -> ApiResult<Json<StripFeederInventoryReport>> {
+    if body.evidence_sources.is_empty() {
+        return Err(ApiError::bad_request(
+            "strip feeder inventory requires one or more evidence sources",
+        ));
+    }
+    let mut scan = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "strip feeder inventory requires a successful workspace scan",
+        ));
+    }
+    let raster_transform = scan.raster_transform.ok_or_else(|| {
+        ApiError::bad_request(
+            "strip feeder inventory requires a machine-coordinate raster transform",
+        )
+    })?;
+    let source_mosaic_artifact_name = scan
+        .refinement_composite
+        .as_ref()
+        .filter(|summary| summary.accepted)
+        .map(|summary| summary.mosaic_artifact_name.clone())
+        .or_else(|| {
+            scan.height_map
+                .as_ref()
+                .map(|summary| summary.corrected_mosaic_artifact_name.clone())
+        })
+        .or_else(|| scan.mosaic_artifact_name.clone())
+        .ok_or_else(|| ApiError::bad_request("workspace scan has no mosaic"))?;
+    let (media_type, mosaic_data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &source_mosaic_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder inventory source mosaic not found"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "strip feeder inventory source mosaic is not a PNG"
+        )));
+    }
+
+    let mut reports = Vec::with_capacity(body.evidence_sources.len());
+    for source in body.evidence_sources {
+        let evidence_scan = state
+            .store
+            .get_workspace_scan(source.scan_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("strip feeder evidence scan not found"))?;
+        if evidence_scan.status != WorkspaceScanStatus::Succeeded {
+            return Err(ApiError::bad_request(
+                "strip feeder inventory evidence requires a successful scan",
+            ));
+        }
+        if evidence_scan.profile_id != scan.profile_id
+            || evidence_scan.calibration_id != scan.calibration_id
+        {
+            return Err(ApiError::bad_request(
+                "strip feeder inventory evidence uses different machine geometry",
+            ));
+        }
+        let artifact_name = format!("strip-feeder-vision-{:03}.json", source.candidate_index);
+        let (media_type, data) = state
+            .store
+            .get_workspace_scan_artifact(source.scan_id, &artifact_name)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("strip feeder vision report not found"))?;
+        if media_type != "application/json" {
+            return Err(ApiError::internal(anyhow::anyhow!(
+                "strip feeder vision report is not JSON"
+            )));
+        }
+        let report: StripFeederVisionReport =
+            serde_json::from_slice(&data).map_err(ApiError::internal)?;
+        if report.algorithm_version != STRIP_FEEDER_VISION_ALGORITHM {
+            return Err(ApiError::bad_request(format!(
+                "strip feeder evidence uses unsupported algorithm {}",
+                report.algorithm_version
+            )));
+        }
+        if report.source_scan_id != source.scan_id
+            || report.source_candidate_index != source.candidate_index
+        {
+            return Err(ApiError::internal(anyhow::anyhow!(
+                "strip feeder vision report source does not match its artifact"
+            )));
+        }
+        reports.push(report);
+    }
+
+    let workspace_scan_id = scan.id;
+    let report_source_name = source_mosaic_artifact_name.clone();
+    let inventory = tokio::task::spawn_blocking(move || {
+        let mosaic = decode_gray_png(&mosaic_data)?;
+        build_strip_feeder_inventory(
+            &mosaic,
+            raster_transform,
+            workspace_scan_id,
+            &report_source_name,
+            &reports,
+            STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT,
+            STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    let report_json = serde_json::to_vec_pretty(&inventory.report).map_err(ApiError::internal)?;
+    let preview_png = encode_rgb_png(&inventory.preview).map_err(ApiError::internal)?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT,
+        "application/json",
+        &report_json,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT,
+        "image/png",
+        &preview_png,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    scan.strip_feeder_inventory = Some(StripFeederInventorySummary {
+        algorithm_version: STRIP_FEEDER_INVENTORY_ALGORITHM.into(),
+        report_artifact_name: STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT.into(),
+        preview_artifact_name: STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT.into(),
+        lane_count: inventory.report.lane_count,
+        populated_lane_count: inventory.report.populated_lane_count,
+        present_count: inventory.report.present_count,
+        absent_count: inventory.report.absent_count,
+        uncertain_count: inventory.report.uncertain_count,
+    });
+    scan.updated_at = Utc::now();
+    persist_workspace_manifest(&state, &mut scan)
+        .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    Ok(Json(inventory.report))
 }
 
 #[derive(Debug, Deserialize)]
@@ -16743,6 +16910,7 @@ mod tests {
             seam_health: None,
             refinement_composite: None,
             board_discovery: None,
+            strip_feeder_inventory: None,
             change_set: None,
             warnings: vec![],
             failure: None,
@@ -18187,6 +18355,21 @@ mod tests {
         let state = test_state();
         let mut scan = test_workspace_scan(Uuid::new_v4());
         scan.status = WorkspaceScanStatus::Succeeded;
+        scan.region = WorkspaceScanRegion {
+            x_min_mm: 100.0,
+            x_max_mm: 124.0,
+            y_min_mm: 40.0,
+            y_max_mm: 104.0,
+        };
+        scan.raster_transform = Some(WorkspaceRasterTransform {
+            top_left_x_mm: 100.0,
+            top_left_y_mm: 104.0,
+            x_mm_per_pixel: 0.1,
+            y_mm_per_pixel: -0.1,
+        });
+        scan.mosaic_width_px = Some(240);
+        scan.mosaic_height_px = Some(640);
+        scan.mosaic_artifact_name = Some("mosaic.png".into());
         scan.board_discovery = Some(WorkspaceBoardDiscoverySummary {
             algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
             source_mosaic_artifact_name: "mosaic.png".into(),
@@ -18297,6 +18480,15 @@ mod tests {
                 &encode_gray_png(&crop).unwrap(),
             )
             .unwrap();
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                "mosaic.png",
+                "image/png",
+                &encode_gray_png(&crop).unwrap(),
+            )
+            .unwrap();
 
         let report = build_strip_feeder_vision(
             State(state.clone()),
@@ -18328,7 +18520,42 @@ mod tests {
                 .is_some());
         }
 
-        let (status, Json(registration)) = create_strip_feeder_registration(
+        let inventory = build_strip_feeder_inventory_report(
+            State(state.clone()),
+            Path(scan.id),
+            Json(BuildStripFeederInventoryRequest {
+                evidence_sources: vec![StripFeederInventoryEvidenceSourceRequest {
+                    scan_id: scan.id,
+                    candidate_index: 0,
+                }],
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(inventory.lane_count, 3);
+        for name in [
+            STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT,
+            STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT,
+        ] {
+            assert!(state
+                .store
+                .get_workspace_scan_artifact(scan.id, name)
+                .unwrap()
+                .is_some());
+        }
+        assert_eq!(
+            state
+                .store
+                .get_workspace_scan(scan.id)
+                .unwrap()
+                .unwrap()
+                .strip_feeder_inventory
+                .unwrap()
+                .lane_count,
+            3,
+        );
+        let error = create_strip_feeder_registration(
             State(state.clone()),
             Json(CreateStripFeederRegistrationRequest {
                 scan_id: scan.id,
@@ -18340,22 +18567,11 @@ mod tests {
             }),
         )
         .await
-        .unwrap();
-        assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(registration.name, "R0603 strip");
-        assert_eq!(registration.part_key.as_deref(), Some("R0603:10k"));
-        assert_eq!(registration.tape_width_mm, 8.0);
-        assert_eq!(registration.tape_pitch_mm, 2.0);
-        assert!(registration.selected_pocket_machine_mm.is_none());
-        assert!(registration.pickup_z_mm.is_none());
-        assert!(registration.active_feeder_id.is_none());
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            state
-                .store
-                .get_strip_feeder_registration(registration.id)
-                .unwrap()
-                .unwrap(),
-            registration,
+            error.message,
+            "strip feeder component pitch needs review before draft creation",
         );
     }
 

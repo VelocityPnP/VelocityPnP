@@ -6,11 +6,11 @@ use opencv::imgproc;
 use std::f64::consts::PI;
 use velocitypnp_domain::{
     PlanarCameraModel, Pose, StripFeederLaneProposal, StripFeederLiveHoldoutReport,
-    StripFeederRegistration, StripFeederRejectedLattice, StripPocketOccupancy,
-    WorkspaceBoardCandidate,
+    StripFeederPocketObservation, StripFeederRegistration, StripFeederRejectedLattice,
+    StripPocketOccupancy, WorkspaceBoardCandidate,
 };
 
-pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v2";
+pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v3";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
@@ -70,6 +70,24 @@ struct SuppressedPocketTrack {
     paired_sprocket_cross_mm: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RectangularFeature {
+    cross_mm: f64,
+    along_mm: f64,
+    cross_size_mm: f64,
+    along_size_mm: f64,
+    rectangularity: f64,
+    circularity: f64,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ComponentFeatureCluster {
+    along_mm: f64,
+    features: Vec<RectangularFeature>,
+    confidence: f64,
+}
+
 /// Finds repeated carrier-tape sprocket holes in one normalized feeder crop.
 /// Candidate edges define the calibrated plate basis, so the result stays
 /// parallel or perpendicular to that basis.
@@ -107,6 +125,19 @@ pub fn analyze_strip_feeder_candidate(
         long_is_y,
     );
     let (tracks, suppressed_tracks) = resolve_pocket_row_competitors(detected_tracks);
+    let rectangular_features =
+        detect_rectangular_features(crop, candidate.width_mm, candidate.height_mm, long_is_y)?;
+    let preferred_pocket_side = infer_bank_pocket_side(
+        &suppressed_tracks,
+        &tracks,
+        &rectangular_features,
+        crop,
+        candidate.width_mm,
+        candidate.height_mm,
+        long_is_y,
+        cross_length_mm,
+        along_length_mm,
+    );
     let mut proposals = tracks
         .iter()
         .enumerate()
@@ -114,12 +145,13 @@ pub fn analyze_strip_feeder_candidate(
             lane_proposal(
                 index as u32,
                 track,
-                &tracks,
                 crop,
                 candidate,
                 long_is_y,
                 cross_length_mm,
                 along_length_mm,
+                &rectangular_features,
+                preferred_pocket_side,
             )
         })
         .collect::<Vec<_>>();
@@ -978,6 +1010,61 @@ fn resolve_pocket_row_competitors(
     (accepted, suppressed)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn infer_bank_pocket_side(
+    suppressed: &[SuppressedPocketTrack],
+    tracks: &[SprocketTrack],
+    features: &[RectangularFeature],
+    crop: &GrayFrame,
+    width_mm: f64,
+    height_mm: f64,
+    long_is_y: bool,
+    cross_length_mm: f64,
+    along_length_mm: f64,
+) -> Option<f64> {
+    if let Some(first) = suppressed
+        .first()
+        .map(|item| (item.track.cross_mm - item.paired_sprocket_cross_mm).signum())
+    {
+        if first != 0.0
+            && suppressed
+                .iter()
+                .all(|item| (item.track.cross_mm - item.paired_sprocket_cross_mm).signum() == first)
+        {
+            return Some(first);
+        }
+    }
+
+    let score_side = |side| {
+        tracks
+            .iter()
+            .filter_map(|track| {
+                let range = track_along_range(track, crop, width_mm, height_mm, long_is_y);
+                let geometry = infer_tape_geometry(
+                    features,
+                    track.cross_mm,
+                    range,
+                    cross_length_mm,
+                    along_length_mm,
+                    Some(side),
+                );
+                geometry.0.map(|_| geometry.4)
+            })
+            .sum::<f64>()
+    };
+    let negative = score_side(-1.0);
+    let positive = score_side(1.0);
+    let strongest = negative.max(positive);
+    let weakest = negative.min(positive);
+    if strongest < 0.52 || strongest < weakest + 0.12 {
+        None
+    } else if positive > negative {
+        Some(1.0)
+    } else {
+        Some(-1.0)
+    }
+}
+
 fn compare_track_quality(first: &SprocketTrack, second: &SprocketTrack) -> std::cmp::Ordering {
     first
         .confidence
@@ -985,6 +1072,95 @@ fn compare_track_quality(first: &SprocketTrack, second: &SprocketTrack) -> std::
         .then_with(|| first.circles.len().cmp(&second.circles.len()))
         .then_with(|| second.residual_p95_mm.total_cmp(&first.residual_p95_mm))
         .then_with(|| second.cross_mm.total_cmp(&first.cross_mm))
+}
+
+fn detect_rectangular_features(
+    crop: &GrayFrame,
+    width_mm: f64,
+    height_mm: f64,
+    long_is_y: bool,
+) -> Result<Vec<RectangularFeature>> {
+    let source = gray_frame_to_mat(crop)?;
+    let mut blurred = Mat::default();
+    imgproc::gaussian_blur(
+        &source,
+        &mut blurred,
+        Size::new(3, 3),
+        0.0,
+        0.0,
+        core::BORDER_DEFAULT,
+    )?;
+    let mut edges = Mat::default();
+    imgproc::canny(&blurred, &mut edges, 24.0, 72.0, 3, true)?;
+    let mut contours = Vector::<Vector<Point>>::new();
+    imgproc::find_contours(
+        &edges,
+        &mut contours,
+        imgproc::RETR_LIST,
+        imgproc::CHAIN_APPROX_SIMPLE,
+        Point::new(0, 0),
+    )?;
+
+    let x_mm_per_pixel = width_mm / f64::from(crop.width);
+    let y_mm_per_pixel = height_mm / f64::from(crop.height);
+    let mut features = Vec::new();
+    for contour in contours {
+        if contour.len() < 4 {
+            continue;
+        }
+        let bounds = imgproc::bounding_rect(&contour)?;
+        if bounds.width < 3 || bounds.height < 3 {
+            continue;
+        }
+        let x_size_mm = f64::from(bounds.width) * x_mm_per_pixel;
+        let y_size_mm = f64::from(bounds.height) * y_mm_per_pixel;
+        let (cross_size_mm, along_size_mm) = if long_is_y {
+            (x_size_mm, y_size_mm)
+        } else {
+            (y_size_mm, x_size_mm)
+        };
+        if !(0.25..=5.0).contains(&cross_size_mm) || !(0.25..=4.0).contains(&along_size_mm) {
+            continue;
+        }
+        let area = imgproc::contour_area(&contour, false)?.abs();
+        let bounds_area = f64::from(bounds.width * bounds.height);
+        if area < 2.0 || bounds_area <= 0.0 {
+            continue;
+        }
+        let rectangularity = (area / bounds_area).clamp(0.0, 1.0);
+        if rectangularity < 0.08 {
+            continue;
+        }
+        let perimeter = imgproc::arc_length(&contour, true)?;
+        let circularity = if perimeter > 1e-9 {
+            (4.0 * PI * area / (perimeter * perimeter)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let x_px = f64::from(bounds.x) + 0.5 * f64::from(bounds.width);
+        let y_px = f64::from(bounds.y) + 0.5 * f64::from(bounds.height);
+        let x_mm = x_px * x_mm_per_pixel;
+        let y_mm = y_px * y_mm_per_pixel;
+        let (cross_mm, along_mm) = if long_is_y {
+            (x_mm, y_mm)
+        } else {
+            (y_mm, x_mm)
+        };
+        let dimension_score = (cross_size_mm.min(along_size_mm) / 0.8).clamp(0.0, 1.0);
+        let confidence =
+            (0.55 * rectangularity + 0.25 * (1.0 - circularity) + 0.20 * dimension_score)
+                .clamp(0.0, 1.0);
+        features.push(RectangularFeature {
+            cross_mm,
+            along_mm,
+            cross_size_mm,
+            along_size_mm,
+            rectangularity,
+            circularity,
+            confidence,
+        });
+    }
+    Ok(features)
 }
 
 fn fit_sprocket_track(cluster: Vec<(f64, f64, CircleFeature)>) -> Option<SprocketTrack> {
@@ -1047,48 +1223,56 @@ fn fit_sprocket_track(cluster: Vec<(f64, f64, CircleFeature)>) -> Option<Sprocke
 fn lane_proposal(
     proposal_index: u32,
     track: &SprocketTrack,
-    tracks: &[SprocketTrack],
     crop: &GrayFrame,
     candidate: &WorkspaceBoardCandidate,
     long_is_y: bool,
     cross_length_mm: f64,
     along_length_mm: f64,
+    rectangular_features: &[RectangularFeature],
+    preferred_pocket_side: Option<f64>,
 ) -> StripFeederLaneProposal {
-    let tape_width_mm = track
-        .paired_pocket_centerline_mm
-        .map(|_| 8.0)
-        .or_else(|| infer_tape_width(track, tracks));
     let mut findings = Vec::new();
-    if track.paired_pocket_centerline_mm.is_some() {
+    let sprocket_along_range = track_along_range(
+        track,
+        crop,
+        candidate.width_mm,
+        candidate.height_mm,
+        long_is_y,
+    );
+    let (tape_width_mm, centerline, component_pitch_mm, phase_mm, periodicity_confidence) =
+        if let Some(cross_mm) = track.paired_pocket_centerline_mm {
+            let (pitch_mm, phase_mm, confidence) = estimate_component_grid(
+                rectangular_features,
+                cross_mm,
+                sprocket_along_range,
+                along_length_mm,
+            );
+            findings.push(
+                "8 mm tape width and pocket side were resolved from the paired 3.5 mm pocket row"
+                    .into(),
+            );
+            (Some(8.0), Some(cross_mm), pitch_mm, phase_mm, confidence)
+        } else {
+            let geometry = infer_tape_geometry(
+                rectangular_features,
+                track.cross_mm,
+                sprocket_along_range,
+                cross_length_mm,
+                along_length_mm,
+                preferred_pocket_side,
+            );
+            if geometry.0.is_some() && preferred_pocket_side.is_some() {
+                findings
+                    .push("pocket side follows the measured orientation of this tape bank".into());
+            }
+            geometry
+        };
+    if tape_width_mm.is_none() {
         findings.push(
-            "8 mm tape width and pocket side were resolved from the paired 3.5 mm pocket row"
+            "tape width and pocket side are unresolved because no component lattice was found"
                 .into(),
         );
     }
-    if tape_width_mm.is_none() {
-        findings.push(
-            "tape width is unresolved because no standard adjacent lane spacing was found".into(),
-        );
-    }
-    let centerline = track.paired_pocket_centerline_mm.or_else(|| {
-        tape_width_mm.and_then(|width_mm| {
-            choose_pick_centerline(crop, track.cross_mm, width_mm, cross_length_mm, long_is_y)
-        })
-    });
-    if centerline.is_none() && tape_width_mm.is_some() {
-        findings.push("both pocket-centerline sides have similar image support".into());
-    }
-    let (component_pitch_mm, phase_mm, periodicity_confidence) =
-        centerline.map_or((None, None, 0.0), |cross_mm| {
-            estimate_component_pitch(
-                crop,
-                cross_mm,
-                along_length_mm,
-                candidate.width_mm,
-                candidate.height_mm,
-                long_is_y,
-            )
-        });
     if component_pitch_mm.is_none() && centerline.is_some() {
         findings.push("component pocket pitch is unresolved in the retained image".into());
     }
@@ -1104,22 +1288,39 @@ fn lane_proposal(
             local_axis_to_machine(cross_mm, along_length_mm, candidate, long_is_y),
         ]
     });
-    let pocket_centers_machine_mm = match (centerline, component_pitch_mm, phase_mm) {
-        (Some(cross_mm), Some(pitch_mm), Some(phase_mm)) => {
-            let mut centers = Vec::new();
-            let mut along_mm = phase_mm;
-            while along_mm < along_length_mm {
-                if along_mm >= 0.0 {
-                    centers.push(local_axis_to_machine(
-                        cross_mm, along_mm, candidate, long_is_y,
-                    ));
-                }
-                along_mm += pitch_mm;
-            }
-            centers
-        }
+    let pocket_observations = match (centerline, component_pitch_mm, phase_mm) {
+        (Some(cross_mm), Some(pitch_mm), Some(phase_mm)) => observe_component_pockets(
+            crop,
+            rectangular_features,
+            cross_mm,
+            pitch_mm,
+            phase_mm,
+            sprocket_along_range,
+            candidate,
+            long_is_y,
+            periodicity_confidence,
+        ),
         _ => Vec::new(),
     };
+    let pocket_centers_machine_mm = pocket_observations
+        .iter()
+        .map(|observation| observation.center_machine_mm)
+        .collect::<Vec<_>>();
+    let present_count = pocket_observations
+        .iter()
+        .filter(|observation| observation.occupancy == StripPocketOccupancy::Occupied)
+        .count() as u32;
+    let absent_count = pocket_observations
+        .iter()
+        .filter(|observation| observation.occupancy == StripPocketOccupancy::Empty)
+        .count() as u32;
+    let uncertain_count = pocket_observations.len() as u32 - present_count - absent_count;
+    let component_size_mm = median_component_size(&pocket_observations);
+    if !pocket_observations.is_empty() {
+        findings.push(format!(
+            "{present_count} present, {absent_count} absent, and {uncertain_count} uncertain feed positions were measured"
+        ));
+    }
     let width_score = if tape_width_mm.is_some() { 1.0 } else { 0.0 };
     let centerline_score = if centerline.is_some() { 1.0 } else { 0.0 };
     let pitch_score = if component_pitch_mm.is_some() {
@@ -1164,6 +1365,11 @@ fn lane_proposal(
         component_pitch_mm,
         pick_centerline_machine_mm,
         pocket_centers_machine_mm,
+        component_size_mm,
+        pocket_observations,
+        present_count,
+        absent_count,
+        uncertain_count,
         confidence,
         review_required,
         findings,
@@ -1207,151 +1413,465 @@ fn rejected_lattice(
     }
 }
 
-fn infer_tape_width(track: &SprocketTrack, tracks: &[SprocketTrack]) -> Option<f64> {
-    let nearest_separation = tracks
-        .iter()
-        .filter(|other| !std::ptr::eq(*other, track))
-        .map(|other| (other.cross_mm - track.cross_mm).abs())
-        .min_by(f64::total_cmp)?;
-    let candidates = STANDARD_TAPE_WIDTHS_MM
-        .into_iter()
-        .filter(|width| {
-            let multiple = (nearest_separation / width).round().max(1.0);
-            (nearest_separation - multiple * width).abs() <= 1.25
-        })
-        .collect::<Vec<_>>();
-    if candidates.len() == 1 {
-        candidates.first().copied()
-    } else {
-        None
-    }
-}
-
-fn choose_pick_centerline(
-    crop: &GrayFrame,
+fn infer_tape_geometry(
+    features: &[RectangularFeature],
     sprocket_cross_mm: f64,
-    tape_width_mm: f64,
+    along_range: Option<[f64; 2]>,
     cross_length_mm: f64,
-    long_is_y: bool,
-) -> Option<f64> {
-    let offset_mm = tape_width_mm * 0.5 - POCKET_CENTERLINE_EDGE_REMAINDER_MM;
-    if offset_mm <= 0.0 {
-        return None;
-    }
-    let candidates = [sprocket_cross_mm - offset_mm, sprocket_cross_mm + offset_mm]
-        .into_iter()
-        .filter(|cross| *cross >= 0.5 && *cross <= cross_length_mm - 0.5)
-        .map(|cross| {
-            (
-                cross,
-                centerline_texture(crop, cross, cross_length_mm, long_is_y),
-            )
-        })
-        .collect::<Vec<_>>();
-    match candidates.as_slice() {
-        [(cross, _)] => Some(*cross),
-        [(first_cross, first_score), (second_cross, second_score)] => {
-            let strongest = first_score.max(*second_score);
-            let weakest = first_score.min(*second_score);
-            if strongest < 1.0 || strongest < weakest * 1.12 {
-                None
-            } else if first_score > second_score {
-                Some(*first_cross)
-            } else {
-                Some(*second_cross)
-            }
-        }
-        _ => None,
-    }
-}
-
-fn centerline_texture(
-    crop: &GrayFrame,
-    cross_mm: f64,
-    cross_length_mm: f64,
-    long_is_y: bool,
-) -> f64 {
-    let cross_pixels = if long_is_y { crop.width } else { crop.height };
-    let along_pixels = if long_is_y { crop.height } else { crop.width };
-    let center = (cross_mm / cross_length_mm * f64::from(cross_pixels)).round() as i32;
-    let half_band = ((0.8 / cross_length_mm * f64::from(cross_pixels)).ceil() as i32).max(1);
-    let mut sum = 0.0;
-    let mut count = 0_u64;
-    for along in 1..along_pixels.saturating_sub(1) as i32 {
-        for cross in center - half_band..=center + half_band {
-            if cross <= 0 || cross >= cross_pixels as i32 - 1 {
+    along_length_mm: f64,
+    preferred_side: Option<f64>,
+) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>, f64) {
+    let sides = preferred_side.map_or_else(|| vec![-1.0, 1.0], |side| vec![side]);
+    let mut candidates = Vec::new();
+    for width_mm in STANDARD_TAPE_WIDTHS_MM {
+        let offset_mm = width_mm * 0.5 - POCKET_CENTERLINE_EDGE_REMAINDER_MM;
+        for side in &sides {
+            let cross_mm = sprocket_cross_mm + side * offset_mm;
+            if cross_mm < 0.5 || cross_mm > cross_length_mm - 0.5 {
                 continue;
             }
-            let previous = sample_axis(crop, cross, along - 1, long_is_y);
-            let next = sample_axis(crop, cross, along + 1, long_is_y);
-            let left = sample_axis(crop, cross - 1, along, long_is_y);
-            let right = sample_axis(crop, cross + 1, along, long_is_y);
-            sum += f64::from(previous.abs_diff(next)) + f64::from(left.abs_diff(right));
-            count += 2;
+            let (pitch_mm, phase_mm, confidence) =
+                estimate_component_grid(features, cross_mm, along_range, along_length_mm);
+            if pitch_mm.is_some() && phase_mm.is_some() {
+                candidates.push((width_mm, cross_mm, pitch_mm, phase_mm, confidence));
+            }
         }
     }
-    sum / count.max(1) as f64
+    candidates.sort_by(|first, second| {
+        second
+            .4
+            .total_cmp(&first.4)
+            .then_with(|| first.0.total_cmp(&second.0))
+    });
+    candidates.first().copied().map_or(
+        (None, None, None, None, 0.0),
+        |(width, cross, pitch, phase, confidence)| {
+            (Some(width), Some(cross), pitch, phase, confidence)
+        },
+    )
 }
 
-fn estimate_component_pitch(
+fn track_along_range(
+    track: &SprocketTrack,
     crop: &GrayFrame,
-    cross_mm: f64,
-    along_length_mm: f64,
     width_mm: f64,
     height_mm: f64,
     long_is_y: bool,
-) -> (Option<f64>, Option<f64>, f64) {
-    let cross_length_mm = if long_is_y { width_mm } else { height_mm };
-    let cross_pixels = if long_is_y { crop.width } else { crop.height };
-    let along_pixels = if long_is_y { crop.height } else { crop.width };
-    let center = (cross_mm / cross_length_mm * f64::from(cross_pixels)).round() as i32;
-    let half_band = ((0.9 / cross_length_mm * f64::from(cross_pixels)).ceil() as i32).max(1);
-    let mut profile = Vec::with_capacity(along_pixels as usize);
-    for along in 0..along_pixels as i32 {
-        let mut values = Vec::new();
-        for cross in center - half_band..=center + half_band {
-            if cross >= 0 && cross < cross_pixels as i32 {
-                values.push(f64::from(sample_axis(crop, cross, along, long_is_y)));
-            }
+) -> Option<[f64; 2]> {
+    let values = track.circles.iter().map(|circle| {
+        if long_is_y {
+            (circle.center_px[1] + 0.5) / f64::from(crop.height) * height_mm
+        } else {
+            (circle.center_px[0] + 0.5) / f64::from(crop.width) * width_mm
         }
-        let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
-        let variance = values
-            .iter()
-            .map(|value| (value - mean).powi(2))
-            .sum::<f64>()
-            / values.len().max(1) as f64;
-        profile.push(variance.sqrt());
+    });
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for value in values {
+        minimum = minimum.min(value);
+        maximum = maximum.max(value);
     }
-    let mm_per_along_pixel = along_length_mm / f64::from(along_pixels);
-    let mut scores = STANDARD_COMPONENT_PITCHES_MM
-        .into_iter()
-        .filter(|pitch| along_length_mm >= 3.0 * pitch)
-        .filter_map(|pitch| {
-            let lag = (pitch / mm_per_along_pixel).round() as usize;
-            (lag >= 2 && lag < profile.len() / 2)
-                .then(|| periodicity_score(&profile, lag).map(|score| (pitch, lag, score)))
-                .flatten()
+    (minimum.is_finite() && maximum.is_finite() && maximum > minimum).then_some([minimum, maximum])
+}
+
+fn estimate_component_grid(
+    features: &[RectangularFeature],
+    cross_mm: f64,
+    along_range: Option<[f64; 2]>,
+    along_length_mm: f64,
+) -> (Option<f64>, Option<f64>, f64) {
+    let range = along_range.unwrap_or([0.0, along_length_mm]);
+    let mut ordered = features
+        .iter()
+        .copied()
+        .filter(|feature| {
+            let aspect = feature.cross_size_mm.max(feature.along_size_mm)
+                / feature.cross_size_mm.min(feature.along_size_mm).max(1e-9);
+            (feature.cross_mm - cross_mm).abs() <= 1.8
+                && feature.along_mm >= range[0] - 1.0
+                && feature.along_mm <= range[1] + 1.0
+                && (feature.circularity < 0.72 || aspect >= 1.25)
         })
         .collect::<Vec<_>>();
-    scores.sort_by(|first, second| second.2.total_cmp(&first.2));
-    let Some(&(best_pitch, lag, best_score)) = scores.first() else {
-        return (None, None, 0.0);
-    };
-    if best_score < 0.20 {
-        return (None, None, best_score.max(0.0));
+    ordered.sort_by(|first, second| first.along_mm.total_cmp(&second.along_mm));
+    let mut clusters: Vec<ComponentFeatureCluster> = Vec::new();
+    for feature in ordered {
+        if let Some(cluster) = clusters
+            .last_mut()
+            .filter(|cluster| (feature.along_mm - cluster.along_mm).abs() <= 0.65)
+        {
+            cluster.features.push(feature);
+            let total = cluster
+                .features
+                .iter()
+                .map(|item| item.confidence)
+                .sum::<f64>();
+            cluster.along_mm = cluster
+                .features
+                .iter()
+                .map(|item| item.along_mm * item.confidence)
+                .sum::<f64>()
+                / total.max(1e-9);
+            cluster.confidence = cluster.confidence.max(feature.confidence);
+        } else {
+            clusters.push(ComponentFeatureCluster {
+                along_mm: feature.along_mm,
+                features: vec![feature],
+                confidence: feature.confidence,
+            });
+        }
     }
-    let selected = scores
+    if clusters.len() < 3 {
+        return (None, None, 0.0);
+    }
+
+    let mut fits = Vec::new();
+    for pitch_mm in STANDARD_COMPONENT_PITCHES_MM {
+        if range[1] - range[0] < 2.0 * pitch_mm {
+            continue;
+        }
+        for seed in &clusters {
+            let phase_mm = seed.along_mm.rem_euclid(pitch_mm);
+            let first_slot = ((range[0] - phase_mm) / pitch_mm).ceil() as i32;
+            let last_slot = ((range[1] - phase_mm) / pitch_mm).floor() as i32;
+            let expected = (last_slot - first_slot + 1).max(0) as usize;
+            if expected < 3 {
+                continue;
+            }
+            let mut occupied_slots = std::collections::BTreeSet::new();
+            let mut residuals = Vec::new();
+            for cluster in &clusters {
+                let slot = ((cluster.along_mm - phase_mm) / pitch_mm).round() as i32;
+                if slot < first_slot || slot > last_slot {
+                    continue;
+                }
+                let residual = (cluster.along_mm - (phase_mm + f64::from(slot) * pitch_mm)).abs();
+                if residual <= 0.55 {
+                    occupied_slots.insert(slot);
+                    residuals.push(residual);
+                }
+            }
+            let coverage = occupied_slots.len() as f64 / expected as f64;
+            let precision = residuals.len() as f64 / clusters.len() as f64;
+            let residual = median(&residuals);
+            let residual_score = if residual.is_finite() {
+                (1.0 - residual / 0.55).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let score = 0.50 * coverage + 0.30 * precision + 0.20 * residual_score;
+            fits.push((pitch_mm, phase_mm, score));
+        }
+    }
+    fits.sort_by(|first, second| {
+        second
+            .2
+            .total_cmp(&first.2)
+            .then_with(|| first.0.total_cmp(&second.0))
+    });
+    let best_for_pitch = |pitch: f64| {
+        fits.iter()
+            .filter(|fit| fit.0 == pitch)
+            .max_by(|first, second| first.2.total_cmp(&second.2))
+            .copied()
+    };
+    let expected_two_mm_positions = ((range[1] - range[0]) / 2.0).floor().max(1.0) as usize;
+    let dense_two_mm_evidence = clusters.len() * 4 >= expected_two_mm_positions * 3;
+    let selected = match (best_for_pitch(2.0), best_for_pitch(4.0)) {
+        (Some(two), Some(four))
+            if dense_two_mm_evidence && two.2 >= 0.65 && two.2 >= four.2 + 0.10 =>
+        {
+            two
+        }
+        (_, Some(four)) if four.2 >= 0.25 => four,
+        _ => {
+            let Some(best) = fits.first().copied() else {
+                return (None, None, 0.0);
+            };
+            best
+        }
+    };
+    let (pitch_mm, phase_mm, score) = selected;
+    if !score.is_finite() {
+        return (None, None, 0.0);
+    }
+    if score < 0.52 {
+        (None, None, score)
+    } else {
+        (Some(pitch_mm), Some(phase_mm), score.clamp(0.0, 1.0))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_component_pockets(
+    crop: &GrayFrame,
+    features: &[RectangularFeature],
+    cross_mm: f64,
+    pitch_mm: f64,
+    phase_mm: f64,
+    along_range: Option<[f64; 2]>,
+    candidate: &WorkspaceBoardCandidate,
+    long_is_y: bool,
+    grid_confidence: f64,
+) -> Vec<StripFeederPocketObservation> {
+    let Some(range) = along_range else {
+        return Vec::new();
+    };
+    let first_slot = ((range[0] - phase_mm) / pitch_mm).ceil() as i32;
+    let last_slot = ((range[1] - phase_mm) / pitch_mm).floor() as i32;
+    let slots = (first_slot..=last_slot)
+        .map(|slot| phase_mm + f64::from(slot) * pitch_mm)
+        .collect::<Vec<_>>();
+    let luma = slots
         .iter()
-        .filter(|(_, _, score)| *score >= best_score - 0.04)
-        .min_by(|first, second| first.0.total_cmp(&second.0))
+        .map(|along_mm| {
+            component_window_mean(crop, candidate, long_is_y, cross_mm, *along_mm, pitch_mm)
+        })
+        .collect::<Vec<_>>();
+    let mut observations = slots
+        .iter()
         .copied()
-        .unwrap_or((best_pitch, lag, best_score));
-    let phase_px = strongest_profile_phase(&profile, selected.1);
-    (
-        Some(selected.0),
-        Some(phase_px as f64 * mm_per_along_pixel),
-        selected.2.clamp(0.0, 1.0),
-    )
+        .enumerate()
+        .map(|(index, along_mm)| {
+            let mut candidates = features
+                .iter()
+                .copied()
+                .filter(|feature| {
+                    (feature.cross_mm - cross_mm).abs() <= 1.2
+                        && (feature.along_mm - along_mm).abs() <= 0.8
+                        && feature.cross_size_mm >= 0.3
+                        && feature.along_size_mm >= 0.25
+                        && feature.cross_size_mm <= 3.3
+                        && feature.along_size_mm <= (0.65 * pitch_mm).min(2.6)
+                        && (feature.circularity < 0.72
+                            || feature.cross_size_mm.max(feature.along_size_mm)
+                                / feature.cross_size_mm.min(feature.along_size_mm)
+                                >= 1.25)
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|first, second| {
+                let first_score = component_outline_score(*first, cross_mm, along_mm);
+                let second_score = component_outline_score(*second, cross_mm, along_mm);
+                second_score.total_cmp(&first_score)
+            });
+            let component = candidates
+                .first()
+                .copied()
+                .filter(|feature| component_outline_score(*feature, cross_mm, along_mm) >= 0.43);
+            let occupancy = if component.is_some() {
+                StripPocketOccupancy::Occupied
+            } else {
+                StripPocketOccupancy::Empty
+            };
+            let confidence = component.map_or(0.70 * grid_confidence, |feature| {
+                (0.45 * grid_confidence
+                    + 0.55 * component_outline_score(feature, cross_mm, along_mm))
+                .clamp(0.0, 1.0)
+            });
+            let component_size_mm =
+                component.map(|feature| [feature.cross_size_mm, feature.along_size_mm]);
+            let component_outline_machine_mm = component.map_or_else(Vec::new, |feature| {
+                component_outline(
+                    cross_mm,
+                    along_mm,
+                    [feature.cross_size_mm, feature.along_size_mm],
+                    candidate,
+                    long_is_y,
+                )
+            });
+            StripFeederPocketObservation {
+                pocket_index: index as u32,
+                center_machine_mm: local_axis_to_machine(cross_mm, along_mm, candidate, long_is_y),
+                occupancy,
+                confidence,
+                component_outline_machine_mm,
+                component_size_mm,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if let Some((labels, occupied_label, separation_score)) =
+        classify_component_luma(&luma, &observations)
+    {
+        for (index, observation) in observations.iter_mut().enumerate() {
+            if observation.occupancy != StripPocketOccupancy::Occupied
+                && labels[index] == occupied_label
+            {
+                observation.occupancy = StripPocketOccupancy::Occupied;
+                observation.confidence =
+                    (0.55 * grid_confidence + 0.45 * separation_score).clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    if let Some(size_mm) = median_component_size(&observations) {
+        for (index, observation) in observations.iter_mut().enumerate() {
+            if observation.occupancy == StripPocketOccupancy::Occupied
+                && observation.component_size_mm.is_none()
+            {
+                observation.component_size_mm = Some(size_mm);
+                observation.component_outline_machine_mm =
+                    component_outline(cross_mm, slots[index], size_mm, candidate, long_is_y);
+            }
+        }
+    }
+    observations
+}
+
+fn component_window_mean(
+    crop: &GrayFrame,
+    candidate: &WorkspaceBoardCandidate,
+    long_is_y: bool,
+    cross_mm: f64,
+    along_mm: f64,
+    pitch_mm: f64,
+) -> f64 {
+    let cross_length_mm = if long_is_y {
+        candidate.width_mm
+    } else {
+        candidate.height_mm
+    };
+    let along_length_mm = if long_is_y {
+        candidate.height_mm
+    } else {
+        candidate.width_mm
+    };
+    let cross_pixels = if long_is_y { crop.width } else { crop.height };
+    let along_pixels = if long_is_y { crop.height } else { crop.width };
+    let cross_center = cross_mm / cross_length_mm * f64::from(cross_pixels);
+    let along_center = along_mm / along_length_mm * f64::from(along_pixels);
+    let cross_radius = (0.8 / cross_length_mm * f64::from(cross_pixels)).ceil() as i32;
+    let along_radius =
+        ((0.5_f64.min(0.2 * pitch_mm)) / along_length_mm * f64::from(along_pixels)).ceil() as i32;
+    let mut sum = 0_u64;
+    let mut count = 0_u64;
+    for along in
+        along_center.round() as i32 - along_radius..=along_center.round() as i32 + along_radius
+    {
+        for cross in
+            cross_center.round() as i32 - cross_radius..=cross_center.round() as i32 + cross_radius
+        {
+            if cross < 0
+                || along < 0
+                || cross >= cross_pixels as i32
+                || along >= along_pixels as i32
+            {
+                continue;
+            }
+            let (x, y) = if long_is_y {
+                (cross as u32, along as u32)
+            } else {
+                (along as u32, cross as u32)
+            };
+            sum += u64::from(crop.pixels[(y * crop.width + x) as usize]);
+            count += 1;
+        }
+    }
+    sum as f64 / count.max(1) as f64
+}
+
+fn classify_component_luma(
+    values: &[f64],
+    observations: &[StripFeederPocketObservation],
+) -> Option<(Vec<usize>, usize, f64)> {
+    if values.len() < 4 || values.len() != observations.len() {
+        return None;
+    }
+    let mut centers = [
+        values.iter().copied().min_by(f64::total_cmp)?,
+        values.iter().copied().max_by(f64::total_cmp)?,
+    ];
+    if centers[1] - centers[0] < 8.0 {
+        return None;
+    }
+    let mut labels = vec![0_usize; values.len()];
+    for _ in 0..12 {
+        for (index, value) in values.iter().enumerate() {
+            labels[index] = usize::from((value - centers[1]).abs() < (value - centers[0]).abs());
+        }
+        for (label, center) in centers.iter_mut().enumerate() {
+            let selected = values
+                .iter()
+                .zip(&labels)
+                .filter(|(_, assigned)| **assigned == label)
+                .map(|(value, _)| *value)
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                return None;
+            }
+            *center = selected.iter().sum::<f64>() / selected.len() as f64;
+        }
+    }
+    let counts = [
+        labels.iter().filter(|label| **label == 0).count(),
+        labels.iter().filter(|label| **label == 1).count(),
+    ];
+    if counts[0] < 2 || counts[1] < 2 || (centers[1] - centers[0]).abs() < 10.0 {
+        return None;
+    }
+    let mut votes = [0_u32; 2];
+    for (index, observation) in observations.iter().enumerate() {
+        if observation.occupancy == StripPocketOccupancy::Occupied {
+            votes[labels[index]] += 1;
+        }
+    }
+    let occupied_label = if votes[0] == votes[1] {
+        usize::from(centers[1] > centers[0])
+    } else {
+        usize::from(votes[1] > votes[0])
+    };
+    let separation_score = ((centers[1] - centers[0]).abs() / 48.0).clamp(0.0, 1.0);
+    Some((labels, occupied_label, separation_score))
+}
+
+fn component_outline(
+    cross_mm: f64,
+    along_mm: f64,
+    size_mm: [f64; 2],
+    candidate: &WorkspaceBoardCandidate,
+    long_is_y: bool,
+) -> Vec<[f64; 2]> {
+    let half_cross = 0.5 * size_mm[0];
+    let half_along = 0.5 * size_mm[1];
+    [
+        [cross_mm - half_cross, along_mm - half_along],
+        [cross_mm + half_cross, along_mm - half_along],
+        [cross_mm + half_cross, along_mm + half_along],
+        [cross_mm - half_cross, along_mm + half_along],
+    ]
+    .into_iter()
+    .map(|point| local_axis_to_machine(point[0], point[1], candidate, long_is_y))
+    .collect()
+}
+
+fn component_outline_score(
+    feature: RectangularFeature,
+    expected_cross_mm: f64,
+    expected_along_mm: f64,
+) -> f64 {
+    let center_error =
+        (feature.cross_mm - expected_cross_mm).hypot(feature.along_mm - expected_along_mm);
+    let center_score = (1.0 - center_error / 0.9).clamp(0.0, 1.0);
+    let aspect = feature.cross_size_mm.max(feature.along_size_mm)
+        / feature.cross_size_mm.min(feature.along_size_mm).max(1e-9);
+    let shape_score = if aspect >= 1.25 {
+        feature.rectangularity
+    } else {
+        0.5 * feature.rectangularity * (1.0 - feature.circularity)
+    };
+    (0.55 * feature.confidence + 0.30 * center_score + 0.15 * shape_score).clamp(0.0, 1.0)
+}
+
+fn median_component_size(observations: &[StripFeederPocketObservation]) -> Option<[f64; 2]> {
+    let sizes = observations
+        .iter()
+        .filter_map(|observation| observation.component_size_mm)
+        .collect::<Vec<_>>();
+    (!sizes.is_empty()).then(|| {
+        let cross = sizes.iter().map(|size| size[0]).collect::<Vec<_>>();
+        let along = sizes.iter().map(|size| size[1]).collect::<Vec<_>>();
+        [median(&cross), median(&along)]
+    })
 }
 
 fn periodicity_score(profile: &[f64], lag: usize) -> Option<f64> {
@@ -1389,15 +1909,6 @@ fn strongest_profile_phase(profile: &[f64], lag: usize) -> usize {
         })
         .max_by(|first, second| first.1.total_cmp(&second.1))
         .map_or(0, |item| item.0)
-}
-
-fn sample_axis(crop: &GrayFrame, cross: i32, along: i32, long_is_y: bool) -> u8 {
-    let (x, y) = if long_is_y {
-        (cross as u32, along as u32)
-    } else {
-        (along as u32, cross as u32)
-    };
-    crop.pixels[(y * crop.width + x) as usize]
 }
 
 fn local_axis_to_machine(
@@ -1507,9 +2018,29 @@ fn render_preview(
         if let Some(line) = proposal.pick_centerline_machine_mm {
             draw_machine_line(&mut preview, candidate, line[0], line[1], [30, 220, 245]);
         }
-        for center in &proposal.pocket_centers_machine_mm {
-            let pixel = machine_to_crop_pixel(*center, candidate, crop);
-            draw_cross(&mut preview, pixel, 3.0, [50, 235, 120]);
+        for observation in &proposal.pocket_observations {
+            let pixel = machine_to_crop_pixel(observation.center_machine_mm, candidate, crop);
+            match observation.occupancy {
+                StripPocketOccupancy::Occupied => {
+                    if observation.component_outline_machine_mm.len() >= 3 {
+                        let points = observation
+                            .component_outline_machine_mm
+                            .iter()
+                            .map(|point| machine_to_crop_pixel(*point, candidate, crop))
+                            .collect::<Vec<_>>();
+                        draw_closed_polyline(&mut preview, &points, [50, 235, 120]);
+                    } else {
+                        draw_circle(&mut preview, pixel, 3.0, [50, 235, 120]);
+                    }
+                }
+                StripPocketOccupancy::Empty => {
+                    draw_circle(&mut preview, pixel, 3.0, [245, 80, 70]);
+                    draw_cross(&mut preview, pixel, 2.0, [245, 80, 70]);
+                }
+                StripPocketOccupancy::Uncertain => {
+                    draw_circle(&mut preview, pixel, 3.0, [255, 190, 40]);
+                }
+            }
         }
     }
     preview
@@ -1592,6 +2123,20 @@ fn draw_line(frame: &mut RgbFrame, start: [f64; 2], end: [f64; 2], color: [u8; 3
             frame,
             (start[0] + fraction * (end[0] - start[0])).round() as i32,
             (start[1] + fraction * (end[1] - start[1])).round() as i32,
+            color,
+        );
+    }
+}
+
+fn draw_closed_polyline(frame: &mut RgbFrame, points: &[[f64; 2]], color: [u8; 3]) {
+    if points.len() < 2 {
+        return;
+    }
+    for index in 0..points.len() {
+        draw_line(
+            frame,
+            points[index],
+            points[(index + 1) % points.len()],
             color,
         );
     }
@@ -1715,16 +2260,9 @@ mod tests {
                     235,
                 );
             }
-            for y_mm in (1..64).step_by(2) {
-                paint_disc(
-                    &mut pixels,
-                    width,
-                    height,
-                    pocket_x,
-                    (f64::from(y_mm) * px_per_mm).round() as i32,
-                    6,
-                    if y_mm % 4 == 1 { 35 } else { 45 },
-                );
+            for y_mm in (1..64).step_by(4) {
+                let pocket_y = (f64::from(y_mm) * px_per_mm).round() as i32;
+                paint_disc(&mut pixels, width, height, pocket_x, pocket_y, 6, 35);
             }
         }
         GrayFrame {
@@ -1757,6 +2295,16 @@ mod tests {
         }
     }
 
+    fn paint_rectangle(frame: &mut GrayFrame, center: [i32; 2], half_size: [i32; 2], value: u8) {
+        for y in center[1] - half_size[1]..=center[1] + half_size[1] {
+            for x in center[0] - half_size[0]..=center[0] + half_size[0] {
+                if x >= 0 && y >= 0 && x < frame.width as i32 && y < frame.height as i32 {
+                    frame.pixels[(y as u32 * frame.width + x as u32) as usize] = value;
+                }
+            }
+        }
+    }
+
     #[test]
     fn finds_plate_aligned_tape_lanes_and_pitch() {
         let result = analyze_strip_feeder_candidate(&synthetic_tape_bank(), &candidate()).unwrap();
@@ -1764,12 +2312,10 @@ mod tests {
         assert_eq!(result.proposals.len(), 3);
         for proposal in &result.proposals {
             assert_eq!(proposal.tape_width_mm, Some(8.0));
-            assert_eq!(proposal.component_pitch_mm, Some(2.0));
             assert!(proposal.sprocket_center_count >= 10);
             assert!(proposal.sprocket_pitch_residual_p95_mm <= 0.2);
             assert!((proposal.tape_rotation_deg + 90.0).abs() < 1e-9);
             assert!(proposal.pick_centerline_machine_mm.is_some());
-            assert!(!proposal.pocket_centers_machine_mm.is_empty());
         }
         assert_eq!(result.rejected_lattices.len(), 3);
         assert!(result.rejected_lattices.iter().all(|rejected| {
@@ -1782,6 +2328,58 @@ mod tests {
             .any(|warning| warning.contains("3 4 mm lattices were rejected")));
         assert_eq!(result.preview.width, 240);
         assert_eq!(result.preview.height, 640);
+    }
+
+    #[test]
+    fn dense_rectangular_features_resolve_two_mm_pitch() {
+        let features = (1..64)
+            .step_by(2)
+            .map(|along_mm| RectangularFeature {
+                cross_mm: 6.5,
+                along_mm: f64::from(along_mm),
+                cross_size_mm: 1.0,
+                along_size_mm: 0.6,
+                rectangularity: 0.9,
+                circularity: 0.2,
+                confidence: 0.9,
+            })
+            .collect::<Vec<_>>();
+
+        let result = estimate_component_grid(&features, 6.5, Some([1.0, 63.0]), 64.0);
+
+        assert_eq!(result.0, Some(2.0));
+        assert!((result.1.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn recognizes_component_outlines_and_empty_feed_positions() {
+        let width = 240_u32;
+        let height = 640_u32;
+        let mut frame = GrayFrame {
+            width,
+            height,
+            pixels: vec![105; (width * height) as usize],
+        };
+        for y_mm in (2..63).step_by(4) {
+            paint_disc(&mut frame.pixels, width, height, 30, y_mm * 10, 7, 235);
+        }
+        for y_mm in (2..63).step_by(8) {
+            paint_rectangle(&mut frame, [65, y_mm * 10], [10, 5], 25);
+        }
+
+        let result = analyze_strip_feeder_candidate(&frame, &candidate()).unwrap();
+
+        assert_eq!(result.proposals.len(), 1);
+        let proposal = &result.proposals[0];
+        assert_eq!(proposal.tape_width_mm, Some(8.0));
+        assert_eq!(proposal.component_pitch_mm, Some(4.0));
+        assert!(proposal.present_count >= 6);
+        assert!(proposal.absent_count >= 6);
+        assert!(proposal.component_size_mm.is_some());
+        assert!(proposal.pocket_observations.iter().any(|observation| {
+            observation.occupancy == StripPocketOccupancy::Occupied
+                && observation.component_outline_machine_mm.len() == 4
+        }));
     }
 
     #[test]
@@ -1801,25 +2399,11 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_track_spacing_does_not_index_an_empty_width_set() {
-        let tracks = vec![
-            SprocketTrack {
-                cross_mm: 2.0,
-                circles: Vec::new(),
-                residual_p95_mm: 0.1,
-                confidence: 0.8,
-                paired_pocket_centerline_mm: None,
-            },
-            SprocketTrack {
-                cross_mm: 7.0,
-                circles: Vec::new(),
-                residual_p95_mm: 0.1,
-                confidence: 0.8,
-                paired_pocket_centerline_mm: None,
-            },
-        ];
-
-        assert_eq!(infer_tape_width(&tracks[0], &tracks), None);
+    fn tape_width_is_not_inferred_from_neighboring_feeder_spacing() {
+        assert_eq!(
+            infer_tape_geometry(&[], 2.0, Some([0.0, 40.0]), 24.0, 64.0, Some(1.0)),
+            (None, None, None, None, 0.0),
+        );
     }
 
     #[test]

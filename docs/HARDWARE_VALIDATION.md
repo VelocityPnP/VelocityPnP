@@ -1980,6 +1980,35 @@ tape, but their two possible pocket sides have similar image support. This
 result does not complete an automatic eight-lane setup. Pickup-Z and indexing
 validation remain open.
 
+### Strip-feeder population inventory replay
+
+On 2026-08-25, version 3 was replayed against the same three focused scans.
+The controller stayed disconnected. The replay caused no machine motion.
+
+Version 3 removed tape-width inference from neighboring sprocket rows. Those
+distances describe feeder placement, not tape width. Component evidence at
+the standard pocket offsets now selects the width and common feeder-bank
+direction. Rectangular contour lattices measure part pitch and visible part
+size. Lane-local brightness classes, anchored by detected part contours,
+classify visible feed positions.
+
+The combined report deduplicated the overlapping X=93 mm lane. It found all
+eight installed strips. Each resolved as 8 mm tape with 4 mm part pitch. Seven
+lanes passed automatically. The X=115.8 mm lane retained a review flag because
+of weaker image confidence.
+
+Across the visible tape extents, the report counted 84 present and 48 absent
+positions, with no uncertain positions. Per-lane present/absent counts were
+3/13, 4/13, 12/3, 9/7, 11/3, 13/1, 17/2, and 15/6. Measured visible part
+outlines ranged from 1.8 by 0.9 mm to 3.2 by 2.0 mm. These sizes do not claim
+part identity or standardized package size.
+
+The result is stored on reconnaissance scan
+`85255974-f066-42b0-80c5-050404fa84ee`. Artifact
+`mosaic-strip-feeder-inventory.png` overlays cyan strip boundaries, green
+present-part outlines, and red absent-position marks on the workspace mosaic.
+The related JSON artifact is `strip-feeder-inventory.json`.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

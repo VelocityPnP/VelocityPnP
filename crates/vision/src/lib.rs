@@ -5,6 +5,7 @@
 mod board_registration;
 mod opencv_backend;
 mod strip_feeder;
+mod strip_feeder_inventory;
 mod workspace_board_discovery;
 mod workspace_features;
 mod workspace_height_map;
@@ -33,6 +34,9 @@ pub use strip_feeder::{
     StripFeederLiveHoldoutArtifacts, StripFeederVisionArtifacts,
     STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM, STRIP_FEEDER_SPROCKET_PITCH_MM,
     STRIP_FEEDER_VISION_ALGORITHM,
+};
+pub use strip_feeder_inventory::{
+    build_strip_feeder_inventory, StripFeederInventoryArtifacts, STRIP_FEEDER_INVENTORY_ALGORITHM,
 };
 pub use workspace_board_discovery::{
     build_workspace_discovery_context, discover_workspace_boards, discover_workspace_objects,
