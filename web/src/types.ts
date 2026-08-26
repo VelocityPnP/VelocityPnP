@@ -764,17 +764,38 @@ export interface StripFeederInventoryReport {
   preview_artifact_name: string;
   created_at: string;
   source_scan_ids: string[];
+  evidence_mosaics: Array<{
+    scan_id: string;
+    artifact_name: string;
+    raster_transform: {
+      top_left_x_mm: number;
+      top_left_y_mm: number;
+      x_mm_per_pixel: number;
+      y_mm_per_pixel: number;
+    };
+  }>;
+  preview_raster_transform: object | null;
   lane_count: number;
   populated_lane_count: number;
   present_count: number;
   absent_count: number;
   uncertain_count: number;
+  coverage_complete: boolean;
+  recommended_rescan_region: {
+    x_min_mm: number;
+    x_max_mm: number;
+    y_min_mm: number;
+    y_max_mm: number;
+  } | null;
   lanes: Array<{
     inventory_index: number;
     source_scan_id: string;
+    source_scan_ids: string[];
     source_candidate_index: number;
     source_proposal_index: number;
     strip_outline_machine_mm: Array<[number, number]>;
+    negative_end_truncated: boolean;
+    positive_end_truncated: boolean;
     proposal: StripFeederLaneProposal;
   }>;
   warnings: string[];
@@ -902,6 +923,13 @@ export interface WorkspaceScanReport {
     present_count: number;
     absent_count: number;
     uncertain_count: number;
+    coverage_complete: boolean;
+    recommended_rescan_region: {
+      x_min_mm: number;
+      x_max_mm: number;
+      y_min_mm: number;
+      y_max_mm: number;
+    } | null;
   } | null;
   change_set: {
     baseline_id: string;

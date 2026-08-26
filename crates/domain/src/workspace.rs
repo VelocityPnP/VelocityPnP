@@ -469,10 +469,23 @@ pub struct StripFeederVisionReport {
 pub struct StripFeederInventoryLane {
     pub inventory_index: u32,
     pub source_scan_id: Uuid,
+    #[serde(default)]
+    pub source_scan_ids: Vec<Uuid>,
     pub source_candidate_index: u32,
     pub source_proposal_index: u32,
     pub strip_outline_machine_mm: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub negative_end_truncated: bool,
+    #[serde(default)]
+    pub positive_end_truncated: bool,
     pub proposal: StripFeederLaneProposal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederInventoryEvidenceMosaic {
+    pub scan_id: Uuid,
+    pub artifact_name: String,
+    pub raster_transform: WorkspaceRasterTransform,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -484,11 +497,19 @@ pub struct StripFeederInventoryReport {
     pub preview_artifact_name: String,
     pub created_at: DateTime<Utc>,
     pub source_scan_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub evidence_mosaics: Vec<StripFeederInventoryEvidenceMosaic>,
+    #[serde(default)]
+    pub preview_raster_transform: Option<WorkspaceRasterTransform>,
     pub lane_count: u32,
     pub populated_lane_count: u32,
     pub present_count: u32,
     pub absent_count: u32,
     pub uncertain_count: u32,
+    #[serde(default)]
+    pub coverage_complete: bool,
+    #[serde(default)]
+    pub recommended_rescan_region: Option<WorkspaceScanRegion>,
     pub lanes: Vec<StripFeederInventoryLane>,
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -504,6 +525,10 @@ pub struct StripFeederInventorySummary {
     pub present_count: u32,
     pub absent_count: u32,
     pub uncertain_count: u32,
+    #[serde(default)]
+    pub coverage_complete: bool,
+    #[serde(default)]
+    pub recommended_rescan_region: Option<WorkspaceScanRegion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

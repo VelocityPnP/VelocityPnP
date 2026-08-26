@@ -1997,8 +1997,8 @@ eight installed strips. Each resolved as 8 mm tape with 4 mm part pitch. Seven
 lanes passed automatically. The X=115.8 mm lane retained a review flag because
 of weaker image confidence.
 
-Across the visible tape extents, the report counted 84 present and 48 absent
-positions, with no uncertain positions. Per-lane present/absent counts were
+Across the visible tape extents, the report counted at least 84 present and 48
+absent positions, with no uncertain positions. Per-lane present/absent counts were
 3/13, 4/13, 12/3, 9/7, 11/3, 13/1, 17/2, and 15/6. Measured visible part
 outlines ranged from 1.8 by 0.9 mm to 3.2 by 2.0 mm. These sizes do not claim
 part identity or standardized package size.
@@ -2008,6 +2008,33 @@ The result is stored on reconnaissance scan
 `mosaic-strip-feeder-inventory.png` overlays cyan strip boundaries, green
 present-part outlines, and red absent-position marks on the workspace mosaic.
 The related JSON artifact is `strip-feeder-inventory.json`.
+
+Review on 2026-08-26 found that the first combined preview used the 0.20
+mm/pixel installed-plate projection as its visible feeder background. The
+detector itself used the focused scans' height-corrected crops, but the preview
+made the annotations appear to use the wrong surface. Version 2 now requires
+height-corrected source mosaics and inserts their 0.10 mm/pixel feeder pixels
+into the combined preview. It also preserves an RGB workspace-discovery preview
+when the target scan has one. Thus, one output can retain detected workspace
+objects, KiCad board details, and feeder inventory.
+
+The two focused scans that overlap the X=93.4 mm strip disagree on two pocket
+states. Version 2 keeps those states uncertain instead of selecting one scan.
+The merged result is therefore at least 83 present, 47 absent, and 2 uncertain
+positions. Two lanes require review. The original 84/48 total above is the sum
+selected by the version 3 lane reports before this conservative merge.
+
+Coverage analysis also found that all eight north tape ends were within two
+sprocket pitches of the Y=195 mm scan edge. The eighth lane also reached the
+south edge. The merged counts are therefore lower bounds, not complete feeder
+counts. The automatically recommended extension region is X=75 to 175 mm and
+Y=92.0 to 209.5 mm. No motion was used for this replay.
+
+The retained target scan covers only X=70 to 275 mm and Y=105 to 195 mm. It has
+no workspace-discovery preview and cannot reproduce the earlier full-workspace
+PCB overlay after the host restart removed that temporary image. A new
+full-workspace reconnaissance scan and focused edge scans remain required for
+the final combined physical artifact.
 
 ## Procedure sources
 

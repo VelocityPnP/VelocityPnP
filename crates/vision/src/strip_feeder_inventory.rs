@@ -6,11 +6,12 @@ use opencv::imgproc;
 use opencv::prelude::*;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    StripFeederInventoryLane, StripFeederInventoryReport, StripFeederLaneProposal,
-    StripFeederVisionReport, StripPocketOccupancy, WorkspaceRasterTransform,
+    StripFeederInventoryEvidenceMosaic, StripFeederInventoryLane, StripFeederInventoryReport,
+    StripFeederLaneProposal, StripFeederVisionReport, StripPocketOccupancy,
+    WorkspaceRasterTransform, WorkspaceScanRegion,
 };
 
-pub const STRIP_FEEDER_INVENTORY_ALGORITHM: &str = "strip_feeder_inventory.v1";
+pub const STRIP_FEEDER_INVENTORY_ALGORITHM: &str = "strip_feeder_inventory.v2";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripFeederInventoryArtifacts {
@@ -18,20 +19,44 @@ pub struct StripFeederInventoryArtifacts {
     pub preview: RgbFrame,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripFeederInventorySourceMosaic {
+    pub scan_id: Uuid,
+    pub artifact_name: String,
+    pub raster_transform: WorkspaceRasterTransform,
+    pub frame: GrayFrame,
+}
+
+pub struct StripFeederInventoryBuild<'a> {
+    pub background: &'a RgbFrame,
+    pub raster: WorkspaceRasterTransform,
+    pub workspace_scan_id: Uuid,
+    pub source_mosaic_artifact_name: &'a str,
+    pub reports: &'a [StripFeederVisionReport],
+    pub source_mosaics: &'a [StripFeederInventorySourceMosaic],
+    pub report_artifact_name: &'a str,
+    pub preview_artifact_name: &'a str,
+}
+
 pub fn build_strip_feeder_inventory(
-    mosaic: &GrayFrame,
-    raster: WorkspaceRasterTransform,
-    workspace_scan_id: Uuid,
-    source_mosaic_artifact_name: &str,
-    reports: &[StripFeederVisionReport],
-    report_artifact_name: &str,
-    preview_artifact_name: &str,
+    build: StripFeederInventoryBuild<'_>,
 ) -> Result<StripFeederInventoryArtifacts> {
+    let StripFeederInventoryBuild {
+        background,
+        raster,
+        workspace_scan_id,
+        source_mosaic_artifact_name,
+        reports,
+        source_mosaics,
+        report_artifact_name,
+        preview_artifact_name,
+    } = build;
     ensure!(
-        mosaic.width > 0
-            && mosaic.height > 0
-            && mosaic.pixels.len() == mosaic.width as usize * mosaic.height as usize,
-        "strip feeder inventory mosaic is invalid"
+        background.width > 0
+            && background.height > 0
+            && background.pixels.len()
+                == background.width as usize * background.height as usize * 3,
+        "strip feeder inventory background is invalid"
     );
     ensure!(
         raster.x_mm_per_pixel.is_finite()
@@ -39,6 +64,19 @@ pub fn build_strip_feeder_inventory(
             && raster.x_mm_per_pixel.abs() > 1e-9
             && raster.y_mm_per_pixel.abs() > 1e-9,
         "strip feeder inventory raster transform is invalid"
+    );
+    ensure!(
+        !source_mosaics.is_empty(),
+        "strip feeder inventory requires height-corrected source mosaics"
+    );
+    for source in source_mosaics {
+        validate_source_mosaic(source)?;
+    }
+    ensure!(
+        reports.iter().all(|report| source_mosaics
+            .iter()
+            .any(|source| source.scan_id == report.source_scan_id)),
+        "each strip feeder report requires its height-corrected source mosaic"
     );
 
     let mut lanes = reports
@@ -49,9 +87,12 @@ pub fn build_strip_feeder_inventory(
                 StripFeederInventoryLane {
                     inventory_index: 0,
                     source_scan_id: report.source_scan_id,
+                    source_scan_ids: vec![report.source_scan_id],
                     source_candidate_index: report.source_candidate_index,
                     source_proposal_index: proposal.proposal_index,
                     strip_outline_machine_mm: outline,
+                    negative_end_truncated: false,
+                    positive_end_truncated: false,
                     proposal,
                 }
             })
@@ -78,9 +119,7 @@ pub fn build_strip_feeder_inventory(
             .iter_mut()
             .find(|existing| same_physical_lane(&lane, existing))
         {
-            if compare_lane_quality(&lane, existing).is_gt() {
-                *existing = lane;
-            }
+            merge_inventory_lane(existing, lane);
         } else {
             deduplicated.push(lane);
         }
@@ -92,6 +131,8 @@ pub fn build_strip_feeder_inventory(
     for (index, lane) in deduplicated.iter_mut().enumerate() {
         lane.inventory_index = index as u32;
     }
+    let (coverage_complete, recommended_rescan_region) =
+        measure_inventory_coverage(&mut deduplicated, source_mosaics);
 
     let present_count = deduplicated
         .iter()
@@ -125,6 +166,24 @@ pub fn build_strip_feeder_inventory(
             "{review_count} feeder lanes retain review-required image evidence"
         ));
     }
+    let truncated_count = deduplicated
+        .iter()
+        .filter(|lane| lane.negative_end_truncated || lane.positive_end_truncated)
+        .count();
+    if truncated_count > 0 {
+        warnings.push(format!(
+            "{truncated_count} feeder lanes reach a source-image edge; counts are lower bounds"
+        ));
+    }
+    let preview_raster = inventory_preview_raster(raster, source_mosaics);
+    let evidence_mosaics = source_mosaics
+        .iter()
+        .map(|source| StripFeederInventoryEvidenceMosaic {
+            scan_id: source.scan_id,
+            artifact_name: source.artifact_name.clone(),
+            raster_transform: source.raster_transform,
+        })
+        .collect();
     let report = StripFeederInventoryReport {
         algorithm_version: STRIP_FEEDER_INVENTORY_ALGORITHM.into(),
         workspace_scan_id,
@@ -133,16 +192,185 @@ pub fn build_strip_feeder_inventory(
         preview_artifact_name: preview_artifact_name.into(),
         created_at: Utc::now(),
         source_scan_ids,
+        evidence_mosaics,
+        preview_raster_transform: Some(preview_raster),
         lane_count: deduplicated.len() as u32,
         populated_lane_count,
         present_count,
         absent_count,
         uncertain_count,
+        coverage_complete,
+        recommended_rescan_region,
         lanes: deduplicated,
         warnings,
     };
-    let preview = render_inventory_overlay(mosaic, raster, &report)?;
+    let preview =
+        render_inventory_overlay(background, raster, source_mosaics, preview_raster, &report)?;
     Ok(StripFeederInventoryArtifacts { report, preview })
+}
+
+fn validate_source_mosaic(source: &StripFeederInventorySourceMosaic) -> Result<()> {
+    ensure!(
+        source.frame.width > 0
+            && source.frame.height > 0
+            && source.frame.pixels.len()
+                == source.frame.width as usize * source.frame.height as usize,
+        "strip feeder source mosaic is invalid"
+    );
+    ensure!(
+        source.raster_transform.x_mm_per_pixel.is_finite()
+            && source.raster_transform.y_mm_per_pixel.is_finite()
+            && source.raster_transform.x_mm_per_pixel.abs() > 1e-9
+            && source.raster_transform.y_mm_per_pixel.abs() > 1e-9,
+        "strip feeder source raster transform is invalid"
+    );
+    Ok(())
+}
+
+fn inventory_preview_raster(
+    raster: WorkspaceRasterTransform,
+    sources: &[StripFeederInventorySourceMosaic],
+) -> WorkspaceRasterTransform {
+    let x_scale = sources
+        .iter()
+        .map(|source| source.raster_transform.x_mm_per_pixel.abs())
+        .fold(raster.x_mm_per_pixel.abs(), f64::min);
+    let y_scale = sources
+        .iter()
+        .map(|source| source.raster_transform.y_mm_per_pixel.abs())
+        .fold(raster.y_mm_per_pixel.abs(), f64::min);
+    WorkspaceRasterTransform {
+        top_left_x_mm: raster.top_left_x_mm,
+        top_left_y_mm: raster.top_left_y_mm,
+        x_mm_per_pixel: x_scale.copysign(raster.x_mm_per_pixel),
+        y_mm_per_pixel: y_scale.copysign(raster.y_mm_per_pixel),
+    }
+}
+
+fn measure_inventory_coverage(
+    lanes: &mut [StripFeederInventoryLane],
+    sources: &[StripFeederInventorySourceMosaic],
+) -> (bool, Option<WorkspaceScanRegion>) {
+    let mut combined_region = sources.iter().map(source_region).reduce(union_regions);
+    let mut complete = true;
+    for lane in lanes {
+        let lane_sources = sources
+            .iter()
+            .filter(|source| lane.source_scan_ids.contains(&source.scan_id))
+            .collect::<Vec<_>>();
+        if lane_sources.is_empty() {
+            complete = false;
+            continue;
+        }
+        let Some(line) = lane.proposal.pick_centerline_machine_mm else {
+            complete = false;
+            continue;
+        };
+        let Some(direction) = normalize(subtract(line[1], line[0])) else {
+            complete = false;
+            continue;
+        };
+        let mut centers = lane.proposal.sprocket_centers_machine_mm.clone();
+        centers.sort_by(|first, second| dot(*first, direction).total_cmp(&dot(*second, direction)));
+        let (Some(negative_end), Some(positive_end)) =
+            (centers.first().copied(), centers.last().copied())
+        else {
+            complete = false;
+            continue;
+        };
+        let threshold_mm = 2.0 * lane.proposal.sprocket_pitch_mm;
+        let negative_exit = lane_sources
+            .iter()
+            .map(|source| source_region(source))
+            .filter(|region| region_contains(*region, negative_end, 1.0))
+            .map(|region| ray_exit_distance(negative_end, scale(direction, -1.0), region))
+            .max_by(f64::total_cmp)
+            .unwrap_or(0.0);
+        let positive_exit = lane_sources
+            .iter()
+            .map(|source| source_region(source))
+            .filter(|region| region_contains(*region, positive_end, 1.0))
+            .map(|region| ray_exit_distance(positive_end, direction, region))
+            .max_by(f64::total_cmp)
+            .unwrap_or(0.0);
+        lane.negative_end_truncated = negative_exit <= threshold_mm;
+        lane.positive_end_truncated = positive_exit <= threshold_mm;
+        if lane.negative_end_truncated || lane.positive_end_truncated {
+            complete = false;
+        }
+        if let Some(recommended) = &mut combined_region {
+            let extension_mm = 4.0 * lane.proposal.sprocket_pitch_mm;
+            if lane.negative_end_truncated {
+                include_point(
+                    recommended,
+                    add(negative_end, scale(direction, -extension_mm)),
+                );
+            }
+            if lane.positive_end_truncated {
+                include_point(
+                    recommended,
+                    add(positive_end, scale(direction, extension_mm)),
+                );
+            }
+        }
+    }
+    (complete, (!complete).then_some(combined_region).flatten())
+}
+
+fn source_region(source: &StripFeederInventorySourceMosaic) -> WorkspaceScanRegion {
+    let raster = source.raster_transform;
+    let opposite_x = raster.top_left_x_mm
+        + raster.x_mm_per_pixel * f64::from(source.frame.width.saturating_sub(1));
+    let opposite_y = raster.top_left_y_mm
+        + raster.y_mm_per_pixel * f64::from(source.frame.height.saturating_sub(1));
+    WorkspaceScanRegion {
+        x_min_mm: raster.top_left_x_mm.min(opposite_x),
+        x_max_mm: raster.top_left_x_mm.max(opposite_x),
+        y_min_mm: raster.top_left_y_mm.min(opposite_y),
+        y_max_mm: raster.top_left_y_mm.max(opposite_y),
+    }
+}
+
+fn union_regions(first: WorkspaceScanRegion, second: WorkspaceScanRegion) -> WorkspaceScanRegion {
+    WorkspaceScanRegion {
+        x_min_mm: first.x_min_mm.min(second.x_min_mm),
+        x_max_mm: first.x_max_mm.max(second.x_max_mm),
+        y_min_mm: first.y_min_mm.min(second.y_min_mm),
+        y_max_mm: first.y_max_mm.max(second.y_max_mm),
+    }
+}
+
+fn include_point(region: &mut WorkspaceScanRegion, point: [f64; 2]) {
+    region.x_min_mm = region.x_min_mm.min(point[0]);
+    region.x_max_mm = region.x_max_mm.max(point[0]);
+    region.y_min_mm = region.y_min_mm.min(point[1]);
+    region.y_max_mm = region.y_max_mm.max(point[1]);
+}
+
+fn region_contains(region: WorkspaceScanRegion, point: [f64; 2], margin_mm: f64) -> bool {
+    point[0] >= region.x_min_mm - margin_mm
+        && point[0] <= region.x_max_mm + margin_mm
+        && point[1] >= region.y_min_mm - margin_mm
+        && point[1] <= region.y_max_mm + margin_mm
+}
+
+fn ray_exit_distance(point: [f64; 2], direction: [f64; 2], region: WorkspaceScanRegion) -> f64 {
+    let mut distances = Vec::new();
+    if direction[0] > 1e-9 {
+        distances.push((region.x_max_mm - point[0]) / direction[0]);
+    } else if direction[0] < -1e-9 {
+        distances.push((region.x_min_mm - point[0]) / direction[0]);
+    }
+    if direction[1] > 1e-9 {
+        distances.push((region.y_max_mm - point[1]) / direction[1]);
+    } else if direction[1] < -1e-9 {
+        distances.push((region.y_min_mm - point[1]) / direction[1]);
+    }
+    distances
+        .into_iter()
+        .filter(|distance| distance.is_finite() && *distance >= 0.0)
+        .min_by(f64::total_cmp)
+        .unwrap_or(0.0)
 }
 
 fn compare_lane_quality(
@@ -170,6 +398,165 @@ fn compare_lane_quality(
                 .sprocket_center_count
                 .cmp(&second.proposal.sprocket_center_count)
         })
+}
+
+fn merge_inventory_lane(
+    existing: &mut StripFeederInventoryLane,
+    incoming: StripFeederInventoryLane,
+) {
+    let incoming_is_primary = compare_lane_quality(&incoming, existing).is_gt();
+    let mut primary = if incoming_is_primary {
+        incoming.clone()
+    } else {
+        existing.clone()
+    };
+    let secondary = if incoming_is_primary {
+        existing.clone()
+    } else {
+        incoming
+    };
+    primary.source_scan_ids.extend(secondary.source_scan_ids);
+    primary.source_scan_ids.sort_unstable();
+    primary.source_scan_ids.dedup();
+
+    for center in secondary.proposal.sprocket_centers_machine_mm {
+        if !primary
+            .proposal
+            .sprocket_centers_machine_mm
+            .iter()
+            .any(|existing| point_distance(*existing, center) <= 1.0)
+        {
+            primary.proposal.sprocket_centers_machine_mm.push(center);
+        }
+    }
+    for observation in secondary.proposal.pocket_observations {
+        if let Some(current) = primary
+            .proposal
+            .pocket_observations
+            .iter_mut()
+            .find(|current| {
+                point_distance(current.center_machine_mm, observation.center_machine_mm) <= 0.8
+            })
+        {
+            if current.occupancy != observation.occupancy
+                && (current.confidence - observation.confidence).abs() < 0.15
+            {
+                current.occupancy = StripPocketOccupancy::Uncertain;
+                current.confidence = current.confidence.min(observation.confidence);
+                current.component_outline_machine_mm.clear();
+                current.component_size_mm = None;
+            } else if observation.confidence > current.confidence {
+                *current = observation;
+            }
+        } else {
+            primary.proposal.pocket_observations.push(observation);
+        }
+    }
+    primary
+        .proposal
+        .findings
+        .extend(secondary.proposal.findings);
+    primary.proposal.findings.sort();
+    primary.proposal.findings.dedup();
+    primary.proposal.sprocket_center_count =
+        primary.proposal.sprocket_centers_machine_mm.len() as u32;
+    if let Some(line) = primary.proposal.pick_centerline_machine_mm {
+        if let Some(direction) = normalize(subtract(line[1], line[0])) {
+            primary
+                .proposal
+                .pocket_observations
+                .sort_by(|first, second| {
+                    dot(first.center_machine_mm, direction)
+                        .total_cmp(&dot(second.center_machine_mm, direction))
+                });
+            for (index, observation) in primary.proposal.pocket_observations.iter_mut().enumerate()
+            {
+                observation.pocket_index = index as u32;
+            }
+            primary.proposal.pocket_centers_machine_mm = primary
+                .proposal
+                .pocket_observations
+                .iter()
+                .map(|observation| observation.center_machine_mm)
+                .collect();
+            let line_offset = cross_product(line[0], direction);
+            let projections = primary
+                .proposal
+                .pocket_centers_machine_mm
+                .iter()
+                .map(|point| dot(*point, direction))
+                .collect::<Vec<_>>();
+            if let (Some(minimum), Some(maximum)) = (
+                projections.iter().copied().min_by(f64::total_cmp),
+                projections.iter().copied().max_by(f64::total_cmp),
+            ) {
+                let normal = [-direction[1], direction[0]];
+                let anchor = scale(normal, -line_offset);
+                primary.proposal.pick_centerline_machine_mm = Some([
+                    add(anchor, scale(direction, minimum)),
+                    add(anchor, scale(direction, maximum)),
+                ]);
+            }
+        }
+    }
+    primary.proposal.present_count = primary
+        .proposal
+        .pocket_observations
+        .iter()
+        .filter(|item| item.occupancy == StripPocketOccupancy::Occupied)
+        .count() as u32;
+    primary.proposal.absent_count = primary
+        .proposal
+        .pocket_observations
+        .iter()
+        .filter(|item| item.occupancy == StripPocketOccupancy::Empty)
+        .count() as u32;
+    primary.proposal.uncertain_count = primary.proposal.pocket_observations.len() as u32
+        - primary.proposal.present_count
+        - primary.proposal.absent_count;
+    primary
+        .proposal
+        .findings
+        .retain(|finding| !finding.contains(" feed positions were measured"));
+    primary.proposal.findings.push(format!(
+        "{} present, {} absent, and {} uncertain feed positions were measured",
+        primary.proposal.present_count,
+        primary.proposal.absent_count,
+        primary.proposal.uncertain_count
+    ));
+    if primary.proposal.uncertain_count > 0 {
+        primary.proposal.review_required = true;
+        primary
+            .proposal
+            .findings
+            .push("overlapping scans disagree on one or more pocket states".into());
+    }
+    primary.proposal.findings.sort();
+    primary.proposal.findings.dedup();
+    let component_sizes = primary
+        .proposal
+        .pocket_observations
+        .iter()
+        .filter_map(|item| item.component_size_mm)
+        .collect::<Vec<_>>();
+    primary.proposal.component_size_mm = median_size(&component_sizes);
+    primary.strip_outline_machine_mm = strip_outline(&primary.proposal);
+    *existing = primary;
+}
+
+fn median_size(values: &[[f64; 2]]) -> Option<[f64; 2]> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut first = values.iter().map(|value| value[0]).collect::<Vec<_>>();
+    let mut second = values.iter().map(|value| value[1]).collect::<Vec<_>>();
+    first.sort_by(f64::total_cmp);
+    second.sort_by(f64::total_cmp);
+    Some([first[first.len() / 2], second[second.len() / 2]])
+}
+
+fn point_distance(first: [f64; 2], second: [f64; 2]) -> f64 {
+    (first[0] - second[0]).hypot(first[1] - second[1])
 }
 
 fn lane_sprocket_center(lane: &StripFeederInventoryLane) -> Option<[f64; 2]> {
@@ -328,20 +715,48 @@ fn strip_outline_from_positions(
 }
 
 fn render_inventory_overlay(
-    mosaic: &GrayFrame,
+    background: &RgbFrame,
     raster: WorkspaceRasterTransform,
+    source_mosaics: &[StripFeederInventorySourceMosaic],
+    preview_raster: WorkspaceRasterTransform,
     report: &StripFeederInventoryReport,
 ) -> Result<RgbFrame> {
-    let mut pixels = Vec::with_capacity(mosaic.pixels.len() * 3);
-    for luma in &mosaic.pixels {
-        pixels.extend_from_slice(&[*luma, *luma, *luma]);
+    let width = ((f64::from(background.width.saturating_sub(1)) * raster.x_mm_per_pixel.abs()
+        / preview_raster.x_mm_per_pixel.abs())
+    .round() as u32)
+        + 1;
+    let height = ((f64::from(background.height.saturating_sub(1)) * raster.y_mm_per_pixel.abs()
+        / preview_raster.y_mm_per_pixel.abs())
+    .round() as u32)
+        + 1;
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let machine = pixel_to_machine([f64::from(x), f64::from(y)], preview_raster);
+            let color = sample_rgb(background, raster, machine).unwrap_or([0, 0, 0]);
+            pixels.extend_from_slice(&color);
+        }
     }
     let mut preview = RgbFrame {
-        width: mosaic.width,
-        height: mosaic.height,
+        width,
+        height,
         pixels,
     };
-    let to_pixel = |point| machine_to_pixel(point, raster);
+    for lane in &report.lanes {
+        for source in source_mosaics
+            .iter()
+            .filter(|source| lane.source_scan_ids.contains(&source.scan_id))
+        {
+            composite_source_polygon(
+                &mut preview,
+                preview_raster,
+                source,
+                &lane.strip_outline_machine_mm,
+            );
+        }
+    }
+
+    let to_pixel = |point| machine_to_pixel(point, preview_raster);
     for lane in &report.lanes {
         draw_closed_polyline(
             &mut preview,
@@ -376,13 +791,20 @@ fn render_inventory_overlay(
     }
 
     let mut text = vec![(
-        [12.0, 20.0],
+        [18.0, 30.0],
         format!(
-            "GREEN PRESENT  RED ABSENT  {} LANES  {} COMPONENTS",
+            "WORKSPACE + CORRECTED FEEDERS  GREEN PRESENT  RED ABSENT  {} LANES  {} COMPONENTS",
             report.lane_count, report.present_count
         ),
     )];
-    let panel_x = f64::from(mosaic.width).mul_add(0.56, 0.0).round();
+    let lane_text_start = if report.coverage_complete { 62.0 } else { 92.0 };
+    if !report.coverage_complete {
+        text.push((
+            [18.0, 58.0],
+            "INCOMPLETE COVERAGE: COUNTS ARE LOWER BOUNDS; RESCAN OUTLINED REGION".into(),
+        ));
+    }
+    let panel_x = f64::from(preview.width).mul_add(0.56, 0.0).round();
     for lane in &report.lanes {
         let proposal = &lane.proposal;
         let size = proposal.component_size_mm.map_or_else(
@@ -390,9 +812,12 @@ fn render_inventory_overlay(
             |size| format!("{:.1}x{:.1}mm", size[0], size[1]),
         );
         text.push((
-            [panel_x, 45.0 + 22.0 * f64::from(lane.inventory_index)],
+            [
+                panel_x,
+                lane_text_start + 30.0 * f64::from(lane.inventory_index),
+            ],
             format!(
-                "F{}  {:.0}mm  P{:.0}  {} PRESENT / {} ABSENT  {}{}",
+                "F{}  {:.0}mm  P{:.0}  {} PRESENT / {} ABSENT  {}{}{}",
                 lane.inventory_index + 1,
                 proposal.tape_width_mm.unwrap_or(0.0),
                 proposal.component_pitch_mm.unwrap_or(0.0),
@@ -404,14 +829,144 @@ fn render_inventory_overlay(
                 } else {
                     ""
                 },
+                if lane.negative_end_truncated || lane.positive_end_truncated {
+                    "  CLIPPED"
+                } else {
+                    ""
+                },
             ),
         ));
     }
-    put_overlay_text(&mut preview, &text)?;
+    if let Some(region) = report.recommended_rescan_region {
+        let points = [
+            [region.x_min_mm, region.y_min_mm],
+            [region.x_max_mm, region.y_min_mm],
+            [region.x_max_mm, region.y_max_mm],
+            [region.x_min_mm, region.y_max_mm],
+        ]
+        .into_iter()
+        .map(to_pixel)
+        .collect::<Vec<_>>();
+        draw_closed_polyline(&mut preview, &points, [255, 190, 40]);
+    }
+    put_overlay_text(&mut preview, &text, 0.68)?;
     Ok(preview)
 }
 
-fn put_overlay_text(frame: &mut RgbFrame, labels: &[([f64; 2], String)]) -> Result<()> {
+fn composite_source_polygon(
+    preview: &mut RgbFrame,
+    preview_raster: WorkspaceRasterTransform,
+    source: &StripFeederInventorySourceMosaic,
+    polygon_machine_mm: &[[f64; 2]],
+) {
+    if polygon_machine_mm.len() < 3 {
+        return;
+    }
+    let polygon_pixels = polygon_machine_mm
+        .iter()
+        .map(|point| machine_to_pixel(*point, preview_raster))
+        .collect::<Vec<_>>();
+    let min_x = polygon_pixels
+        .iter()
+        .map(|point| point[0])
+        .min_by(f64::total_cmp)
+        .unwrap_or(0.0)
+        .floor()
+        .max(0.0) as u32;
+    let max_x = polygon_pixels
+        .iter()
+        .map(|point| point[0])
+        .max_by(f64::total_cmp)
+        .unwrap_or(0.0)
+        .ceil()
+        .min(f64::from(preview.width.saturating_sub(1))) as u32;
+    let min_y = polygon_pixels
+        .iter()
+        .map(|point| point[1])
+        .min_by(f64::total_cmp)
+        .unwrap_or(0.0)
+        .floor()
+        .max(0.0) as u32;
+    let max_y = polygon_pixels
+        .iter()
+        .map(|point| point[1])
+        .max_by(f64::total_cmp)
+        .unwrap_or(0.0)
+        .ceil()
+        .min(f64::from(preview.height.saturating_sub(1))) as u32;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let pixel = [f64::from(x), f64::from(y)];
+            if !point_in_polygon(pixel, &polygon_pixels) {
+                continue;
+            }
+            let machine = pixel_to_machine(pixel, preview_raster);
+            let Some(luma) = sample_gray(&source.frame, source.raster_transform, machine) else {
+                continue;
+            };
+            set_rgb(preview, x as i32, y as i32, [luma, luma, luma]);
+        }
+    }
+}
+
+fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+    let mut inside = false;
+    let mut previous = polygon.len() - 1;
+    for current in 0..polygon.len() {
+        let first = polygon[current];
+        let second = polygon[previous];
+        if (first[1] > point[1]) != (second[1] > point[1])
+            && point[0]
+                < (second[0] - first[0]) * (point[1] - first[1]) / (second[1] - first[1]) + first[0]
+        {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+fn sample_gray(
+    frame: &GrayFrame,
+    raster: WorkspaceRasterTransform,
+    machine: [f64; 2],
+) -> Option<u8> {
+    let pixel = machine_to_pixel(machine, raster);
+    let x = pixel[0].round() as i32;
+    let y = pixel[1].round() as i32;
+    if x < 0 || y < 0 || x >= frame.width as i32 || y >= frame.height as i32 {
+        return None;
+    }
+    Some(frame.pixels[(y as u32 * frame.width + x as u32) as usize])
+}
+
+fn sample_rgb(
+    frame: &RgbFrame,
+    raster: WorkspaceRasterTransform,
+    machine: [f64; 2],
+) -> Option<[u8; 3]> {
+    let pixel = machine_to_pixel(machine, raster);
+    let x = pixel[0].round() as i32;
+    let y = pixel[1].round() as i32;
+    if x < 0 || y < 0 || x >= frame.width as i32 || y >= frame.height as i32 {
+        return None;
+    }
+    let index = (y as u32 * frame.width + x as u32) as usize * 3;
+    Some([
+        frame.pixels[index],
+        frame.pixels[index + 1],
+        frame.pixels[index + 2],
+    ])
+}
+
+fn pixel_to_machine(point: [f64; 2], raster: WorkspaceRasterTransform) -> [f64; 2] {
+    [
+        raster.top_left_x_mm + point[0] * raster.x_mm_per_pixel,
+        raster.top_left_y_mm + point[1] * raster.y_mm_per_pixel,
+    ]
+}
+
+fn put_overlay_text(frame: &mut RgbFrame, labels: &[([f64; 2], String)], scale: f64) -> Result<()> {
     let row = Mat::from_slice(&frame.pixels).context("creating inventory RGB buffer")?;
     let reshaped = row
         .reshape(3, frame.height as i32)
@@ -424,9 +979,9 @@ fn put_overlay_text(frame: &mut RgbFrame, labels: &[([f64; 2], String)]) -> Resu
             label,
             point,
             imgproc::FONT_HERSHEY_SIMPLEX,
-            0.42,
+            scale,
             Scalar::new(0.0, 0.0, 0.0, 0.0),
-            3,
+            4,
             imgproc::LINE_AA,
             false,
         )?;
@@ -435,7 +990,7 @@ fn put_overlay_text(frame: &mut RgbFrame, labels: &[([f64; 2], String)]) -> Resu
             label,
             point,
             imgproc::FONT_HERSHEY_SIMPLEX,
-            0.42,
+            scale,
             Scalar::new(245.0, 235.0, 60.0, 0.0),
             1,
             imgproc::LINE_AA,
@@ -657,10 +1212,10 @@ mod tests {
         let base_scan_id = Uuid::new_v4();
         let first_scan_id = Uuid::new_v4();
         let second_scan_id = Uuid::new_v4();
-        let mosaic = GrayFrame {
+        let background = RgbFrame {
             width: 240,
             height: 200,
-            pixels: vec![80; 240 * 200],
+            pixels: vec![80; 240 * 200 * 3],
         };
         let reports = vec![
             report(first_scan_id, vec![proposal(4.0, 1, 1)]),
@@ -672,20 +1227,40 @@ mod tests {
                 ],
             ),
         ];
-        let result = build_strip_feeder_inventory(
-            &mosaic,
-            WorkspaceRasterTransform {
+        let source_raster = WorkspaceRasterTransform {
+            top_left_x_mm: 0.0,
+            top_left_y_mm: 30.0,
+            x_mm_per_pixel: 0.1,
+            y_mm_per_pixel: -0.1,
+        };
+        let sources = [first_scan_id, second_scan_id]
+            .into_iter()
+            .map(|scan_id| StripFeederInventorySourceMosaic {
+                scan_id,
+                artifact_name: "mosaic-height-corrected.png".into(),
+                raster_transform: source_raster,
+                frame: GrayFrame {
+                    width: 240,
+                    height: 300,
+                    pixels: vec![110; 240 * 300],
+                },
+            })
+            .collect::<Vec<_>>();
+        let result = build_strip_feeder_inventory(StripFeederInventoryBuild {
+            background: &background,
+            raster: WorkspaceRasterTransform {
                 top_left_x_mm: 0.0,
                 top_left_y_mm: 20.0,
                 x_mm_per_pixel: 0.1,
                 y_mm_per_pixel: -0.1,
             },
-            base_scan_id,
-            "mosaic.png",
-            &reports,
-            "inventory.json",
-            "inventory.png",
-        )
+            workspace_scan_id: base_scan_id,
+            source_mosaic_artifact_name: "mosaic.png",
+            reports: &reports,
+            source_mosaics: &sources,
+            report_artifact_name: "inventory.json",
+            preview_artifact_name: "inventory.png",
+        })
         .unwrap();
 
         assert_eq!(result.report.lane_count, 2);
@@ -693,6 +1268,14 @@ mod tests {
         assert_eq!(result.report.present_count, 3);
         assert_eq!(result.report.absent_count, 3);
         assert_eq!(result.report.lanes[0].source_scan_id, second_scan_id);
+        assert_eq!(result.report.lanes[0].source_scan_ids.len(), 2);
+        assert!(!result.report.coverage_complete);
+        assert!(result.report.recommended_rescan_region.is_some());
+        assert!(result
+            .preview
+            .pixels
+            .chunks_exact(3)
+            .any(|pixel| pixel == [110, 110, 110]));
         assert!(result.preview.pixels.iter().any(|pixel| *pixel != 80));
     }
 }

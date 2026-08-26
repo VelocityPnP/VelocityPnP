@@ -561,12 +561,19 @@ cargo run -p velocitypnp -- build-strip-feeder-inventory WORKSPACE_SCAN \
 The API route is
 `POST /workspace-scans/SCAN_UUID/strip-feeder-inventory`. The Python client
 uses `build_strip_feeder_inventory()`. Compatible source scans must use the
-same profile and calibration. The operation deduplicates overlapping lanes
-and stores `strip-feeder-inventory.json` and
+same profile and calibration. Each feeder report must trace to a
+height-corrected mosaic. If the target scan has completed workspace discovery,
+the operation starts with `mosaic-board-candidates.png`. Thus, detected
+workspace elements, the fitted PCB outline, KiCad placement marks, and KiCad
+fiducials remain in the full-workspace image. It replaces only the inside of
+each strip with corrected feeder pixels, merges observations from overlapping
+or adjacent scans, and stores `strip-feeder-inventory.json` and
 `mosaic-strip-feeder-inventory.png` on the workspace scan. Cyan polygons mark
 strip bounds. Green polygons mark present component outlines. Red marks show
-absent feed positions; amber marks show uncertain positions. This operation
-causes no motion.
+absent feed positions; amber marks show uncertain positions. A lane that ends
+within two sprocket pitches of a source-image edge is marked clipped. Its
+counts are lower bounds, and the report gives a region for an extension scan.
+This operation causes no motion.
 
 A measured lane can be stored as an inactive draft:
 

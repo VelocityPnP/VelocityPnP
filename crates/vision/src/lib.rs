@@ -36,7 +36,8 @@ pub use strip_feeder::{
     STRIP_FEEDER_VISION_ALGORITHM,
 };
 pub use strip_feeder_inventory::{
-    build_strip_feeder_inventory, StripFeederInventoryArtifacts, STRIP_FEEDER_INVENTORY_ALGORITHM,
+    build_strip_feeder_inventory, StripFeederInventoryArtifacts, StripFeederInventoryBuild,
+    StripFeederInventorySourceMosaic, STRIP_FEEDER_INVENTORY_ALGORITHM,
 };
 pub use workspace_board_discovery::{
     build_workspace_discovery_context, discover_workspace_boards, discover_workspace_objects,
@@ -182,6 +183,36 @@ pub fn decode_gray_png(encoded: &[u8]) -> anyhow::Result<GrayFrame> {
     let output = reader.next_frame(&mut pixels)?;
     pixels.truncate(output.buffer_size());
     Ok(GrayFrame {
+        width: output.width,
+        height: output.height,
+        pixels,
+    })
+}
+
+pub fn decode_rgb_png(encoded: &[u8]) -> anyhow::Result<RgbFrame> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(encoded));
+    let mut reader = decoder.read_info()?;
+    anyhow::ensure!(
+        reader.info().bit_depth == png::BitDepth::Eight,
+        "workspace preview must be an 8-bit PNG"
+    );
+    let color_type = reader.info().color_type;
+    anyhow::ensure!(
+        matches!(color_type, png::ColorType::Grayscale | png::ColorType::Rgb),
+        "workspace preview must be a grayscale or RGB PNG"
+    );
+    let mut decoded = vec![0; reader.output_buffer_size()];
+    let output = reader.next_frame(&mut decoded)?;
+    decoded.truncate(output.buffer_size());
+    let pixels = match color_type {
+        png::ColorType::Grayscale => decoded
+            .into_iter()
+            .flat_map(|luma| [luma, luma, luma])
+            .collect(),
+        png::ColorType::Rgb => decoded,
+        _ => unreachable!("validated PNG color type"),
+    };
+    Ok(RgbFrame {
         width: output.width,
         height: output.height,
         pixels,

@@ -306,10 +306,14 @@ paths:
       operationId: buildStripFeederInventory
       description: >-
         Combines retained strip-feeder vision reports from compatible focused
-        scans. It deduplicates overlapping lanes and annotates strip outlines,
-        measured component outlines, and present, absent, or uncertain feed
-        positions on this workspace scan's mosaic. This operation causes no
-        machine motion.
+        scans. Every report must come from a height-corrected mosaic. If the
+        target scan has a semantic workspace preview, that full preview remains
+        the background, including detected elements and PCB design marks.
+        Corrected feeder pixels replace only the strip interiors. The result
+        merges overlapping lanes and annotates strip outlines, measured
+        component outlines, and present, absent, or uncertain feed positions.
+        Lanes that reach a scan edge make counts lower bounds and produce a
+        recommended rescan region. This operation causes no machine motion.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -2245,13 +2249,20 @@ components:
       required:
         - inventory_index
         - source_scan_id
+        - source_scan_ids
         - source_candidate_index
         - source_proposal_index
         - strip_outline_machine_mm
+        - negative_end_truncated
+        - positive_end_truncated
         - proposal
       properties:
         inventory_index: { type: integer, minimum: 0 }
         source_scan_id: { type: string, format: uuid }
+        source_scan_ids:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
         source_candidate_index: { type: integer, minimum: 0 }
         source_proposal_index: { type: integer, minimum: 0 }
         strip_outline_machine_mm:
@@ -2259,7 +2270,16 @@ components:
           minItems: 4
           maxItems: 4
           items: { $ref: "#/components/schemas/Point2d" }
+        negative_end_truncated: { type: boolean }
+        positive_end_truncated: { type: boolean }
         proposal: { $ref: "#/components/schemas/StripFeederLaneProposal" }
+    StripFeederInventoryEvidenceMosaic:
+      type: object
+      required: [scan_id, artifact_name, raster_transform]
+      properties:
+        scan_id: { type: string, format: uuid }
+        artifact_name: { type: string }
+        raster_transform: { $ref: "#/components/schemas/WorkspaceRasterTransform" }
     StripFeederInventoryReport:
       type: object
       required:
@@ -2270,28 +2290,49 @@ components:
         - preview_artifact_name
         - created_at
         - source_scan_ids
+        - evidence_mosaics
+        - preview_raster_transform
         - lane_count
         - populated_lane_count
         - present_count
         - absent_count
         - uncertain_count
+        - coverage_complete
+        - recommended_rescan_region
         - lanes
         - warnings
       properties:
         algorithm_version: { type: string }
         workspace_scan_id: { type: string, format: uuid }
-        source_mosaic_artifact_name: { type: string }
+        source_mosaic_artifact_name:
+          type: string
+          description: >-
+            Full-workspace background artifact. This is the semantic workspace
+            preview when one exists, or the best available workspace mosaic.
         report_artifact_name: { type: string }
         preview_artifact_name: { type: string }
         created_at: { type: string, format: date-time }
         source_scan_ids:
           type: array
           items: { type: string, format: uuid }
+        evidence_mosaics:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/StripFeederInventoryEvidenceMosaic" }
+        preview_raster_transform:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceRasterTransform"
+            - type: "null"
         lane_count: { type: integer, minimum: 0 }
         populated_lane_count: { type: integer, minimum: 0 }
         present_count: { type: integer, minimum: 0 }
         absent_count: { type: integer, minimum: 0 }
         uncertain_count: { type: integer, minimum: 0 }
+        coverage_complete: { type: boolean }
+        recommended_rescan_region:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceScanRegion"
+            - type: "null"
         lanes:
           type: array
           items: { $ref: "#/components/schemas/StripFeederInventoryLane" }
@@ -2309,6 +2350,8 @@ components:
         - present_count
         - absent_count
         - uncertain_count
+        - coverage_complete
+        - recommended_rescan_region
       properties:
         algorithm_version: { type: string }
         report_artifact_name: { type: string }
@@ -2318,6 +2361,11 @@ components:
         present_count: { type: integer, minimum: 0 }
         absent_count: { type: integer, minimum: 0 }
         uncertain_count: { type: integer, minimum: 0 }
+        coverage_complete: { type: boolean }
+        recommended_rescan_region:
+          oneOf:
+            - $ref: "#/components/schemas/WorkspaceScanRegion"
+            - type: "null"
     StripFeederRegistration:
       type: object
       required:

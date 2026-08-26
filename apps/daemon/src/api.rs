@@ -64,22 +64,24 @@ use velocitypnp_vision::{
     build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
     camera_sample_metrics, capture_gray_frame, capture_gray_frames, compare_workspace_observation,
     compare_workspace_reconnaissance, compose_workspace_refinements,
-    composite_workspace_camera_aperture, decode_gray_png, detect_board_fiducial_near,
-    detect_bright_fiducial_near, detect_bright_reference_pad, detect_camera_target,
-    detect_installed_plate_hole, discover_workspace_objects, encode_gray_png, encode_rgb_png,
-    encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
-    fit_planar_camera_model, fit_top_side_board_registration, interpolate_planar_camera_model,
-    mean_nozzle_detection, measure_workspace_parallax, merge_workspace_height_maps,
-    monotonic_timestamp, plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing,
-    plan_workspace_scan, query_camera_controls, reanalyze_workspace_seam_health,
-    render_board_fiducial_evidence, render_workspace_height_mosaic_with_consistency,
+    composite_workspace_camera_aperture, decode_gray_png, decode_rgb_png,
+    detect_board_fiducial_near, detect_bright_fiducial_near, detect_bright_reference_pad,
+    detect_camera_target, detect_installed_plate_hole, discover_workspace_objects, encode_gray_png,
+    encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
+    fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
+    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
+    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    reanalyze_workspace_seam_health, render_board_fiducial_evidence,
+    render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
     summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
     CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
     DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame, NozzleToolingReport,
-    PersistentGrayCapture, RgbFrame, RgbaFrame, V4l2CaptureConfig, VisualHomingPlan,
+    PersistentGrayCapture, RgbFrame, RgbaFrame, StripFeederInventoryBuild,
+    StripFeederInventorySourceMosaic, V4l2CaptureConfig, VisualHomingPlan,
     WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
     WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject, WorkspaceParallaxObservation,
     WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRasterEvidence,
@@ -5075,10 +5077,15 @@ async fn build_strip_feeder_inventory_report(
         )
     })?;
     let source_mosaic_artifact_name = scan
-        .refinement_composite
+        .board_discovery
         .as_ref()
-        .filter(|summary| summary.accepted)
-        .map(|summary| summary.mosaic_artifact_name.clone())
+        .map(|summary| summary.preview_artifact_name.clone())
+        .or_else(|| {
+            scan.refinement_composite
+                .as_ref()
+                .filter(|summary| summary.accepted)
+                .map(|summary| summary.mosaic_artifact_name.clone())
+        })
         .or_else(|| {
             scan.height_map
                 .as_ref()
@@ -5098,6 +5105,7 @@ async fn build_strip_feeder_inventory_report(
     }
 
     let mut reports = Vec::with_capacity(body.evidence_sources.len());
+    let mut corrected_sources = Vec::with_capacity(body.evidence_sources.len());
     for source in body.evidence_sources {
         let evidence_scan = state
             .store
@@ -5142,22 +5150,83 @@ async fn build_strip_feeder_inventory_report(
                 "strip feeder vision report source does not match its artifact"
             )));
         }
+        let object_report = load_workspace_object_report(&state, &evidence_scan)?;
+        let candidate = object_report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate_index == source.candidate_index)
+            .ok_or_else(|| ApiError::not_found("strip feeder source candidate not found"))?;
+        if candidate.evidence_artifact_name.as_deref() != Some(&report.source_artifact_name) {
+            return Err(ApiError::internal(anyhow::anyhow!(
+                "strip feeder report does not match its normalized source evidence"
+            )));
+        }
+        let corrected_artifact_name = object_report.source_mosaic_artifact_name;
+        let height_corrected = evidence_scan.height_map.as_ref().is_some_and(|summary| {
+            summary.corrected_mosaic_artifact_name == corrected_artifact_name
+        });
+        let refined = evidence_scan
+            .refinement_composite
+            .as_ref()
+            .is_some_and(|summary| {
+                summary.accepted && summary.mosaic_artifact_name == corrected_artifact_name
+            });
+        if !height_corrected && !refined {
+            return Err(ApiError::bad_request(
+                "strip feeder recognition requires a height-corrected evidence mosaic",
+            ));
+        }
+        if !corrected_sources
+            .iter()
+            .any(|(scan_id, _, _, _)| *scan_id == source.scan_id)
+        {
+            let source_raster = evidence_scan.raster_transform.ok_or_else(|| {
+                ApiError::bad_request(
+                    "strip feeder evidence has no machine-coordinate raster transform",
+                )
+            })?;
+            let (media_type, data) = state
+                .store
+                .get_workspace_scan_artifact(source.scan_id, &corrected_artifact_name)
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| {
+                    ApiError::not_found("height-corrected strip feeder mosaic not found")
+                })?;
+            if media_type != "image/png" {
+                return Err(ApiError::internal(anyhow::anyhow!(
+                    "height-corrected strip feeder mosaic is not a PNG"
+                )));
+            }
+            corrected_sources.push((source.scan_id, corrected_artifact_name, source_raster, data));
+        }
         reports.push(report);
     }
 
     let workspace_scan_id = scan.id;
     let report_source_name = source_mosaic_artifact_name.clone();
     let inventory = tokio::task::spawn_blocking(move || {
-        let mosaic = decode_gray_png(&mosaic_data)?;
-        build_strip_feeder_inventory(
-            &mosaic,
-            raster_transform,
+        let background = decode_rgb_png(&mosaic_data)?;
+        let source_mosaics = corrected_sources
+            .into_iter()
+            .map(|(scan_id, artifact_name, raster_transform, data)| {
+                Ok(StripFeederInventorySourceMosaic {
+                    scan_id,
+                    artifact_name,
+                    raster_transform,
+                    frame: decode_gray_png(&data)?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        build_strip_feeder_inventory(StripFeederInventoryBuild {
+            background: &background,
+            raster: raster_transform,
             workspace_scan_id,
-            &report_source_name,
-            &reports,
-            STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT,
-            STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT,
-        )
+            source_mosaic_artifact_name: &report_source_name,
+            reports: &reports,
+            source_mosaics: &source_mosaics,
+            report_artifact_name: STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT,
+            preview_artifact_name: STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT,
+        })
     })
     .await
     .map_err(ApiError::internal)?
@@ -5189,6 +5258,8 @@ async fn build_strip_feeder_inventory_report(
         present_count: inventory.report.present_count,
         absent_count: inventory.report.absent_count,
         uncertain_count: inventory.report.uncertain_count,
+        coverage_complete: inventory.report.coverage_complete,
+        recommended_rescan_region: inventory.report.recommended_rescan_region,
     });
     scan.updated_at = Utc::now();
     persist_workspace_manifest(&state, &mut scan)
@@ -18370,6 +18441,22 @@ mod tests {
         scan.mosaic_width_px = Some(240);
         scan.mosaic_height_px = Some(640);
         scan.mosaic_artifact_name = Some("mosaic.png".into());
+        scan.height_map = Some(WorkspaceHeightMapSummary {
+            map_artifact_name: "height.json".into(),
+            preview_artifact_name: "height.png".into(),
+            confidence_artifact_name: "height-confidence.png".into(),
+            corrected_mosaic_artifact_name: "mosaic.png".into(),
+            class_overlay_artifact_name: "height-overlay.png".into(),
+            class_preview_artifact_name: "height-classes.png".into(),
+            cell_size_mm: 2.0,
+            rows: 32,
+            columns: 12,
+            measured_cells: 384,
+            inferred_cells: 0,
+            unknown_cells: 0,
+            candidate_fractions: vec![0.0, 1.0],
+            camera_aperture: None,
+        });
         scan.board_discovery = Some(WorkspaceBoardDiscoverySummary {
             algorithm_version: WORKSPACE_BOARD_DISCOVERY_ALGORITHM.into(),
             source_mosaic_artifact_name: "mosaic.png".into(),
@@ -18489,6 +18576,24 @@ mod tests {
                 &encode_gray_png(&crop).unwrap(),
             )
             .unwrap();
+        let semantic_preview = RgbFrame {
+            width,
+            height,
+            pixels: [105_u8, 106, 107]
+                .into_iter()
+                .cycle()
+                .take((width * height * 3) as usize)
+                .collect(),
+        };
+        state
+            .store
+            .put_workspace_scan_artifact(
+                scan.id,
+                WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
+                "image/png",
+                &encode_rgb_png(&semantic_preview).unwrap(),
+            )
+            .unwrap();
 
         let report = build_strip_feeder_vision(
             State(state.clone()),
@@ -18534,6 +18639,10 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(inventory.lane_count, 3);
+        assert_eq!(
+            inventory.source_mosaic_artifact_name,
+            WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT
+        );
         for name in [
             STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT,
             STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT,
