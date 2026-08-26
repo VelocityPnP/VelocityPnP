@@ -521,12 +521,14 @@ candidate that has feeder evidence. The specialist must still find a carrier
 tape lattice before a usable draft can be stored.
 
 OpenCV contour measurements find 1.5 mm sprocket-hole candidates. At least
-three features must fit the 4 mm carrier-tape lattice. The crop basis comes
-from the installed plate, so tape axes stay parallel or perpendicular to the
-calibrated plate axes. Neighboring sprocket rows describe feeder placement;
-they do not describe tape width. Version 3 instead tests component evidence
-at the EIA-481-C `F` offsets for standard 8, 12, 16, and 24 mm tape. It
-selects the common bank direction from the strongest lanes.
+five features must fit the 4 mm carrier-tape lattice during workspace
+analysis. This rejects short plate-hole alignments. The live holdout uses its
+separate, bounded camera span. The crop basis comes from the installed plate,
+so tape axes stay parallel or perpendicular to the calibrated plate axes.
+Neighboring sprocket rows describe feeder placement; they do not describe tape
+width. The detector tests component evidence at the EIA-481-C `F` offsets for
+standard 8, 12, 16, and 24 mm tape. It selects the common bank direction from
+the strongest lanes.
 
 Rectangular component contours estimate visible part size. A constrained
 lattice fit selects a 2, 4, 8, 12, or 16 mm component pitch while penalizing
@@ -535,10 +537,8 @@ component contours, classify each observed feed position as occupied, empty,
 or uncertain. Counts cover only the visible tape extent. Part size is a
 visible-outline estimate, not a package or part-identity result.
 
-candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
 Circular component pockets can also form a 4 mm lattice. The detector pairs
 two candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
-candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
 the separation is less than the width of standard carrier tape. The stronger
 row stays as the sprocket row. The weaker row becomes rejected pocket evidence
 and gives the exact pickup side for 8 mm tape. Unpaired or ambiguous rows stay

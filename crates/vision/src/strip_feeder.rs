@@ -10,7 +10,7 @@ use velocitypnp_domain::{
     StripPocketOccupancy, WorkspaceBoardCandidate,
 };
 
-pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v3";
+pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v4";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
@@ -26,7 +26,7 @@ const SPROCKET_DIAMETER_MIN_MM: f64 = 1.2;
 const SPROCKET_DIAMETER_MAX_MM: f64 = 2.2;
 const SPROCKET_TRACK_TOLERANCE_MM: f64 = 0.75;
 const SPROCKET_LATTICE_TOLERANCE_MM: f64 = 0.45;
-const MINIMUM_SPROCKETS_PER_TRACK: usize = 3;
+const MINIMUM_SPROCKETS_PER_TRACK: usize = 5;
 const EIGHT_MM_POCKET_CENTER_OFFSET_MM: f64 = 3.5;
 const POCKET_ROW_PAIR_TOLERANCE_MM: f64 = 0.45;
 const STANDARD_TAPE_WIDTHS_MM: [f64; 4] = [8.0, 12.0, 16.0, 24.0];
@@ -2396,6 +2396,22 @@ mod tests {
 
         assert!(result.proposals.is_empty());
         assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_three_hole_plate_lattice() {
+        let mut frame = GrayFrame {
+            width: 240,
+            height: 640,
+            pixels: vec![100; 240 * 640],
+        };
+        for center_y in [50, 90, 130] {
+            paint_disc(&mut frame.pixels, 240, 640, 50, center_y, 7, 240);
+        }
+
+        let result = analyze_strip_feeder_candidate(&frame, &candidate()).unwrap();
+
+        assert!(result.proposals.is_empty());
     }
 
     #[test]

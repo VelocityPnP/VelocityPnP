@@ -218,6 +218,24 @@ impl WorkspaceObjectClassifier for DeterministicWorkspaceObjectClassifier {
 fn resolve_workspace_classification(
     observations: &[WorkspaceClassificationEvidence],
 ) -> (WorkspaceObjectClass, f64, bool) {
+    let feeder_tracks = observations
+        .iter()
+        .find(|item| item.source == "staging_parallel_feeder_tracks");
+    let visual_board = observations.iter().find(|item| {
+        item.suggested_class == WorkspaceObjectClass::Board
+            && item.source.starts_with("kicad_visual_outline:")
+    });
+    if let (Some(feeder_tracks), Some(visual_board)) = (feeder_tracks, visual_board) {
+        if feeder_tracks.confidence >= 0.90
+            && visual_board.confidence - feeder_tracks.confidence <= 0.03
+        {
+            // A tape bank can contain a strong square or rectangular outline.
+            // Prefer the staging-specific repeated-track evidence when the
+            // generic outline match does not separate the two hypotheses.
+            // The sprocket-lattice specialist remains the next gate.
+            return (WorkspaceObjectClass::Feeder, feeder_tracks.confidence, true);
+        }
+    }
     let strongest = observations
         .iter()
         .filter(|item| item.suggested_class != WorkspaceObjectClass::Unknown)
@@ -1591,6 +1609,29 @@ mod tests {
         assert_eq!(
             resolve_workspace_classification(&observations),
             (WorkspaceObjectClass::Feeder, 0.66, true)
+        );
+    }
+
+    #[test]
+    fn staging_tracks_override_an_indistinct_visual_board_outline() {
+        let observations = vec![
+            WorkspaceClassificationEvidence {
+                source: "kicad_visual_outline:board-id".into(),
+                suggested_class: WorkspaceObjectClass::Board,
+                confidence: 0.977,
+                explanation: String::new(),
+            },
+            WorkspaceClassificationEvidence {
+                source: "staging_parallel_feeder_tracks".into(),
+                suggested_class: WorkspaceObjectClass::Feeder,
+                confidence: 0.966,
+                explanation: String::new(),
+            },
+        ];
+
+        assert_eq!(
+            resolve_workspace_classification(&observations),
+            (WorkspaceObjectClass::Feeder, 0.966, true)
         );
     }
 

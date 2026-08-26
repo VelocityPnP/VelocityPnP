@@ -2036,6 +2036,64 @@ PCB overlay after the host restart removed that temporary image. A new
 full-workspace reconnaissance scan and focused edge scans remain required for
 the final combined physical artifact.
 
+### Full semantic workspace and feeder inventory overlay
+
+On 2026-08-26, the operator confirmed the full travel envelope. Coarse home
+`38d86e6f-b51b-4417-8fa3-fff4683b8662` established X0, Y0, and Z31.5. Fine
+home `94c8f228-588e-49a9-9264-db2ce76a3a02` repeated the N2 datum contact at
+Z59.1 and applied zero correction.
+
+Full reconnaissance scan `badf767f-967f-4ef0-91d7-2401dc1292ac` captured all
+1,023 planned tiles. It covered X=-8.026 to 441.032 mm and Y=84.054 to 325.991
+mm at 0.2 mm/pixel. Capture, mosaic generation, and seam analysis took 20
+minutes 47 seconds. Seam health selected seven focused regions.
+
+Refinement batch `a86dee55-dc9a-456e-a083-36b6dea2db58` captured all 2,855
+planned height-aware tiles in about 87 minutes. Its child scans were:
+
+| Target | Region | Tiles | Scan |
+| ---: | --- | ---: | --- |
+| 0 | main feeder bank | 1,007 | `cd0fe50f-61bf-4023-897d-8970dfa2c2d9` |
+| 1 | smaller feeder area | 530 | `4a57e86f-fa56-4f27-b18d-0e12b92cfd8a` |
+| 2 | nozzle bank | 180 | `8bd5a682-1ad6-414d-a7e3-5c891e00b202` |
+| 3 | fixed camera-area feature | 50 | `7e6bfaed-fb10-4b79-ade0-7b75a3eed13d` |
+| 4 | fixed camera-area feature | 8 | `791130e8-9490-4e2c-9120-3eacb7fbe40f` |
+| 5 | datum and bottom-camera area | 306 | `bcf151c6-d831-41a1-a226-c7baf2e71bce` |
+| 6 | FTP PCB | 774 | `fe31d7a6-d76d-428b-9e07-1662b889d99c` |
+
+All seven patches had complete coverage and passed the automatic composition
+gate. Object proposals then found seven workspace elements: the FTP PCB, two
+feeder regions, the datum PCB, two nozzle-bank regions, and the bottom-camera
+guard. The FTP board matched `Opulo FTP PCB REV00` at 0.9905 confidence. Its
+fitted center was X395.457, Y258.778 mm, and its angle was -1.510 degrees. The
+preview retained the fitted board outline, 80 enabled top-side component
+placements, and three KiCad fiducials.
+
+The focused feeder crop also fit a 75 mm square inside the tape bank. Strong
+staging-plate parallel-track evidence differed from that false board match by
+only 0.012 confidence. The classifier now routes that close conflict to the
+feeder specialist and retains review state. The first specialist replay found
+one false three-hole lattice between two tapes. Version 4 requires five holes
+for offline workspace analysis and keeps the shorter live-holdout rule
+separate.
+
+The final 0.1 mm/pixel replay found exactly eight populated component strips.
+All eight are 8 mm tape with 4 mm part pitch. It measured 110 present, 45
+absent, and no uncertain visible feed positions. Seven tape extents are
+complete in the refined image. The eighth leaves the south image boundary, so
+its 27 present and 2 absent positions remain lower bounds.
+
+The parent scan stores the combined RGB artifact as
+`mosaic-strip-feeder-inventory.png`. It is 4,493 by 2,421 pixels and 8.7 MiB.
+Its SHA-256 is
+`7fb0bb5a814e039c79b763896e8991521f8cb3ef1d5259ee718570a89f017002`.
+The image keeps all semantic workspace outlines, the PCB design overlay, the
+height-corrected feeder pixels, strip outlines, and present or absent marks.
+
+Normal disconnect operation `80b4775e-b066-47a0-a59f-9b989fcc218c` disabled
+the machine and released control. No emergency stop was used. Final state was
+disconnected, unhomed, and fault-free.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
