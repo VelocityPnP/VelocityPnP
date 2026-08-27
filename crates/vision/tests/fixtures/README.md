@@ -66,4 +66,4 @@ cargo run -p velocitypnp-vision \
   crates/vision/tests/fixtures/lumenpnp-v3.0.4-strip-feeder-bank-ground-truth.json
 ```
 
-The fixture contains 170 component pockets: 117 occupied and 53 empty.
+The fixture contains 170 component pockets: 118 occupied and 52 empty.

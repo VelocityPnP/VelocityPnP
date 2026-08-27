@@ -2094,11 +2094,12 @@ Normal disconnect operation `80b4775e-b066-47a0-a59f-9b989fcc218c` disabled
 the machine and released control. No emergency stop was used. Final state was
 disconnected, unhomed, and fault-free.
 
-### Operator-labeled feeder inventory replay
+### Initial operator-labeled feeder inventory replay
 
-On 2026-08-27, the operator labeled all eight strips in the retained feeder
-crop. The labels contain 170 component pockets: 117 occupied and 53 empty.
-They also identify the endpoint undercount for each strip. The source remains
+On 2026-08-27, the operator gave initial labels for all eight strips in the
+retained feeder crop. These labels contained 170 component pockets: 117
+occupied and 53 empty. A later visual review corrected four lower endpoints;
+see the next section. The source remains
 `object-evidence-000.png` on scan
 `cd0fe50f-61bf-4023-897d-8970dfa2c2d9`. Its SHA-256 is
 `b08a2ddbe513b79de702cbe057cf7b879a35bc23633a5cbb5f86288dd1d129bf`.
@@ -2126,6 +2127,33 @@ Baseline `4db1e1da-1f58-488a-a2f4-cca2ec1b0a5b` activated parent scan
 `3b837434-a961-4e60-945a-18335b42d21f` and object proposal version 6. The scan,
 refinements, feeder report, overlay, and active baseline are in the persistent
 database. The replay used a simulated daemon and caused no machine motion.
+
+### Corrected feeder endpoint replay
+
+On 2026-08-27, a follow-up review rejected one lower pocket on feeder 2 and
+added one lower pocket on feeder 4, feeder 6, and feeder 7. It also superseded
+the earlier lower-end estimates for feeder 3 and feeder 5. The corrected
+fixture contains 170 pockets: 118 occupied and 52 empty.
+
+Version 6 raises the first endpoint patch-correlation gate from 0.35 to 0.43.
+The rejected feeder 2 patch measured 0.412. It expands the positive range gate
+from 2.08 mm to 2.12 mm for a 4 mm pitch. Feeder 7 measured 2.099 mm from the
+last sprocket and had 0.974 patch correlation. One further phase-correct slot
+can pass when direct image evidence remains. The added feeder 4 and feeder 6
+patches measured 0.911 and 0.434. This is a general image gate, not a stored
+count for a specific feeder.
+
+The corrected no-motion replay found all 170 labeled pocket centers. It had
+167 correct confident occupancy labels, no incorrect confident labels, and
+three uncertain labels. The uncertain labels are the empty transition pocket
+on feeder 1 and feeder 2, and an occupied transition pocket on feeder 5.
+
+The rebuilt inventory has 117 present, 50 absent, and 3 uncertain positions.
+Feeder 8 still reaches the source-image boundary, so the report remains
+clipped. The regenerated 4,493 by 2,421 full-workspace overlay has SHA-256
+`0e03e134a6fe2c210e4821b94ea73d1e4e810664cb740b775e921d76f670daf7`.
+The simulated daemon updated the persistent parent scan and caused no machine
+motion.
 
 ## Procedure sources
 

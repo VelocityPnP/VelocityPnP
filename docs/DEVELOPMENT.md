@@ -543,6 +543,12 @@ lane and remains far enough from the crop edge. This fixes the common
 half-pitch undercount without changing the fitted pitch. A weak endpoint stays
 outside the count.
 
+Version 6 uses a stronger correlation gate for the first extra pocket. At the
+lower image boundary, it can accept one more phase-correct pocket when the
+feeder body hides the terminal sprocket but the component-pocket patch remains
+visible. This extension is limited to one additional slot and requires direct
+image evidence.
+
 Occupancy uses three lane-local checks after contour detection. Strong luma
 transitions can reject repeated embossed pocket outlines. A homogeneous lane
 with repeated component evidence can recover weak component contours. Bright

@@ -8,50 +8,34 @@
   "lanes": [
     {
       "feeder_number": 1,
-      "missing_top_pockets_before_tuning": 1,
-      "missing_bottom_pockets_before_tuning": 1,
       "occupancy": "EEEEEEEPPPPPPPPPPPPP"
     },
     {
       "feeder_number": 2,
-      "missing_top_pockets_before_tuning": 1,
-      "missing_bottom_pockets_before_tuning": 1,
-      "occupancy": "EEEEEEEEEEPPPPPPPPPPP"
+      "occupancy": "EEEEEEEEEEPPPPPPPPPP"
     },
     {
       "feeder_number": 3,
-      "missing_top_pockets_before_tuning": 1,
-      "missing_bottom_pockets_before_tuning": 2,
-      "occupancy": "EEEEEEEPPPPPPPPPPPPPP"
+      "occupancy": "EEEEEEEPPPPPPPPPPPPP"
     },
     {
       "feeder_number": 4,
-      "missing_top_pockets_before_tuning": 1,
-      "missing_bottom_pockets_before_tuning": 1,
-      "occupancy": "EEEEEEEEEEPPPPPPPPP"
+      "occupancy": "EEEEEEEEEEPPPPPPPPPP"
     },
     {
       "feeder_number": 5,
-      "missing_top_pockets_before_tuning": 1,
-      "missing_bottom_pockets_before_tuning": 2,
-      "occupancy": "EEEEPEEEEEEEEEPPPPP"
+      "occupancy": "EEEEPEEEEEEEEPPPPP"
     },
     {
       "feeder_number": 6,
-      "missing_top_pockets_before_tuning": 1,
-      "missing_bottom_pockets_before_tuning": 1,
-      "occupancy": "EEEEEEPPPPPPPPPPPPP"
+      "occupancy": "EEEEEEPPPPPPPPPPPPPP"
     },
     {
       "feeder_number": 7,
-      "missing_top_pockets_before_tuning": 1,
-      "missing_bottom_pockets_before_tuning": 0,
-      "occupancy": "PPPPPPPPPPPPPPPPPPPPPP"
+      "occupancy": "PPPPPPPPPPPPPPPPPPPPPPP"
     },
     {
       "feeder_number": 8,
-      "missing_top_pockets_before_tuning": 0,
-      "missing_bottom_pockets_before_tuning": 0,
       "occupancy": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP"
     }
   ]

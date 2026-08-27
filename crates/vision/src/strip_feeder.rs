@@ -10,7 +10,7 @@ use velocitypnp_domain::{
     StripPocketOccupancy, WorkspaceBoardCandidate,
 };
 
-pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v5";
+pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
@@ -35,9 +35,10 @@ const STANDARD_COMPONENT_PITCHES_MM: [f64; 5] = [2.0, 4.0, 8.0, 12.0, 16.0];
 // visible terminal pocket. The image-patch check below must also support the
 // extra slot. The two directions have different crop and lighting residuals.
 const NEGATIVE_ENDPOINT_RANGE_PADDING_FRACTION: f64 = 0.5425;
-const POSITIVE_ENDPOINT_RANGE_PADDING_FRACTION: f64 = 0.52;
+const POSITIVE_ENDPOINT_RANGE_PADDING_FRACTION: f64 = 0.53;
 const ENDPOINT_PATCH_RADIUS_MM: f64 = 1.3;
-const MINIMUM_ENDPOINT_PATCH_CORRELATION: f64 = 0.35;
+const MINIMUM_ENDPOINT_PATCH_CORRELATION: f64 = 0.43;
+const MINIMUM_SECOND_ENDPOINT_PATCH_CORRELATION: f64 = 0.40;
 const MINIMUM_COMPONENT_OUTLINE_SCORE: f64 = 0.43;
 // EIA-481-C Table 2 dimension F is 3.5, 5.5, 7.5, and 11.5 mm for
 // 8, 12, 16, and 24 mm carrier tape.
@@ -1838,29 +1839,47 @@ fn extend_visible_pocket_slot_range(
             .map(|slot| phase_mm + f64::from(slot) * pitch_mm)
             .collect::<Vec<_>>()
     };
-    let slot_supported = |slot: i32, positive_end: bool| {
+    let slot_correlation = |slot: i32, positive_end: bool| {
         let along_mm = phase_mm + f64::from(slot) * pitch_mm;
         if along_mm < 0.75 * pitch_mm || along_mm > along_length_mm - 0.75 * pitch_mm {
-            return false;
+            return None;
         }
         let references = endpoint_reference(positive_end);
-        endpoint_patch_correlation(crop, candidate, long_is_y, cross_mm, along_mm, &references)
-            >= MINIMUM_ENDPOINT_PATCH_CORRELATION
+        Some(endpoint_patch_correlation(
+            crop,
+            candidate,
+            long_is_y,
+            cross_mm,
+            along_mm,
+            &references,
+        ))
     };
     let mut first_slot = base_first_slot;
     let negative_candidate = base_first_slot - 1;
     let negative_along_mm = phase_mm + f64::from(negative_candidate) * pitch_mm;
-    let negative_support = slot_supported(negative_candidate, false);
-    if sprocket_along_range[0] - negative_along_mm <= negative_padding_mm && negative_support {
+    let negative_correlation = slot_correlation(negative_candidate, false);
+    if sprocket_along_range[0] - negative_along_mm <= negative_padding_mm
+        && negative_correlation.is_some_and(|score| score >= MINIMUM_ENDPOINT_PATCH_CORRELATION)
+    {
         first_slot = negative_candidate;
     }
 
     let mut last_slot = base_last_slot;
     let positive_candidate = base_last_slot + 1;
     let positive_along_mm = phase_mm + f64::from(positive_candidate) * pitch_mm;
-    let positive_support = slot_supported(positive_candidate, true);
-    if positive_along_mm - sprocket_along_range[1] <= positive_padding_mm && positive_support {
+    let positive_correlation = slot_correlation(positive_candidate, true);
+    if positive_along_mm - sprocket_along_range[1] <= positive_padding_mm
+        && positive_correlation.is_some_and(|score| score >= MINIMUM_ENDPOINT_PATCH_CORRELATION)
+    {
         last_slot = positive_candidate;
+        // A feeder body can hide a terminal sprocket while the next component
+        // pocket stays visible. Admit one more slot only with direct evidence.
+        let second_candidate = positive_candidate + 1;
+        if slot_correlation(second_candidate, true)
+            .is_some_and(|score| score >= MINIMUM_SECOND_ENDPOINT_PATCH_CORRELATION)
+        {
+            last_slot = second_candidate;
+        }
     }
     (first_slot, last_slot)
 }
@@ -3088,14 +3107,14 @@ mod tests {
                 .iter()
                 .map(|value| value.matches('P').count())
                 .sum::<usize>(),
-            117
+            118
         );
         assert_eq!(
             occupancy
                 .iter()
                 .map(|value| value.matches('E').count())
                 .sum::<usize>(),
-            53
+            52
         );
     }
 
