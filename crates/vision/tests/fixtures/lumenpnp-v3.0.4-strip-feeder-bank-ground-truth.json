@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "source_scan_id": "cd0fe50f-61bf-4023-897d-8970dfa2c2d9",
+  "source_candidate_index": 0,
+  "source_artifact_name": "object-evidence-000.png",
+  "source_sha256": "b08a2ddbe513b79de702cbe057cf7b879a35bc23633a5cbb5f86288dd1d129bf",
+  "orientation": "feeders are numbered left to right; occupancy runs image top to bottom",
+  "lanes": [
+    {
+      "feeder_number": 1,
+      "missing_top_pockets_before_tuning": 1,
+      "missing_bottom_pockets_before_tuning": 1,
+      "occupancy": "EEEEEEEPPPPPPPPPPPPP"
+    },
+    {
+      "feeder_number": 2,
+      "missing_top_pockets_before_tuning": 1,
+      "missing_bottom_pockets_before_tuning": 1,
+      "occupancy": "EEEEEEEEEEPPPPPPPPPPP"
+    },
+    {
+      "feeder_number": 3,
+      "missing_top_pockets_before_tuning": 1,
+      "missing_bottom_pockets_before_tuning": 2,
+      "occupancy": "EEEEEEEPPPPPPPPPPPPPP"
+    },
+    {
+      "feeder_number": 4,
+      "missing_top_pockets_before_tuning": 1,
+      "missing_bottom_pockets_before_tuning": 1,
+      "occupancy": "EEEEEEEEEEPPPPPPPPP"
+    },
+    {
+      "feeder_number": 5,
+      "missing_top_pockets_before_tuning": 1,
+      "missing_bottom_pockets_before_tuning": 2,
+      "occupancy": "EEEEPEEEEEEEEEPPPPP"
+    },
+    {
+      "feeder_number": 6,
+      "missing_top_pockets_before_tuning": 1,
+      "missing_bottom_pockets_before_tuning": 1,
+      "occupancy": "EEEEEEPPPPPPPPPPPPP"
+    },
+    {
+      "feeder_number": 7,
+      "missing_top_pockets_before_tuning": 1,
+      "missing_bottom_pockets_before_tuning": 0,
+      "occupancy": "PPPPPPPPPPPPPPPPPPPPPP"
+    },
+    {
+      "feeder_number": 8,
+      "missing_top_pockets_before_tuning": 0,
+      "missing_bottom_pockets_before_tuning": 0,
+      "occupancy": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP"
+    }
+  ]
+}

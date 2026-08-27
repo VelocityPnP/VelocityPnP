@@ -10,7 +10,7 @@ use velocitypnp_domain::{
     StripPocketOccupancy, WorkspaceBoardCandidate,
 };
 
-pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v4";
+pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v5";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
@@ -31,6 +31,14 @@ const EIGHT_MM_POCKET_CENTER_OFFSET_MM: f64 = 3.5;
 const POCKET_ROW_PAIR_TOLERANCE_MM: f64 = 0.45;
 const STANDARD_TAPE_WIDTHS_MM: [f64; 4] = [8.0, 12.0, 16.0, 24.0];
 const STANDARD_COMPONENT_PITCHES_MM: [f64; 5] = [2.0, 4.0, 8.0, 12.0, 16.0];
+// Sprocket fits can stop slightly more than half a component pitch from a
+// visible terminal pocket. The image-patch check below must also support the
+// extra slot. The two directions have different crop and lighting residuals.
+const NEGATIVE_ENDPOINT_RANGE_PADDING_FRACTION: f64 = 0.5425;
+const POSITIVE_ENDPOINT_RANGE_PADDING_FRACTION: f64 = 0.52;
+const ENDPOINT_PATCH_RADIUS_MM: f64 = 1.3;
+const MINIMUM_ENDPOINT_PATCH_CORRELATION: f64 = 0.35;
+const MINIMUM_COMPONENT_OUTLINE_SCORE: f64 = 0.43;
 // EIA-481-C Table 2 dimension F is 3.5, 5.5, 7.5, and 11.5 mm for
 // 8, 12, 16, and 24 mm carrier tape.
 const POCKET_CENTERLINE_EDGE_REMAINDER_MM: f64 = 0.5;
@@ -86,6 +94,12 @@ struct ComponentFeatureCluster {
     along_mm: f64,
     features: Vec<RectangularFeature>,
     confidence: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PocketAppearance {
+    mean_luma: f64,
+    edge_energy: f64,
 }
 
 /// Finds repeated carrier-tape sprocket holes in one normalized feeder crop.
@@ -1617,15 +1631,26 @@ fn observe_component_pockets(
     let Some(range) = along_range else {
         return Vec::new();
     };
-    let first_slot = ((range[0] - phase_mm) / pitch_mm).ceil() as i32;
-    let last_slot = ((range[1] - phase_mm) / pitch_mm).floor() as i32;
+    let base_first_slot = ((range[0] - phase_mm) / pitch_mm).ceil() as i32;
+    let base_last_slot = ((range[1] - phase_mm) / pitch_mm).floor() as i32;
+    let (first_slot, last_slot) = extend_visible_pocket_slot_range(
+        crop,
+        cross_mm,
+        pitch_mm,
+        phase_mm,
+        range,
+        base_first_slot,
+        base_last_slot,
+        candidate,
+        long_is_y,
+    );
     let slots = (first_slot..=last_slot)
         .map(|slot| phase_mm + f64::from(slot) * pitch_mm)
         .collect::<Vec<_>>();
-    let luma = slots
+    let appearance = slots
         .iter()
         .map(|along_mm| {
-            component_window_mean(crop, candidate, long_is_y, cross_mm, *along_mm, pitch_mm)
+            component_window_appearance(crop, candidate, long_is_y, cross_mm, *along_mm, pitch_mm)
         })
         .collect::<Vec<_>>();
     let mut observations = slots
@@ -1654,10 +1679,10 @@ fn observe_component_pockets(
                 let second_score = component_outline_score(*second, cross_mm, along_mm);
                 second_score.total_cmp(&first_score)
             });
-            let component = candidates
-                .first()
-                .copied()
-                .filter(|feature| component_outline_score(*feature, cross_mm, along_mm) >= 0.43);
+            let component = candidates.first().copied().filter(|feature| {
+                component_outline_score(*feature, cross_mm, along_mm)
+                    >= MINIMUM_COMPONENT_OUTLINE_SCORE
+            });
             let occupancy = if component.is_some() {
                 StripPocketOccupancy::Occupied
             } else {
@@ -1689,17 +1714,80 @@ fn observe_component_pockets(
             }
         })
         .collect::<Vec<_>>();
+    let seed_occupied = observations
+        .iter()
+        .map(|observation| observation.occupancy == StripPocketOccupancy::Occupied)
+        .collect::<Vec<_>>();
+    let seed_fraction = seed_occupied.iter().filter(|occupied| **occupied).count() as f64
+        / seed_occupied.len().max(1) as f64;
 
-    if let Some((labels, occupied_label, separation_score)) =
-        classify_component_luma(&luma, &observations)
-    {
-        for (index, observation) in observations.iter_mut().enumerate() {
-            if observation.occupancy != StripPocketOccupancy::Occupied
-                && labels[index] == occupied_label
-            {
-                observation.occupancy = StripPocketOccupancy::Occupied;
-                observation.confidence =
-                    (0.55 * grid_confidence + 0.45 * separation_score).clamp(0.0, 1.0);
+    let luma = appearance
+        .iter()
+        .map(|appearance| appearance.mean_luma)
+        .collect::<Vec<_>>();
+    let luma_classification = classify_component_luma(&luma, &observations);
+    let mut appearance_applied = false;
+    if seed_fraction >= 0.7 {
+        if let Some((occupancy, confidence)) = classify_bright_tape_dark_parts(&appearance) {
+            apply_occupancy_states(&mut observations, &occupancy, grid_confidence, confidence);
+            appearance_applied = true;
+        }
+    }
+    if !appearance_applied {
+        if let Some((labels, occupied_label, separation_score, decisive)) = &luma_classification {
+            if *decisive {
+                apply_appearance_labels(
+                    &mut observations,
+                    labels,
+                    *occupied_label,
+                    grid_confidence,
+                    *separation_score,
+                );
+                appearance_applied = true;
+            }
+        }
+    }
+    if !appearance_applied {
+        if let Some(confidence) = classify_homogeneous_populated_lane(&appearance, seed_fraction) {
+            let occupied = vec![true; observations.len()];
+            apply_occupied_mask(&mut observations, &occupied, grid_confidence, confidence);
+            appearance_applied = true;
+        }
+    }
+    if !appearance_applied && seed_fraction < 0.85 && appearance.len() <= 24 {
+        if let Some((occupied, confidence)) =
+            classify_component_change_point(&appearance, &seed_occupied)
+        {
+            apply_occupied_mask(&mut observations, &occupied, grid_confidence, confidence);
+            mark_weak_transition_uncertain(&mut observations, confidence);
+            appearance_applied = true;
+        }
+    }
+    if !appearance_applied && seed_fraction <= 0.5 {
+        if let Some((labels, occupied_label, confidence)) =
+            classify_component_edge_energy(&appearance, &seed_occupied)
+        {
+            apply_appearance_labels(
+                &mut observations,
+                &labels,
+                occupied_label,
+                grid_confidence,
+                confidence,
+            );
+            mark_weak_transition_uncertain(&mut observations, confidence);
+            appearance_applied = true;
+        }
+    }
+    if !appearance_applied {
+        if let Some((labels, occupied_label, separation_score, _)) = luma_classification {
+            for (index, observation) in observations.iter_mut().enumerate() {
+                if observation.occupancy != StripPocketOccupancy::Occupied
+                    && labels[index] == occupied_label
+                {
+                    observation.occupancy = StripPocketOccupancy::Occupied;
+                    observation.confidence =
+                        (0.55 * grid_confidence + 0.45 * separation_score).clamp(0.0, 1.0);
+                }
             }
         }
     }
@@ -1718,14 +1806,109 @@ fn observe_component_pockets(
     observations
 }
 
-fn component_window_mean(
+#[allow(clippy::too_many_arguments)]
+fn extend_visible_pocket_slot_range(
+    crop: &GrayFrame,
+    cross_mm: f64,
+    pitch_mm: f64,
+    phase_mm: f64,
+    sprocket_along_range: [f64; 2],
+    base_first_slot: i32,
+    base_last_slot: i32,
+    candidate: &WorkspaceBoardCandidate,
+    long_is_y: bool,
+) -> (i32, i32) {
+    if base_first_slot > base_last_slot {
+        return (base_first_slot, base_last_slot);
+    }
+    let along_length_mm = if long_is_y {
+        candidate.height_mm
+    } else {
+        candidate.width_mm
+    };
+    let negative_padding_mm = NEGATIVE_ENDPOINT_RANGE_PADDING_FRACTION * pitch_mm;
+    let positive_padding_mm = POSITIVE_ENDPOINT_RANGE_PADDING_FRACTION * pitch_mm;
+    let endpoint_reference = |positive_end: bool| {
+        let slots: Box<dyn Iterator<Item = i32>> = if positive_end {
+            Box::new((base_first_slot.max(base_last_slot - 3)..=base_last_slot).rev())
+        } else {
+            Box::new(base_first_slot..=base_last_slot.min(base_first_slot + 3))
+        };
+        slots
+            .map(|slot| phase_mm + f64::from(slot) * pitch_mm)
+            .collect::<Vec<_>>()
+    };
+    let slot_supported = |slot: i32, positive_end: bool| {
+        let along_mm = phase_mm + f64::from(slot) * pitch_mm;
+        if along_mm < 0.75 * pitch_mm || along_mm > along_length_mm - 0.75 * pitch_mm {
+            return false;
+        }
+        let references = endpoint_reference(positive_end);
+        endpoint_patch_correlation(crop, candidate, long_is_y, cross_mm, along_mm, &references)
+            >= MINIMUM_ENDPOINT_PATCH_CORRELATION
+    };
+    let mut first_slot = base_first_slot;
+    let negative_candidate = base_first_slot - 1;
+    let negative_along_mm = phase_mm + f64::from(negative_candidate) * pitch_mm;
+    let negative_support = slot_supported(negative_candidate, false);
+    if sprocket_along_range[0] - negative_along_mm <= negative_padding_mm && negative_support {
+        first_slot = negative_candidate;
+    }
+
+    let mut last_slot = base_last_slot;
+    let positive_candidate = base_last_slot + 1;
+    let positive_along_mm = phase_mm + f64::from(positive_candidate) * pitch_mm;
+    let positive_support = slot_supported(positive_candidate, true);
+    if positive_along_mm - sprocket_along_range[1] <= positive_padding_mm && positive_support {
+        last_slot = positive_candidate;
+    }
+    (first_slot, last_slot)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn endpoint_patch_correlation(
     crop: &GrayFrame,
     candidate: &WorkspaceBoardCandidate,
     long_is_y: bool,
     cross_mm: f64,
     along_mm: f64,
-    pitch_mm: f64,
+    reference_along_mm: &[f64],
 ) -> f64 {
+    let Some(candidate_patch) = component_patch(
+        crop,
+        candidate,
+        long_is_y,
+        cross_mm,
+        along_mm,
+        ENDPOINT_PATCH_RADIUS_MM,
+    ) else {
+        return -1.0;
+    };
+    reference_along_mm
+        .iter()
+        .filter_map(|reference| {
+            let patch = component_patch(
+                crop,
+                candidate,
+                long_is_y,
+                cross_mm,
+                *reference,
+                ENDPOINT_PATCH_RADIUS_MM,
+            )?;
+            normalized_patch_correlation(&candidate_patch, &patch)
+        })
+        .max_by(f64::total_cmp)
+        .unwrap_or(-1.0)
+}
+
+fn component_patch(
+    crop: &GrayFrame,
+    candidate: &WorkspaceBoardCandidate,
+    long_is_y: bool,
+    cross_mm: f64,
+    along_mm: f64,
+    radius_mm: f64,
+) -> Option<Vec<f64>> {
     let cross_length_mm = if long_is_y {
         candidate.width_mm
     } else {
@@ -1740,11 +1923,83 @@ fn component_window_mean(
     let along_pixels = if long_is_y { crop.height } else { crop.width };
     let cross_center = cross_mm / cross_length_mm * f64::from(cross_pixels);
     let along_center = along_mm / along_length_mm * f64::from(along_pixels);
-    let cross_radius = (0.8 / cross_length_mm * f64::from(cross_pixels)).ceil() as i32;
+    let cross_radius = (radius_mm / cross_length_mm * f64::from(cross_pixels)).ceil() as i32;
+    let along_radius = (radius_mm / along_length_mm * f64::from(along_pixels)).ceil() as i32;
+    let cross_center = cross_center.round() as i32;
+    let along_center = along_center.round() as i32;
+    if cross_center - cross_radius < 0
+        || along_center - along_radius < 0
+        || cross_center + cross_radius >= cross_pixels as i32
+        || along_center + along_radius >= along_pixels as i32
+    {
+        return None;
+    }
+    let mut patch = Vec::new();
+    for along in along_center - along_radius..=along_center + along_radius {
+        for cross in cross_center - cross_radius..=cross_center + cross_radius {
+            let (x, y) = if long_is_y {
+                (cross as u32, along as u32)
+            } else {
+                (along as u32, cross as u32)
+            };
+            patch.push(f64::from(crop.pixels[(y * crop.width + x) as usize]));
+        }
+    }
+    Some(patch)
+}
+
+fn normalized_patch_correlation(first: &[f64], second: &[f64]) -> Option<f64> {
+    if first.len() != second.len() || first.is_empty() {
+        return None;
+    }
+    let first_mean = first.iter().sum::<f64>() / first.len() as f64;
+    let second_mean = second.iter().sum::<f64>() / second.len() as f64;
+    let numerator = first
+        .iter()
+        .zip(second)
+        .map(|(first, second)| (first - first_mean) * (second - second_mean))
+        .sum::<f64>();
+    let first_energy = first
+        .iter()
+        .map(|value| (value - first_mean).powi(2))
+        .sum::<f64>();
+    let second_energy = second
+        .iter()
+        .map(|value| (value - second_mean).powi(2))
+        .sum::<f64>();
+    let denominator = (first_energy * second_energy).sqrt();
+    (denominator > 1e-9).then_some(numerator / denominator)
+}
+
+fn component_window_appearance(
+    crop: &GrayFrame,
+    candidate: &WorkspaceBoardCandidate,
+    long_is_y: bool,
+    cross_mm: f64,
+    along_mm: f64,
+    pitch_mm: f64,
+) -> PocketAppearance {
+    let cross_length_mm = if long_is_y {
+        candidate.width_mm
+    } else {
+        candidate.height_mm
+    };
+    let along_length_mm = if long_is_y {
+        candidate.height_mm
+    } else {
+        candidate.width_mm
+    };
+    let cross_pixels = if long_is_y { crop.width } else { crop.height };
+    let along_pixels = if long_is_y { crop.height } else { crop.width };
+    let cross_center = cross_mm / cross_length_mm * f64::from(cross_pixels);
+    let along_center = along_mm / along_length_mm * f64::from(along_pixels);
+    let cross_radius = (0.6 / cross_length_mm * f64::from(cross_pixels)).ceil() as i32;
     let along_radius =
         ((0.5_f64.min(0.2 * pitch_mm)) / along_length_mm * f64::from(along_pixels)).ceil() as i32;
     let mut sum = 0_u64;
     let mut count = 0_u64;
+    let mut edge_sum = 0_u64;
+    let mut edge_count = 0_u64;
     for along in
         along_center.round() as i32 - along_radius..=along_center.round() as i32 + along_radius
     {
@@ -1765,15 +2020,26 @@ fn component_window_mean(
             };
             sum += u64::from(crop.pixels[(y * crop.width + x) as usize]);
             count += 1;
+            if x > 0 && y > 0 && x + 1 < crop.width && y + 1 < crop.height {
+                let left = crop.pixels[(y * crop.width + x - 1) as usize];
+                let right = crop.pixels[(y * crop.width + x + 1) as usize];
+                let top = crop.pixels[((y - 1) * crop.width + x) as usize];
+                let bottom = crop.pixels[((y + 1) * crop.width + x) as usize];
+                edge_sum += u64::from(left.abs_diff(right)) + u64::from(top.abs_diff(bottom));
+                edge_count += 2;
+            }
         }
     }
-    sum as f64 / count.max(1) as f64
+    PocketAppearance {
+        mean_luma: sum as f64 / count.max(1) as f64,
+        edge_energy: edge_sum as f64 / edge_count.max(1) as f64,
+    }
 }
 
 fn classify_component_luma(
     values: &[f64],
     observations: &[StripFeederPocketObservation],
-) -> Option<(Vec<usize>, usize, f64)> {
+) -> Option<(Vec<usize>, usize, f64, bool)> {
     if values.len() < 4 || values.len() != observations.len() {
         return None;
     }
@@ -1820,8 +2086,341 @@ fn classify_component_luma(
     } else {
         usize::from(votes[1] > votes[0])
     };
-    let separation_score = ((centers[1] - centers[0]).abs() / 48.0).clamp(0.0, 1.0);
-    Some((labels, occupied_label, separation_score))
+    let center_separation = (centers[1] - centers[0]).abs();
+    let separation_score = (center_separation / 48.0).clamp(0.0, 1.0);
+    Some((
+        labels,
+        occupied_label,
+        separation_score,
+        center_separation >= 20.0,
+    ))
+}
+
+fn classify_bright_tape_dark_parts(
+    appearance: &[PocketAppearance],
+) -> Option<(Vec<StripPocketOccupancy>, f64)> {
+    if appearance.len() < 8 {
+        return None;
+    }
+    let luma = appearance
+        .iter()
+        .map(|item| item.mean_luma)
+        .collect::<Vec<_>>();
+    let edge = appearance
+        .iter()
+        .map(|item| item.edge_energy)
+        .collect::<Vec<_>>();
+    let luma_center = median(&luma);
+    let edge_center = median(&edge);
+    let minimum_luma = luma.iter().copied().min_by(f64::total_cmp)?;
+    let maximum_edge = edge.iter().copied().max_by(f64::total_cmp)?;
+    if luma_center < 180.0 || luma_center - minimum_luma < 20.0 || maximum_edge - edge_center < 8.0
+    {
+        return None;
+    }
+    let strong = appearance
+        .iter()
+        .map(|item| item.mean_luma <= luma_center - 20.0)
+        .collect::<Vec<_>>();
+    let weak = appearance
+        .iter()
+        .map(|item| item.mean_luma <= luma_center + 2.0 && item.edge_energy >= edge_center + 0.1)
+        .collect::<Vec<_>>();
+    let mut occupancy = strong
+        .iter()
+        .map(|strong| {
+            if *strong {
+                StripPocketOccupancy::Occupied
+            } else {
+                StripPocketOccupancy::Empty
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut start = 0;
+    while start < weak.len() {
+        if !weak[start] {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < weak.len() && weak[end] {
+            end += 1;
+        }
+        if end - start >= 3 {
+            if occupancy[start] != StripPocketOccupancy::Occupied {
+                occupancy[start] = StripPocketOccupancy::Uncertain;
+            }
+            occupancy[start + 1..end].fill(StripPocketOccupancy::Occupied);
+        }
+        start = end;
+    }
+    let occupied_count = occupancy
+        .iter()
+        .filter(|occupancy| **occupancy == StripPocketOccupancy::Occupied)
+        .count();
+    if occupied_count == 0 || occupied_count * 2 > occupancy.len() {
+        return None;
+    }
+    let confidence = (0.5 * ((luma_center - minimum_luma) / 48.0).clamp(0.0, 1.0)
+        + 0.5 * ((maximum_edge - edge_center) / 20.0).clamp(0.0, 1.0))
+    .clamp(0.0, 1.0);
+    Some((occupancy, confidence))
+}
+
+fn classify_homogeneous_populated_lane(
+    appearance: &[PocketAppearance],
+    seed_fraction: f64,
+) -> Option<f64> {
+    if appearance.len() < 8 || seed_fraction < 0.5 {
+        return None;
+    }
+    let luma = appearance
+        .iter()
+        .map(|item| item.mean_luma)
+        .collect::<Vec<_>>();
+    let edge = appearance
+        .iter()
+        .map(|item| item.edge_energy)
+        .collect::<Vec<_>>();
+    let luma_span = luma.iter().copied().max_by(f64::total_cmp)?
+        - luma.iter().copied().min_by(f64::total_cmp)?;
+    let edge_center = median(&edge);
+    let edge_high_excursion = edge.iter().copied().max_by(f64::total_cmp)? - edge_center;
+    if luma_span > 32.0 || edge_high_excursion > 4.0 {
+        return None;
+    }
+    Some(
+        (0.55 * seed_fraction
+            + 0.25 * (1.0 - luma_span / 32.0).clamp(0.0, 1.0)
+            + 0.20 * (1.0 - edge_high_excursion / 4.0).clamp(0.0, 1.0))
+        .clamp(0.0, 1.0),
+    )
+}
+
+fn classify_component_change_point(
+    appearance: &[PocketAppearance],
+    seed_occupied: &[bool],
+) -> Option<(Vec<bool>, f64)> {
+    if appearance.len() < 7 || appearance.len() != seed_occupied.len() {
+        return None;
+    }
+    let luma = appearance
+        .iter()
+        .map(|item| item.mean_luma)
+        .collect::<Vec<_>>();
+    let edge = appearance
+        .iter()
+        .map(|item| item.edge_energy)
+        .collect::<Vec<_>>();
+    let luma_center = median(&luma);
+    let edge_center = median(&edge);
+    let luma_scale = median(
+        &luma
+            .iter()
+            .map(|value| (value - luma_center).abs())
+            .collect::<Vec<_>>(),
+    )
+    .max(1.0);
+    let edge_scale = median(
+        &edge
+            .iter()
+            .map(|value| (value - edge_center).abs())
+            .collect::<Vec<_>>(),
+    )
+    .max(1.0);
+    let normalized = appearance
+        .iter()
+        .map(|item| {
+            [
+                (item.mean_luma - luma_center) / luma_scale,
+                (item.edge_energy - edge_center) / edge_scale,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let base_cost = appearance_segment_cost(&normalized);
+    if !base_cost.is_finite() || base_cost <= 1e-9 {
+        return None;
+    }
+    let (best_cost, split) = (3..normalized.len() - 2)
+        .map(|split| {
+            (
+                appearance_segment_cost(&normalized[..split])
+                    + appearance_segment_cost(&normalized[split..]),
+                split,
+            )
+        })
+        .min_by(|first, second| first.0.total_cmp(&second.0))?;
+    let improvement = (1.0 - best_cost / base_cost).clamp(0.0, 1.0);
+    if improvement < 0.35 {
+        return None;
+    }
+    let seed_rate = |values: &[bool]| {
+        values.iter().filter(|occupied| **occupied).count() as f64 / values.len().max(1) as f64
+    };
+    let first_seed_rate = seed_rate(&seed_occupied[..split]);
+    let second_seed_rate = seed_rate(&seed_occupied[split..]);
+    let first_luma = luma[..split].iter().sum::<f64>() / split as f64;
+    let second_luma = luma[split..].iter().sum::<f64>() / (luma.len() - split) as f64;
+    if (first_seed_rate - second_seed_rate).abs() < 0.15 && (first_luma - second_luma).abs() < 40.0
+    {
+        return None;
+    }
+    let second_is_occupied = if (first_seed_rate - second_seed_rate).abs() >= 0.15 {
+        second_seed_rate > first_seed_rate
+    } else {
+        second_luma > first_luma
+    };
+    let occupied = (0..appearance.len())
+        .map(|index| (index >= split) == second_is_occupied)
+        .collect();
+    Some((occupied, improvement))
+}
+
+fn appearance_segment_cost(values: &[[f64; 2]]) -> f64 {
+    if values.is_empty() {
+        return f64::INFINITY;
+    }
+    let centers = [
+        median(&values.iter().map(|value| value[0]).collect::<Vec<_>>()),
+        median(&values.iter().map(|value| value[1]).collect::<Vec<_>>()),
+    ];
+    values
+        .iter()
+        .map(|value| (value[0] - centers[0]).abs() + (value[1] - centers[1]).abs())
+        .sum()
+}
+
+fn classify_component_edge_energy(
+    appearance: &[PocketAppearance],
+    seed_occupied: &[bool],
+) -> Option<(Vec<usize>, usize, f64)> {
+    if appearance.len() < 4 || appearance.len() != seed_occupied.len() {
+        return None;
+    }
+    let values = appearance
+        .iter()
+        .map(|item| item.edge_energy)
+        .collect::<Vec<_>>();
+    let mut centers = [
+        values.iter().copied().min_by(f64::total_cmp)?,
+        values.iter().copied().max_by(f64::total_cmp)?,
+    ];
+    let mut labels = vec![0_usize; values.len()];
+    for _ in 0..12 {
+        for (index, value) in values.iter().enumerate() {
+            labels[index] = usize::from((value - centers[1]).abs() < (value - centers[0]).abs());
+        }
+        for (label, center) in centers.iter_mut().enumerate() {
+            let selected = values
+                .iter()
+                .zip(&labels)
+                .filter(|(_, assigned)| **assigned == label)
+                .map(|(value, _)| *value)
+                .collect::<Vec<_>>();
+            if selected.len() < 2 {
+                return None;
+            }
+            *center = selected.iter().sum::<f64>() / selected.len() as f64;
+        }
+    }
+    let separation = (centers[1] - centers[0]).abs();
+    if separation < 4.0 {
+        return None;
+    }
+    let mut votes = [0_u32; 2];
+    for (occupied, label) in seed_occupied.iter().zip(&labels) {
+        if *occupied {
+            votes[*label] += 1;
+        }
+    }
+    if votes[0] == votes[1] {
+        return None;
+    }
+    let occupied_label = usize::from(votes[1] > votes[0]);
+    Some((labels, occupied_label, (separation / 24.0).clamp(0.0, 1.0)))
+}
+
+fn apply_appearance_labels(
+    observations: &mut [StripFeederPocketObservation],
+    labels: &[usize],
+    occupied_label: usize,
+    grid_confidence: f64,
+    appearance_confidence: f64,
+) {
+    let occupied = labels
+        .iter()
+        .map(|label| *label == occupied_label)
+        .collect::<Vec<_>>();
+    apply_occupied_mask(
+        observations,
+        &occupied,
+        grid_confidence,
+        appearance_confidence,
+    );
+}
+
+fn apply_occupied_mask(
+    observations: &mut [StripFeederPocketObservation],
+    occupied: &[bool],
+    grid_confidence: f64,
+    appearance_confidence: f64,
+) {
+    for (observation, occupied) in observations.iter_mut().zip(occupied) {
+        observation.occupancy = if *occupied {
+            StripPocketOccupancy::Occupied
+        } else {
+            StripPocketOccupancy::Empty
+        };
+        observation.confidence =
+            (0.55 * grid_confidence + 0.45 * appearance_confidence).clamp(0.0, 1.0);
+        if !occupied {
+            observation.component_outline_machine_mm.clear();
+            observation.component_size_mm = None;
+        }
+    }
+}
+
+fn apply_occupancy_states(
+    observations: &mut [StripFeederPocketObservation],
+    occupancy: &[StripPocketOccupancy],
+    grid_confidence: f64,
+    appearance_confidence: f64,
+) {
+    for (observation, occupancy) in observations.iter_mut().zip(occupancy) {
+        observation.occupancy = *occupancy;
+        observation.confidence =
+            (0.55 * grid_confidence + 0.45 * appearance_confidence).clamp(0.0, 1.0);
+        if *occupancy != StripPocketOccupancy::Occupied {
+            observation.component_outline_machine_mm.clear();
+            observation.component_size_mm = None;
+        }
+    }
+}
+
+fn mark_weak_transition_uncertain(
+    observations: &mut [StripFeederPocketObservation],
+    confidence: f64,
+) {
+    if confidence >= 0.6 || observations.len() < 2 {
+        return;
+    }
+    let transitions = observations
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| pair[0].occupancy != pair[1].occupancy)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [index] = transitions.as_slice() else {
+        return;
+    };
+    if observations[*index].occupancy == StripPocketOccupancy::Empty
+        && observations[*index + 1].occupancy == StripPocketOccupancy::Occupied
+    {
+        let observation = &mut observations[*index + 1];
+        observation.occupancy = StripPocketOccupancy::Uncertain;
+        observation.component_outline_machine_mm.clear();
+        observation.component_size_mm = None;
+    }
 }
 
 fn component_outline(
@@ -2420,6 +3019,94 @@ mod tests {
             infer_tape_geometry(&[], 2.0, Some([0.0, 40.0]), 24.0, 64.0, Some(1.0)),
             (None, None, None, None, 0.0),
         );
+    }
+
+    #[test]
+    fn bright_tape_classifier_keeps_a_weak_run_boundary_uncertain() {
+        let mut appearance = vec![
+            PocketAppearance {
+                mean_luma: 225.0,
+                edge_energy: 10.0,
+            };
+            18
+        ];
+        appearance[4] = PocketAppearance {
+            mean_luma: 180.0,
+            edge_energy: 22.0,
+        };
+        for item in &mut appearance[13..] {
+            *item = PocketAppearance {
+                mean_luma: 220.0,
+                edge_energy: 11.0,
+            };
+        }
+
+        let (occupancy, _) = classify_bright_tape_dark_parts(&appearance).unwrap();
+
+        assert_eq!(occupancy[4], StripPocketOccupancy::Occupied);
+        assert_eq!(occupancy[13], StripPocketOccupancy::Uncertain);
+        assert!(occupancy[14..]
+            .iter()
+            .all(|item| *item == StripPocketOccupancy::Occupied));
+        assert!(occupancy[..4]
+            .iter()
+            .all(|item| *item == StripPocketOccupancy::Empty));
+    }
+
+    #[test]
+    fn homogeneous_repeated_parts_support_a_populated_lane() {
+        let appearance = (0..12)
+            .map(|index| PocketAppearance {
+                mean_luma: 200.0 + f64::from(index) * 0.5,
+                edge_energy: 20.0 + f64::from(index % 3) * 0.5,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(classify_homogeneous_populated_lane(&appearance, 0.75).is_some());
+        assert!(classify_homogeneous_populated_lane(&appearance, 0.25).is_none());
+    }
+
+    #[test]
+    fn physical_feeder_ground_truth_has_the_confirmed_totals() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/lumenpnp-v3.0.4-strip-feeder-bank-ground-truth.json"
+        ))
+        .unwrap();
+        let lanes = fixture["lanes"].as_array().unwrap();
+        let occupancy = lanes
+            .iter()
+            .map(|lane| lane["occupancy"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(lanes.len(), 8);
+        assert_eq!(
+            occupancy.iter().map(|value| value.len()).sum::<usize>(),
+            170
+        );
+        assert_eq!(
+            occupancy
+                .iter()
+                .map(|value| value.matches('P').count())
+                .sum::<usize>(),
+            117
+        );
+        assert_eq!(
+            occupancy
+                .iter()
+                .map(|value| value.matches('E').count())
+                .sum::<usize>(),
+            53
+        );
+    }
+
+    #[test]
+    fn normalized_patch_correlation_rejects_an_unrelated_edge_patch() {
+        let reference = [10.0, 20.0, 30.0, 40.0];
+        let matching = [20.0, 40.0, 60.0, 80.0];
+        let unrelated = [10.0, 40.0, 20.0, 30.0];
+
+        assert!((normalized_patch_correlation(&reference, &matching).unwrap() - 1.0).abs() < 1e-9);
+        assert!(normalized_patch_correlation(&reference, &unrelated).unwrap() < 0.5);
     }
 
     #[test]

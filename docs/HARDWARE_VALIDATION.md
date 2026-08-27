@@ -2094,6 +2094,39 @@ Normal disconnect operation `80b4775e-b066-47a0-a59f-9b989fcc218c` disabled
 the machine and released control. No emergency stop was used. Final state was
 disconnected, unhomed, and fault-free.
 
+### Operator-labeled feeder inventory replay
+
+On 2026-08-27, the operator labeled all eight strips in the retained feeder
+crop. The labels contain 170 component pockets: 117 occupied and 53 empty.
+They also identify the endpoint undercount for each strip. The source remains
+`object-evidence-000.png` on scan
+`cd0fe50f-61bf-4023-897d-8970dfa2c2d9`. Its SHA-256 is
+`b08a2ddbe513b79de702cbe057cf7b879a35bc23633a5cbb5f86288dd1d129bf`.
+
+Version 5 preserves the measured 4 mm pitch and checks adjacent phase-correct
+pocket centers against the retained image. It also separates strong luma
+transitions, homogeneous populated lanes, and small dark parts on bright tape.
+Weak occupancy transitions remain uncertain.
+
+The no-motion replay found 168 of the 170 labeled pocket centers. It omitted
+the final bottom pocket on feeder 3 and feeder 5. This is 98.8% pocket-center
+coverage. Of the 168 detected centers, 165 confident labels matched the
+operator labels, none disagreed, and three were uncertain. The uncertain
+labels are one empty transition pocket on feeder 1, feeder 2, and feeder 5.
+This one scene is a regression fixture, not general feeder validation.
+
+The rebuilt inventory contains 115 present, 50 absent, and 3 uncertain visible
+positions. Feeder 7 and feeder 8 are correctly all populated. Feeder 8 still
+reaches the source-image boundary, so the inventory keeps incomplete coverage
+state. The regenerated 4,493 by 2,421 full-workspace overlay has SHA-256
+`057e163ce5c00fac547835acca1e72c342dc363510d1fd35676ad4465bc77338`.
+
+Baseline `4db1e1da-1f58-488a-a2f4-cca2ec1b0a5b` activated parent scan
+`badf767f-967f-4ef0-91d7-2401dc1292ac`. It uses calibration
+`3b837434-a961-4e60-945a-18335b42d21f` and object proposal version 6. The scan,
+refinements, feeder report, overlay, and active baseline are in the persistent
+database. The replay used a simulated daemon and caused no machine motion.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

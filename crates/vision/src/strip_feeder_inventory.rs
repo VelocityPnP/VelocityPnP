@@ -1169,7 +1169,7 @@ mod tests {
         proposals: Vec<StripFeederLaneProposal>,
     ) -> StripFeederVisionReport {
         StripFeederVisionReport {
-            algorithm_version: "strip_feeder_vision.v4".into(),
+            algorithm_version: "strip_feeder_vision.v5".into(),
             source_scan_id,
             source_candidate_index: 0,
             source_artifact_name: "evidence.png".into(),

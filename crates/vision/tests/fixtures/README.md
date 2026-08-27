@@ -40,3 +40,30 @@ manual profile and 60 settling frames during attached head-geometry runs.
 The fixtures may be replaced only by a documented capture with equal or better
 target visibility. Update the hashes and detector expectations in the same
 change.
+
+## Physical strip-feeder ground truth
+
+`lumenpnp-v3.0.4-strip-feeder-bank-ground-truth.json` records operator labels
+for the eight physical strip feeders captured on 2026-08-26. Feeder numbers run
+left to right. Pocket occupancy runs from the image top to the image bottom.
+The source is candidate 0 from workspace scan
+`cd0fe50f-61bf-4023-897d-8970dfa2c2d9`. Its retained evidence artifact is
+`object-evidence-000.png`; SHA-256:
+`b08a2ddbe513b79de702cbe057cf7b879a35bc23633a5cbb5f86288dd1d129bf`.
+
+The image remains in the persistent workspace database, which is the
+authoritative production artifact store. Export the image and discovery report
+from a daemon that uses that database, then run the evaluator:
+
+```bash
+curl -o /tmp/feeder-evidence.png \
+  http://127.0.0.1:4080/api/v1/workspace-scans/cd0fe50f-61bf-4023-897d-8970dfa2c2d9/artifacts/object-evidence-000.png
+curl -o /tmp/feeder-discovery.json \
+  http://127.0.0.1:4080/api/v1/workspace-scans/cd0fe50f-61bf-4023-897d-8970dfa2c2d9/artifacts/board-discovery.json
+cargo run -p velocitypnp-vision \
+  --example evaluate_strip_feeder_ground_truth -- \
+  /tmp/feeder-evidence.png /tmp/feeder-discovery.json \
+  crates/vision/tests/fixtures/lumenpnp-v3.0.4-strip-feeder-bank-ground-truth.json
+```
+
+The fixture contains 170 component pockets: 117 occupied and 53 empty.

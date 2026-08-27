@@ -537,6 +537,24 @@ component contours, classify each observed feed position as occupied, empty,
 or uncertain. Counts cover only the visible tape extent. Part size is a
 visible-outline estimate, not a package or part-identity result.
 
+Version 5 evaluates one phase-correct pocket beyond each terminal sprocket
+range. It accepts the endpoint only when its image patch matches the measured
+lane and remains far enough from the crop edge. This fixes the common
+half-pitch undercount without changing the fitted pitch. A weak endpoint stays
+outside the count.
+
+Occupancy uses three lane-local checks after contour detection. Strong luma
+transitions can reject repeated embossed pocket outlines. A homogeneous lane
+with repeated component evidence can recover weak component contours. Bright
+tape with small dark parts uses a fine central edge profile. A weak transition
+is `uncertain`; the detector does not force it to present or absent.
+
+The physical eight-feeder labels are retained in
+`crates/vision/tests/fixtures/lumenpnp-v3.0.4-strip-feeder-bank-ground-truth.json`.
+The fixture README gives the no-motion replay command. The evaluator aligns a
+consecutive detected range with each full labeled lane and fails if a
+confident occupancy label disagrees.
+
 Circular component pockets can also form a 4 mm lattice. The detector pairs
 two candidate rows that are 3.5 mm apart. Both rows cannot be sprocket rows because
 the separation is less than the width of standard carrier tape. The stronger
