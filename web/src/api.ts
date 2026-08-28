@@ -2,7 +2,8 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, SensorReading, StripFeederLiveHoldoutRun, StripFeederRegistration,
+  Operation, SensorReading, StripFeederLiveHoldoutRun,
+  StripFeederPickupQualificationRun, StripFeederRegistration,
   StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
   WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
@@ -240,6 +241,25 @@ export const api = {
   stripFeederLiveHoldout: (holdoutId: string) =>
     request<StripFeederLiveHoldoutRun>(
       `/strip-feeder-live-holdouts/${holdoutId}`,
+    ),
+  startStripFeederPickupQualification: (
+    registrationId: string, leaseId: string,
+    nozzleId = "N1", fallbackDropSurfaceMachineMm?: [number, number],
+  ) => jsonPost<{
+    qualification: StripFeederPickupQualificationRun;
+    operation: Operation;
+  }>(
+    `/strip-feeder-registrations/${registrationId}/pickup-qualifications`,
+    {
+      lease_id: leaseId,
+      nozzle_id: nozzleId,
+      fallback_drop_surface_machine_mm: fallbackDropSurfaceMachineMm ?? null,
+      confirmed_external_safety_checks: true,
+    },
+  ),
+  stripFeederPickupQualification: (qualificationId: string) =>
+    request<StripFeederPickupQualificationRun>(
+      `/strip-feeder-pickup-qualifications/${qualificationId}`,
     ),
   stripFeederDraft: (registrationId: string) =>
     request<StripFeederRegistration>(

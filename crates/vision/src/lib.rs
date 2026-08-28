@@ -3,6 +3,7 @@
 //! V4L2 device.
 
 mod board_registration;
+mod held_part;
 mod opencv_backend;
 mod strip_feeder;
 mod strip_feeder_inventory;
@@ -27,6 +28,9 @@ pub use v4l2_capture::*;
 pub use board_registration::{
     detect_board_fiducial_near, fit_top_side_board_registration, render_board_fiducial_evidence,
     BoardRegistrationFit,
+};
+pub use held_part::{
+    inspect_held_part_difference, HeldPartInspectionArtifacts, HELD_PART_INSPECTION_ALGORITHM,
 };
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use strip_feeder::{

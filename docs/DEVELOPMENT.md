@@ -8,17 +8,30 @@
 - OpenCV 4.6 or newer, `pkg-config`, and CMake
 - Clang and libclang for the OpenCV and Linux V4L2 Rust bindings
 
-On Debian or Ubuntu, install the native vision toolchain with:
+On Debian or Ubuntu, install the native vision toolchain and operator tools
+with:
 
 ```bash
-sudo apt install clang cmake libclang-dev libopencv-dev pkg-config
+sudo apt install clang cmake curl libclang-dev libopencv-dev pkg-config \
+  sqlite3 v4l-utils
 ```
 
 The workspace pins Rust crate `opencv` 0.99.1. OpenCV is a required build and
 runtime dependency, not a Python package or an optional Cargo feature.
 
 The SQLite library is statically bundled, so a system SQLite development
-package is not required.
+package is not required. The `sqlite3` command is useful for database checks
+and recovery.
+
+The physical daemon user must have access to the V4L2 camera devices. On a
+standard Debian or Ubuntu system, add the user to the `video` group and then
+start a new login session:
+
+```bash
+sudo usermod -aG video "$USER"
+```
+
+Use `v4l2-ctl --list-devices` to verify camera access before a physical run.
 
 ## Vision implementation boundary
 
@@ -636,8 +649,37 @@ PNG marks expected sprocket lines in yellow, the expected pocket centerline in
 cyan, the measured sprocket line in magenta, detected holes in yellow, and
 measured pocket centers in green. A passed result selects a measured occupied
 pocket in the draft. It does not lower a nozzle, index tape, measure pickup Z,
-or create an active `Feeder`. Pickup-Z and indexing validation remain the next
-hardware gates.
+or create an active `Feeder`.
+
+Qualify pickup Z, vacuum hold, bottom vision, and release after a passed live
+holdout:
+
+```bash
+cargo run --release -p velocitypnp -- qualify-strip-feeder-pickup \
+  DRAFT_UUID --lease LEASE_UUID --nozzle N1 \
+  --drop-x FALLBACK_X --drop-y FALLBACK_Y --confirm-safety-checks
+```
+
+The API route is
+`POST /strip-feeder-registrations/DRAFT_UUID/pickup-qualifications`. The
+Python client uses `start_strip_feeder_pickup_qualification()`. The machine
+rechecks fine X/Y home and the installed nozzle tip. It captures a centered
+bare-nozzle bottom-camera reference, moves to the measured occupied pocket at
+level Z, and starts vacuum before it descends. The descent starts 2.0 mm above
+the stored datum-board contact and stops 0.2 mm above it. Vacuum transition
+and the calibrated acquire threshold stop the descent.
+
+The runner lifts the part to level Z, transfers it to the exact bare-nozzle
+bottom-camera pose, and checks both retained vacuum and a frame-difference
+part outline. It then returns to the exact source head pose and releases at
+the detected pickup Z. A supplied fallback point is used only when the source
+return target is invalid. A daemon restart marks an incomplete run failed.
+The retained report includes pickup samples, held and release samples,
+bottom-camera measurements, disposition, findings, and three PNG artifacts.
+
+A passed qualification stores pickup Z. It creates an active strip `Feeder`
+only when the draft also has a part key and orientation. Tape indexing remains
+a separate hardware gate.
 
 ### Automatic board registration
 

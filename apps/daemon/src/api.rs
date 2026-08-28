@@ -38,7 +38,8 @@ use velocitypnp_domain::{
     NozzleHeightSample, NozzleRunoutReport, NozzleRunoutSample, Operation, OperationStatus,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
     Residuals, SensorReading, StripFeederInventoryReport, StripFeederInventorySummary,
-    StripFeederLiveHoldoutRun, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederLiveHoldoutRun, StripFeederPickupDisposition, StripFeederPickupQualificationReport,
+    StripFeederPickupQualificationRun, StripFeederRegistration, StripFeederRegistrationStatus,
     StripFeederVisionReport, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
@@ -69,10 +70,10 @@ use velocitypnp_vision::{
     detect_camera_target, detect_installed_plate_hole, discover_workspace_objects, encode_gray_png,
     encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
     fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
-    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
-    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
-    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
-    reanalyze_workspace_seam_health, render_board_fiducial_evidence,
+    inspect_held_part_difference, interpolate_planar_camera_model, mean_nozzle_detection,
+    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
+    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
+    query_camera_controls, reanalyze_workspace_seam_health, render_board_fiducial_evidence,
     render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
@@ -100,6 +101,10 @@ const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
+const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v1";
+const BARE_NOZZLE_ARTIFACT: &str = "bare-nozzle.png";
+const HELD_PART_ARTIFACT: &str = "held-part.png";
+const HELD_PART_INSPECTION_ARTIFACT: &str = "held-part-inspection.png";
 const REUSED_TOP_PLANAR_REPORT: &str = "reused_top_camera_planar_report";
 const REUSED_BOTTOM_PLANAR_REPORT: &str = "reused_bottom_camera_planar_report";
 const REUSED_INSTALLED_GEOMETRY_SOURCE_RUN: &str = "reused_installed_geometry_source_run";
@@ -198,7 +203,60 @@ impl AppState {
         state.recover_interrupted_workspace_scans();
         state.recover_interrupted_board_registrations();
         state.recover_interrupted_strip_feeder_holdouts();
+        state.recover_interrupted_strip_feeder_pickups();
         state
+    }
+
+    fn recover_interrupted_strip_feeder_pickups(&self) {
+        let Ok(runs) = self.store.list_strip_feeder_pickup_qualifications() else {
+            tracing::error!("failed to inspect strip feeder pickups during startup");
+            return;
+        };
+        for mut run in runs.into_iter().filter(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        }) {
+            let message = "daemon restarted before the strip feeder pickup completed";
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.into());
+            run.updated_at = Utc::now();
+            if let Err(error) = self.store.put_strip_feeder_pickup_qualification(&run) {
+                tracing::error!(
+                    %error,
+                    qualification_id = %run.id,
+                    "failed to recover strip feeder pickup"
+                );
+            }
+            match self.store.get_operation(run.operation_id) {
+                Ok(Some(mut operation))
+                    if matches!(
+                        operation.status,
+                        OperationStatus::Pending | OperationStatus::Running
+                    ) =>
+                {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some(message.into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(
+                            %error,
+                            operation_id = %operation.id,
+                            "failed to recover strip feeder pickup operation"
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        operation_id = %run.operation_id,
+                        "failed to inspect strip feeder pickup operation"
+                    );
+                }
+            }
+        }
     }
 
     fn recover_interrupted_strip_feeder_holdouts(&self) {
@@ -592,12 +650,24 @@ pub fn router(state: AppState) -> Router {
             post(start_strip_feeder_live_holdout),
         )
         .route(
+            "/api/v1/strip-feeder-registrations/{id}/pickup-qualifications",
+            post(start_strip_feeder_pickup_qualification),
+        )
+        .route(
             "/api/v1/strip-feeder-live-holdouts/{id}",
             get(get_strip_feeder_live_holdout),
         )
         .route(
             "/api/v1/strip-feeder-live-holdouts/{id}/artifacts/{name}",
             get(get_strip_feeder_live_holdout_artifact),
+        )
+        .route(
+            "/api/v1/strip-feeder-pickup-qualifications/{id}",
+            get(get_strip_feeder_pickup_qualification),
+        )
+        .route(
+            "/api/v1/strip-feeder-pickup-qualifications/{id}/artifacts/{name}",
+            get(get_strip_feeder_pickup_artifact),
         )
         .route("/api/v1/jobs", get(list_jobs).post(put_job))
         .route("/api/v1/jobs/{id}/plan", get(get_job_plan))
@@ -1385,6 +1455,8 @@ async fn start_workspace_scan(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
@@ -4249,6 +4321,8 @@ async fn start_workspace_refinement_batch(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let parent = state
         .store
         .get_workspace_scan(parent_scan_id)
@@ -5389,9 +5463,11 @@ async fn create_strip_feeder_registration(
         pick_centerline_machine_mm,
         pocket_centers_machine_mm: proposal.pocket_centers_machine_mm,
         selected_pocket_machine_mm: None,
+        selected_pocket_index: None,
         pickup_z_mm: None,
         active_feeder_id: None,
         latest_live_holdout_id: None,
+        latest_pickup_qualification_id: None,
         vision_confidence: proposal.confidence,
         vision_review_required: proposal.review_required,
         findings,
@@ -5514,6 +5590,7 @@ async fn start_strip_feeder_live_holdout(
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let registration = state
         .store
         .get_strip_feeder_registration(registration_id)
@@ -5578,6 +5655,7 @@ async fn start_strip_feeder_live_holdout(
         created_at: now,
         updated_at: now,
         sample_count: body.sample_count,
+        pocket_index: pocket_index as u32,
         predicted_pocket_machine_mm,
         report: None,
         message: None,
@@ -5696,6 +5774,11 @@ async fn execute_strip_feeder_live_holdout_task(
             registration.latest_live_holdout_id = Some(run.id);
             if report.passed {
                 registration.selected_pocket_machine_mm = report.measured_pocket_machine_mm;
+                registration.selected_pocket_index = nearest_strip_feeder_pocket_index(
+                    &registration.pocket_centers_machine_mm,
+                    report.predicted_pocket_machine_mm,
+                )
+                .or(Some(run.pocket_index));
                 registration.findings.retain(|finding| {
                     !finding.contains("live pocket occupancy") && !finding.contains("live holdout")
                 });
@@ -5884,6 +5967,1282 @@ async fn get_strip_feeder_live_holdout_artifact(
 }
 
 #[derive(Debug, Deserialize)]
+struct StartStripFeederPickupQualificationRequest {
+    lease_id: Uuid,
+    nozzle_id: String,
+    #[serde(default)]
+    fallback_drop_surface_machine_mm: Option<[f64; 2]>,
+    confirmed_external_safety_checks: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StartStripFeederPickupQualificationResponse {
+    qualification: StripFeederPickupQualificationRun,
+    operation: Operation,
+}
+
+struct PreparedStripFeederPickup {
+    run: StripFeederPickupQualificationRun,
+    registration: StripFeederRegistration,
+    lease_id: Uuid,
+    geometry: CalibratedNozzleGeometry,
+    head_reference: CalibratedHeadReference,
+    height_model: Option<NozzleHeightModel>,
+    height_model_has_working_plane_transfer: bool,
+    reference_contact: VacuumProbeReport,
+    vacuum_characterization: VacuumSensorCharacterizationReport,
+}
+
+async fn start_strip_feeder_pickup_qualification(
+    State(state): State<AppState>,
+    Path(registration_id): Path<Uuid>,
+    Json(body): Json<StartStripFeederPickupQualificationRequest>,
+) -> ApiResult<(
+    StatusCode,
+    Json<StartStripFeederPickupQualificationResponse>,
+)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "pickup qualification requires confirmation that the tape is fixed and uncovered, both nozzles are level, the travel envelope and fallback drop target are clear, and power isolation is reachable",
+        ));
+    }
+    if body.nozzle_id.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "pickup qualification needs a nozzle ID",
+        ));
+    }
+    if body
+        .fallback_drop_surface_machine_mm
+        .is_some_and(|point| point.into_iter().any(|value| !value.is_finite()))
+    {
+        return Err(ApiError::bad_request(
+            "pickup fallback drop coordinates must be finite",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+        return Err(ApiError::bad_request(
+            "pickup qualification requires a homed ready machine",
+        ));
+    }
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    let pickup_profile = state.profile.strip_feeder_pickup.as_ref().ok_or_else(|| {
+        ApiError::bad_request("active profile does not define strip-feeder pickup")
+    })?;
+    pickup_profile.validate().map_err(ApiError::bad_request)?;
+    let registration = state
+        .store
+        .get_strip_feeder_registration(registration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
+    if registration.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "pickup registration uses a different machine profile",
+        ));
+    }
+    if !status.simulated && status.calibration_revision != Some(registration.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "pickup qualification requires fine XYZ homing with calibration {}",
+            registration.calibration_id,
+        )));
+    }
+    let selected_pocket_machine_mm = registration
+        .selected_pocket_machine_mm
+        .ok_or_else(|| ApiError::bad_request("pickup qualification needs a passed live holdout"))?;
+    let latest_holdout_id = registration
+        .latest_live_holdout_id
+        .ok_or_else(|| ApiError::bad_request("pickup qualification needs a live holdout"))?;
+    let latest_holdout = state
+        .store
+        .get_strip_feeder_live_holdout(latest_holdout_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::bad_request("latest live holdout is missing"))?;
+    if latest_holdout.status != OperationStatus::Succeeded
+        || latest_holdout.calibration_id != registration.calibration_id
+        || !latest_holdout
+            .report
+            .as_ref()
+            .is_some_and(|report| report.passed)
+    {
+        return Err(ApiError::bad_request(
+            "pickup qualification needs a current passed live holdout",
+        ));
+    }
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?;
+    let nozzle = bottom
+        .nozzles
+        .iter()
+        .find(|nozzle| nozzle.nozzle_id == body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("unknown pickup nozzle"))?;
+    let sensor_id = sensor_id_for_nozzle(&body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("pickup nozzle has no vacuum sensor"))?;
+    if !state
+        .profile
+        .sensors
+        .iter()
+        .any(|sensor| sensor.id == sensor_id && sensor.actuator_id.as_deref() == Some(sensor_id))
+    {
+        return Err(ApiError::bad_request(
+            "active profile has no matching vacuum actuator and sensor",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(registration.calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("pickup calibration snapshot not found"))?;
+    let artifacts_changed =
+        crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+            .map_err(ApiError::bad_request)?;
+    let runtime_artifact = CalibrationArtifactId::runtime_tip_transform(&body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("unknown pickup nozzle"))?;
+    let contact_artifact = CalibrationArtifactId::vacuum_contact(&body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("unknown pickup nozzle"))?;
+    let characterization_artifact = CalibrationArtifactId::vacuum_characterization(&body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("unknown pickup nozzle"))?;
+    for (artifact, message) in [
+        (runtime_artifact, "current runtime tip transform"),
+        (contact_artifact, "current reference contact"),
+        (characterization_artifact, "current vacuum characterization"),
+    ] {
+        if !crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, artifact) {
+            return Err(ApiError::bad_request(format!(
+                "pickup qualification requires a {message}"
+            )));
+        }
+    }
+    let reference_contact: VacuumProbeReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(&snapshot, contact_artifact)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored vacuum contact is invalid"))?;
+    let vacuum_characterization: VacuumSensorCharacterizationReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(&snapshot, characterization_artifact)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored vacuum characterization is invalid"))?;
+    if !reference_contact.passed
+        || reference_contact.contact_nozzle_z_mm.is_none()
+        || !vacuum_characterization.passed
+        || !vacuum_characterization.reference_seal_validated
+        || vacuum_characterization.sensor_id != sensor_id
+    {
+        return Err(ApiError::bad_request(
+            "pickup qualification requires passed contact and vacuum references",
+        ));
+    }
+    let geometry = calibrated_nozzle_geometry(&snapshot, &body.nozzle_id)?;
+    if geometry.tip_id != nozzle.expected_tip_id {
+        return Err(ApiError::bad_request(
+            "pickup nozzle tip does not match the active profile",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let head_reference = calibrated_head_reference(&snapshot, visual.pixel_error_to_machine_mm)?;
+    let height_model = calibrated_nozzle_height_model(&snapshot, &body.nozzle_id)?;
+    let height_model_has_working_plane_transfer = height_model
+        .as_ref()
+        .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
+    let contact_z_mm = reference_contact.contact_nozzle_z_mm.unwrap();
+    let search_start_nozzle_z_mm = contact_z_mm + pickup_profile.search_start_above_reference_mm;
+    let search_end_nozzle_z_mm = contact_z_mm + pickup_profile.search_end_above_reference_mm;
+    let z_kinematics = state
+        .profile
+        .z_kinematics
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define Z kinematics"))?;
+    for nozzle_z_mm in [search_start_nozzle_z_mm, search_end_nozzle_z_mm] {
+        z_kinematics
+            .controller_z(&body.nozzle_id, nozzle_z_mm)
+            .ok_or_else(|| ApiError::bad_request("pickup Z search is outside machine bounds"))?;
+    }
+    let approximate_head_x_mm = selected_pocket_machine_mm[0] - geometry.head_offset_x_mm;
+    let approximate_head_y_mm = selected_pocket_machine_mm[1] - geometry.head_offset_y_mm;
+    for point in std::iter::once([approximate_head_x_mm, approximate_head_y_mm]).chain(
+        body.fallback_drop_surface_machine_mm.map(|point| {
+            [
+                point[0] - geometry.head_offset_x_mm,
+                point[1] - geometry.head_offset_y_mm,
+            ]
+        }),
+    ) {
+        if !state.profile.bounds.contains(Pose {
+            x_mm: point[0],
+            y_mm: point[1],
+            z_mm: z_kinematics.level_controller_z_mm,
+            rotation_deg: status.pose.unwrap().rotation_deg,
+        }) {
+            return Err(ApiError::bad_request(
+                "pickup or fallback target is outside machine bounds",
+            ));
+        }
+    }
+    if artifacts_changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let operation = Operation::pending("vision.strip_feeder_pickup_qualification");
+    let now = Utc::now();
+    let run = StripFeederPickupQualificationRun {
+        id: Uuid::new_v4(),
+        operation_id: operation.id,
+        registration_id,
+        profile_id: state.profile.id.clone(),
+        calibration_id: registration.calibration_id,
+        status: OperationStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        nozzle_id: body.nozzle_id,
+        fallback_drop_surface_machine_mm: body.fallback_drop_surface_machine_mm,
+        report: None,
+        message: None,
+    };
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_strip_feeder_pickup_qualification(&run)
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartStripFeederPickupQualificationResponse {
+        qualification: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    let prepared = PreparedStripFeederPickup {
+        run,
+        registration,
+        lease_id: body.lease_id,
+        geometry,
+        head_reference,
+        height_model,
+        height_model_has_working_plane_transfer,
+        reference_contact,
+        vacuum_characterization,
+    };
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_strip_feeder_pickup_task(task_state, prepared),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn execute_strip_feeder_pickup_task(
+    state: AppState,
+    mut prepared: PreparedStripFeederPickup,
+) -> Result<Option<String>, String> {
+    let _motion_guard = state.workspace_scan_motion_lock.lock().await;
+    prepared.run.status = OperationStatus::Running;
+    prepared.run.updated_at = Utc::now();
+    state
+        .store
+        .put_strip_feeder_pickup_qualification(&prepared.run)
+        .map_err(|error| error.to_string())?;
+    let result = if state.machine.status().simulated {
+        execute_simulated_strip_feeder_pickup(&state, &prepared).await
+    } else {
+        execute_physical_strip_feeder_pickup(&state, &prepared).await
+    };
+    match result {
+        Ok(report) => {
+            let passed = report.passed;
+            let message = if passed {
+                format!(
+                    "Pickup qualification passed at nozzle Z{:.3}; bottom vision and release passed",
+                    report.pickup_nozzle_z_mm.unwrap_or_default(),
+                )
+            } else {
+                format!(
+                    "Pickup qualification did not pass: {}",
+                    report.findings.join("; ")
+                )
+            };
+            prepared.run.status = if passed {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            };
+            prepared.run.report = Some(report.clone());
+            prepared.run.message = Some(message.clone());
+            prepared.run.updated_at = Utc::now();
+            state
+                .store
+                .put_strip_feeder_pickup_qualification(&prepared.run)
+                .map_err(|error| error.to_string())?;
+            update_registration_after_pickup(
+                &state,
+                prepared.registration,
+                prepared.run.id,
+                &report,
+            )?;
+            if passed {
+                Ok(Some(message))
+            } else {
+                Err(message)
+            }
+        }
+        Err(error) => {
+            prepared.run.status = OperationStatus::Failed;
+            prepared.run.message = Some(error.clone());
+            prepared.run.updated_at = Utc::now();
+            if let Err(store_error) = state
+                .store
+                .put_strip_feeder_pickup_qualification(&prepared.run)
+            {
+                tracing::error!(%store_error, qualification_id = %prepared.run.id, "failed to persist pickup failure");
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn execute_simulated_strip_feeder_pickup(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+) -> Result<StripFeederPickupQualificationReport, String> {
+    let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let contact_z_mm = prepared
+        .reference_contact
+        .contact_nozzle_z_mm
+        .ok_or_else(|| "simulated pickup has no reference contact".to_string())?;
+    let pickup_z_mm = contact_z_mm + 1.0;
+    let controller_z_mm = state
+        .profile
+        .z_kinematics
+        .as_ref()
+        .unwrap()
+        .controller_z(&prepared.run.nozzle_id, pickup_z_mm)
+        .ok_or_else(|| "simulated pickup Z is outside bounds".to_string())?;
+    let width = 320_u32;
+    let height = 240_u32;
+    let bare = GrayFrame {
+        width,
+        height,
+        pixels: vec![80; (width * height) as usize],
+    };
+    let mut held = bare.clone();
+    for y in 105..135 {
+        for x in 130..190 {
+            held.pixels[(y * width + x) as usize] = 190;
+        }
+    }
+    let inspection = inspect_held_part_difference(
+        &bare,
+        &held,
+        [160.0, 120.0],
+        [[0.02, 0.0], [0.0, 0.02]],
+        pickup.maximum_part_offset_mm,
+        pickup.minimum_part_size_mm,
+        pickup.maximum_part_size_mm,
+        HELD_PART_INSPECTION_ARTIFACT,
+    )
+    .map_err(|error| error.to_string())?;
+    persist_pickup_gray_artifact(state, prepared.run.id, BARE_NOZZLE_ARTIFACT, &bare)?;
+    persist_pickup_gray_artifact(state, prepared.run.id, HELD_PART_ARTIFACT, &held)?;
+    persist_pickup_rgb_artifact(
+        state,
+        prepared.run.id,
+        HELD_PART_INSPECTION_ARTIFACT,
+        &inspection.preview,
+    )?;
+    let open = prepared
+        .vacuum_characterization
+        .pump_on_open
+        .raw_values
+        .clone();
+    let held_values = prepared
+        .vacuum_characterization
+        .sealed_reference
+        .raw_values
+        .clone();
+    let held_median = median_raw(&held_values);
+    let sample = VacuumProbeSample {
+        nozzle_z_mm: pickup_z_mm,
+        controller_z_mm,
+        raw_values: held_values.clone(),
+        median_raw_value: held_median.unwrap_or_default(),
+        signal_delta_counts: held_median
+            .zip(median_raw(&open))
+            .map_or(0.0, |(held, open)| (held - open).abs()),
+    };
+    let vacuum_held = held_median
+        .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value));
+    let released = true;
+    let passed = vacuum_held && inspection.report.passed && released;
+    Ok(StripFeederPickupQualificationReport {
+        algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+        nozzle_id: prepared.run.nozzle_id.clone(),
+        tip_id: prepared.geometry.tip_id.clone(),
+        sensor_id: prepared.vacuum_characterization.sensor_id.clone(),
+        pocket_machine_mm: prepared.registration.selected_pocket_machine_mm.unwrap(),
+        pickup_nozzle_z_mm: Some(pickup_z_mm),
+        pickup_controller_z_mm: Some(controller_z_mm),
+        open_nozzle_raw_values: open,
+        pickup_samples: vec![sample],
+        held_raw_values: held_values,
+        held_median_raw_value: held_median,
+        vacuum_acquired: vacuum_held,
+        vacuum_held_after_transfer: vacuum_held,
+        inspection: Some(inspection.report),
+        disposition: StripFeederPickupDisposition::ReturnedToPocket,
+        release_surface_machine_mm: prepared.registration.selected_pocket_machine_mm,
+        release_raw_values: prepared.vacuum_characterization.pump_off.raw_values.clone(),
+        released,
+        passed,
+        artifact_names: vec![
+            BARE_NOZZLE_ARTIFACT.into(),
+            HELD_PART_ARTIFACT.into(),
+            HELD_PART_INSPECTION_ARTIFACT.into(),
+        ],
+        findings: vec![
+            "simulator exercised pickup persistence, inspection, and release policy".into(),
+        ],
+    })
+}
+
+async fn execute_physical_strip_feeder_pickup(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+) -> Result<StripFeederPickupQualificationReport, String> {
+    let nozzle_id = &prepared.run.nozzle_id;
+    let sensor_id = &prepared.vacuum_characterization.sensor_id;
+    let pickup_profile = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let vacuum_profile = state.profile.vacuum_calibration.as_ref().unwrap();
+    let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+    let bottom = state.profile.bottom_vision.as_ref().unwrap();
+    let camera_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let camera_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let pocket_machine_mm = prepared.registration.selected_pocket_machine_mm.unwrap();
+    let contact_z_mm = prepared
+        .reference_contact
+        .contact_nozzle_z_mm
+        .ok_or_else(|| "pickup reference contact has no nozzle Z".to_string())?;
+    let search = VacuumProbeSearch {
+        start_nozzle_z_mm: contact_z_mm + pickup_profile.search_start_above_reference_mm,
+        end_nozzle_z_mm: contact_z_mm + pickup_profile.search_end_above_reference_mm,
+    };
+    let mut artifact_names = Vec::new();
+    let mut findings = Vec::new();
+
+    state
+        .machine
+        .disable_actuator(sensor_id.clone())
+        .await
+        .map_err(|error| format!("pickup could not establish the vacuum-off state: {error}"))?;
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id: prepared.lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let current_tip_offset = measure_current_tip_offset(
+        state,
+        prepared.lease_id,
+        nozzle_id,
+        &prepared.head_reference,
+    )
+    .await?;
+    let bottom_pose = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "pickup lost the centered bottom-camera pose".to_string())?;
+    let bare = capture_bottom_mean_with_lights(
+        state,
+        prepared.lease_id,
+        &camera_profile,
+        &camera_path,
+        pickup_profile.inspection_sample_count,
+    )
+    .await?;
+    persist_pickup_gray_artifact(state, prepared.run.id, BARE_NOZZLE_ARTIFACT, &bare)?;
+    artifact_names.push(BARE_NOZZLE_ARTIFACT.into());
+
+    let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
+    let height_correction = prepared
+        .height_model
+        .as_ref()
+        .filter(|_| prepared.height_model_has_working_plane_transfer)
+        .and_then(|model| model.tip_offset_correction_at(alignment_nozzle_z_mm))
+        .unwrap_or([0.0, 0.0]);
+    let pickup_head_x_mm = pocket_machine_mm[0] - current_tip_offset.x_mm - height_correction[0];
+    let pickup_head_y_mm = pocket_machine_mm[1] - current_tip_offset.y_mm - height_correction[1];
+    let approach_controller_z_mm = z_kinematics
+        .controller_z(nozzle_id, search.start_nozzle_z_mm)
+        .ok_or_else(|| "pickup approach Z is outside bounds".to_string())?;
+    let level_target = JogTarget {
+        x_mm: pickup_head_x_mm,
+        y_mm: pickup_head_y_mm,
+        z_mm: z_kinematics.level_controller_z_mm,
+        rotation_deg: None,
+    };
+    let approach_target = JogTarget {
+        z_mm: approach_controller_z_mm,
+        ..level_target
+    };
+    state
+        .machine
+        .jog(
+            prepared.lease_id,
+            level_target,
+            vacuum_profile.xy_feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .machine
+        .jog(
+            prepared.lease_id,
+            approach_target,
+            vacuum_profile.z_approach_feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let setup = async {
+        state
+            .machine
+            .actuate(prepared.lease_id, sensor_id.clone(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(vacuum_profile.vacuum_settle_ms)).await;
+        Ok::<(), String>(())
+    }
+    .await;
+    if let Err(error) = setup {
+        let _ = state.machine.disable_actuator(sensor_id.clone()).await;
+        let _ = lift_and_restore_after_pickup(state, prepared.lease_id).await;
+        return Err(error);
+    }
+    let descent = execute_vacuum_probe_descent(
+        state,
+        prepared.lease_id,
+        nozzle_id,
+        sensor_id,
+        pickup_head_x_mm,
+        pickup_head_y_mm,
+        search,
+        Some(&prepared.vacuum_characterization),
+    )
+    .await;
+    let (open_nozzle_raw_values, pickup_samples, contact) = match descent {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = state.machine.disable_actuator(sensor_id.clone()).await;
+            let _ = lift_and_restore_after_pickup(state, prepared.lease_id).await;
+            return Err(error);
+        }
+    };
+    let Some(contact) = contact else {
+        state
+            .machine
+            .disable_actuator(sensor_id.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        lift_and_restore_after_pickup(state, prepared.lease_id).await?;
+        findings.push(format!(
+            "no vacuum transition occurred from nozzle Z{:.3} through Z{:.3}",
+            search.start_nozzle_z_mm, search.end_nozzle_z_mm,
+        ));
+        return Ok(StripFeederPickupQualificationReport {
+            algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+            nozzle_id: nozzle_id.clone(),
+            tip_id: prepared.geometry.tip_id.clone(),
+            sensor_id: sensor_id.clone(),
+            pocket_machine_mm,
+            pickup_nozzle_z_mm: None,
+            pickup_controller_z_mm: None,
+            open_nozzle_raw_values,
+            pickup_samples,
+            held_raw_values: Vec::new(),
+            held_median_raw_value: None,
+            vacuum_acquired: false,
+            vacuum_held_after_transfer: false,
+            inspection: None,
+            disposition: StripFeederPickupDisposition::NotReleased,
+            release_surface_machine_mm: None,
+            release_raw_values: Vec::new(),
+            released: true,
+            passed: false,
+            artifact_names,
+            findings,
+        });
+    };
+    let vacuum_acquired =
+        vacuum_value_is_acquired(&prepared.vacuum_characterization, contact.median_raw_value);
+    if !vacuum_acquired {
+        findings.push(
+            "pickup signal crossed the coarse delta gate but not the calibrated acquire threshold"
+                .into(),
+        );
+    }
+    let inspection_phase = async {
+        state
+            .machine
+            .jog(
+                prepared.lease_id,
+                level_target,
+                vacuum_profile.z_approach_feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        state
+            .machine
+            .jog(
+                prepared.lease_id,
+                JogTarget {
+                    x_mm: bottom_pose.x_mm,
+                    y_mm: bottom_pose.y_mm,
+                    z_mm: bottom_pose.z_mm,
+                    rotation_deg: None,
+                },
+                bottom.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let held_raw_values = collect_sensor_values(
+            state,
+            prepared.lease_id,
+            sensor_id,
+            pickup_profile.held_sample_count,
+        )
+        .await?;
+        let held_median_raw_value = median_raw(&held_raw_values);
+        let vacuum_held_after_transfer = held_median_raw_value.is_some_and(|value| {
+            vacuum_value_is_acquired(&prepared.vacuum_characterization, value)
+        });
+        let held = capture_bottom_mean_with_lights(
+            state,
+            prepared.lease_id,
+            &camera_profile,
+            &camera_path,
+            pickup_profile.inspection_sample_count,
+        )
+        .await?;
+        persist_pickup_gray_artifact(state, prepared.run.id, HELD_PART_ARTIFACT, &held)?;
+        let inspection = inspect_held_part_difference(
+            &bare,
+            &held,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            prepared.head_reference.bottom_camera_mapping,
+            pickup_profile.maximum_part_offset_mm,
+            pickup_profile.minimum_part_size_mm,
+            pickup_profile.maximum_part_size_mm,
+            HELD_PART_INSPECTION_ARTIFACT,
+        )
+        .map_err(|error| error.to_string())?;
+        persist_pickup_rgb_artifact(
+            state,
+            prepared.run.id,
+            HELD_PART_INSPECTION_ARTIFACT,
+            &inspection.preview,
+        )?;
+        Ok::<_, String>((
+            held_raw_values,
+            held_median_raw_value,
+            vacuum_held_after_transfer,
+            inspection,
+        ))
+    }
+    .await;
+    let (held_raw_values, held_median_raw_value, vacuum_held_after_transfer, inspection) =
+        match inspection_phase {
+            Ok(result) => result,
+            Err(error) => {
+                let release_cleanup = release_pickup_part(
+                    state,
+                    prepared,
+                    sensor_id,
+                    [pickup_head_x_mm, pickup_head_y_mm],
+                    current_tip_offset,
+                    contact.controller_z_mm,
+                )
+                .await;
+                let restore_cleanup = lift_and_restore_after_pickup(state, prepared.lease_id).await;
+                let cleanup = release_cleanup.map(|_| ()).and(restore_cleanup);
+                return Err(match cleanup {
+                    Ok(()) => format!("{error}; the part was returned to its pocket"),
+                    Err(cleanup_error) => {
+                        format!("{error}; pickup cleanup also failed: {cleanup_error}")
+                    }
+                });
+            }
+        };
+    artifact_names.push(HELD_PART_ARTIFACT.into());
+    artifact_names.push(HELD_PART_INSPECTION_ARTIFACT.into());
+    if !vacuum_held_after_transfer {
+        findings.push("vacuum did not remain above the calibrated hold threshold".into());
+    }
+    findings.extend(inspection.report.findings.clone());
+
+    // A coarse contact transition can hold a part even when a later signal or
+    // image gate rejects it. Every contact path returns to the source pocket.
+    let (disposition, release_surface_machine_mm, release_raw_values, released) = {
+        // Return to the exact pickup head pose. The measured part-to-nozzle
+        // offset must not be applied here because it existed at pickup time.
+        release_pickup_part(
+            state,
+            prepared,
+            sensor_id,
+            [pickup_head_x_mm, pickup_head_y_mm],
+            current_tip_offset,
+            contact.controller_z_mm,
+        )
+        .await?
+    };
+    lift_and_restore_after_pickup(state, prepared.lease_id).await?;
+    if !released {
+        findings.push("vacuum release did not reach the calibrated off state".into());
+    }
+    let passed =
+        vacuum_acquired && vacuum_held_after_transfer && inspection.report.passed && released;
+    if passed {
+        findings.push("pickup, transfer, bottom inspection, and release passed".into());
+    }
+    Ok(StripFeederPickupQualificationReport {
+        algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+        nozzle_id: nozzle_id.clone(),
+        tip_id: prepared.geometry.tip_id.clone(),
+        sensor_id: sensor_id.clone(),
+        pocket_machine_mm,
+        pickup_nozzle_z_mm: Some(contact.nozzle_z_mm),
+        pickup_controller_z_mm: Some(contact.controller_z_mm),
+        open_nozzle_raw_values,
+        pickup_samples,
+        held_raw_values,
+        held_median_raw_value,
+        vacuum_acquired,
+        vacuum_held_after_transfer,
+        inspection: Some(inspection.report),
+        disposition,
+        release_surface_machine_mm,
+        release_raw_values,
+        released,
+        passed,
+        artifact_names,
+        findings,
+    })
+}
+
+async fn release_pickup_part(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    sensor_id: &str,
+    pickup_head_machine_mm: [f64; 2],
+    current_tip_offset: CurrentTipOffset,
+    pickup_controller_z_mm: f64,
+) -> Result<
+    (
+        StripFeederPickupDisposition,
+        Option<[f64; 2]>,
+        Vec<i64>,
+        bool,
+    ),
+    String,
+> {
+    let pickup_profile = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let vacuum_profile = state.profile.vacuum_calibration.as_ref().unwrap();
+    let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+    let pocket_machine_mm = prepared.registration.selected_pocket_machine_mm.unwrap();
+    let status = state.machine.status();
+    let pose = status
+        .pose
+        .ok_or_else(|| "pickup release has no trusted machine pose".to_string())?;
+    let return_level = JogTarget {
+        x_mm: pickup_head_machine_mm[0],
+        y_mm: pickup_head_machine_mm[1],
+        z_mm: z_kinematics.level_controller_z_mm,
+        rotation_deg: None,
+    };
+    let return_is_valid = state.profile.bounds.contains(Pose {
+        x_mm: return_level.x_mm,
+        y_mm: return_level.y_mm,
+        z_mm: return_level.z_mm,
+        rotation_deg: pose.rotation_deg,
+    });
+    let (release_level, release_surface, release_at_pickup_z, success_disposition) =
+        if return_is_valid {
+            (
+                return_level,
+                pocket_machine_mm,
+                true,
+                StripFeederPickupDisposition::ReturnedToPocket,
+            )
+        } else if let Some(drop_surface) = prepared.run.fallback_drop_surface_machine_mm {
+            let drop_level = JogTarget {
+                x_mm: drop_surface[0] - current_tip_offset.x_mm,
+                y_mm: drop_surface[1] - current_tip_offset.y_mm,
+                z_mm: z_kinematics.level_controller_z_mm,
+                rotation_deg: None,
+            };
+            if !state.profile.bounds.contains(Pose {
+                x_mm: drop_level.x_mm,
+                y_mm: drop_level.y_mm,
+                z_mm: drop_level.z_mm,
+                rotation_deg: pose.rotation_deg,
+            }) {
+                return Err("pickup return and fallback drop targets are outside bounds".into());
+            }
+            (
+                drop_level,
+                drop_surface,
+                false,
+                StripFeederPickupDisposition::DroppedAtFallback,
+            )
+        } else {
+            return Err(
+                "pickup return target is outside bounds and no fallback was supplied".into(),
+            );
+        };
+
+    let release_result = async {
+        if (pose.z_mm - z_kinematics.level_controller_z_mm).abs() > 1e-9 {
+            state
+                .machine
+                .jog(
+                    prepared.lease_id,
+                    JogTarget {
+                        x_mm: pose.x_mm,
+                        y_mm: pose.y_mm,
+                        z_mm: z_kinematics.level_controller_z_mm,
+                        rotation_deg: None,
+                    },
+                    vacuum_profile.z_approach_feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        state
+            .machine
+            .jog(
+                prepared.lease_id,
+                release_level,
+                vacuum_profile.xy_feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if release_at_pickup_z {
+            state
+                .machine
+                .jog(
+                    prepared.lease_id,
+                    JogTarget {
+                        z_mm: pickup_controller_z_mm,
+                        ..release_level
+                    },
+                    vacuum_profile.z_approach_feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        state
+            .machine
+            .disable_actuator(sensor_id.into())
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(pickup_profile.release_settle_ms)).await;
+        let release_raw_values = collect_sensor_values(
+            state,
+            prepared.lease_id,
+            sensor_id,
+            pickup_profile.release_sample_count,
+        )
+        .await?;
+        let released = median_raw(&release_raw_values).is_some_and(|value| {
+            vacuum_value_is_released(&prepared.vacuum_characterization, value)
+        });
+        if release_at_pickup_z {
+            state
+                .machine
+                .jog(
+                    prepared.lease_id,
+                    release_level,
+                    vacuum_profile.z_approach_feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok::<_, String>((
+            if released {
+                success_disposition
+            } else {
+                StripFeederPickupDisposition::NotReleased
+            },
+            Some(release_surface),
+            release_raw_values,
+            released,
+        ))
+    }
+    .await;
+    if let Err(error) = release_result {
+        let disable_error = state
+            .machine
+            .disable_actuator(sensor_id.into())
+            .await
+            .err()
+            .map(|cleanup| cleanup.to_string());
+        let lift_error = lift_and_restore_after_pickup(state, prepared.lease_id)
+            .await
+            .err();
+        let cleanup = [disable_error, lift_error]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+        return if cleanup.is_empty() {
+            Err(error)
+        } else {
+            Err(format!("{error}; release cleanup also failed: {cleanup}"))
+        };
+    }
+    release_result
+}
+
+async fn capture_bottom_mean_with_lights(
+    state: &AppState,
+    lease_id: Uuid,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    sample_count: u32,
+) -> Result<GrayFrame, String> {
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let capture = capture_profiled_frames(state, camera_profile, camera_path, sample_count)
+        .await
+        .map_err(|error| error.message)
+        .and_then(|frames| mean_gray_frames(&frames));
+    let lights_off = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    match (capture, lights_off) {
+        (Ok(frame), Ok(())) => Ok(frame),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(format!("bottom-camera light cleanup failed: {error}")),
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{error}; bottom-camera light cleanup also failed: {cleanup_error}"
+        )),
+    }
+}
+
+async fn lift_and_restore_after_pickup(state: &AppState, lease_id: Uuid) -> Result<(), String> {
+    let status = state.machine.status();
+    let pose = status
+        .pose
+        .ok_or_else(|| "pickup cleanup has no trusted pose".to_string())?;
+    let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+    let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
+    if (pose.z_mm - z_kinematics.level_controller_z_mm).abs() > 1e-9 {
+        state
+            .machine
+            .jog(
+                lease_id,
+                JogTarget {
+                    x_mm: pose.x_mm,
+                    y_mm: pose.y_mm,
+                    z_mm: z_kinematics.level_controller_z_mm,
+                    rotation_deg: None,
+                },
+                vacuum.z_approach_feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    restore_level_visual_home(state, lease_id).await
+}
+
+fn update_registration_after_pickup(
+    state: &AppState,
+    mut registration: StripFeederRegistration,
+    qualification_id: Uuid,
+    report: &StripFeederPickupQualificationReport,
+) -> Result<(), String> {
+    registration.latest_pickup_qualification_id = Some(qualification_id);
+    registration.updated_at = Utc::now();
+    registration
+        .findings
+        .retain(|finding| !finding.contains("pickup qualification"));
+    if report.passed {
+        registration.pickup_z_mm = report.pickup_nozzle_z_mm;
+        let selected_pocket_reference =
+            if let Some(holdout_id) = registration.latest_live_holdout_id {
+                state
+                    .store
+                    .get_strip_feeder_live_holdout(holdout_id)
+                    .map_err(|error| error.to_string())?
+                    .and_then(|run| run.report)
+                    .filter(|holdout| holdout.passed)
+                    .map_or(report.pocket_machine_mm, |holdout| {
+                        holdout.predicted_pocket_machine_mm
+                    })
+            } else {
+                report.pocket_machine_mm
+            };
+        registration.selected_pocket_index = nearest_strip_feeder_pocket_index(
+            &registration.pocket_centers_machine_mm,
+            selected_pocket_reference,
+        )
+        .or(registration.selected_pocket_index);
+        match (
+            registration.part_key.clone(),
+            registration.part_rotation_deg,
+        ) {
+            (Some(part_key), Some(part_rotation_deg)) => {
+                let feeder_id = registration.active_feeder_id.unwrap_or_else(Uuid::new_v4);
+                let pocket_index = registration.selected_pocket_index.unwrap_or_default();
+                let remaining = registration
+                    .pocket_centers_machine_mm
+                    .len()
+                    .checked_sub(pocket_index as usize)
+                    .and_then(|value| u32::try_from(value).ok());
+                let first_pick = Pose {
+                    x_mm: report.pocket_machine_mm[0],
+                    y_mm: report.pocket_machine_mm[1],
+                    z_mm: report.pickup_nozzle_z_mm.unwrap(),
+                    rotation_deg: part_rotation_deg,
+                };
+                let feeder = Feeder::Strip {
+                    id: feeder_id,
+                    name: registration.name.clone(),
+                    part_key,
+                    first_pick,
+                    tape_pitch_mm: registration.tape_pitch_mm,
+                    tape_width_mm: registration.tape_width_mm,
+                    tape_rotation_deg: registration.tape_rotation_deg,
+                    remaining,
+                };
+                state
+                    .store
+                    .put_feeder(&feeder)
+                    .map_err(|error| error.to_string())?;
+                registration.active_feeder_id = Some(feeder_id);
+                registration.status = StripFeederRegistrationStatus::Ready;
+                registration.findings.push(
+                    "pickup Z, vacuum hold, bottom inspection, release, and active indexing passed"
+                        .into(),
+                );
+            }
+            _ => {
+                registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
+                registration.findings.push(
+                    "pickup qualification passed; part identity and orientation are still required"
+                        .into(),
+                );
+            }
+        }
+    } else {
+        registration
+            .findings
+            .push("latest pickup qualification did not pass".into());
+    }
+    state
+        .store
+        .put_strip_feeder_registration(&registration)
+        .map_err(|error| error.to_string())
+}
+
+fn nearest_strip_feeder_pocket_index(
+    pocket_centers_machine_mm: &[[f64; 2]],
+    point_machine_mm: [f64; 2],
+) -> Option<u32> {
+    point_machine_mm
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(())?;
+    pocket_centers_machine_mm
+        .iter()
+        .enumerate()
+        .filter(|(_, center)| center.iter().all(|value| value.is_finite()))
+        .min_by(|(_, first), (_, second)| {
+            let first_distance =
+                (first[0] - point_machine_mm[0]).powi(2) + (first[1] - point_machine_mm[1]).powi(2);
+            let second_distance = (second[0] - point_machine_mm[0]).powi(2)
+                + (second[1] - point_machine_mm[1]).powi(2);
+            first_distance.total_cmp(&second_distance)
+        })
+        .and_then(|(index, _)| u32::try_from(index).ok())
+}
+
+fn vacuum_value_is_acquired(
+    characterization: &VacuumSensorCharacterizationReport,
+    value: f64,
+) -> bool {
+    match characterization.signal_polarity {
+        velocitypnp_domain::VacuumSignalPolarity::LowerIsMoreVacuum => {
+            value <= characterization.acquire_threshold_raw_value
+        }
+        velocitypnp_domain::VacuumSignalPolarity::HigherIsMoreVacuum => {
+            value >= characterization.acquire_threshold_raw_value
+        }
+    }
+}
+
+fn vacuum_value_is_released(
+    characterization: &VacuumSensorCharacterizationReport,
+    value: f64,
+) -> bool {
+    let off = &characterization.pump_off;
+    let off_margin = (3.0 * off.standard_deviation_counts).max(2.0);
+    let matches_pump_off_state =
+        value >= off.p05_raw_value - off_margin && value <= off.p95_raw_value + off_margin;
+    let crosses_release_threshold = match characterization.signal_polarity {
+        velocitypnp_domain::VacuumSignalPolarity::LowerIsMoreVacuum => {
+            value >= characterization.release_threshold_raw_value
+        }
+        velocitypnp_domain::VacuumSignalPolarity::HigherIsMoreVacuum => {
+            value <= characterization.release_threshold_raw_value
+        }
+    };
+    matches_pump_off_state || crosses_release_threshold
+}
+
+fn persist_pickup_gray_artifact(
+    state: &AppState,
+    run_id: Uuid,
+    name: &str,
+    frame: &GrayFrame,
+) -> Result<(), String> {
+    let data = encode_gray_png(frame).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_strip_feeder_pickup_artifact(run_id, name, "image/png", &data)
+        .map_err(|error| error.to_string())
+}
+
+fn persist_pickup_rgb_artifact(
+    state: &AppState,
+    run_id: Uuid,
+    name: &str,
+    frame: &RgbFrame,
+) -> Result<(), String> {
+    let data = encode_rgb_png(frame).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_strip_feeder_pickup_artifact(run_id, name, "image/png", &data)
+        .map_err(|error| error.to_string())
+}
+
+fn mean_gray_frames(frames: &[GrayFrame]) -> Result<GrayFrame, String> {
+    let first = frames
+        .first()
+        .ok_or_else(|| "camera returned no frames".to_string())?;
+    if frames.iter().any(|frame| {
+        frame.width != first.width
+            || frame.height != first.height
+            || frame.pixels.len() != first.pixels.len()
+    }) {
+        return Err("camera returned incompatible frames".into());
+    }
+    let mut sums = vec![0_u32; first.pixels.len()];
+    for frame in frames {
+        for (sum, value) in sums.iter_mut().zip(&frame.pixels) {
+            *sum += u32::from(*value);
+        }
+    }
+    Ok(GrayFrame {
+        width: first.width,
+        height: first.height,
+        pixels: sums
+            .into_iter()
+            .map(|sum| (sum / frames.len() as u32) as u8)
+            .collect(),
+    })
+}
+
+fn ensure_no_active_strip_feeder_pickup_qualifications(state: &AppState) -> ApiResult<()> {
+    let active = state
+        .store
+        .list_strip_feeder_pickup_qualifications()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .any(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        });
+    if active {
+        return Err(ApiError::bad_request(
+            "a strip-feeder pickup qualification is already active",
+        ));
+    }
+    Ok(())
+}
+
+fn sensor_id_for_nozzle(nozzle_id: &str) -> Option<&'static str> {
+    match nozzle_id {
+        "N1" => Some("vacuum_1"),
+        "N2" => Some("vacuum_2"),
+        _ => None,
+    }
+}
+
+async fn get_strip_feeder_pickup_qualification(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<StripFeederPickupQualificationRun>> {
+    state
+        .store
+        .get_strip_feeder_pickup_qualification(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("strip feeder pickup qualification not found"))
+}
+
+async fn get_strip_feeder_pickup_artifact(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    let (media_type, data) = state
+        .store
+        .get_strip_feeder_pickup_artifact(id, &name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder pickup artifact not found"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(data))
+        .map_err(ApiError::internal)
+}
+
+#[derive(Debug, Deserialize)]
 struct StartBoardRegistrationRequest {
     lease_id: Uuid,
     candidate_index: u32,
@@ -5932,6 +7291,8 @@ async fn start_board_registration(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let scan = state
         .store
         .get_workspace_scan(scan_id)
@@ -8673,7 +10034,7 @@ async fn execute_vacuum_probe(
         }
     };
     let probe_result = execute_vacuum_probe_descent(
-        &state, lease_id, &nozzle_id, &sensor_id, head_x_mm, head_y_mm, search,
+        &state, lease_id, &nozzle_id, &sensor_id, head_x_mm, head_y_mm, search, None,
     )
     .await;
     let (open_nozzle_raw_values, samples, contact) = match probe_result {
@@ -9182,6 +10543,7 @@ fn append_vacuum_probe_cleanup_errors(
     error
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_vacuum_probe_descent(
     state: &AppState,
     lease_id: Uuid,
@@ -9190,6 +10552,7 @@ async fn execute_vacuum_probe_descent(
     head_x_mm: f64,
     head_y_mm: f64,
     search: VacuumProbeSearch,
+    calibrated_acquisition: Option<&VacuumSensorCharacterizationReport>,
 ) -> Result<(Vec<i64>, Vec<VacuumProbeSample>, Option<VacuumProbeSample>), String> {
     let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
     let probe = state.profile.vacuum_calibration.as_ref().unwrap();
@@ -9236,13 +10599,16 @@ async fn execute_vacuum_probe_descent(
             median_raw_value,
             signal_delta_counts,
         };
+        let calibrated_acquired = calibrated_acquisition.is_some_and(|characterization| {
+            vacuum_value_is_acquired(characterization, median_raw_value)
+        });
         if signal_delta_counts >= probe.minimum_signal_delta_counts as f64 {
             consecutive += 1;
         } else {
             consecutive = 0;
         }
         samples.push(sample.clone());
-        if consecutive >= probe.required_consecutive_steps {
+        if calibrated_acquired || consecutive >= probe.required_consecutive_steps {
             return Ok((open_nozzle_raw_values, samples, Some(sample)));
         }
     }
@@ -16901,6 +18267,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn live_holdout_records_the_occupied_pocket_selected_by_vision() {
+        let centers = (0..20)
+            .map(|index| [85.7, 202.3 - f64::from(index) * 4.0])
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            nearest_strip_feeder_pocket_index(&centers, [85.8, 154.3]),
+            Some(12),
+        );
+    }
+
     fn test_state() -> AppState {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
@@ -18779,6 +20157,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn motion_admission_rejects_an_active_pickup_qualification() {
+        let state = test_state();
+        let now = Utc::now();
+        let mut run = StripFeederPickupQualificationRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            registration_id: Uuid::new_v4(),
+            profile_id: state.profile.id.clone(),
+            calibration_id: Uuid::new_v4(),
+            status: OperationStatus::Running,
+            created_at: now,
+            updated_at: now,
+            nozzle_id: "N1".into(),
+            fallback_drop_surface_machine_mm: None,
+            report: None,
+            message: None,
+        };
+        state
+            .store
+            .put_strip_feeder_pickup_qualification(&run)
+            .unwrap();
+
+        let error = ensure_no_active_strip_feeder_pickup_qualifications(&state).unwrap_err();
+        assert!(error.message.contains("already active"));
+
+        run.status = OperationStatus::Succeeded;
+        state
+            .store
+            .put_strip_feeder_pickup_qualification(&run)
+            .unwrap();
+        ensure_no_active_strip_feeder_pickup_qualifications(&state).unwrap();
+    }
+
+    #[tokio::test]
     async fn refinement_batch_progress_is_observable() {
         let state = test_state();
         let operation = Operation::pending("vision.workspace_refinement_batch");
@@ -19624,6 +21036,37 @@ mod tests {
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("tape is fixed"));
         assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn strip_feeder_pickup_requires_external_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/strip-feeder-registrations/{}/pickup-qualifications",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("tape is fixed and uncovered"));
+        assert!(message.contains("fallback drop target"));
     }
 
     #[test]

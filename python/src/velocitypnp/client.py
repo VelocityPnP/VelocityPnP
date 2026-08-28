@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -418,6 +419,60 @@ class Client:
             "GET",
             f"/strip-feeder-live-holdouts/{holdout_id}/artifacts/"
             "live-pocket-holdout.png",
+            "image/png",
+        )
+
+    def start_strip_feeder_pickup_qualification(
+        self,
+        registration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        nozzle_id: str = "N1",
+        fallback_drop_surface_machine_mm: tuple[float, float] | None = None,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Pick, inspect, and return one component from a validated strip."""
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "pickup qualification requires explicit confirmation that the "
+                "tape is fixed and uncovered, both nozzles are level, the "
+                "envelope and fallback target are clear, and power isolation "
+                "is reachable"
+            )
+        if not nozzle_id.strip():
+            raise ValueError("nozzle_id must not be empty")
+        fallback = None
+        if fallback_drop_surface_machine_mm is not None:
+            fallback = list(fallback_drop_surface_machine_mm)
+            if len(fallback) != 2 or not all(math.isfinite(v) for v in fallback):
+                raise ValueError("fallback drop point must contain two finite values")
+        return self._request(
+            "POST",
+            f"/strip-feeder-registrations/{registration_id}/"
+            "pickup-qualifications",
+            {
+                "lease_id": str(lease_id),
+                "nozzle_id": nozzle_id,
+                "fallback_drop_surface_machine_mm": fallback,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+
+    def strip_feeder_pickup_qualification(
+        self, qualification_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/strip-feeder-pickup-qualifications/{qualification_id}",
+        )
+
+    def strip_feeder_pickup_preview(
+        self, qualification_id: str | uuid.UUID,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/strip-feeder-pickup-qualifications/{qualification_id}/"
+            "artifacts/held-part-inspection.png",
             "image/png",
         )
 

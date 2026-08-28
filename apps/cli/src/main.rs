@@ -145,6 +145,26 @@ enum Command {
     StripFeederHoldout {
         holdout: Uuid,
     },
+    QualifyStripFeederPickup {
+        registration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value = "N1")]
+        nozzle: String,
+        /// Fallback surface X. Supply this with --drop-y.
+        #[arg(long, requires = "drop_y")]
+        drop_x: Option<f64>,
+        /// Fallback surface Y. Supply this with --drop-x.
+        #[arg(long, requires = "drop_x")]
+        drop_y: Option<f64>,
+        /// Confirm uncovered fixed tape, level nozzles, a clear envelope and
+        /// fallback target, and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    StripFeederPickupQualification {
+        qualification: Uuid,
+    },
     SetWorkspaceBaseline {
         scan: Uuid,
     },
@@ -605,6 +625,33 @@ async fn main() -> Result<()> {
             get(
                 &client,
                 &format!("{base}/strip-feeder-live-holdouts/{holdout}"),
+            )
+            .await?
+        }
+        Command::QualifyStripFeederPickup {
+            registration,
+            lease,
+            nozzle,
+            drop_x,
+            drop_y,
+            confirm_safety_checks,
+        } => {
+            post(
+                &client,
+                &format!("{base}/strip-feeder-registrations/{registration}/pickup-qualifications"),
+                Some(json!({
+                    "lease_id": lease,
+                    "nozzle_id": nozzle,
+                    "fallback_drop_surface_machine_mm": drop_x.zip(drop_y).map(|(x, y)| [x, y]),
+                    "confirmed_external_safety_checks": confirm_safety_checks,
+                })),
+            )
+            .await?
+        }
+        Command::StripFeederPickupQualification { qualification } => {
+            get(
+                &client,
+                &format!("{base}/strip-feeder-pickup-qualifications/{qualification}"),
             )
             .await?
         }

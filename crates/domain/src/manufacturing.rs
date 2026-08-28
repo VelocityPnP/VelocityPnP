@@ -1,4 +1,4 @@
-use crate::{OperationStatus, Pose, Residuals, Transform2d};
+use crate::{OperationStatus, Pose, Residuals, Transform2d, VacuumProbeSample};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -260,9 +260,88 @@ pub struct StripFeederLiveHoldoutRun {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub sample_count: u32,
+    #[serde(default)]
+    pub pocket_index: u32,
     pub predicted_pocket_machine_mm: [f64; 2],
     #[serde(default)]
     pub report: Option<StripFeederLiveHoldoutReport>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StripFeederPickupDisposition {
+    ReturnedToPocket,
+    DroppedAtFallback,
+    NotReleased,
+}
+
+/// Bottom-camera comparison between the centered bare nozzle and a held part.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartInspectionReport {
+    pub algorithm_version: String,
+    pub detected: bool,
+    pub center_x_px: Option<f64>,
+    pub center_y_px: Option<f64>,
+    pub centering_correction_x_mm: Option<f64>,
+    pub centering_correction_y_mm: Option<f64>,
+    pub centering_correction_mm: Option<f64>,
+    pub width_mm: Option<f64>,
+    pub length_mm: Option<f64>,
+    pub rotation_deg: Option<f64>,
+    pub changed_pixel_count: u32,
+    pub mean_difference_luma: f64,
+    pub confidence: f64,
+    pub passed: bool,
+    pub artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Evidence from one bounded pickup, bottom inspection, and release cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StripFeederPickupQualificationReport {
+    pub algorithm_version: String,
+    pub nozzle_id: String,
+    pub tip_id: String,
+    pub sensor_id: String,
+    pub pocket_machine_mm: [f64; 2],
+    pub pickup_nozzle_z_mm: Option<f64>,
+    pub pickup_controller_z_mm: Option<f64>,
+    pub open_nozzle_raw_values: Vec<i64>,
+    pub pickup_samples: Vec<VacuumProbeSample>,
+    pub held_raw_values: Vec<i64>,
+    pub held_median_raw_value: Option<f64>,
+    pub vacuum_acquired: bool,
+    pub vacuum_held_after_transfer: bool,
+    pub inspection: Option<HeldPartInspectionReport>,
+    pub disposition: StripFeederPickupDisposition,
+    pub release_surface_machine_mm: Option<[f64; 2]>,
+    pub release_raw_values: Vec<i64>,
+    pub released: bool,
+    pub passed: bool,
+    pub artifact_names: Vec<String>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Persistent operation state for a pickup qualification cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StripFeederPickupQualificationRun {
+    pub id: Uuid,
+    pub operation_id: Uuid,
+    pub registration_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub status: OperationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub nozzle_id: String,
+    #[serde(default)]
+    pub fallback_drop_surface_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub report: Option<StripFeederPickupQualificationReport>,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -295,11 +374,15 @@ pub struct StripFeederRegistration {
     #[serde(default)]
     pub selected_pocket_machine_mm: Option<[f64; 2]>,
     #[serde(default)]
+    pub selected_pocket_index: Option<u32>,
+    #[serde(default)]
     pub pickup_z_mm: Option<f64>,
     #[serde(default)]
     pub active_feeder_id: Option<Uuid>,
     #[serde(default)]
     pub latest_live_holdout_id: Option<Uuid>,
+    #[serde(default)]
+    pub latest_pickup_qualification_id: Option<Uuid>,
     pub vision_confidence: f64,
     pub vision_review_required: bool,
     #[serde(default)]

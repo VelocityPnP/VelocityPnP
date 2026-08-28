@@ -3,7 +3,8 @@ import { api, waitForOperation } from "./api";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
   CalibrationSnapshot, CalibrationStep, Device, MachineEvent, MachineStatus, Pose,
-  SensorReading, StripFeederLiveHoldoutRun, StripFeederRegistration,
+  SensorReading, StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun,
+  StripFeederRegistration,
   StripFeederVisionReport, VisualHomingResult,
   WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport, WorkspaceChangeSetReport,
   WorkspaceInventoryBaseline, WorkspaceScanReport,
@@ -511,6 +512,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
   const [feederVisionBusy, setFeederVisionBusy] = useState(false);
   const [feederDraft, setFeederDraft] = useState<StripFeederRegistration | null>(null);
   const [feederHoldout, setFeederHoldout] = useState<StripFeederLiveHoldoutRun | null>(null);
+  const [feederPickup, setFeederPickup] = useState<StripFeederPickupQualificationRun | null>(null);
   const [feederPartKey, setFeederPartKey] = useState("");
   const [feederPartRotation, setFeederPartRotation] = useState("");
   const [pcb, setPcb] = useState<File | null>(null);
@@ -600,7 +602,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
   };
   const analyzeStripFeeder = async (candidate: WorkspaceBoardCandidate) => {
     if (!selectedScan) return;
-    setFeederVisionBusy(true); setError(null); setFeederVision(null); setFeederDraft(null); setFeederHoldout(null);
+    setFeederVisionBusy(true); setError(null); setFeederVision(null); setFeederDraft(null); setFeederHoldout(null); setFeederPickup(null);
     try {
       setFeederVision(await api.analyzeStripFeeder(
         selectedScan, candidate.candidate_index,
@@ -657,6 +659,31 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       setFeederVisionBusy(false);
     }
   };
+  const runStripFeederPickup = async () => {
+    if (!feederDraft || feederHoldout?.report?.passed !== true) return;
+    if (!window.confirm(
+      "Pick and inspect one component with N1? Confirm the cover tape is removed, the carrier tape is fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable. The machine will use bounded vacuum Z detection, inspect the part with the bottom camera, and return it to the same pocket.",
+    )) return;
+    setFeederVisionBusy(true); setError(null); setFeederPickup(null);
+    try {
+      const machine = await api.status();
+      const lease = machine.control_lease
+        ? await api.renewLease(machine.control_lease.id, 900)
+        : await api.lease("VelocityPnP strip feeder pickup", 900);
+      const started = await api.startStripFeederPickupQualification(
+        feederDraft.id, lease.id,
+      );
+      try { await waitForOperation(started.operation); } catch { /* Load retained failure. */ }
+      setFeederPickup(await api.stripFeederPickupQualification(
+        started.qualification.id,
+      ));
+      setFeederDraft(await api.stripFeederDraft(feederDraft.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setFeederVisionBusy(false);
+    }
+  };
   const selectedReport = scans.find((scan) => scan.id === selectedScan);
   const hasProposals = discovery !== null || selectedReport?.board_discovery != null;
   return <div className="boards-layout">
@@ -673,7 +700,7 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
       <div className="card-heading"><div><p className="eyebrow">Workspace inventory</p><h2>Analyze workspace objects</h2></div>{scans.length > 0 && <span className="count">{scans.length}</span>}</div>
       <p>Select a completed height-aware scan. Plate-aligned proposals use known fixtures and retain uncertain objects for later classification. Analysis causes no machine motion.</p>
       <div className="board-discovery-controls">
-        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); setChanges(null); setFeederVision(null); setFeederDraft(null); setFeederHoldout(null); }}>
+        <select value={selectedScan} onChange={(event) => { setSelectedScan(event.target.value); setDiscovery(null); setChanges(null); setFeederVision(null); setFeederDraft(null); setFeederHoldout(null); setFeederPickup(null); }}>
           {scans.length === 0 && <option value="">No eligible scans</option>}
           {scans.map((scan) => <option key={scan.id} value={scan.id}>{new Date(scan.updated_at).toLocaleString()} · {pretty(scan.mode)}{scan.board_discovery ? ` · ${scan.board_discovery.candidate_count} prior candidates` : ""}</option>)}
         </select>
@@ -699,8 +726,9 @@ function BoardsPanel({ setError }: { setError: (value: string | null) => void })
         {feederVision.rejected_lattices.length > 0 && <p><strong>{feederVision.rejected_lattices.length} pocket-row {feederVision.rejected_lattices.length === 1 ? "lattice" : "lattices"} rejected</strong>. Red lines in the preview mark repeated component-pocket features that were paired with stronger sprocket rows.</p>}
         <div className="board-discovery-controls"><input value={feederPartKey} onChange={(event) => setFeederPartKey(event.target.value)} placeholder="Part key (optional)" /><input value={feederPartRotation} onChange={(event) => setFeederPartRotation(event.target.value)} placeholder="Part rotation ° (optional)" /></div>
         {feederVision.proposals.map((proposal) => <div key={proposal.proposal_index}><p>Lane {proposal.proposal_index + 1}: <strong>{proposal.tape_width_mm?.toFixed(0) ?? "unknown"} mm tape</strong>; {proposal.component_pitch_mm?.toFixed(0) ?? "unknown"} mm component pitch; {proposal.component_size_mm ? `${proposal.component_size_mm[0].toFixed(1)} × ${proposal.component_size_mm[1].toFixed(1)} mm parts; ` : "unknown part size; "}{proposal.present_count} present and {proposal.absent_count} absent; {proposal.sprocket_center_count} sprocket holes; {proposal.sprocket_pitch_residual_p95_mm.toFixed(3)} mm lattice p95; {(proposal.confidence * 100).toFixed(0)}% confidence{proposal.review_required ? "; review required" : "; draft gate passed"}.</p><button disabled={feederVisionBusy || proposal.tape_width_mm == null || proposal.component_pitch_mm == null || proposal.pick_centerline_machine_mm == null} onClick={() => void saveStripFeederDraft(proposal.proposal_index)}>Save lane as draft</button></div>)}
-        {feederDraft && <div><p><strong>{feederDraft.name} saved</strong> as {pretty(feederDraft.status)}. Live pocket occupancy and pickup Z are still required.</p><button disabled={feederVisionBusy} onClick={() => void runStripFeederHoldout()}>{feederVisionBusy ? "Checking…" : "Run live pocket holdout"}</button></div>}
+        {feederDraft && <div><p><strong>{feederDraft.name} saved</strong> as {pretty(feederDraft.status)}. Live pocket occupancy and pickup qualification are required before production use.</p><button disabled={feederVisionBusy} onClick={() => void runStripFeederHoldout()}>{feederVisionBusy ? "Checking…" : "Run live pocket holdout"}</button>{feederHoldout?.report?.passed && <button disabled={feederVisionBusy} onClick={() => void runStripFeederPickup()}>{feederVisionBusy ? "Qualifying…" : "Pick, inspect, and return one part"}</button>}</div>}
         {feederHoldout?.report && <div><p><strong>{feederHoldout.report.passed ? "Live holdout passed" : "Live holdout rejected"}</strong>: {feederHoldout.report.sprocket_center_count} sprocket centers, {feederHoldout.report.correction_magnitude_mm.toFixed(3)} mm local correction, {pretty(feederHoldout.report.occupancy)} at {(feederHoldout.report.occupancy_confidence * 100).toFixed(0)}% confidence.</p><a href={`/api/v1/strip-feeder-live-holdouts/${feederHoldout.id}/artifacts/${feederHoldout.report.artifact_name}`} target="_blank" rel="noreferrer">View live holdout evidence</a>{feederHoldout.report.findings.map((finding) => <p key={finding}>{finding}</p>)}</div>}
+        {feederPickup?.report && <div><p><strong>{feederPickup.report.passed ? "Pickup qualification passed" : "Pickup qualification failed"}</strong>: {feederPickup.report.pickup_nozzle_z_mm != null ? `pickup Z ${feederPickup.report.pickup_nozzle_z_mm.toFixed(3)} mm; ` : "no pickup Z; "}{feederPickup.report.vacuum_held_after_transfer ? "vacuum held; " : "vacuum hold failed; "}{pretty(feederPickup.report.disposition)}.</p>{feederPickup.report.inspection && <a href={`/api/v1/strip-feeder-pickup-qualifications/${feederPickup.id}/artifacts/${feederPickup.report.inspection.artifact_name}`} target="_blank" rel="noreferrer">View bottom-camera pickup evidence</a>}{feederPickup.report.findings.map((finding) => <p key={finding}>{finding}</p>)}</div>}
         {feederVision.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
       </div>}
       {discovery && <div className="board-discovery-result">

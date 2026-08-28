@@ -820,9 +820,11 @@ export interface StripFeederRegistration {
   pick_centerline_machine_mm: [[number, number], [number, number]];
   pocket_centers_machine_mm: Array<[number, number]>;
   selected_pocket_machine_mm: [number, number] | null;
+  selected_pocket_index: number | null;
   pickup_z_mm: number | null;
   active_feeder_id: string | null;
   latest_live_holdout_id: string | null;
+  latest_pickup_qualification_id: string | null;
   vision_confidence: number;
   vision_review_required: boolean;
   findings: string[];
@@ -856,8 +858,73 @@ export interface StripFeederLiveHoldoutRun {
   created_at: string;
   updated_at: string;
   sample_count: number;
+  pocket_index: number;
   predicted_pocket_machine_mm: [number, number];
   report: StripFeederLiveHoldoutReport | null;
+  message: string | null;
+}
+
+export interface HeldPartInspectionReport {
+  algorithm_version: string;
+  detected: boolean;
+  center_x_px: number | null;
+  center_y_px: number | null;
+  centering_correction_x_mm: number | null;
+  centering_correction_y_mm: number | null;
+  centering_correction_mm: number | null;
+  width_mm: number | null;
+  length_mm: number | null;
+  rotation_deg: number | null;
+  changed_pixel_count: number;
+  mean_difference_luma: number;
+  confidence: number;
+  passed: boolean;
+  artifact_name: string;
+  findings: string[];
+}
+
+export interface StripFeederPickupQualificationReport {
+  algorithm_version: string;
+  nozzle_id: string;
+  tip_id: string;
+  sensor_id: string;
+  pocket_machine_mm: [number, number];
+  pickup_nozzle_z_mm: number | null;
+  pickup_controller_z_mm: number | null;
+  open_nozzle_raw_values: number[];
+  pickup_samples: Array<{
+    nozzle_z_mm: number;
+    controller_z_mm: number;
+    raw_values: number[];
+    median_raw_value: number;
+    signal_delta_counts: number;
+  }>;
+  held_raw_values: number[];
+  held_median_raw_value: number | null;
+  vacuum_acquired: boolean;
+  vacuum_held_after_transfer: boolean;
+  inspection: HeldPartInspectionReport | null;
+  disposition: "returned_to_pocket" | "dropped_at_fallback" | "not_released";
+  release_surface_machine_mm: [number, number] | null;
+  release_raw_values: number[];
+  released: boolean;
+  passed: boolean;
+  artifact_names: string[];
+  findings: string[];
+}
+
+export interface StripFeederPickupQualificationRun {
+  id: string;
+  operation_id: string;
+  registration_id: string;
+  profile_id: string;
+  calibration_id: string;
+  status: Operation["status"];
+  created_at: string;
+  updated_at: string;
+  nozzle_id: string;
+  fallback_drop_surface_machine_mm: [number, number] | null;
+  report: StripFeederPickupQualificationReport | null;
   message: string | null;
 }
 

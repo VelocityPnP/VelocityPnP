@@ -2155,6 +2155,60 @@ clipped. The regenerated 4,493 by 2,421 full-workspace overlay has SHA-256
 The simulated daemon updated the persistent parent scan and caused no machine
 motion.
 
+### Physical strip-feeder pickup qualification
+
+On 2026-08-27, after a host restart, the camera devices rejected the physical
+daemon user. The user was added to the `video` group. The release daemon was
+then started in that group. Both cameras opened and captured normally.
+
+Draft `4447a5fb-3fe2-468a-8c3c-bcf10910a7cb` represents feeder 1 from focused
+scan `cd0fe50f-61bf-4023-897d-8970dfa2c2d9`. The operator removed its cover
+tape and confirmed the travel envelope. Coarse home
+`c6b62e2b-41da-4f64-bd00-048f196e9ef7` passed. Fine home
+`f596c719-685f-453b-8665-c34ed5cadfea` detected N2 with its N24 tip and reset
+the datum contact from Z59.4 to Z59.1.
+
+The first local holdout showed only four sprocket holes in its camera field.
+The local rule now accepts a three-hole 4 mm lattice. The retained workspace
+rule still requires five holes. A dark-disc detector now adds live sprocket
+evidence when a rectified image seam hides a circle edge. Holdout
+`0f620f1a-8aeb-4d68-818c-54c0a3c3a21f` then passed with four sprocket centers,
+0.047 mm pitch residual, 0.845 mm position correction, and 0.722 occupancy
+confidence. It selected pocket 12 at measured X85.892, Y155.137 mm.
+
+The first physical pickup attempt measured a median vacuum value of 230 at
+Z3.7 and 228 at Z3.6. The learned acquire threshold was 230.5, but the descent
+used only the larger coarse delta gate. It therefore did not report contact
+and did not transfer the part. The stop rule now accepts either the calibrated
+threshold or the coarse delta gate. A second run at that point found no vacuum
+transition. The fresh holdout above selected a different occupied pocket.
+
+Qualification `afc75a54-17f2-440a-a2a4-465d02e1b4e7` passed at Z3.6. Its open
+median was 236. The pickup median was 230, and the post-transfer hold median
+was 228. Bottom-camera frame difference found the held part with 0.365 mm
+center offset and 0.703 confidence. The runner returned to the exact source
+head pose, lowered to the detected pickup Z, disabled vacuum, and confirmed a
+released value of zero. Its disposition is `returned_to_pocket`.
+
+The retained pickup artifacts and downloaded SHA-256 values are:
+
+- `bare-nozzle.png`:
+  `3a0014198827568ceb9309c1e069f3741b105f5336844523c50c3a5844473cc5`
+- `held-part.png`:
+  `73bd4b7e82bdac7f0a8b1561cc8639b7beaf70b955af6d1948f3700ae934ccf6`
+- `held-part-inspection.png`:
+  `ea341a47387daf8ed2ca0b4c5f6db0d3149e415291438c581d93c6608df9f922`
+
+The live detector selected pocket 12, but the first stored registration used
+the requested anchor index 10. The measured pickup point was correct. The
+registration update now derives the index from the selected visual pocket.
+The retained record was repaired to index 12, and the SQLite integrity check
+passed.
+
+Normal disconnect `2c411232-e2c1-4bff-9400-9002ffca012a` left the controller
+disconnected, unhomed, and fault-free. Vacuum and lights were off. No emergency
+stop was used.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

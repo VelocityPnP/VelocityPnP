@@ -461,6 +461,60 @@ class ClientTests(unittest.TestCase):
             "image/png",
         )
 
+        started_pickup = {
+            "qualification": {"id": "pickup"},
+            "operation": {"id": "operation"},
+        }
+        with patch.object(
+            client, "_request", return_value=started_pickup,
+        ) as send:
+            self.assertEqual(
+                client.start_strip_feeder_pickup_qualification(
+                    "draft", "lease", nozzle_id="N1",
+                    fallback_drop_surface_machine_mm=(220.0, 68.0),
+                    safety_checks_confirmed=True,
+                ),
+                started_pickup,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/strip-feeder-registrations/draft/pickup-qualifications",
+            {
+                "lease_id": "lease",
+                "nozzle_id": "N1",
+                "fallback_drop_surface_machine_mm": [220.0, 68.0],
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_pickup_qualification("draft", "lease")
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_pickup_qualification(
+                "draft", "lease", fallback_drop_surface_machine_mm=(1.0, float("nan")),
+                safety_checks_confirmed=True,
+            )
+
+        pickup = {"id": "pickup", "status": "succeeded"}
+        with patch.object(client, "_request", return_value=pickup) as send:
+            self.assertEqual(
+                client.strip_feeder_pickup_qualification("pickup"), pickup,
+            )
+        send.assert_called_once_with(
+            "GET", "/strip-feeder-pickup-qualifications/pickup",
+        )
+        with patch.object(
+            client, "_request_bytes", return_value=b"pickup",
+        ) as send:
+            self.assertEqual(
+                client.strip_feeder_pickup_preview("pickup"), b"pickup",
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/strip-feeder-pickup-qualifications/pickup/"
+            "artifacts/held-part-inspection.png",
+            "image/png",
+        )
+
         with patch.object(client, "_request", return_value=report) as send:
             self.assertEqual(
                 client.workspace_board_discovery_report("scan"), report,

@@ -138,6 +138,8 @@ pub struct MachineProfile {
     #[serde(default)]
     pub vacuum_characterization: Option<VacuumCharacterizationProfile>,
     #[serde(default)]
+    pub strip_feeder_pickup: Option<StripFeederPickupProfile>,
+    #[serde(default)]
     pub local_xy_direction_response: Option<LocalXyDirectionResponseProfile>,
     #[serde(default)]
     pub installed_geometry_calibration: Option<InstalledGeometryCalibrationProfile>,
@@ -374,6 +376,20 @@ pub struct VacuumCharacterizationProfile {
     pub characterization_sample_count: u32,
     pub release_sample_count: u32,
     pub minimum_distribution_gap_counts: i64,
+}
+
+/// Bounded search and inspection policy for strip-feeder pickup qualification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederPickupProfile {
+    pub search_start_above_reference_mm: f64,
+    pub search_end_above_reference_mm: f64,
+    pub maximum_part_offset_mm: f64,
+    pub minimum_part_size_mm: f64,
+    pub maximum_part_size_mm: f64,
+    pub inspection_sample_count: u32,
+    pub held_sample_count: u32,
+    pub release_sample_count: u32,
+    pub release_settle_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -616,6 +632,34 @@ impl VacuumCharacterizationProfile {
             || self.minimum_distribution_gap_counts >= minimum_signal_delta_counts
         {
             return Err("vacuum characterization profile is invalid");
+        }
+        Ok(())
+    }
+}
+
+impl StripFeederPickupProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let values = [
+            self.search_start_above_reference_mm,
+            self.search_end_above_reference_mm,
+            self.maximum_part_offset_mm,
+            self.minimum_part_size_mm,
+            self.maximum_part_size_mm,
+        ];
+        if values.iter().any(|value| !value.is_finite())
+            || !(0.5..=5.0).contains(&self.search_start_above_reference_mm)
+            || !(0.05..=1.0).contains(&self.search_end_above_reference_mm)
+            || self.search_start_above_reference_mm <= self.search_end_above_reference_mm
+            || !(0.1..=2.0).contains(&self.maximum_part_offset_mm)
+            || !(0.05..=1.0).contains(&self.minimum_part_size_mm)
+            || self.maximum_part_size_mm <= self.minimum_part_size_mm
+            || self.maximum_part_size_mm > 20.0
+            || !(1..=5).contains(&self.inspection_sample_count)
+            || !(3..=30).contains(&self.held_sample_count)
+            || !(3..=30).contains(&self.release_sample_count)
+            || !(100..=2_000).contains(&self.release_settle_ms)
+        {
+            return Err("strip-feeder pickup profile is invalid");
         }
         Ok(())
     }

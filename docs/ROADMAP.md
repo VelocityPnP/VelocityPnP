@@ -87,7 +87,9 @@ The project is organized by measurable gates rather than calendar estimates.
   from retained workspace evidence
 - [x] Measure visible strip population, part pitch, part outline size, and
   present/absent feed-position counts across compatible focused scans
-- [ ] Validate vision-assisted strip setup and indexing
+- [x] Add persistent vision-assisted strip setup through live pocket,
+  bounded pickup Z, vacuum hold, bottom inspection, and release
+- [ ] Validate strip indexing and deterministic next-pocket advancement
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
 - [ ] Add vacuum and bottom-vision feedback to the physical job executor

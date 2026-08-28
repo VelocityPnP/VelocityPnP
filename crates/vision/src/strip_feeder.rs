@@ -27,6 +27,7 @@ const SPROCKET_DIAMETER_MAX_MM: f64 = 2.2;
 const SPROCKET_TRACK_TOLERANCE_MM: f64 = 0.75;
 const SPROCKET_LATTICE_TOLERANCE_MM: f64 = 0.45;
 const MINIMUM_SPROCKETS_PER_TRACK: usize = 5;
+const MINIMUM_LIVE_HOLDOUT_SPROCKETS: usize = 3;
 const EIGHT_MM_POCKET_CENTER_OFFSET_MM: f64 = 3.5;
 const POCKET_ROW_PAIR_TOLERANCE_MM: f64 = 0.45;
 const STANDARD_TAPE_WIDTHS_MM: [f64; 4] = [8.0, 12.0, 16.0, 24.0];
@@ -138,6 +139,7 @@ pub fn analyze_strip_feeder_candidate(
         candidate.width_mm,
         candidate.height_mm,
         long_is_y,
+        MINIMUM_SPROCKETS_PER_TRACK,
     );
     let (tracks, suppressed_tracks) = resolve_pocket_row_competitors(detected_tracks);
     let rectangular_features =
@@ -307,13 +309,14 @@ pub fn analyze_live_strip_feeder_holdout(
         cross_span_mm,
         LIVE_HOLDOUT_ALONG_SPAN_MM,
     )?;
-    let circles = detect_sprocket_circles(&crop, cross_span_mm, LIVE_HOLDOUT_ALONG_SPAN_MM)?;
+    let circles = detect_live_sprocket_circles(&crop, cross_span_mm, LIVE_HOLDOUT_ALONG_SPAN_MM)?;
     let tracks = build_sprocket_tracks(
         &circles,
         &crop,
         cross_span_mm,
         LIVE_HOLDOUT_ALONG_SPAN_MM,
         true,
+        MINIMUM_LIVE_HOLDOUT_SPROCKETS,
     );
     let center_cross_mm = cross_span_mm * 0.5;
     let center_along_mm = LIVE_HOLDOUT_ALONG_SPAN_MM * 0.5;
@@ -436,7 +439,7 @@ pub fn analyze_live_strip_feeder_holdout(
     );
     let selected_machine = add(selected_predicted, correction);
 
-    let geometry_passed = track.circles.len() >= MINIMUM_SPROCKETS_PER_TRACK
+    let geometry_passed = track.circles.len() >= MINIMUM_LIVE_HOLDOUT_SPROCKETS
         && track.residual_p95_mm <= LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM
         && correction_magnitude_mm <= LIVE_HOLDOUT_MAX_CORRECTION_MM
         && rotation_correction_deg.abs() <= LIVE_HOLDOUT_MAX_ROTATION_DEG
@@ -907,9 +910,96 @@ fn detect_sprocket_circles(
             confidence,
         });
     }
+    let duplicate_distance_px = 0.65 / mean_mm_per_pixel;
+    Ok(deduplicate_circle_features(features, duplicate_distance_px))
+}
+
+fn detect_live_sprocket_circles(
+    crop: &GrayFrame,
+    width_mm: f64,
+    height_mm: f64,
+) -> Result<Vec<CircleFeature>> {
+    let mut features = detect_sprocket_circles(crop, width_mm, height_mm)?;
+    let source = gray_frame_to_mat(crop)?;
+    let mut blurred = Mat::default();
+    imgproc::gaussian_blur(
+        &source,
+        &mut blurred,
+        Size::new(3, 3),
+        0.0,
+        0.0,
+        core::BORDER_DEFAULT,
+    )?;
+    let mut dark_mask = Mat::default();
+    imgproc::threshold(
+        &blurred,
+        &mut dark_mask,
+        0.0,
+        255.0,
+        imgproc::THRESH_BINARY_INV | imgproc::THRESH_OTSU,
+    )?;
+    let mut contours = Vector::<Vector<Point>>::new();
+    imgproc::find_contours(
+        &dark_mask,
+        &mut contours,
+        imgproc::RETR_LIST,
+        imgproc::CHAIN_APPROX_SIMPLE,
+        Point::new(0, 0),
+    )?;
+    let mean_mm_per_pixel =
+        0.5 * (width_mm / f64::from(crop.width) + height_mm / f64::from(crop.height));
+    for contour in contours {
+        if contour.len() < 8 {
+            continue;
+        }
+        let area = imgproc::contour_area(&contour, false)?.abs();
+        let perimeter = imgproc::arc_length(&contour, true)?;
+        if area <= 1.0 || perimeter <= 1.0 {
+            continue;
+        }
+        let circularity = 4.0 * PI * area / (perimeter * perimeter);
+        if circularity < 0.55 {
+            continue;
+        }
+        let mut center = Point2f::default();
+        let mut radius_px = 0.0_f32;
+        imgproc::min_enclosing_circle(&contour, &mut center, &mut radius_px)?;
+        let diameter_mm = 2.0 * f64::from(radius_px) * mean_mm_per_pixel;
+        let fill_fraction = area / (PI * f64::from(radius_px).powi(2)).max(1.0);
+        if !(SPROCKET_DIAMETER_MIN_MM..=SPROCKET_DIAMETER_MAX_MM).contains(&diameter_mm)
+            || fill_fraction < 0.60
+        {
+            continue;
+        }
+        let center_px = [f64::from(center.x), f64::from(center.y)];
+        if center_px[0] < 1.0
+            || center_px[1] < 1.0
+            || center_px[0] >= f64::from(crop.width - 1)
+            || center_px[1] >= f64::from(crop.height - 1)
+        {
+            continue;
+        }
+        let diameter_score = (1.0 - (diameter_mm - 1.5).abs() / 0.7).clamp(0.0, 1.0);
+        features.push(CircleFeature {
+            center_px,
+            confidence: (0.50 * circularity.clamp(0.0, 1.0)
+                + 0.25 * fill_fraction.clamp(0.0, 1.0)
+                + 0.25 * diameter_score)
+                .clamp(0.0, 1.0),
+        });
+    }
+    Ok(deduplicate_circle_features(
+        features,
+        0.65 / mean_mm_per_pixel,
+    ))
+}
+
+fn deduplicate_circle_features(
+    mut features: Vec<CircleFeature>,
+    duplicate_distance_px: f64,
+) -> Vec<CircleFeature> {
     features.sort_by(|first, second| second.confidence.total_cmp(&first.confidence));
     let mut deduplicated: Vec<CircleFeature> = Vec::new();
-    let duplicate_distance_px = 0.65 / mean_mm_per_pixel;
     for feature in features {
         if deduplicated.iter().any(|accepted| {
             (accepted.center_px[0] - feature.center_px[0])
@@ -920,7 +1010,7 @@ fn detect_sprocket_circles(
         }
         deduplicated.push(feature);
     }
-    Ok(deduplicated)
+    deduplicated
 }
 
 fn build_sprocket_tracks(
@@ -929,6 +1019,7 @@ fn build_sprocket_tracks(
     width_mm: f64,
     height_mm: f64,
     long_is_y: bool,
+    minimum_sprockets: usize,
 ) -> Vec<SprocketTrack> {
     let local = circles
         .iter()
@@ -958,7 +1049,7 @@ fn build_sprocket_tracks(
     }
     clusters
         .into_iter()
-        .filter_map(fit_sprocket_track)
+        .filter_map(|cluster| fit_sprocket_track(cluster, minimum_sprockets))
         .collect()
 }
 
@@ -1178,8 +1269,11 @@ fn detect_rectangular_features(
     Ok(features)
 }
 
-fn fit_sprocket_track(cluster: Vec<(f64, f64, CircleFeature)>) -> Option<SprocketTrack> {
-    if cluster.len() < MINIMUM_SPROCKETS_PER_TRACK {
+fn fit_sprocket_track(
+    cluster: Vec<(f64, f64, CircleFeature)>,
+    minimum_sprockets: usize,
+) -> Option<SprocketTrack> {
+    if cluster.len() < minimum_sprockets {
         return None;
     }
     let phases = cluster
@@ -1205,7 +1299,7 @@ fn fit_sprocket_track(cluster: Vec<(f64, f64, CircleFeature)>) -> Option<Sprocke
             best_residuals = residuals;
         }
     }
-    if best_inliers.len() < MINIMUM_SPROCKETS_PER_TRACK {
+    if best_inliers.len() < minimum_sprockets {
         return None;
     }
     best_inliers.sort_by(|first, second| first.1.total_cmp(&second.1));
@@ -3133,7 +3227,9 @@ mod tests {
         let width = 500_u32;
         let height = 500_u32;
         let mut pixels = vec![105_u8; (width * height) as usize];
-        for y_mm in (-8_i32..=8).step_by(4) {
+        // A live crop can contain only four sprockets. Offline discovery
+        // still requires five, but this bounded local holdout requires three.
+        for y_mm in (-6_i32..=6).step_by(4) {
             paint_disc(&mut pixels, width, height, 163, 250 + y_mm * 25, 18, 235);
         }
         for y_mm in (-8_i32..=8).step_by(2) {
@@ -3188,9 +3284,11 @@ mod tests {
                 .map(|index| [112.0, 82.0 - f64::from(index) * 2.0])
                 .collect(),
             selected_pocket_machine_mm: None,
+            selected_pocket_index: None,
             pickup_z_mm: None,
             active_feeder_id: None,
             latest_live_holdout_id: None,
+            latest_pickup_qualification_id: None,
             vision_confidence: 0.9,
             vision_review_required: false,
             findings: Vec::new(),
@@ -3212,10 +3310,44 @@ mod tests {
         .unwrap();
 
         assert!(result.report.passed, "{:?}", result.report.findings);
-        assert!(result.report.sprocket_center_count >= 3);
+        assert_eq!(result.report.sprocket_center_count, 4);
         assert_eq!(result.report.occupancy, StripPocketOccupancy::Occupied);
         assert!(result.report.correction_magnitude_mm < 0.15);
         assert_eq!(result.preview.width, 350);
         assert_eq!(result.preview.height, 500);
+    }
+
+    #[test]
+    fn live_dark_disc_path_keeps_three_holes_when_one_touches_a_crop_seam() {
+        let width = 350_u32;
+        let height = 500_u32;
+        let mut pixels = vec![220_u8; (width * height) as usize];
+        for y in 0..75 {
+            for x in 0..width {
+                pixels[(y * width + x) as usize] = 0;
+            }
+        }
+        for center_y in [75, 175, 275, 375] {
+            paint_disc(&mut pixels, width, height, 90, center_y, 19, 30);
+        }
+        let crop = GrayFrame {
+            width,
+            height,
+            pixels,
+        };
+
+        let circles = detect_live_sprocket_circles(&crop, 14.0, 20.0).unwrap();
+        let tracks = build_sprocket_tracks(
+            &circles,
+            &crop,
+            14.0,
+            20.0,
+            true,
+            MINIMUM_LIVE_HOLDOUT_SPROCKETS,
+        );
+
+        assert!(circles.len() >= 3);
+        assert_eq!(tracks.len(), 1);
+        assert!(tracks[0].circles.len() >= 3);
     }
 }
