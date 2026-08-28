@@ -41,6 +41,11 @@ vacuum and bottom-camera evidence. A normal return also needs a top-camera
 occupied-pocket check. Restart recovery marks an unresolved reservation as
 needing review.
 
+Held-part alignment moves only after vacuum hold and initial bottom-camera
+evidence pass. The profile limits it to two X/Y and angle corrections. The
+runner restores the nozzle angle before it returns to the exact pickup pose.
+It fails closed if the requested angle exceeds the configured bound.
+
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the
 attached firmware was observed moving X/Y toward zero before homing Z, which

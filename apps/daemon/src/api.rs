@@ -30,7 +30,8 @@ use velocitypnp_domain::{
     CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase,
     CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId, CameraProfile,
     CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
-    HeadFeatureCenterReport, HeadGeometryReport, InspectionReport, InspectionStatus,
+    HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
+    HeldPartAlignmentReport, InspectionReport, InspectionStatus,
     InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
     InstalledPlateRegistrationReport, Job, JogTarget, LinearAxis, LocalXyAxisDirectionReport,
     LocalXyAxisEstimate, LocalXyCompensationHoldout, LocalXyDirectionResponseReport,
@@ -82,20 +83,21 @@ use velocitypnp_vision::{
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
     summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
     CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame, NozzleToolingReport,
-    PersistentGrayCapture, RgbFrame, RgbaFrame, StripFeederInventoryBuild,
-    StripFeederInventorySourceMosaic, V4l2CaptureConfig, VisualHomingPlan,
-    WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
-    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject, WorkspaceParallaxObservation,
-    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRasterEvidence,
-    WorkspaceRefinementPatch, WorkspaceScanPlan, WorkspaceSeamHealthArtifacts,
-    WorkspaceSeamHealthReport, WorkspaceSeamStatus, MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA,
-    MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO, MAX_WORKSPACE_SURFACE_FRACTION,
-    MIN_REFINEMENT_COMPOSITE_COVERAGE, MIN_REFINEMENT_TEXTURE_RETENTION_RATIO,
-    MIN_WORKSPACE_SURFACE_FRACTION, STRIP_FEEDER_INVENTORY_ALGORITHM,
-    STRIP_FEEDER_VISION_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_ALGORITHM,
-    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
-    WORKSPACE_CHANGE_SET_ARTIFACT, WORKSPACE_HEIGHT_CANDIDATE_STEP,
+    DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
+    HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame,
+    StripFeederInventoryBuild, StripFeederInventorySourceMosaic, V4l2CaptureConfig,
+    VisualHomingPlan, WorkspaceCameraApertureComposite, WorkspaceHeightComposite,
+    WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject,
+    WorkspaceParallaxObservation, WorkspaceParallaxReport, WorkspaceParallaxStream,
+    WorkspaceRasterEvidence, WorkspaceRefinementPatch, WorkspaceScanPlan,
+    WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport, WorkspaceSeamStatus,
+    MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
+    MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
+    MIN_REFINEMENT_TEXTURE_RETENTION_RATIO, MIN_WORKSPACE_SURFACE_FRACTION,
+    STRIP_FEEDER_INVENTORY_ALGORITHM, STRIP_FEEDER_VISION_ALGORITHM,
+    WORKSPACE_BOARD_DISCOVERY_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
+    WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT, WORKSPACE_CHANGE_SET_ARTIFACT,
+    WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -103,9 +105,12 @@ const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
-const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v1";
+const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v2";
+const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v1";
 const BARE_NOZZLE_ARTIFACT: &str = "bare-nozzle.png";
 const HELD_PART_ARTIFACT: &str = "held-part.png";
+const HELD_PART_ALIGNED_ARTIFACT: &str = "held-part-aligned.png";
+const HELD_PART_INITIAL_INSPECTION_ARTIFACT: &str = "held-part-inspection-initial.png";
 const HELD_PART_INSPECTION_ARTIFACT: &str = "held-part-inspection.png";
 const SOURCE_POCKET_BEFORE_ARTIFACT: &str = "source-pocket-before.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
@@ -6567,7 +6572,26 @@ async fn execute_simulated_strip_feeder_pickup(
     let vacuum_held = held_median
         .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value));
     let released = true;
-    let passed = vacuum_held && inspection.report.passed && released;
+    let inspection_report = inspection.report;
+    let alignment = HeldPartAlignmentReport {
+        algorithm_version: "held_part_alignment.simulated".into(),
+        target_rotation_deg: 0.0,
+        commanded_x_mm: 0.0,
+        commanded_y_mm: 0.0,
+        commanded_rotation_deg: 0.0,
+        final_centering_residual_mm: inspection_report.centering_correction_mm,
+        final_rotation_residual_deg: inspection_report.rotation_deg,
+        passed: inspection_report.passed,
+        observations: vec![HeldPartAlignmentObservation {
+            iteration: 0,
+            head_machine_mm: [0.0, 0.0],
+            nozzle_rotation_offset_deg: 0.0,
+            inspection: inspection_report.clone(),
+        }],
+        artifact_names: vec![HELD_PART_INSPECTION_ARTIFACT.into()],
+        findings: vec!["simulator retained held-part alignment evidence".into()],
+    };
+    let passed = vacuum_held && alignment.passed && released;
     Ok(StripFeederPickupQualificationReport {
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
         nozzle_id: prepared.run.nozzle_id.clone(),
@@ -6582,17 +6606,24 @@ async fn execute_simulated_strip_feeder_pickup(
         held_median_raw_value: held_median,
         vacuum_acquired: vacuum_held,
         vacuum_held_after_transfer: vacuum_held,
-        inspection: Some(inspection.report),
+        inspection: Some(inspection_report),
+        alignment: Some(alignment),
         disposition: StripFeederPickupDisposition::ReturnedToPocket,
         release_surface_machine_mm: prepared.registration.selected_pocket_machine_mm,
         release_raw_values: prepared.vacuum_characterization.pump_off.raw_values.clone(),
         released,
         return_verification: Some(velocitypnp_domain::StripFeederPocketReturnReport {
             algorithm_version: "strip_feeder_pocket_return.simulated".into(),
+            nominal_center_machine_mm: prepared.registration.selected_pocket_machine_mm,
             before_occupancy: StripPocketOccupancy::Occupied,
             before_confidence: 1.0,
+            before_measured_center_machine_mm: prepared.registration.selected_pocket_machine_mm,
+            before_center_offset_mm: Some(0.0),
             after_occupancy: StripPocketOccupancy::Occupied,
             after_confidence: 1.0,
+            after_measured_center_machine_mm: prepared.registration.selected_pocket_machine_mm,
+            after_center_offset_mm: Some(0.0),
+            return_center_shift_mm: Some(0.0),
             passed: true,
             artifact_name: POCKET_RETURN_INSPECTION_ARTIFACT.into(),
             findings: vec!["simulator retained the source-pocket return state".into()],
@@ -6790,6 +6821,7 @@ async fn execute_physical_strip_feeder_pickup(
             vacuum_acquired: false,
             vacuum_held_after_transfer: false,
             inspection: None,
+            alignment: None,
             disposition: StripFeederPickupDisposition::NotReleased,
             release_surface_machine_mm: None,
             release_raw_values: Vec::new(),
@@ -6852,7 +6884,7 @@ async fn execute_physical_strip_feeder_pickup(
         )
         .await?;
         persist_pickup_gray_artifact(state, prepared.run.id, HELD_PART_ARTIFACT, &held)?;
-        let inspection = inspect_held_part_difference(
+        let initial_inspection = inspect_held_part_difference(
             &bare,
             &held,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -6860,24 +6892,71 @@ async fn execute_physical_strip_feeder_pickup(
             pickup_profile.maximum_part_offset_mm,
             pickup_profile.minimum_part_size_mm,
             pickup_profile.maximum_part_size_mm,
-            HELD_PART_INSPECTION_ARTIFACT,
+            HELD_PART_INITIAL_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
         persist_pickup_rgb_artifact(
             state,
             prepared.run.id,
-            HELD_PART_INSPECTION_ARTIFACT,
-            &inspection.preview,
+            HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+            &initial_inspection.preview,
         )?;
+        let motion_permitted = vacuum_held_after_transfer && initial_inspection.report.passed;
+        let rotation_reference_captured = if motion_permitted {
+            state
+                .machine
+                .calibration_rotation_reference(prepared.lease_id, prepared.run.nozzle_id.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            true
+        } else {
+            false
+        };
+        let target_rotation_deg = prepared.registration.part_rotation_deg.unwrap_or(0.0);
+        let alignment_result = align_held_part(
+            state,
+            prepared,
+            &bare,
+            initial_inspection,
+            bottom_pose,
+            &camera_profile,
+            &camera_path,
+            target_rotation_deg,
+            motion_permitted,
+        )
+        .await;
+        let rotation_restore = if rotation_reference_captured {
+            state
+                .machine
+                .calibration_rotate_nozzle(prepared.lease_id, prepared.run.nozzle_id.clone(), 0.0)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        } else {
+            Ok(())
+        };
+        let (inspection, alignment) = match (alignment_result, rotation_restore) {
+            (Ok(result), Ok(())) => result,
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => {
+                return Err(format!("failed to restore pickup rotation: {error}"));
+            }
+            (Err(error), Err(restore_error)) => {
+                return Err(format!(
+                    "{error}; pickup rotation restore also failed: {restore_error}"
+                ));
+            }
+        };
         Ok::<_, String>((
             held_raw_values,
             held_median_raw_value,
             vacuum_held_after_transfer,
             inspection,
+            alignment,
         ))
     }
     .await;
-    let (held_raw_values, held_median_raw_value, vacuum_held_after_transfer, inspection) =
+    let (held_raw_values, held_median_raw_value, vacuum_held_after_transfer, inspection, alignment) =
         match inspection_phase {
             Ok(result) => result,
             Err(error) => {
@@ -6901,11 +6980,16 @@ async fn execute_physical_strip_feeder_pickup(
             }
         };
     artifact_names.push(HELD_PART_ARTIFACT.into());
-    artifact_names.push(HELD_PART_INSPECTION_ARTIFACT.into());
+    for artifact_name in &alignment.artifact_names {
+        if !artifact_names.contains(artifact_name) {
+            artifact_names.push(artifact_name.clone());
+        }
+    }
     if !vacuum_held_after_transfer {
         findings.push("vacuum did not remain above the calibrated hold threshold".into());
     }
     findings.extend(inspection.report.findings.clone());
+    findings.extend(alignment.findings.clone());
 
     // A coarse contact transition can hold a part even when a later signal or
     // image gate rejects it. Every contact path returns to the source pocket.
@@ -6976,6 +7060,7 @@ async fn execute_physical_strip_feeder_pickup(
     let passed = vacuum_acquired
         && vacuum_held_after_transfer
         && inspection.report.passed
+        && alignment.passed
         && released
         && disposition == StripFeederPickupDisposition::ReturnedToPocket
         && return_verification
@@ -7002,6 +7087,7 @@ async fn execute_physical_strip_feeder_pickup(
         vacuum_acquired,
         vacuum_held_after_transfer,
         inspection: Some(inspection.report),
+        alignment: Some(alignment),
         disposition,
         release_surface_machine_mm,
         release_raw_values,
@@ -7187,6 +7273,178 @@ async fn release_pickup_part(
     release_result
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn align_held_part(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    bare: &GrayFrame,
+    initial: HeldPartInspectionArtifacts,
+    initial_head_pose: Pose,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    target_rotation_deg: f64,
+    motion_permitted: bool,
+) -> Result<(HeldPartInspectionArtifacts, HeldPartAlignmentReport), String> {
+    let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let bottom = state.profile.bottom_vision.as_ref().unwrap();
+    let mut current = initial;
+    let mut head_pose = initial_head_pose;
+    let mut commanded_x_mm = 0.0;
+    let mut commanded_y_mm = 0.0;
+    let mut commanded_rotation_deg = 0.0;
+    let mut artifact_names = vec![HELD_PART_INITIAL_INSPECTION_ARTIFACT.into()];
+    let mut observations = Vec::new();
+    let mut findings = Vec::new();
+
+    for iteration in 0..=pickup.alignment_max_iterations {
+        observations.push(HeldPartAlignmentObservation {
+            iteration,
+            head_machine_mm: [head_pose.x_mm, head_pose.y_mm],
+            nozzle_rotation_offset_deg: commanded_rotation_deg,
+            inspection: current.report.clone(),
+        });
+        let center_residual = current.report.centering_correction_mm;
+        let rotation_residual = current
+            .report
+            .rotation_deg
+            .map(|measured| package_axis_rotation_error_deg(measured, target_rotation_deg));
+        let passed = current.report.passed
+            && center_residual
+                .is_some_and(|value| value <= pickup.alignment_translation_tolerance_mm)
+            && rotation_residual
+                .is_some_and(|value| value.abs() <= pickup.alignment_rotation_tolerance_deg);
+        if passed
+            || iteration == pickup.alignment_max_iterations
+            || !current.report.passed
+            || !motion_permitted
+        {
+            if passed {
+                findings.push("bottom vision verified the corrected held-part pose".into());
+            } else if !current.report.passed {
+                findings.push("initial held-part evidence did not permit alignment motion".into());
+            } else if !motion_permitted {
+                findings.push("vacuum evidence did not permit alignment motion".into());
+            } else {
+                findings.push("held-part alignment reached its bounded iteration limit".into());
+            }
+            if current.report.artifact_name != HELD_PART_INSPECTION_ARTIFACT {
+                current.report.artifact_name = HELD_PART_INSPECTION_ARTIFACT.into();
+                persist_pickup_rgb_artifact(
+                    state,
+                    prepared.run.id,
+                    HELD_PART_INSPECTION_ARTIFACT,
+                    &current.preview,
+                )?;
+            }
+            if !artifact_names
+                .iter()
+                .any(|name| name == HELD_PART_INSPECTION_ARTIFACT)
+            {
+                artifact_names.push(HELD_PART_INSPECTION_ARTIFACT.into());
+            }
+            return Ok((
+                current,
+                HeldPartAlignmentReport {
+                    algorithm_version: HELD_PART_ALIGNMENT_ALGORITHM.into(),
+                    target_rotation_deg,
+                    commanded_x_mm,
+                    commanded_y_mm,
+                    commanded_rotation_deg,
+                    final_centering_residual_mm: center_residual,
+                    final_rotation_residual_deg: rotation_residual,
+                    passed,
+                    observations,
+                    artifact_names,
+                    findings,
+                },
+            ));
+        }
+
+        let correction_x_mm = current
+            .report
+            .centering_correction_x_mm
+            .ok_or_else(|| "held-part alignment has no X correction".to_string())?;
+        let correction_y_mm = current
+            .report
+            .centering_correction_y_mm
+            .ok_or_else(|| "held-part alignment has no Y correction".to_string())?;
+        let rotation_correction_deg = -rotation_residual
+            .ok_or_else(|| "held-part alignment has no rotation measurement".to_string())?;
+        commanded_rotation_deg += rotation_correction_deg;
+        if commanded_rotation_deg.abs() > pickup.alignment_max_rotation_correction_deg {
+            return Err(format!(
+                "held-part rotation correction {commanded_rotation_deg:.3} degrees exceeds the configured bound"
+            ));
+        }
+        state
+            .machine
+            .calibration_rotate_nozzle(
+                prepared.lease_id,
+                prepared.run.nozzle_id.clone(),
+                commanded_rotation_deg,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        head_pose = state
+            .machine
+            .jog(
+                prepared.lease_id,
+                JogTarget {
+                    x_mm: head_pose.x_mm + correction_x_mm,
+                    y_mm: head_pose.y_mm + correction_y_mm,
+                    z_mm: head_pose.z_mm,
+                    rotation_deg: None,
+                },
+                bottom.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        commanded_x_mm += correction_x_mm;
+        commanded_y_mm += correction_y_mm;
+        let held = capture_bottom_mean_with_lights(
+            state,
+            prepared.lease_id,
+            camera_profile,
+            camera_path,
+            pickup.inspection_sample_count,
+        )
+        .await?;
+        persist_pickup_gray_artifact(state, prepared.run.id, HELD_PART_ALIGNED_ARTIFACT, &held)?;
+        if !artifact_names
+            .iter()
+            .any(|name| name == HELD_PART_ALIGNED_ARTIFACT)
+        {
+            artifact_names.push(HELD_PART_ALIGNED_ARTIFACT.into());
+        }
+        current = inspect_held_part_difference(
+            bare,
+            &held,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            prepared.head_reference.bottom_camera_mapping,
+            pickup.maximum_part_offset_mm,
+            pickup.minimum_part_size_mm,
+            pickup.maximum_part_size_mm,
+            HELD_PART_INSPECTION_ARTIFACT,
+        )
+        .map_err(|error| error.to_string())?;
+        persist_pickup_rgb_artifact(
+            state,
+            prepared.run.id,
+            HELD_PART_INSPECTION_ARTIFACT,
+            &current.preview,
+        )?;
+    }
+    Err("held-part alignment ended without a report".into())
+}
+
+fn package_axis_rotation_error_deg(measured_deg: f64, target_deg: f64) -> f64 {
+    let mut error = (measured_deg - target_deg).rem_euclid(180.0);
+    if error > 90.0 {
+        error -= 180.0;
+    }
+    error
+}
+
 async fn capture_top_pocket_mean(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
@@ -7316,7 +7574,12 @@ fn update_registration_after_pickup(
             .width_mm
             .zip(inspection.length_mm)
             .map(|(width, length)| [width, length]);
-        registration.measured_part_rotation_deg = inspection.rotation_deg;
+        registration.measured_part_rotation_deg = report
+            .alignment
+            .as_ref()
+            .and_then(|alignment| alignment.observations.first())
+            .and_then(|observation| observation.inspection.rotation_deg)
+            .or(inspection.rotation_deg);
         registration.measured_part_confidence = Some(inspection.confidence);
     }
     if report.passed {
@@ -21399,6 +21662,13 @@ mod tests {
     fn board_registration_angle_difference_wraps_at_180_degrees() {
         assert!((angle_difference_deg(-179.0, 179.0) - 2.0).abs() < 1e-9);
         assert!((angle_difference_deg(179.0, -179.0) + 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn held_part_axis_error_uses_180_degree_package_symmetry() {
+        assert!((package_axis_rotation_error_deg(89.0, -89.0) + 2.0).abs() < 1e-12);
+        assert!((package_axis_rotation_error_deg(-89.0, 89.0) - 2.0).abs() < 1e-12);
+        assert!((package_axis_rotation_error_deg(46.0, 45.0) - 1.0).abs() < 1e-12);
     }
 
     #[tokio::test]

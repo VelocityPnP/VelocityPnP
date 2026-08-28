@@ -669,21 +669,22 @@ fn component_oriented_geometry(
         point(major_max, minor_max),
         point(major_min, minor_max),
     ];
-    let mapped_scale = |axis: [f64; 2]| {
-        let machine_x =
-            pixel_error_to_machine_mm[0][0] * axis[0] + pixel_error_to_machine_mm[0][1] * axis[1];
-        let machine_y =
-            pixel_error_to_machine_mm[1][0] * axis[0] + pixel_error_to_machine_mm[1][1] * axis[1];
-        machine_x.hypot(machine_y)
+    let mapped_axis = |axis: [f64; 2]| {
+        [
+            pixel_error_to_machine_mm[0][0] * axis[0] + pixel_error_to_machine_mm[0][1] * axis[1],
+            pixel_error_to_machine_mm[1][0] * axis[0] + pixel_error_to_machine_mm[1][1] * axis[1],
+        ]
     };
-    let major_mm = (major_max - major_min) * mapped_scale(major_axis);
-    let minor_mm = (minor_max - minor_min) * mapped_scale(minor_axis);
-    let (width_mm, length_mm) = if minor_mm <= major_mm {
-        (minor_mm, major_mm)
+    let mapped_major_axis = mapped_axis(major_axis);
+    let mapped_minor_axis = mapped_axis(minor_axis);
+    let major_mm = (major_max - major_min) * mapped_major_axis[0].hypot(mapped_major_axis[1]);
+    let minor_mm = (minor_max - minor_min) * mapped_minor_axis[0].hypot(mapped_minor_axis[1]);
+    let (width_mm, length_mm, length_axis) = if minor_mm <= major_mm {
+        (minor_mm, major_mm, mapped_major_axis)
     } else {
-        rotation_deg += 90.0;
-        (major_mm, minor_mm)
+        (major_mm, minor_mm, mapped_minor_axis)
     };
+    rotation_deg = length_axis[1].atan2(length_axis[0]).to_degrees();
     while rotation_deg >= 90.0 {
         rotation_deg -= 180.0;
     }
@@ -828,6 +829,38 @@ mod tests {
             }
         }
         output
+    }
+
+    #[test]
+    fn reports_package_rotation_in_mapped_machine_coordinates() {
+        let width = 320_u32;
+        let center = [160.0, 120.0];
+        let mut difference = vec![0_u8; width as usize * 240];
+        let mut component = Vec::new();
+        let unit = 2.0_f64.sqrt();
+        for y in 80..160 {
+            for x in 120..200 {
+                let dx = f64::from(x) + 0.5 - center[0];
+                let dy = f64::from(y) + 0.5 - center[1];
+                let along = (dx + dy) / unit;
+                let cross = (-dx + dy) / unit;
+                if along.abs() <= 30.0 && cross.abs() <= 8.0 {
+                    let index = (y * width + x) as usize;
+                    difference[index] = 100;
+                    component.push(index);
+                }
+            }
+        }
+
+        let geometry = component_oriented_geometry(
+            &component,
+            &difference,
+            width,
+            [[0.02, 0.0], [0.0, -0.02]],
+            center,
+        );
+
+        assert!((geometry.rotation_deg + 45.0).abs() < 1.0);
     }
 
     #[test]

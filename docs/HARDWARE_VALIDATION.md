@@ -2249,6 +2249,19 @@ package edge. Its retained held-part overlay SHA-256 is
 The retained before-and-after return overlay SHA-256 is
 `8c09dab4389f2966b5cfbc815d72bf44edd80a0d45e1169345e290ab8fb484fc`.
 
+No-motion replay later showed that the green version 1 circle was not the
+pocket center. Its center was at the top package edge. The live phase search
+had selected the strongest package edge instead of the package center. The
+original workspace estimate, Y154.297 mm, was close to the physical center.
+
+Version 2 keeps periodic phase as a tentative locator and measures local
+foreground support for the package center. It measured the before center at
+X85.926, Y154.257 mm and the after center at X85.922, Y154.307 mm. The
+before-to-after shift was 0.050 mm. In the corrected replay, cyan marks the old
+nominal location and green marks the measured centers. The replay caused no
+machine motion. Its overlay SHA-256 is
+`4a1a015ac6b386653d8d281d05e04c0b87e33cf3a39978cc019df136bbc0e3e9`.
+
 Normal disconnect `31d1d944-4edc-4f22-a22b-58f6d54c95bb` left the
 controller disconnected, unhomed, and fault-free. Vacuum and lights were off.
 No emergency stop was used.

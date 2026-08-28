@@ -390,6 +390,10 @@ pub struct StripFeederPickupProfile {
     pub held_sample_count: u32,
     pub release_sample_count: u32,
     pub release_settle_ms: u64,
+    pub alignment_max_iterations: u32,
+    pub alignment_translation_tolerance_mm: f64,
+    pub alignment_rotation_tolerance_deg: f64,
+    pub alignment_max_rotation_correction_deg: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -645,6 +649,9 @@ impl StripFeederPickupProfile {
             self.maximum_part_offset_mm,
             self.minimum_part_size_mm,
             self.maximum_part_size_mm,
+            self.alignment_translation_tolerance_mm,
+            self.alignment_rotation_tolerance_deg,
+            self.alignment_max_rotation_correction_deg,
         ];
         if values.iter().any(|value| !value.is_finite())
             || !(0.5..=5.0).contains(&self.search_start_above_reference_mm)
@@ -658,6 +665,10 @@ impl StripFeederPickupProfile {
             || !(3..=30).contains(&self.held_sample_count)
             || !(3..=30).contains(&self.release_sample_count)
             || !(100..=2_000).contains(&self.release_settle_ms)
+            || !(1..=3).contains(&self.alignment_max_iterations)
+            || !(0.02..=0.25).contains(&self.alignment_translation_tolerance_mm)
+            || !(0.2..=3.0).contains(&self.alignment_rotation_tolerance_deg)
+            || !(5.0..=90.0).contains(&self.alignment_max_rotation_correction_deg)
         {
             return Err("strip-feeder pickup profile is invalid");
         }

@@ -1146,9 +1146,10 @@ paths:
       operationId: startStripFeederPickupQualification
       description: >-
         Uses bounded vacuum Z detection to pick one component from a passed
-        live holdout, transfers it to the bottom camera, inspects it, and
-        returns it to the same pocket. A supplied fallback point is used only
-        if the pocket return target is invalid.
+        live holdout, transfers it to the bottom camera, applies bounded
+        closed-loop centering and angle corrections, and returns it to the
+        same pocket. A supplied fallback point is used only if the pocket
+        return target is invalid.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -2673,23 +2674,84 @@ components:
         raw_values: { type: array, items: { type: integer } }
         median_raw_value: { type: number }
         signal_delta_counts: { type: number, minimum: 0 }
+    HeldPartAlignmentObservation:
+      type: object
+      required:
+        - iteration
+        - head_machine_mm
+        - nozzle_rotation_offset_deg
+        - inspection
+      properties:
+        iteration: { type: integer, minimum: 0 }
+        head_machine_mm: { $ref: "#/components/schemas/Point2d" }
+        nozzle_rotation_offset_deg: { type: number }
+        inspection: { $ref: "#/components/schemas/HeldPartInspectionReport" }
+    HeldPartAlignmentReport:
+      type: object
+      required:
+        - algorithm_version
+        - target_rotation_deg
+        - commanded_x_mm
+        - commanded_y_mm
+        - commanded_rotation_deg
+        - final_centering_residual_mm
+        - final_rotation_residual_deg
+        - passed
+        - observations
+        - artifact_names
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        target_rotation_deg: { type: number }
+        commanded_x_mm: { type: number }
+        commanded_y_mm: { type: number }
+        commanded_rotation_deg: { type: number }
+        final_centering_residual_mm: { type: [number, "null"], minimum: 0 }
+        final_rotation_residual_deg: { type: [number, "null"] }
+        passed: { type: boolean }
+        observations:
+          type: array
+          items: { $ref: "#/components/schemas/HeldPartAlignmentObservation" }
+        artifact_names: { type: array, items: { type: string } }
+        findings: { type: array, items: { type: string } }
     StripFeederPocketReturnReport:
       type: object
       required:
         - algorithm_version
+        - nominal_center_machine_mm
         - before_occupancy
         - before_confidence
+        - before_measured_center_machine_mm
+        - before_center_offset_mm
         - after_occupancy
         - after_confidence
+        - after_measured_center_machine_mm
+        - after_center_offset_mm
+        - return_center_shift_mm
         - passed
         - artifact_name
         - findings
       properties:
         algorithm_version: { type: string }
+        nominal_center_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
         before_occupancy: { type: string, enum: [occupied, empty, uncertain] }
         before_confidence: { type: number, minimum: 0, maximum: 1 }
+        before_measured_center_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        before_center_offset_mm: { type: [number, "null"], minimum: 0 }
         after_occupancy: { type: string, enum: [occupied, empty, uncertain] }
         after_confidence: { type: number, minimum: 0, maximum: 1 }
+        after_measured_center_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        after_center_offset_mm: { type: [number, "null"], minimum: 0 }
+        return_center_shift_mm: { type: [number, "null"], minimum: 0 }
         passed: { type: boolean }
         artifact_name: { type: string }
         findings: { type: array, items: { type: string } }
@@ -2710,6 +2772,7 @@ components:
         - vacuum_acquired
         - vacuum_held_after_transfer
         - inspection
+        - alignment
         - disposition
         - release_surface_machine_mm
         - release_raw_values
@@ -2737,6 +2800,10 @@ components:
         inspection:
           oneOf:
             - { $ref: "#/components/schemas/HeldPartInspectionReport" }
+            - type: "null"
+        alignment:
+          oneOf:
+            - { $ref: "#/components/schemas/HeldPartAlignmentReport" }
             - type: "null"
         disposition:
           type: string

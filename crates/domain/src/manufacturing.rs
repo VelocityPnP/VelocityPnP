@@ -344,14 +344,53 @@ pub struct HeldPartInspectionReport {
     pub findings: Vec<String>,
 }
 
+/// One retained bottom-camera observation during held-part alignment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartAlignmentObservation {
+    pub iteration: u32,
+    pub head_machine_mm: [f64; 2],
+    pub nozzle_rotation_offset_deg: f64,
+    pub inspection: HeldPartInspectionReport,
+}
+
+/// Bounded closed-loop centering and rotation evidence for a held part.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartAlignmentReport {
+    pub algorithm_version: String,
+    pub target_rotation_deg: f64,
+    pub commanded_x_mm: f64,
+    pub commanded_y_mm: f64,
+    pub commanded_rotation_deg: f64,
+    pub final_centering_residual_mm: Option<f64>,
+    pub final_rotation_residual_deg: Option<f64>,
+    pub passed: bool,
+    pub observations: Vec<HeldPartAlignmentObservation>,
+    #[serde(default)]
+    pub artifact_names: Vec<String>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// Top-camera evidence that a returned part is present in its source pocket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederPocketReturnReport {
     pub algorithm_version: String,
+    #[serde(default)]
+    pub nominal_center_machine_mm: Option<[f64; 2]>,
     pub before_occupancy: StripPocketOccupancy,
     pub before_confidence: f64,
+    #[serde(default)]
+    pub before_measured_center_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub before_center_offset_mm: Option<f64>,
     pub after_occupancy: StripPocketOccupancy,
     pub after_confidence: f64,
+    #[serde(default)]
+    pub after_measured_center_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub after_center_offset_mm: Option<f64>,
+    #[serde(default)]
+    pub return_center_shift_mm: Option<f64>,
     pub passed: bool,
     pub artifact_name: String,
     #[serde(default)]
@@ -375,6 +414,8 @@ pub struct StripFeederPickupQualificationReport {
     pub vacuum_acquired: bool,
     pub vacuum_held_after_transfer: bool,
     pub inspection: Option<HeldPartInspectionReport>,
+    #[serde(default)]
+    pub alignment: Option<HeldPartAlignmentReport>,
     pub disposition: StripFeederPickupDisposition,
     pub release_surface_machine_mm: Option<[f64; 2]>,
     pub release_raw_values: Vec<i64>,

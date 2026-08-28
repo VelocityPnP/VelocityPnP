@@ -901,6 +901,25 @@ export interface HeldPartInspectionReport {
   findings: string[];
 }
 
+export interface HeldPartAlignmentReport {
+  algorithm_version: string;
+  target_rotation_deg: number;
+  commanded_x_mm: number;
+  commanded_y_mm: number;
+  commanded_rotation_deg: number;
+  final_centering_residual_mm: number | null;
+  final_rotation_residual_deg: number | null;
+  passed: boolean;
+  observations: Array<{
+    iteration: number;
+    head_machine_mm: [number, number];
+    nozzle_rotation_offset_deg: number;
+    inspection: HeldPartInspectionReport;
+  }>;
+  artifact_names: string[];
+  findings: string[];
+}
+
 export interface StripFeederPickupQualificationReport {
   algorithm_version: string;
   nozzle_id: string;
@@ -922,16 +941,23 @@ export interface StripFeederPickupQualificationReport {
   vacuum_acquired: boolean;
   vacuum_held_after_transfer: boolean;
   inspection: HeldPartInspectionReport | null;
+  alignment: HeldPartAlignmentReport | null;
   disposition: "returned_to_pocket" | "dropped_at_fallback" | "not_released";
   release_surface_machine_mm: [number, number] | null;
   release_raw_values: number[];
   released: boolean;
   return_verification: {
     algorithm_version: string;
+    nominal_center_machine_mm: [number, number] | null;
     before_occupancy: "occupied" | "empty" | "uncertain";
     before_confidence: number;
+    before_measured_center_machine_mm: [number, number] | null;
+    before_center_offset_mm: number | null;
     after_occupancy: "occupied" | "empty" | "uncertain";
     after_confidence: number;
+    after_measured_center_machine_mm: [number, number] | null;
+    after_center_offset_mm: number | null;
+    return_center_shift_mm: number | null;
     passed: boolean;
     artifact_name: string;
     findings: string[];

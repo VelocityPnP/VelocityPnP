@@ -35,7 +35,8 @@ This repository contains the first working platform slice:
   imported KiCad dimension matching
 - automatic top-side PCB registration from scan seeds and local KiCad
   fiducials, with persisted visual evidence and residual-gated transforms
-- strip-feeder drafts, live pocket holdouts, and bounded pickup qualification
+- strip-feeder drafts, center-refined live holdouts, and closed-loop pickup
+  qualification
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

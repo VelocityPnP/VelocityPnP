@@ -644,6 +644,11 @@ the calibrated planar camera model. It then checks the 4 mm sprocket lattice,
 local line angle, pocket phase, bounded XY correction, and occupied-component
 image support.
 
+Version 2 uses the periodic response only to find a tentative pocket. It then
+measures the package center from local foreground support. This prevents a
+strong package edge from becoming the pickup point. The selected machine
+coordinate and the stored local correction use the measured center.
+
 The persistent report gives predicted and measured machine coordinates. Its
 PNG marks expected sprocket lines in yellow, the expected pocket centerline in
 cyan, the measured sprocket line in magenta, detected holes in yellow, and
@@ -671,14 +676,22 @@ and the calibrated acquire threshold stop the descent.
 
 The runner lifts the part to level Z, transfers it to the exact bare-nozzle
 bottom-camera pose, and checks both retained vacuum and a frame-difference
-part outline. It then returns to the exact source head pose and releases at
-the detected pickup Z. A supplied fallback point is used only when the source
-return target is invalid. The top camera records the pocket before pickup and
-after release. A passed cycle requires occupied-pocket evidence in both views.
-The retained report includes pickup samples, held and release samples,
-bottom-camera measurements, return evidence, disposition, and six PNG
-artifacts. Use `strip_feeder_return_preview()` to get the before/after return
-overlay from Python.
+part outline. It applies at most two bounded X/Y and nozzle-angle corrections.
+Each correction gets a new camera measurement. The final gate requires a
+0.10 mm center residual and a 1 degree package-axis residual. The runner then
+restores the pickup nozzle angle, returns to the exact source head pose, and
+releases at the detected pickup Z. A supplied fallback point is used only
+when the source return target is invalid.
+
+The top camera records the pocket before pickup and after release. Version 2
+measures the package center in each view. The cyan cross is the nominal pickup
+coordinate. The green circle is the measured package center. A passed return
+requires occupied evidence in both views and less than one-quarter pitch of
+measured center shift. The retained report includes pickup samples, held and
+release samples, bottom-camera measurements, alignment observations, return
+evidence, disposition, and PNG artifacts. Use
+`strip_feeder_return_preview()` to get the before/after return overlay from
+Python.
 
 Held-part inspection aligns the bare-nozzle reference within an 8 pixel bound
 before subtraction. It selects the brighter or darker foreground polarity
@@ -700,6 +713,15 @@ cargo run --release -p velocitypnp-vision --example inspect_held_part -- \
 The last four values are the calibrated bottom-camera millimeters-per-pixel
 matrix in row-major order. The command writes the inspection report to
 standard output and writes the annotated image to `OUTPUT.png`.
+
+Replay two retained top-camera pocket views without machine motion:
+
+```bash
+cargo run --release -p velocitypnp-vision \
+  --example inspect_strip_feeder_return -- \
+  BEFORE.png AFTER.png MODEL.json REGISTRATION.json OUTPUT.png \
+  POCKET_X POCKET_Y POSE_X POSE_Y POSE_Z POSE_ROTATION
+```
 
 A draft stores each feed position as available, empty, reserved, consumed, or
 in need of review. Reservation and settlement are atomic. Selection skips

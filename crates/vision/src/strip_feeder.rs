@@ -11,8 +11,8 @@ use velocitypnp_domain::{
 };
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
-pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
-pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v1";
+pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v2";
+pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v2";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
 const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
@@ -116,26 +116,82 @@ pub fn inspect_strip_feeder_pocket_return(
     )?;
     let center_cross_mm = cross_span_mm * 0.5;
     let center_along_mm = along_span_mm * 0.5;
-    let before_confidence = pocket_occupancy_evidence(
+    let before_center = measure_pocket_image_center(
         &before_crop,
         center_cross_mm,
         center_along_mm,
         cross_span_mm,
         along_span_mm,
         registration.tape_pitch_mm,
+        registration.tape_width_mm,
     );
-    let after_confidence = pocket_occupancy_evidence(
+    let after_center = measure_pocket_image_center(
         &after_crop,
         center_cross_mm,
         center_along_mm,
         cross_span_mm,
         along_span_mm,
         registration.tape_pitch_mm,
+        registration.tape_width_mm,
+    );
+    let before_local_center = before_center
+        .map(|measurement| measurement.center_mm)
+        .unwrap_or([center_cross_mm, center_along_mm]);
+    let after_local_center = after_center
+        .map(|measurement| measurement.center_mm)
+        .unwrap_or([center_cross_mm, center_along_mm]);
+    let before_confidence = pocket_occupancy_evidence(
+        &before_crop,
+        before_local_center[0],
+        before_local_center[1],
+        cross_span_mm,
+        along_span_mm,
+        registration.tape_pitch_mm,
+    );
+    let after_confidence = pocket_occupancy_evidence(
+        &after_crop,
+        after_local_center[0],
+        after_local_center[1],
+        cross_span_mm,
+        along_span_mm,
+        registration.tape_pitch_mm,
     );
     let before_occupancy = pocket_occupancy_from_evidence(before_confidence);
     let after_occupancy = pocket_occupancy_from_evidence(after_confidence);
+    let to_machine = |local: [f64; 2]| {
+        add(
+            pocket_machine_mm,
+            add(
+                scale(cross, local[0] - center_cross_mm),
+                scale(along, local[1] - center_along_mm),
+            ),
+        )
+    };
+    let before_machine = before_center.map(|measurement| to_machine(measurement.center_mm));
+    let after_machine = after_center.map(|measurement| to_machine(measurement.center_mm));
+    let offset = |center: Option<[f64; 2]>| {
+        center.map(|center| {
+            (center[0] - pocket_machine_mm[0]).hypot(center[1] - pocket_machine_mm[1])
+        })
+    };
+    let before_offset = offset(before_machine);
+    let after_offset = offset(after_machine);
+    let return_center_shift_mm = before_machine
+        .zip(after_machine)
+        .map(|(before, after)| (after[0] - before[0]).hypot(after[1] - before[1]));
+    let maximum_nominal_offset_mm = registration.tape_pitch_mm * 0.45;
+    let maximum_return_shift_mm = registration.tape_pitch_mm * 0.25;
+    let centers_passed = before_offset
+        .zip(after_offset)
+        .zip(return_center_shift_mm)
+        .is_some_and(|((before, after), shift)| {
+            before <= maximum_nominal_offset_mm
+                && after <= maximum_nominal_offset_mm
+                && shift <= maximum_return_shift_mm
+        });
     let passed = before_occupancy == StripPocketOccupancy::Occupied
-        && after_occupancy == StripPocketOccupancy::Occupied;
+        && after_occupancy == StripPocketOccupancy::Occupied
+        && centers_passed;
     let mut findings = Vec::new();
     if before_occupancy != StripPocketOccupancy::Occupied {
         findings.push("the source pocket was not occupied before pickup".into());
@@ -143,18 +199,38 @@ pub fn inspect_strip_feeder_pocket_return(
     if after_occupancy != StripPocketOccupancy::Occupied {
         findings.push("the source pocket was not occupied after release".into());
     }
+    if before_center.is_none() || after_center.is_none() {
+        findings.push("the source pocket center was not measured in both views".into());
+    }
+    if return_center_shift_mm.is_some_and(|shift| shift > maximum_return_shift_mm) {
+        findings.push(format!(
+            "the returned center shifted more than {maximum_return_shift_mm:.3} mm"
+        ));
+    }
     if passed {
         findings.push("top vision confirmed the returned part in its source pocket".into());
     }
-    let preview =
-        render_pocket_return_preview(&before_crop, &after_crop, before_occupancy, after_occupancy);
+    let preview = render_pocket_return_preview(
+        &before_crop,
+        &after_crop,
+        before_occupancy,
+        after_occupancy,
+        before_center.map(|measurement| measurement.center_px),
+        after_center.map(|measurement| measurement.center_px),
+    );
     Ok(StripFeederPocketReturnArtifacts {
         report: StripFeederPocketReturnReport {
             algorithm_version: STRIP_FEEDER_POCKET_RETURN_ALGORITHM.into(),
+            nominal_center_machine_mm: Some(pocket_machine_mm),
             before_occupancy,
             before_confidence,
+            before_measured_center_machine_mm: before_machine,
+            before_center_offset_mm: before_offset,
             after_occupancy,
             after_confidence,
+            after_measured_center_machine_mm: after_machine,
+            after_center_offset_mm: after_offset,
+            return_center_shift_mm,
             passed,
             artifact_name: artifact_name.into(),
             findings,
@@ -166,6 +242,13 @@ pub fn inspect_strip_feeder_pocket_return(
 #[derive(Debug, Clone, Copy)]
 struct CircleFeature {
     center_px: [f64; 2],
+    confidence: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PocketImageCenter {
+    center_px: [f64; 2],
+    center_mm: [f64; 2],
     confidence: f64,
 }
 
@@ -500,8 +583,6 @@ pub fn analyze_live_strip_feeder_holdout(
     .unwrap_or((center_along_mm, 0.0));
     let along_delta_mm =
         nearest_periodic_delta(phase_mm, registration.tape_pitch_mm, center_along_mm);
-    let correction = add(scale(cross, cross_delta_mm), scale(along, along_delta_mm));
-    let correction_magnitude_mm = correction[0].hypot(correction[1]);
     let mut visible_pockets = Vec::new();
     let first_index =
         ((1.0 - center_along_mm - along_delta_mm) / registration.tape_pitch_mm).ceil() as i32;
@@ -509,25 +590,48 @@ pub fn analyze_live_strip_feeder_holdout(
         / registration.tape_pitch_mm)
         .floor() as i32;
     for index in first_index..=last_index {
-        let along_mm =
+        let tentative_along_mm =
             center_along_mm + along_delta_mm + f64::from(index) * registration.tape_pitch_mm;
-        let evidence = pocket_occupancy_evidence(
+        let measured_center = measure_pocket_image_center(
             &crop,
             live_centerline_cross_mm,
-            along_mm,
+            tentative_along_mm,
+            cross_span_mm,
+            LIVE_HOLDOUT_ALONG_SPAN_MM,
+            registration.tape_pitch_mm,
+            registration.tape_width_mm,
+        );
+        let measured_center_mm = measured_center
+            .map(|measurement| measurement.center_mm)
+            .unwrap_or([live_centerline_cross_mm, tentative_along_mm]);
+        let evidence = pocket_occupancy_evidence(
+            &crop,
+            measured_center_mm[0],
+            measured_center_mm[1],
             cross_span_mm,
             LIVE_HOLDOUT_ALONG_SPAN_MM,
             registration.tape_pitch_mm,
         );
-        visible_pockets.push((index, along_mm, evidence));
+        visible_pockets.push((
+            index,
+            measured_center_mm,
+            evidence,
+            measured_center.map_or(0.0, |measurement| measurement.confidence),
+        ));
     }
-    let selected = visible_pockets
-        .iter()
-        .max_by(|first, second| first.2.total_cmp(&second.2));
+    let selected = visible_pockets.iter().max_by(|first, second| {
+        first
+            .2
+            .total_cmp(&second.2)
+            .then_with(|| first.3.total_cmp(&second.3))
+    });
     let occupancy_confidence = selected.map_or(0.0, |item| item.2);
     let occupancy = pocket_occupancy_from_evidence(occupancy_confidence);
     let selected_index = selected.map_or(0, |item| item.0);
-    let selected_along_mm = selected.map_or(center_along_mm + along_delta_mm, |item| item.1);
+    let selected_local_center = selected.map_or(
+        [live_centerline_cross_mm, center_along_mm + along_delta_mm],
+        |item| item.1,
+    );
     let selected_predicted = add(
         predicted_pocket_machine_mm,
         scale(
@@ -535,7 +639,15 @@ pub fn analyze_live_strip_feeder_holdout(
             f64::from(selected_index) * registration.tape_pitch_mm,
         ),
     );
-    let selected_machine = add(selected_predicted, correction);
+    let selected_machine = add(
+        predicted_pocket_machine_mm,
+        add(
+            scale(cross, selected_local_center[0] - center_cross_mm),
+            scale(along, selected_local_center[1] - center_along_mm),
+        ),
+    );
+    let correction = subtract(selected_machine, selected_predicted);
+    let correction_magnitude_mm = correction[0].hypot(correction[1]);
 
     let geometry_passed = track.circles.len() >= MINIMUM_LIVE_HOLDOUT_SPROCKETS
         && track.residual_p95_mm <= LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM
@@ -581,7 +693,7 @@ pub fn analyze_live_strip_feeder_holdout(
         .clamp(0.0, 1.0);
     let preview_pockets = visible_pockets
         .iter()
-        .map(|item| [live_centerline_cross_mm, item.1])
+        .map(|item| item.1)
         .collect::<Vec<_>>();
     let preview = render_live_holdout_preview(
         &crop,
@@ -590,7 +702,7 @@ pub fn analyze_live_strip_feeder_holdout(
         expected_tracks,
         center_cross_mm,
         &preview_pockets,
-        Some([live_centerline_cross_mm, selected_along_mm]),
+        Some(selected_local_center),
     );
     Ok(StripFeederLiveHoldoutArtifacts {
         report: StripFeederLiveHoldoutReport {
@@ -874,6 +986,95 @@ fn pocket_occupancy_evidence(
     .clamp(0.0, 1.0)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn measure_pocket_image_center(
+    crop: &GrayFrame,
+    nominal_cross_mm: f64,
+    nominal_along_mm: f64,
+    cross_span_mm: f64,
+    along_span_mm: f64,
+    pitch_mm: f64,
+    tape_width_mm: f64,
+) -> Option<PocketImageCenter> {
+    let nominal_x = nominal_cross_mm / cross_span_mm * f64::from(crop.width);
+    let nominal_y = nominal_along_mm / along_span_mm * f64::from(crop.height);
+    let half_cross_mm = (tape_width_mm * 0.30).clamp(1.25, 2.5);
+    let half_along_mm = (pitch_mm * 0.45).clamp(0.9, 2.0);
+    let half_x = half_cross_mm / cross_span_mm * f64::from(crop.width);
+    let half_y = half_along_mm / along_span_mm * f64::from(crop.height);
+    let x_min = (nominal_x - half_x).floor().max(0.0) as u32;
+    let x_max = (nominal_x + half_x)
+        .ceil()
+        .min(f64::from(crop.width.saturating_sub(1))) as u32;
+    let y_min = (nominal_y - half_y).floor().max(0.0) as u32;
+    let y_max = (nominal_y + half_y)
+        .ceil()
+        .min(f64::from(crop.height.saturating_sub(1))) as u32;
+    if x_max <= x_min + 4 || y_max <= y_min + 4 {
+        return None;
+    }
+
+    let margin_x = ((x_max - x_min) / 6).max(1);
+    let margin_y = ((y_max - y_min) / 6).max(1);
+    let mut perimeter = Vec::new();
+    for y in y_min..=y_max {
+        for x in x_min..=x_max {
+            if x <= x_min + margin_x
+                || x + margin_x >= x_max
+                || y <= y_min + margin_y
+                || y + margin_y >= y_max
+            {
+                perimeter.push(f64::from(crop.pixels[(y * crop.width + x) as usize]));
+            }
+        }
+    }
+    if perimeter.is_empty() {
+        return None;
+    }
+    let background = median(&perimeter);
+    let noise = median(
+        &perimeter
+            .iter()
+            .map(|value| (value - background).abs())
+            .collect::<Vec<_>>(),
+    );
+    let threshold = (noise * 3.0 + 6.0).clamp(10.0, 45.0);
+    let mut weight_sum = 0.0;
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    let mut support = 0_u32;
+    for y in y_min..=y_max {
+        for x in x_min..=x_max {
+            let value = f64::from(crop.pixels[(y * crop.width + x) as usize]);
+            let weight = ((value - background).abs() - threshold).max(0.0);
+            if weight > 0.0 {
+                weight_sum += weight;
+                weighted_x += (f64::from(x) + 0.5) * weight;
+                weighted_y += (f64::from(y) + 0.5) * weight;
+                support += 1;
+            }
+        }
+    }
+    let area = f64::from((x_max - x_min + 1) * (y_max - y_min + 1));
+    if weight_sum <= 1e-9 || support < 12 {
+        return None;
+    }
+    let center_px = [weighted_x / weight_sum, weighted_y / weight_sum];
+    let center_mm = [
+        center_px[0] / f64::from(crop.width) * cross_span_mm,
+        center_px[1] / f64::from(crop.height) * along_span_mm,
+    ];
+    let support_fraction = f64::from(support) / area;
+    let mean_weight = weight_sum / f64::from(support);
+    let confidence =
+        ((support_fraction / 0.08).clamp(0.0, 1.0) * (mean_weight / 35.0).clamp(0.0, 1.0)).sqrt();
+    Some(PocketImageCenter {
+        center_px,
+        center_mm,
+        confidence,
+    })
+}
+
 fn pocket_occupancy_from_evidence(confidence: f64) -> StripPocketOccupancy {
     if confidence >= 0.42 {
         StripPocketOccupancy::Occupied
@@ -889,6 +1090,8 @@ fn render_pocket_return_preview(
     after: &GrayFrame,
     before_occupancy: StripPocketOccupancy,
     after_occupancy: StripPocketOccupancy,
+    before_center_px: Option<[f64; 2]>,
+    after_center_px: Option<[f64; 2]>,
 ) -> RgbFrame {
     let width = before.width + after.width;
     let height = before.height.max(after.height);
@@ -912,20 +1115,40 @@ fn render_pocket_return_preview(
         StripPocketOccupancy::Uncertain => [255, 190, 40],
     };
     let radius = f64::from(before.width.min(before.height)) * 0.10;
-    draw_circle(
+    draw_cross(
         &mut frame,
         [
             f64::from(before.width) * 0.5,
             f64::from(before.height) * 0.5,
         ],
-        radius,
-        color(before_occupancy),
+        8.0,
+        [0, 210, 255],
     );
-    draw_circle(
+    draw_cross(
         &mut frame,
         [
             f64::from(before.width) + f64::from(after.width) * 0.5,
             f64::from(after.height) * 0.5,
+        ],
+        8.0,
+        [0, 210, 255],
+    );
+    draw_circle(
+        &mut frame,
+        before_center_px.unwrap_or([
+            f64::from(before.width) * 0.5,
+            f64::from(before.height) * 0.5,
+        ]),
+        radius,
+        color(before_occupancy),
+    );
+    let after_center_px =
+        after_center_px.unwrap_or([f64::from(after.width) * 0.5, f64::from(after.height) * 0.5]);
+    draw_circle(
+        &mut frame,
+        [
+            f64::from(before.width) + after_center_px[0],
+            after_center_px[1],
         ],
         radius,
         color(after_occupancy),
@@ -3377,6 +3600,29 @@ mod tests {
 
         assert!((normalized_patch_correlation(&reference, &matching).unwrap() - 1.0).abs() < 1e-9);
         assert!(normalized_patch_correlation(&reference, &unrelated).unwrap() < 0.5);
+    }
+
+    #[test]
+    fn pocket_center_measurement_does_not_select_the_package_edge() {
+        let width = 350_u32;
+        let height = 500_u32;
+        let mut pixels = vec![235_u8; (width * height) as usize];
+        for y in 250..290 {
+            for x in 135..215 {
+                pixels[(y * width + x) as usize] = 105;
+            }
+        }
+        let crop = GrayFrame {
+            width,
+            height,
+            pixels,
+        };
+
+        let measured = measure_pocket_image_center(&crop, 7.0, 10.0, 14.0, 20.0, 4.0, 8.0).unwrap();
+
+        assert!((measured.center_mm[0] - 7.0).abs() < 0.03);
+        assert!((measured.center_mm[1] - 10.8).abs() < 0.03);
+        assert!(measured.confidence > 0.8);
     }
 
     #[test]
