@@ -112,7 +112,71 @@ pub struct BoardRegistrationRun {
     #[serde(default)]
     pub board_instance: Option<BoardInstance>,
     #[serde(default)]
+    pub latest_surface_measurement_id: Option<Uuid>,
+    #[serde(default)]
     pub passed: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// One detected board fiducial from one safe-Z camera view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardSurfaceFiducialView {
+    pub reference: String,
+    pub view_index: u32,
+    pub camera_pose: Pose,
+    pub observed_x_px: f64,
+    pub observed_y_px: f64,
+    pub diameter_px: f64,
+    pub confidence: f64,
+    pub artifact_name: String,
+}
+
+/// A board-height estimate from two views of the same known fiducial.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardSurfaceParallaxObservation {
+    pub reference: String,
+    pub fixed_view_index: u32,
+    pub moving_view_index: u32,
+    pub surface_fraction: f64,
+    pub residual_mm: f64,
+    pub parallax_signal_mm: f64,
+}
+
+/// Non-contact board-surface result in one nozzle's working-Z coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardSurfaceMeasurementReport {
+    pub algorithm_version: String,
+    pub nozzle_id: String,
+    pub reference_contact_nozzle_z_mm: f64,
+    pub installed_plate_depth_below_working_plane_mm: f64,
+    pub median_surface_fraction: f64,
+    pub surface_fraction_p95_deviation: f64,
+    pub surface_z_mm: f64,
+    pub uncertainty_mm: f64,
+    pub fit_residuals: Residuals,
+    pub views: Vec<BoardSurfaceFiducialView>,
+    pub observations: Vec<BoardSurfaceParallaxObservation>,
+    pub passed: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Persistent state for one automatic, non-contact board-surface run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardSurfaceMeasurementRun {
+    pub id: Uuid,
+    pub operation_id: Uuid,
+    pub registration_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub nozzle_id: String,
+    pub status: OperationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub sample_count: u32,
+    #[serde(default)]
+    pub report: Option<BoardSurfaceMeasurementReport>,
     #[serde(default)]
     pub message: Option<String>,
 }

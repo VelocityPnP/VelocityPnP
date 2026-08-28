@@ -26,10 +26,11 @@ use velocitypnp_domain::{
     lumen_calibration_workflow, summarize_visual_homing_validation, ApproachSide,
     AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BoardInstance,
     BoardRegistrationFiducialObservation, BoardRegistrationHypothesis, BoardRegistrationRun,
-    BoardSide, BottomCameraMappingReport, CalibrationArtifactId, CalibrationArtifactPlan,
-    CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase,
-    CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId, CameraProfile,
-    CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
+    BoardSide, BoardSurfaceFiducialView, BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun,
+    BoardSurfaceParallaxObservation, BottomCameraMappingReport, CalibrationArtifactId,
+    CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus,
+    CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId,
+    CameraProfile, CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
     HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
     HeldPartAlignmentReport, HeldPartInspectionReport, InspectionReport, InspectionStatus,
     InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
@@ -75,10 +76,10 @@ use velocitypnp_vision::{
     encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
     fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
     inspect_held_part_difference, inspect_strip_feeder_pocket_return,
-    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
-    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
-    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
-    reanalyze_workspace_seam_health, render_board_fiducial_evidence,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
+    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
+    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
+    query_camera_controls, reanalyze_workspace_seam_health, render_board_fiducial_evidence,
     render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
@@ -115,6 +116,10 @@ const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.60;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
 const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v1";
+const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
+const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
+const BOARD_SURFACE_MAX_FRACTION_P95_DEVIATION: f64 = 0.10;
+const BOARD_SURFACE_MAX_UNCERTAINTY_MM: f64 = 0.20;
 const BARE_NOZZLE_ARTIFACT: &str = "bare-nozzle.png";
 const HELD_PART_ARTIFACT: &str = "held-part.png";
 const HELD_PART_ALIGNED_ARTIFACT: &str = "held-part-aligned.png";
@@ -222,6 +227,7 @@ impl AppState {
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
         state.recover_interrupted_board_registrations();
+        state.recover_interrupted_board_surface_measurements();
         state.recover_interrupted_strip_feeder_holdouts();
         state.recover_interrupted_strip_feeder_pickups();
         state.recover_interrupted_placement_executions();
@@ -416,6 +422,46 @@ impl AppState {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(%error, "failed to inspect board registration operation")
+                }
+            }
+        }
+    }
+
+    fn recover_interrupted_board_surface_measurements(&self) {
+        let Ok(runs) = self.store.list_board_surface_measurements() else {
+            tracing::error!("failed to inspect board surface measurements during startup");
+            return;
+        };
+        for mut run in runs.into_iter().filter(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        }) {
+            let message = "daemon restarted before the board surface measurement completed";
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.into());
+            run.updated_at = Utc::now();
+            if let Err(error) = self.store.put_board_surface_measurement(&run) {
+                tracing::error!(%error, measurement_id = %run.id, "failed to recover board surface measurement");
+            }
+            match self.store.get_operation(run.operation_id) {
+                Ok(Some(mut operation))
+                    if matches!(
+                        operation.status,
+                        OperationStatus::Pending | OperationStatus::Running
+                    ) =>
+                {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some(message.into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(%error, operation_id = %operation.id, "failed to recover board surface operation");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, operation_id = %run.operation_id, "failed to inspect board surface operation");
                 }
             }
         }
@@ -622,6 +668,22 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/board-registrations/{id}",
             get(get_board_registration),
+        )
+        .route(
+            "/api/v1/board-registrations/{id}/surface-measurements",
+            post(start_board_surface_measurement),
+        )
+        .route(
+            "/api/v1/board-surface-measurements",
+            get(list_board_surface_measurements),
+        )
+        .route(
+            "/api/v1/board-surface-measurements/{id}",
+            get(get_board_surface_measurement),
+        )
+        .route(
+            "/api/v1/board-surface-measurements/{id}/artifacts/{name}",
+            get(get_board_surface_measurement_artifact),
         )
         .route(
             "/api/v1/board-registrations/{id}/artifacts/{name}",
@@ -1549,6 +1611,7 @@ async fn start_workspace_scan(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
@@ -1661,6 +1724,27 @@ fn ensure_no_active_board_registrations(state: &AppState) -> ApiResult<()> {
         return Err(ApiError::bad_request(format!(
             "board registration {} is already active",
             registration.id
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_no_active_board_surface_measurements(state: &AppState) -> ApiResult<()> {
+    let active = state
+        .store
+        .list_board_surface_measurements()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|measurement| {
+            matches!(
+                measurement.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        });
+    if let Some(measurement) = active {
+        return Err(ApiError::bad_request(format!(
+            "board surface measurement {} is already active",
+            measurement.id
         )));
     }
     Ok(())
@@ -4415,6 +4499,7 @@ async fn start_workspace_refinement_batch(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let parent = state
@@ -5723,6 +5808,7 @@ async fn start_strip_feeder_live_holdout(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let registration = state
@@ -6187,6 +6273,7 @@ async fn start_strip_feeder_pickup_qualification(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let pickup_profile = state.profile.strip_feeder_pickup.as_ref().ok_or_else(|| {
@@ -8514,6 +8601,7 @@ async fn start_board_registration(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let scan = state
@@ -8613,6 +8701,7 @@ async fn start_board_registration(
         fit_residuals: None,
         design_to_machine: None,
         board_instance: None,
+        latest_surface_measurement_id: None,
         passed: false,
         message: None,
     };
@@ -9126,6 +9215,730 @@ async fn get_board_registration_artifact(
         .get_board_registration_artifact(id, &name)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("board registration artifact not found"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(data))
+        .map_err(ApiError::internal)
+}
+
+#[derive(Debug, Deserialize)]
+struct StartBoardSurfaceMeasurementRequest {
+    lease_id: Uuid,
+    #[serde(default = "default_board_surface_nozzle")]
+    nozzle_id: String,
+    #[serde(default = "default_board_registration_sample_count")]
+    sample_count: u32,
+    confirmed_external_safety_checks: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StartBoardSurfaceMeasurementResponse {
+    measurement: BoardSurfaceMeasurementRun,
+    operation: Operation,
+}
+
+fn default_board_surface_nozzle() -> String {
+    "N1".into()
+}
+
+async fn start_board_surface_measurement(
+    State(state): State<AppState>,
+    Path(registration_id): Path<Uuid>,
+    Json(body): Json<StartBoardSurfaceMeasurementRequest>,
+) -> ApiResult<(StatusCode, Json<StartBoardSurfaceMeasurementResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "board surface measurement requires confirmation that the PCB is fixed, its fiducials are visible, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    if !(3..=5).contains(&body.sample_count) {
+        return Err(ApiError::bad_request(
+            "board surface sample_count must be between 3 and 5",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+        return Err(ApiError::bad_request(
+            "board surface measurement requires a homed ready machine",
+        ));
+    }
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    let registration = state
+        .store
+        .get_board_registration(registration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("board registration not found"))?;
+    if registration.status != OperationStatus::Succeeded
+        || !registration.passed
+        || registration.design_to_machine.is_none()
+        || registration.board_instance.is_none()
+    {
+        return Err(ApiError::bad_request(
+            "board surface measurement requires a passing board registration",
+        ));
+    }
+    if registration.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "board registration does not match the active machine profile",
+        ));
+    }
+    if !status.simulated && status.calibration_revision != Some(registration.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "board surface measurement requires fine XYZ homing with calibration {}",
+            registration.calibration_id,
+        )));
+    }
+    let board = state
+        .store
+        .get_board(registration.board_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("board design not found"))?;
+    let fiducial_count = board
+        .placements
+        .iter()
+        .filter(|placement| {
+            placement.enabled && placement.fiducial && placement.side == BoardSide::Top
+        })
+        .count();
+    if fiducial_count < 3 {
+        return Err(ApiError::bad_request(
+            "board surface measurement requires at least three top fiducials",
+        ));
+    }
+    let (snapshot, top_camera_model) =
+        load_workspace_camera_model(&state, registration.calibration_id)?;
+    let (working_camera_model, _, installed_camera_model, _) = select_workspace_surface_models(
+        &state,
+        &snapshot,
+        top_camera_model,
+        Some(WorkspaceRegionPreset::InstalledPlates),
+        WorkspaceScanMode::Precision,
+    )?;
+    let installed_camera_model = installed_camera_model.ok_or_else(|| {
+        ApiError::bad_request("board surface measurement has no installed-plate camera model")
+    })?;
+    let installed_geometry = state
+        .profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define installed plate geometry")
+        })?;
+    let plate_depth_mm = installed_geometry
+        .installed_plate_depth_below_working_plane_mm
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "active profile does not define installed plate depth below the working plane",
+            )
+        })?;
+    let contact_artifact = CalibrationArtifactId::vacuum_contact(&body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("unknown surface-reference nozzle"))?;
+    if !crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, contact_artifact)
+    {
+        return Err(ApiError::bad_request(
+            "board surface measurement requires a current vacuum-contact reference",
+        ));
+    }
+    let contact: VacuumProbeReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(&snapshot, contact_artifact)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored vacuum contact is invalid"))?;
+    let reference_contact_nozzle_z_mm = contact
+        .contact_nozzle_z_mm
+        .filter(|_| contact.passed && contact.nozzle_id == body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("stored vacuum contact did not pass"))?;
+    let camera_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let operation = Operation::pending("vision.board_surface_measurement");
+    let now = Utc::now();
+    let measurement = BoardSurfaceMeasurementRun {
+        id: Uuid::new_v4(),
+        operation_id: operation.id,
+        registration_id,
+        profile_id: state.profile.id.clone(),
+        calibration_id: registration.calibration_id,
+        nozzle_id: body.nozzle_id,
+        status: OperationStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        sample_count: body.sample_count,
+        report: None,
+        message: None,
+    };
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_board_surface_measurement(&measurement)
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartBoardSurfaceMeasurementResponse {
+        measurement: measurement.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_board_surface_measurement_task(
+            task_state,
+            measurement,
+            registration,
+            board,
+            working_camera_model,
+            installed_camera_model,
+            camera_profile,
+            camera_path,
+            visual,
+            reference_contact_nozzle_z_mm,
+            plate_depth_mm,
+            body.lease_id,
+        ),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_board_surface_measurement_task(
+    state: AppState,
+    mut run: BoardSurfaceMeasurementRun,
+    mut registration: BoardRegistrationRun,
+    board: BoardDesign,
+    working_camera_model: PlanarCameraModel,
+    installed_camera_model: PlanarCameraModel,
+    camera_profile: CameraProfile,
+    camera_path: String,
+    visual: VisualHomingProfile,
+    reference_contact_nozzle_z_mm: f64,
+    plate_depth_mm: f64,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    run.status = OperationStatus::Running;
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_board_surface_measurement(&run)
+        .map_err(|error| error.to_string())?;
+    let result = execute_board_surface_measurement(
+        &state,
+        &run,
+        &registration,
+        &board,
+        &working_camera_model,
+        &installed_camera_model,
+        &camera_profile,
+        &camera_path,
+        &visual,
+        reference_contact_nozzle_z_mm,
+        plate_depth_mm,
+        lease_id,
+    )
+    .await;
+    match result {
+        Ok(report) => {
+            if !report.passed {
+                let message = format!(
+                    "board surface was rejected: fraction {:.3}, p95 spread {:.3}, residual {:.3} mm, uncertainty {:.3} mm",
+                    report.median_surface_fraction,
+                    report.surface_fraction_p95_deviation,
+                    report.fit_residuals.p95_mm,
+                    report.uncertainty_mm,
+                );
+                run.report = Some(report);
+                run.status = OperationStatus::Failed;
+                run.message = Some(message.clone());
+                run.updated_at = Utc::now();
+                state
+                    .store
+                    .put_board_surface_measurement(&run)
+                    .map_err(|error| error.to_string())?;
+                return Err(message);
+            }
+            let message = format!(
+                "Measured board surface Z {:.3} mm without contact; uncertainty {:.3} mm",
+                report.surface_z_mm, report.uncertainty_mm,
+            );
+            let board_instance = registration
+                .board_instance
+                .as_mut()
+                .ok_or_else(|| "board registration lost its board instance".to_string())?;
+            board_instance.surface_z_mm = Some(report.surface_z_mm);
+            registration.latest_surface_measurement_id = Some(run.id);
+            registration.updated_at = Utc::now();
+            state
+                .store
+                .put_board_registration(&registration)
+                .map_err(|error| error.to_string())?;
+            run.report = Some(report);
+            run.status = OperationStatus::Succeeded;
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_board_surface_measurement(&run)
+                .map_err(|error| error.to_string())?;
+            Ok(Some(message))
+        }
+        Err(message) => {
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            if let Err(error) = state.store.put_board_surface_measurement(&run) {
+                tracing::error!(%error, measurement_id = %run.id, "failed to persist rejected board surface measurement");
+            }
+            Err(message)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_board_surface_measurement(
+    state: &AppState,
+    run: &BoardSurfaceMeasurementRun,
+    registration: &BoardRegistrationRun,
+    board: &BoardDesign,
+    working_camera_model: &PlanarCameraModel,
+    installed_camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    reference_contact_nozzle_z_mm: f64,
+    plate_depth_mm: f64,
+    lease_id: Uuid,
+) -> Result<BoardSurfaceMeasurementReport, String> {
+    let _motion_guard = state.workspace_scan_motion_lock.lock().await;
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "visual home before board surface measurement failed: {}",
+            error.message
+        )
+    })?;
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let result = measure_board_surface(
+        state,
+        run,
+        registration,
+        board,
+        working_camera_model,
+        installed_camera_model,
+        camera_profile,
+        camera_path,
+        visual,
+        reference_contact_nozzle_z_mm,
+        plate_depth_mm,
+        lease_id,
+    )
+    .await;
+    let return_result = state
+        .machine
+        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
+        .await;
+    let lights_result = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = return_result {
+        return Err(format!("board surface return move failed: {error}"));
+    }
+    if let Err(error) = lights_result {
+        return Err(format!("board surface light cleanup failed: {error}"));
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_board_surface(
+    state: &AppState,
+    run: &BoardSurfaceMeasurementRun,
+    registration: &BoardRegistrationRun,
+    board: &BoardDesign,
+    working_camera_model: &PlanarCameraModel,
+    installed_camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    reference_contact_nozzle_z_mm: f64,
+    plate_depth_mm: f64,
+    lease_id: Uuid,
+) -> Result<BoardSurfaceMeasurementReport, String> {
+    let transform = registration
+        .design_to_machine
+        .ok_or_else(|| "board registration has no machine transform".to_string())?;
+    let view_offsets = board_surface_view_offsets(working_camera_model)
+        .ok_or_else(|| "top-camera model cannot plan board surface views".to_string())?;
+    let mut fiducials = board
+        .placements
+        .iter()
+        .filter(|placement| {
+            placement.enabled && placement.fiducial && placement.side == BoardSide::Top
+        })
+        .collect::<Vec<_>>();
+    fiducials.sort_by(|left, right| left.reference.cmp(&right.reference));
+    let mut views = Vec::new();
+    let mut observations = Vec::new();
+    for fiducial in fiducials.into_iter().take(3) {
+        let feature_machine = transform.apply(fiducial.pose.x_mm, fiducial.pose.y_mm);
+        let mut feature_views = Vec::new();
+        for (view_index, offset) in view_offsets.iter().enumerate() {
+            let target = Pose {
+                x_mm: feature_machine.0 + offset[0],
+                y_mm: feature_machine.1 + offset[1],
+                z_mm: state.profile.safe_z_mm,
+                rotation_deg: 0.0,
+            };
+            if !state.profile.bounds.contains(target) {
+                return Err(format!(
+                    "surface view {} for {} is outside machine bounds",
+                    view_index, fiducial.reference,
+                ));
+            }
+            let expected_correction = [-offset[0], -offset[1]];
+            let expected_pixel =
+                invert_planar_camera_correction(working_camera_model, expected_correction)
+                    .ok_or_else(|| {
+                        format!(
+                            "surface view {} for {} is outside the camera model",
+                            view_index, fiducial.reference,
+                        )
+                    })?;
+            state
+                .machine
+                .renew_lease(lease_id, 900)
+                .await
+                .map_err(|error| error.to_string())?;
+            let measured_pose =
+                jog_board_registration_target(state, lease_id, target, visual).await?;
+            let scale_mm_per_px = working_camera_model
+                .local_mm_per_pixel(expected_pixel[0], expected_pixel[1])
+                .ok_or_else(|| "top-camera model has no local surface-view scale".to_string())?;
+            let frames =
+                capture_profiled_frames(state, camera_profile, camera_path, run.sample_count)
+                    .await
+                    .map_err(|error| error.message)?;
+            let detections = frames
+                .iter()
+                .filter_map(|frame| {
+                    detect_board_fiducial_near(
+                        frame,
+                        expected_pixel[0],
+                        expected_pixel[1],
+                        1.5 / scale_mm_per_px,
+                        BOARD_REGISTRATION_FIDUCIAL_DIAMETER_MM / scale_mm_per_px,
+                        BOARD_REGISTRATION_FIDUCIAL_DIAMETER_TOLERANCE_MM / scale_mm_per_px,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let required_detections = (2 * run.sample_count).div_ceil(3);
+            let detection = (detections.len() >= required_detections as usize)
+                .then(|| mean_fiducial_detection(&detections))
+                .flatten();
+            let artifact_name = format!(
+                "surface-{}-view-{view_index}.png",
+                safe_artifact_component(&fiducial.reference),
+            );
+            let evidence = render_board_fiducial_evidence(
+                frames
+                    .last()
+                    .ok_or_else(|| "top camera returned no surface frames".to_string())?,
+                expected_pixel,
+                detection,
+            );
+            let encoded = encode_rgb_png(&evidence).map_err(|error| error.to_string())?;
+            state
+                .store
+                .put_board_surface_measurement_artifact(
+                    run.id,
+                    &artifact_name,
+                    "image/png",
+                    &encoded,
+                )
+                .map_err(|error| error.to_string())?;
+            let detection = detection.ok_or_else(|| {
+                format!(
+                    "{} surface view {} was detected in {} of {} frames",
+                    fiducial.reference,
+                    view_index,
+                    detections.len(),
+                    run.sample_count,
+                )
+            })?;
+            let maximum_jitter_mm = detections
+                .iter()
+                .map(|sample| {
+                    (sample.x_px - detection.x_px).hypot(sample.y_px - detection.y_px)
+                        * scale_mm_per_px
+                })
+                .fold(0.0_f64, f64::max);
+            if maximum_jitter_mm > BOARD_REGISTRATION_MAX_RESIDUAL_MM {
+                return Err(format!(
+                    "{} surface-view jitter {:.3} mm exceeds {:.3} mm",
+                    fiducial.reference, maximum_jitter_mm, BOARD_REGISTRATION_MAX_RESIDUAL_MM,
+                ));
+            }
+            let view = BoardSurfaceFiducialView {
+                reference: fiducial.reference.clone(),
+                view_index: view_index as u32,
+                camera_pose: measured_pose,
+                observed_x_px: detection.x_px,
+                observed_y_px: detection.y_px,
+                diameter_px: detection.diameter_px,
+                confidence: detection.confidence,
+                artifact_name,
+            };
+            views.push(view.clone());
+            feature_views.push(view);
+        }
+        for fixed_index in 0..feature_views.len() {
+            for moving_index in (fixed_index + 1)..feature_views.len() {
+                let fixed = &feature_views[fixed_index];
+                let moving = &feature_views[moving_index];
+                let observation = measure_known_feature_surface_fraction(
+                    fixed.camera_pose,
+                    [fixed.observed_x_px, fixed.observed_y_px],
+                    moving.camera_pose,
+                    [moving.observed_x_px, moving.observed_y_px],
+                    working_camera_model,
+                    installed_camera_model,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "{} views {} and {} did not produce a valid parallax estimate",
+                        fiducial.reference, fixed.view_index, moving.view_index,
+                    )
+                })?;
+                observations.push(BoardSurfaceParallaxObservation {
+                    reference: fiducial.reference.clone(),
+                    fixed_view_index: fixed.view_index,
+                    moving_view_index: moving.view_index,
+                    surface_fraction: observation.surface_fraction,
+                    residual_mm: observation.residual_mm,
+                    parallax_signal_mm: observation.parallax_signal_mm,
+                });
+            }
+        }
+    }
+    if observations.len() < 6 {
+        return Err("board surface measurement produced fewer than six estimates".into());
+    }
+    let mut fractions = observations
+        .iter()
+        .map(|observation| observation.surface_fraction)
+        .collect::<Vec<_>>();
+    fractions.sort_by(f64::total_cmp);
+    let median_fraction = percentile_sorted(&fractions, 0.5)
+        .ok_or_else(|| "board surface fraction is unavailable".to_string())?;
+    let mut deviations = fractions
+        .iter()
+        .map(|fraction| (fraction - median_fraction).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_by(f64::total_cmp);
+    let p95_deviation = percentile_sorted(&deviations, 0.95)
+        .ok_or_else(|| "board surface spread is unavailable".to_string())?;
+    let fit_residuals = summarize_residuals(
+        observations
+            .iter()
+            .map(|observation| observation.residual_mm),
+    )
+    .ok_or_else(|| "board surface residuals are invalid".to_string())?;
+    let mut fractional_fit_uncertainties = observations
+        .iter()
+        .map(|observation| observation.residual_mm / observation.parallax_signal_mm)
+        .collect::<Vec<_>>();
+    fractional_fit_uncertainties.sort_by(f64::total_cmp);
+    let fit_fraction_uncertainty = percentile_sorted(&fractional_fit_uncertainties, 0.95)
+        .ok_or_else(|| "board surface fit uncertainty is unavailable".to_string())?;
+    let uncertainty_mm = (plate_depth_mm * p95_deviation.max(fit_fraction_uncertainty)).hypot(0.10);
+    let surface_z_mm = reference_contact_nozzle_z_mm - plate_depth_mm * median_fraction;
+    let passed = (MIN_WORKSPACE_SURFACE_FRACTION..=0.90).contains(&median_fraction)
+        && p95_deviation <= BOARD_SURFACE_MAX_FRACTION_P95_DEVIATION
+        && fit_residuals.p95_mm <= BOARD_REGISTRATION_MAX_RESIDUAL_MM
+        && uncertainty_mm <= BOARD_SURFACE_MAX_UNCERTAINTY_MM;
+    let findings = vec![
+        format!(
+            "{} fiducial views produced {} pair estimates",
+            views.len(),
+            observations.len(),
+        ),
+        "All views were captured at safe Z; no board contact was made".into(),
+    ];
+    let report = BoardSurfaceMeasurementReport {
+        algorithm_version: BOARD_SURFACE_MEASUREMENT_ALGORITHM.into(),
+        nozzle_id: run.nozzle_id.clone(),
+        reference_contact_nozzle_z_mm,
+        installed_plate_depth_below_working_plane_mm: plate_depth_mm,
+        median_surface_fraction: median_fraction,
+        surface_fraction_p95_deviation: p95_deviation,
+        surface_z_mm,
+        uncertainty_mm,
+        fit_residuals,
+        views,
+        observations,
+        passed,
+        findings,
+    };
+    let encoded = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_board_surface_measurement_artifact(run.id, "report.json", "application/json", &encoded)
+        .map_err(|error| error.to_string())?;
+    Ok(report)
+}
+
+fn invert_planar_camera_correction(
+    model: &PlanarCameraModel,
+    target_correction_mm: [f64; 2],
+) -> Option<[f64; 2]> {
+    let mut pixel = [model.center_x_px, model.center_y_px];
+    for _ in 0..10 {
+        let correction = model.correction_at(pixel[0], pixel[1])?;
+        let error = [
+            correction[0] - target_correction_mm[0],
+            correction[1] - target_correction_mm[1],
+        ];
+        if error[0].hypot(error[1]) < 1e-6 {
+            return Some(pixel);
+        }
+        let correction_x = model.correction_at(pixel[0] + 1.0, pixel[1])?;
+        let correction_y = model.correction_at(pixel[0], pixel[1] + 1.0)?;
+        let jacobian = [
+            [
+                correction_x[0] - correction[0],
+                correction_y[0] - correction[0],
+            ],
+            [
+                correction_x[1] - correction[1],
+                correction_y[1] - correction[1],
+            ],
+        ];
+        let determinant = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
+        if determinant.abs() < 1e-12 {
+            return None;
+        }
+        pixel[0] -= (jacobian[1][1] * error[0] - jacobian[0][1] * error[1]) / determinant;
+        pixel[1] -= (-jacobian[1][0] * error[0] + jacobian[0][0] * error[1]) / determinant;
+    }
+    let correction = model.correction_at(pixel[0], pixel[1])?;
+    (correction[0] - target_correction_mm[0])
+        .hypot(correction[1] - target_correction_mm[1])
+        .lt(&1e-4)
+        .then_some(pixel)
+}
+
+fn board_surface_view_offsets(model: &PlanarCameraModel) -> Option<[[f64; 2]; 3]> {
+    let x_probe = [
+        model.center_x_px
+            + BOARD_SURFACE_APERTURE_FRACTION * (model.supported_max_x_px - model.center_x_px),
+        model.center_y_px,
+    ];
+    let y_probe = [
+        model.center_x_px,
+        model.center_y_px
+            + BOARD_SURFACE_APERTURE_FRACTION * (model.supported_min_y_px - model.center_y_px),
+    ];
+    let x_correction = model.correction_at(x_probe[0], x_probe[1])?;
+    let y_correction = model.correction_at(y_probe[0], y_probe[1])?;
+    if x_correction[0].hypot(x_correction[1]) < 1.0 || y_correction[0].hypot(y_correction[1]) < 1.0
+    {
+        return None;
+    }
+    Some([
+        [0.0, 0.0],
+        [-x_correction[0], -x_correction[1]],
+        [-y_correction[0], -y_correction[1]],
+    ])
+}
+
+fn safe_artifact_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn percentile_sorted(values: &[f64], fraction: f64) -> Option<f64> {
+    if values.is_empty() || !(0.0..=1.0).contains(&fraction) {
+        return None;
+    }
+    let index = ((values.len() - 1) as f64 * fraction).ceil() as usize;
+    values.get(index).copied()
+}
+
+async fn list_board_surface_measurements(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "measurements": state
+            .store
+            .list_board_surface_measurements()
+            .map_err(ApiError::internal)?,
+    })))
+}
+
+async fn get_board_surface_measurement(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<BoardSurfaceMeasurementRun>> {
+    state
+        .store
+        .get_board_surface_measurement(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("board surface measurement not found"))
+}
+
+async fn get_board_surface_measurement_artifact(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    let (media_type, data) = state
+        .store
+        .get_board_surface_measurement_artifact(id, &name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("board surface artifact not found"))?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, media_type)
@@ -19275,6 +20088,7 @@ async fn start_guarded_placement_execution(
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
     ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     ensure_no_active_placement_executions(&state)?;
@@ -21234,6 +22048,32 @@ mod tests {
     }
 
     #[test]
+    fn board_surface_views_stay_inside_the_calibrated_aperture() {
+        let model = PlanarCameraModel {
+            role: CameraRole::TopCamera,
+            center_x_px: 640.0,
+            center_y_px: 360.0,
+            normalization_x_px: 640.0,
+            normalization_y_px: 360.0,
+            correction_x_coefficients_mm: [-8.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            correction_y_coefficients_mm: [0.0, 4.7, 0.0, 0.0, 0.0, 0.0, 0.0],
+            supported_min_x_px: 195.0,
+            supported_max_x_px: 1084.0,
+            supported_min_y_px: 139.0,
+            supported_max_y_px: 591.0,
+            kind: velocitypnp_domain::PlanarCameraModelKind::Affine,
+        };
+        let offsets = board_surface_view_offsets(&model).unwrap();
+
+        assert_eq!(offsets[0], [0.0, 0.0]);
+        for offset in offsets.into_iter().skip(1) {
+            let pixel = invert_planar_camera_correction(&model, [-offset[0], -offset[1]]).unwrap();
+            assert!((model.supported_min_x_px..=model.supported_max_x_px).contains(&pixel[0]));
+            assert!((model.supported_min_y_px..=model.supported_max_y_px).contains(&pixel[1]));
+        }
+    }
+
+    #[test]
     fn layered_workspace_overlap_prefers_quality_before_tile_count() {
         assert_eq!(layered_workspace_overlap(0.41), 0.60);
         assert_eq!(layered_workspace_overlap(0.70), 0.70);
@@ -22998,6 +23838,36 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("PCB is fixed"));
+        assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn board_surface_requires_external_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/board-registrations/{}/surface-measurements",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("fiducials are visible"));
         assert!(message.contains("travel envelope"));
     }
 

@@ -199,6 +199,7 @@
     "resolved_relative_uncertainty": 0.5
   },
   "installed_geometry_calibration": {
+    "installed_plate_depth_below_working_plane_mm": 1.6,
     "top_camera_sweep": {
       "x_offsets_mm": [-6.0, -3.0, 0.0, 3.0, 6.0],
       "y_offsets_mm": [-3.0, -1.5, 0.0, 1.5, 3.0],

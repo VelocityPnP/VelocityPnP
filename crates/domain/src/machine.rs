@@ -496,6 +496,10 @@ pub struct InstalledGeometryCalibrationProfile {
     pub top_camera_sweep: PlanarCameraSweepProfile,
     pub bottom_camera_sweep: PlanarCameraSweepProfile,
     pub plates: Vec<InstalledPlateGridProfile>,
+    /// Positive distance from the top-camera working plane down to the bare
+    /// installed plate plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_plate_depth_below_working_plane_mm: Option<f64>,
     pub plate_hole_diameter_mm: f64,
     pub plate_pad_diameter_mm: f64,
     pub plate_diameter_tolerance_mm: f64,
@@ -843,6 +847,9 @@ impl InstalledGeometryCalibrationProfile {
             self.plate_search_radius_mm,
             self.feed_mm_per_min,
         ];
+        let plane_depth_invalid = self
+            .installed_plate_depth_below_working_plane_mm
+            .is_some_and(|depth| !depth.is_finite() || !(0.5..=5.0).contains(&depth));
         let mut ids = BTreeMap::new();
         let staging = self
             .plates
@@ -888,6 +895,7 @@ impl InstalledGeometryCalibrationProfile {
             || self.plate_diameter_tolerance_mm >= self.plate_hole_diameter_mm
             || !(0.5..=5.0).contains(&self.plate_search_radius_mm)
             || self.feed_mm_per_min <= 0.0
+            || plane_depth_invalid
             || semantic_layout_invalid
         {
             return Err("installed geometry calibration profile is invalid");
@@ -1223,6 +1231,10 @@ mod tests {
             .is_ok());
         assert!(direction_response.validate().is_ok());
         assert!(installed.validate().is_ok());
+        assert_eq!(
+            installed.installed_plate_depth_below_working_plane_mm,
+            Some(1.6)
+        );
         assert_eq!(z.controller_z("N1", 30.0), Some(30.0));
         assert_eq!(z.controller_z("N2", 30.0), Some(33.0));
         assert_eq!(z.controller_z("N1", 33.0), Some(33.0));

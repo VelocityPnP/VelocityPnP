@@ -138,6 +138,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add scan-seeded automatic top-side board registration with square-board
   orientation hypotheses, local KiCad fiducial measurements, evidence images,
   and a residual-gated design-to-machine transform
+- [x] Physically validate persistent non-contact board-surface measurement
+  from safe-Z parallax views of registered KiCad fiducials
 - [ ] Tune inventory change thresholds with unchanged scans and deliberate
   board and feeder changes on attached hardware
 - [ ] Add learned semantic segmentation with versioned datasets, calibrated

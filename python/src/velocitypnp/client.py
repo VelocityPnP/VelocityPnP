@@ -628,6 +628,72 @@ class Client:
             "image/png",
         )
 
+    def start_board_surface_measurement(
+        self,
+        registration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        nozzle_id: str = "N1",
+        sample_count: int = 3,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "board surface measurement requires explicit confirmation that "
+                "the PCB is fixed, its fiducials are visible, both nozzles are "
+                "level, the envelope is clear, and power isolation is reachable"
+            )
+        if not 3 <= sample_count <= 5:
+            raise ValueError("sample_count must be between 3 and 5")
+        return self._request(
+            "POST",
+            f"/board-registrations/{registration_id}/surface-measurements",
+            {
+                "lease_id": str(lease_id),
+                "nozzle_id": nozzle_id,
+                "sample_count": sample_count,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+
+    def measure_board_surface(
+        self,
+        registration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        nozzle_id: str = "N1",
+        sample_count: int = 3,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        started = self.start_board_surface_measurement(
+            registration_id,
+            lease_id,
+            nozzle_id=nozzle_id,
+            sample_count=sample_count,
+            safety_checks_confirmed=safety_checks_confirmed,
+        )
+        self.wait(started["operation"])
+        return self.board_surface_measurement(started["measurement"]["id"])
+
+    def board_surface_measurements(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/board-surface-measurements")["measurements"]
+
+    def board_surface_measurement(
+        self, measurement_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET", f"/board-surface-measurements/{measurement_id}"
+        )
+
+    def board_surface_measurement_artifact(
+        self, measurement_id: str | uuid.UUID, artifact_name: str,
+    ) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/board-surface-measurements/{measurement_id}/artifacts/{artifact_name}",
+            "image/png" if artifact_name.endswith(".png") else "application/json",
+        )
+
     def set_workspace_inventory_baseline(
         self, scan_id: str | uuid.UUID,
     ) -> dict[str, Any]:

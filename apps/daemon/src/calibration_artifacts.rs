@@ -892,17 +892,16 @@ fn expected_inputs(
             );
         }
         InstalledPlateGeometry => {
-            add(
-                &mut inputs,
-                "installed_geometry_profile",
-                &state
-                    .profile
-                    .installed_geometry_calibration
-                    .as_ref()
-                    .ok_or_else(|| {
-                        "active profile has no installed geometry calibration".to_string()
-                    })?,
-            );
+            let mut geometry_profile = state
+                .profile
+                .installed_geometry_calibration
+                .as_ref()
+                .ok_or_else(|| "active profile has no installed geometry calibration".to_string())?
+                .clone();
+            // Plane depth converts an existing optical map into a physical Z
+            // value. It does not change how the plate geometry was captured.
+            geometry_profile.installed_plate_depth_below_working_plane_mm = None;
+            add(&mut inputs, "installed_geometry_profile", &geometry_profile);
         }
         ReciprocalCameraGeometry => {
             add(&mut inputs, "top_camera_profile", &top_profile()?);
@@ -1224,5 +1223,25 @@ mod tests {
         let after =
             expected_inputs(&changed_state, CalibrationArtifactId::CameraRayTransfer).unwrap();
         assert_ne!(before, after);
+    }
+
+    #[tokio::test]
+    async fn plane_depth_does_not_invalidate_installed_plate_geometry() {
+        let state = state();
+        let before =
+            expected_inputs(&state, CalibrationArtifactId::InstalledPlateGeometry).unwrap();
+        let mut changed = (*state.profile).clone();
+        changed
+            .installed_geometry_calibration
+            .as_mut()
+            .unwrap()
+            .installed_plate_depth_below_working_plane_mm = Some(2.0);
+        let changed_state = AppState::new(state.machine.clone(), changed, state.store.clone());
+        let after = expected_inputs(
+            &changed_state,
+            CalibrationArtifactId::InstalledPlateGeometry,
+        )
+        .unwrap();
+        assert_eq!(before, after);
     }
 }

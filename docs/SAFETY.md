@@ -26,6 +26,13 @@ moves stay at safe Z, omit nozzle rotation, use the profile feed limit, and
 return to the visual-home seed. A failed fiducial hypothesis does not create a
 board instance.
 
+Automatic board-surface measurement is non-contact. The operator must confirm
+that the PCB is fixed and that at least three fiducials are visible and clear
+of adhesive or other cover. The top camera views each fiducial only at safe Z.
+The runner does not lower a nozzle onto the PCB. It fails closed if the camera
+models, datum-contact reference, fiducial detections, spread, residual, or
+uncertainty are not valid.
+
 Retained-image strip-feeder analysis causes no machine motion and does not
 require homing. It can store a setup draft, but the draft has no pickup Z,
 selected occupied pocket, or active feeder ID. The job planner cannot consume

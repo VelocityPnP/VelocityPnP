@@ -5,7 +5,9 @@ use opencv::features2d;
 use opencv::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use velocitypnp_domain::{CameraRole, PlanarCameraModel, WorkspaceScanRegion, WorkspaceScanTile};
+use velocitypnp_domain::{
+    CameraRole, PlanarCameraModel, Pose, WorkspaceScanRegion, WorkspaceScanTile,
+};
 
 use crate::WorkspaceScanPlan;
 
@@ -393,18 +395,65 @@ fn solve_surface_fraction(
     working_model: &PlanarCameraModel,
     installed_plate_model: &PlanarCameraModel,
 ) -> Option<WorkspaceParallaxObservation> {
-    let fixed_working = working_model.correction_at(fixed_pixel.x.into(), fixed_pixel.y.into())?;
-    let moving_working =
-        working_model.correction_at(moving_pixel.x.into(), moving_pixel.y.into())?;
-    let fixed_installed =
-        installed_plate_model.correction_at(fixed_pixel.x.into(), fixed_pixel.y.into())?;
-    let moving_installed =
-        installed_plate_model.correction_at(moving_pixel.x.into(), moving_pixel.y.into())?;
+    measure_surface_fraction(
+        fixed_tile.nominal_pose,
+        [f64::from(fixed_pixel.x), f64::from(fixed_pixel.y)],
+        moving_tile.nominal_pose,
+        [f64::from(moving_pixel.x), f64::from(moving_pixel.y)],
+        working_model,
+        installed_plate_model,
+        fixed_tile.index,
+        moving_tile.index,
+    )
+}
+
+/// Solves a surface fraction from two views of the same known feature.
+pub fn measure_known_feature_surface_fraction(
+    fixed_pose: Pose,
+    fixed_pixel: [f64; 2],
+    moving_pose: Pose,
+    moving_pixel: [f64; 2],
+    working_model: &PlanarCameraModel,
+    installed_plate_model: &PlanarCameraModel,
+) -> Option<WorkspaceParallaxObservation> {
+    measure_surface_fraction(
+        fixed_pose,
+        fixed_pixel,
+        moving_pose,
+        moving_pixel,
+        working_model,
+        installed_plate_model,
+        0,
+        1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_surface_fraction(
+    fixed_pose: Pose,
+    fixed_pixel: [f64; 2],
+    moving_pose: Pose,
+    moving_pixel: [f64; 2],
+    working_model: &PlanarCameraModel,
+    installed_plate_model: &PlanarCameraModel,
+    fixed_index: u32,
+    moving_index: u32,
+) -> Option<WorkspaceParallaxObservation> {
+    if !compatible_models(working_model, installed_plate_model)
+        || fixed_pixel
+            .iter()
+            .chain(moving_pixel.iter())
+            .any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let fixed_working = working_model.correction_at(fixed_pixel[0], fixed_pixel[1])?;
+    let moving_working = working_model.correction_at(moving_pixel[0], moving_pixel[1])?;
+    let fixed_installed = installed_plate_model.correction_at(fixed_pixel[0], fixed_pixel[1])?;
+    let moving_installed = installed_plate_model.correction_at(moving_pixel[0], moving_pixel[1])?;
     let offset = [
-        fixed_tile.nominal_pose.x_mm - moving_tile.nominal_pose.x_mm + fixed_working[0]
-            - moving_working[0],
-        fixed_tile.nominal_pose.y_mm - moving_tile.nominal_pose.y_mm + fixed_working[1]
-            - moving_working[1],
+        fixed_pose.x_mm - moving_pose.x_mm + fixed_working[0] - moving_working[0],
+        fixed_pose.y_mm - moving_pose.y_mm + fixed_working[1] - moving_working[1],
     ];
     let parallax = [
         fixed_installed[0] - fixed_working[0] - moving_installed[0] + moving_working[0],
@@ -438,12 +487,12 @@ fn solve_surface_fraction(
         moving_installed[1] - moving_working[1],
     ];
     let fixed_world = [
-        fixed_tile.nominal_pose.x_mm + fixed_working[0] + surface_fraction * fixed_delta[0],
-        fixed_tile.nominal_pose.y_mm + fixed_working[1] + surface_fraction * fixed_delta[1],
+        fixed_pose.x_mm + fixed_working[0] + surface_fraction * fixed_delta[0],
+        fixed_pose.y_mm + fixed_working[1] + surface_fraction * fixed_delta[1],
     ];
     let moving_world = [
-        moving_tile.nominal_pose.x_mm + moving_working[0] + surface_fraction * moving_delta[0],
-        moving_tile.nominal_pose.y_mm + moving_working[1] + surface_fraction * moving_delta[1],
+        moving_pose.x_mm + moving_working[0] + surface_fraction * moving_delta[0],
+        moving_pose.y_mm + moving_working[1] + surface_fraction * moving_delta[1],
     ];
     Some(WorkspaceParallaxObservation {
         x_mm: (fixed_world[0] + moving_world[0]) / 2.0,
@@ -451,8 +500,8 @@ fn solve_surface_fraction(
         surface_fraction,
         residual_mm,
         parallax_signal_mm,
-        fixed_tile_index: fixed_tile.index,
-        moving_tile_index: moving_tile.index,
+        fixed_tile_index: fixed_index,
+        moving_tile_index: moving_index,
     })
 }
 
@@ -527,6 +576,29 @@ mod tests {
             fixed_pixel,
             &moving,
             moving_pixel,
+            &working,
+            &installed,
+        )
+        .unwrap();
+
+        assert!((observation.surface_fraction - surface_fraction).abs() < 1e-6);
+        assert!(observation.residual_mm < 1e-6);
+    }
+
+    #[test]
+    fn known_feature_solution_uses_measured_camera_poses() {
+        let working = model(0.01);
+        let installed = model(0.02);
+        let surface_fraction = 0.40;
+        let scale = 0.01 + surface_fraction * 0.01;
+        let fixed_pose = tile(0, 10.0).nominal_pose;
+        let moving_pose = tile(1, 10.5).nominal_pose;
+
+        let observation = measure_known_feature_surface_fraction(
+            fixed_pose,
+            [50.0, 50.0],
+            moving_pose,
+            [50.0 - 0.5 / scale, 50.0],
             &working,
             &installed,
         )

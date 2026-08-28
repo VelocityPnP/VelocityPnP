@@ -840,6 +840,31 @@ attempted fiducial stores an annotated PNG under
 `GET /board-registrations/RUN_UUID/artifacts/ARTIFACT_NAME`; amber marks the
 expected optical center and green marks the measured feature.
 
+Measure the registered PCB surface without contact:
+
+```bash
+cargo run --release -p velocitypnp -- measure-board-surface \
+  REGISTRATION_UUID --lease LEASE_UUID --nozzle N1 \
+  --confirm-safety-checks
+```
+
+The runner first repeats fine visual X/Y home. It then observes three known
+KiCad fiducials from three safe-Z camera positions. It derives the two offset
+views from 65% of the calibrated camera aperture, so it keeps margin at the
+model limits. Parallax between the working-plane and installed-plate camera
+models gives the bare PCB surface.
+The V3.0.4 profile records the 1.6 mm distance between these planes. The
+stored N1 or N2 datum-contact result converts the optical fraction into that
+nozzle's working Z coordinates. The nozzle does not touch the PCB.
+
+The operation needs at least six valid view pairs. It rejects a fraction p95
+spread above 0.10, a fit p95 above 0.15 mm, or total uncertainty above
+0.20 mm. A passing result updates the registered `BoardInstance.surface_z_mm`.
+A failed result keeps the old surface value. Runs, the JSON report, and each
+annotated fiducial image survive daemon restarts. The Python client provides
+`measure_board_surface()` and the related start, get, list, and artifact
+methods.
+
 ### Persistent workspace inventory
 
 Use a successful full scan and its accepted refinements as a stable inventory

@@ -7,11 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationSnapshot, CameraProfile,
-    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, PlacementExecutionRun,
-    StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun, StripFeederPocketOutcome,
-    StripFeederPocketStatus, StripFeederRegistration, StripPocketOccupancy,
-    WorkspaceInventoryBaseline, WorkspaceScanReport,
+    AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, BoardSurfaceMeasurementRun,
+    CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job, MachineEvent,
+    Operation, PlacementExecutionRun, StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun,
+    StripFeederPocketOutcome, StripFeederPocketStatus, StripFeederRegistration,
+    StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -113,6 +113,16 @@ impl Store {
             );
             INSERT OR IGNORE INTO schema_version(version, applied_at)
                 VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            CREATE TABLE IF NOT EXISTS board_surface_measurement_artifacts (
+                measurement_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(measurement_id, name)
+            );
+            INSERT OR IGNORE INTO schema_version(version, applied_at)
+                VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             "#,
         )?;
         Ok(())
@@ -140,6 +150,66 @@ impl Store {
 
     pub fn get_board_registration(&self, id: Uuid) -> Result<Option<BoardRegistrationRun>> {
         self.get("board_registration", id)
+    }
+
+    pub fn put_board_surface_measurement(
+        &self,
+        measurement: &BoardSurfaceMeasurementRun,
+    ) -> Result<()> {
+        self.put("board_surface_measurement", measurement.id, measurement)
+    }
+
+    pub fn list_board_surface_measurements(&self) -> Result<Vec<BoardSurfaceMeasurementRun>> {
+        self.list("board_surface_measurement")
+    }
+
+    pub fn get_board_surface_measurement(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<BoardSurfaceMeasurementRun>> {
+        self.get("board_surface_measurement", id)
+    }
+
+    pub fn put_board_surface_measurement_artifact(
+        &self,
+        measurement_id: Uuid,
+        name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(!name.is_empty(), "board surface artifact name is empty");
+        anyhow::ensure!(
+            !media_type.is_empty(),
+            "board surface artifact media type is empty"
+        );
+        self.connection.lock().execute(
+            r#"INSERT INTO board_surface_measurement_artifacts(
+                 measurement_id, name, media_type, data, created_at
+               ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ON CONFLICT(measurement_id, name) DO UPDATE SET
+                 media_type = excluded.media_type,
+                 data = excluded.data,
+                 created_at = excluded.created_at"#,
+            params![measurement_id.to_string(), name, media_type, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_board_surface_measurement_artifact(
+        &self,
+        measurement_id: Uuid,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT media_type, data FROM board_surface_measurement_artifacts \
+                 WHERE measurement_id = ?1 AND name = ?2",
+                params![measurement_id.to_string(), name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn put_board_registration_artifact(
@@ -902,8 +972,9 @@ mod tests {
     use std::collections::BTreeMap;
     use velocitypnp_domain::{
         AutomatedCalibrationConfig, BoardDesign, CalibrationRunPhase, CalibrationRunStatus,
-        WorkspaceArtifactRetention, WorkspacePixelBounds, WorkspaceRasterTransform,
-        WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanStatus, WorkspaceSurfaceModel,
+        OperationStatus, WorkspaceArtifactRetention, WorkspacePixelBounds,
+        WorkspaceRasterTransform, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanStatus,
+        WorkspaceSurfaceModel,
     };
 
     #[test]
@@ -922,6 +993,46 @@ mod tests {
         };
         store.put_board(&board).unwrap();
         assert_eq!(store.get_board(board.id).unwrap().unwrap().name, "fixture");
+    }
+
+    #[test]
+    fn board_surface_measurement_and_artifact_round_trip() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let measurement = BoardSurfaceMeasurementRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            registration_id: Uuid::new_v4(),
+            profile_id: "lumenpnp-v3.0.4".into(),
+            calibration_id: Uuid::new_v4(),
+            nozzle_id: "N1".into(),
+            status: OperationStatus::Pending,
+            created_at: now,
+            updated_at: now,
+            sample_count: 3,
+            report: None,
+            message: None,
+        };
+
+        store.put_board_surface_measurement(&measurement).unwrap();
+        assert_eq!(
+            store.get_board_surface_measurement(measurement.id).unwrap(),
+            Some(measurement.clone())
+        );
+        store
+            .put_board_surface_measurement_artifact(
+                measurement.id,
+                "report.json",
+                "application/json",
+                b"{}",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_board_surface_measurement_artifact(measurement.id, "report.json")
+                .unwrap(),
+            Some(("application/json".into(), b"{}".to_vec()))
+        );
     }
 
     #[test]

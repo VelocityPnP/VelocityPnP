@@ -72,8 +72,9 @@ pub use workspace_mosaic::{
     WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
 };
 pub use workspace_parallax::{
-    measure_workspace_parallax, WorkspaceParallaxObservation, WorkspaceParallaxReport,
-    WorkspaceParallaxStream, MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
+    measure_known_feature_surface_fraction, measure_workspace_parallax,
+    WorkspaceParallaxObservation, WorkspaceParallaxReport, WorkspaceParallaxStream,
+    MAX_WORKSPACE_SURFACE_FRACTION, MIN_WORKSPACE_SURFACE_FRACTION,
 };
 pub use workspace_refinement::{
     compose_workspace_refinements, WorkspaceRefinementComposite, WorkspaceRefinementPatch,

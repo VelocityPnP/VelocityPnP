@@ -235,6 +235,22 @@ enum Command {
     BoardRegistration {
         registration: Uuid,
     },
+    MeasureBoardSurface {
+        registration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value = "N1")]
+        nozzle: String,
+        #[arg(long, default_value_t = 3)]
+        samples: u32,
+        /// Confirm a fixed PCB, visible clear fiducials, level nozzles, a
+        /// clear envelope, and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    BoardSurfaceMeasurement {
+        measurement: Uuid,
+    },
     CalibrationWorkflow,
     CalibrationArtifacts,
     NewCalibration {
@@ -878,6 +894,46 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::MeasureBoardSurface {
+            registration,
+            lease,
+            nozzle,
+            samples,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "board surface measurement requires --confirm-safety-checks after inspecting the fixed PCB, visible clear fiducials, level nozzles, travel envelope, and power isolation"
+                );
+            }
+            let started = post(
+                &client,
+                &format!("{base}/board-registrations/{registration}/surface-measurements"),
+                Some(json!({
+                    "lease_id": lease,
+                    "nozzle_id": nozzle,
+                    "sample_count": samples,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            let measurement_id = started["measurement"]["id"]
+                .as_str()
+                .context("board surface response did not contain a measurement ID")?;
+            run_operation(&client, base, started["operation"].clone()).await?;
+            get(
+                &client,
+                &format!("{base}/board-surface-measurements/{measurement_id}"),
+            )
+            .await?
+        }
+        Command::BoardSurfaceMeasurement { measurement } => {
+            get(
+                &client,
+                &format!("{base}/board-surface-measurements/{measurement}"),
+            )
+            .await?
+        }
         Command::Boards => get(&client, &format!("{base}/boards")).await?,
         Command::CalibrationWorkflow => {
             get(&client, &format!("{base}/calibration/workflow")).await?
@@ -1281,6 +1337,25 @@ mod tests {
                 lease: parsed_lease,
                 ..
             } if parsed_scan == scan && parsed_board == board && parsed_lease == lease
+        ));
+
+        let registration = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "measure-board-surface",
+            &registration.to_string(),
+            "--lease",
+            &lease.to_string(),
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::MeasureBoardSurface {
+                registration: parsed_registration,
+                lease: parsed_lease,
+                ..
+            } if parsed_registration == registration && parsed_lease == lease
         ));
 
         let args =

@@ -2372,6 +2372,33 @@ aligned appearance similarity. Pockets 2, 3, and 4 are distinct passed
 returns. Feeder 8 is ready as active feeder
 `15080231-ec84-4b6b-a341-11a24ca6bcfb`.
 
+### Non-contact FTP board-surface measurement
+
+On 2026-08-28, coarse home
+`8a78b3a1-85af-4880-a390-5c72680607ff` and fine home
+`d33da4c7-10b1-4579-86d9-83728cfd1a53` passed after the surface-measurement
+daemon restart. Fine home detected N2 with its N24 tip and reset the datum
+contact from controller Z59.3 to Z59.1.
+
+The first surface attempt
+`f44eb7e6-4aeb-4b91-9c9d-2dcd514336b5` stopped before its third camera move.
+A fixed +3 mm Y view was outside the top-camera model support. No PCB contact
+occurred. Surface algorithm version 2 derives its two offset views from 65%
+of the current model aperture instead of using fixed offsets.
+
+Surface run `54576534-fdeb-4d3e-9264-f405bc5e7ede` then observed FTP fiducials
+FID1, FID2, and FID3 from three camera poses each. All nine views used
+controller Z31.5. No nozzle touched the PCB or its double-sided tape. Nine
+view pairs measured a median surface fraction of -0.0355. The p95 fraction
+spread was 0.0476. Fit residual was 0.015 mm RMS, 0.034 mm p95, and 0.034 mm
+maximum.
+
+Using the N1 datum-contact reference of nozzle Z3.4 and the installed 1.6 mm
+plane separation, the run measured N1 board-surface Z3.457 with 0.126 mm
+uncertainty. It passed and updated board registration
+`7a84d68f-1377-4808-936f-50fec50b7d92`. The persistent report SHA-256 is
+`cdc2caafed686a3b310ef4a0ed84da077c942c8bff897381c9c43b3932770dd6`.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

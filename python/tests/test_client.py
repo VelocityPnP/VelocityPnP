@@ -701,6 +701,41 @@ class ClientTests(unittest.TestCase):
             },
         ))
 
+    def test_board_surface_measurement_requires_confirmation_and_waits(self):
+        client = Client(timeout=1)
+        with patch.object(client, "_request") as send:
+            with self.assertRaisesRegex(ValueError, "explicit confirmation"):
+                client.start_board_surface_measurement(
+                    "registration", "lease"
+                )
+        send.assert_not_called()
+
+        started = {
+            "measurement": {"id": "measurement"},
+            "operation": {"id": "operation", "status": "succeeded"},
+        }
+        completed = {"id": "measurement", "status": "succeeded"}
+        with patch.object(
+            client, "_request", side_effect=[started, completed],
+        ) as send:
+            with patch.object(client, "wait"):
+                report = client.measure_board_surface(
+                    "registration",
+                    "lease",
+                    safety_checks_confirmed=True,
+                )
+        self.assertEqual(report, completed)
+        self.assertEqual(send.call_args_list[0].args, (
+            "POST",
+            "/board-registrations/registration/surface-measurements",
+            {
+                "lease_id": "lease",
+                "nozzle_id": "N1",
+                "sample_count": 3,
+                "confirmed_external_safety_checks": True,
+            },
+        ))
+
     def test_workspace_mosaic_selects_a_calibrated_height_layer(self):
         client = Client(timeout=1)
         layered_report = {
