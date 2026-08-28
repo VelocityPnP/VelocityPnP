@@ -3,12 +3,28 @@ use anyhow::{ensure, Result};
 use std::collections::VecDeque;
 use velocitypnp_domain::HeldPartInspectionReport;
 
-pub const HELD_PART_INSPECTION_ALGORITHM: &str = "held_part_difference.v1";
+pub const HELD_PART_INSPECTION_ALGORITHM: &str = "held_part_difference.v2";
+const MAX_BARE_ALIGNMENT_SHIFT_PX: f64 = 8.0;
+const BARE_ALIGNMENT_STEP_PX: f64 = 0.5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeldPartInspectionArtifacts {
     pub report: HeldPartInspectionReport,
     pub preview: RgbFrame,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OrientedPartGeometry {
+    width_mm: f64,
+    length_mm: f64,
+    rotation_deg: f64,
+    corners_px: [[f64; 2]; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundPolarity {
+    Brighter,
+    Darker,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -54,12 +70,21 @@ pub fn inspect_held_part_difference(
         "camera map is singular"
     );
 
-    let difference = bare
-        .pixels
-        .iter()
-        .zip(&held.pixels)
-        .map(|(bare, held)| bare.abs_diff(*held))
-        .collect::<Vec<_>>();
+    let alignment = estimate_bare_alignment(
+        bare,
+        held,
+        frame_center_px,
+        maximum_part_size_mm,
+        mean_scale,
+    );
+    let (difference, foreground_polarity) = aligned_foreground_difference(
+        bare,
+        held,
+        alignment,
+        frame_center_px,
+        maximum_center_offset_mm,
+        mean_scale,
+    );
     let mut sorted_difference = difference.clone();
     sorted_difference.sort_unstable();
     let background = sorted_difference[sorted_difference.len() / 2];
@@ -78,6 +103,12 @@ pub fn inspect_held_part_difference(
     }
     mask = dilate_mask(&mask, bare.width, bare.height);
     mask = dilate_mask(&mask, bare.width, bare.height);
+    mask = erode_mask(&mask, bare.width, bare.height);
+    mask = erode_mask(&mask, bare.width, bare.height);
+    mask = erode_mask(&mask, bare.width, bare.height);
+    mask = erode_mask(&mask, bare.width, bare.height);
+    mask = dilate_mask(&mask, bare.width, bare.height);
+    mask = dilate_mask(&mask, bare.width, bare.height);
 
     let minimum_area_px = ((minimum_part_size_mm / mean_scale).powi(2) * 0.2)
         .max(20.0)
@@ -90,6 +121,7 @@ pub fn inspect_held_part_difference(
         .filter(|component| {
             component.len() >= minimum_area_px && component.len() <= maximum_area_px
         })
+        .filter(|component| component_axis_fill_fraction(component, bare.width) >= 0.30)
         .filter_map(|component| {
             let center = component_center(&component, &difference, bare.width)?;
             let distance_px =
@@ -133,14 +165,15 @@ pub fn inspect_held_part_difference(
         return Ok(HeldPartInspectionArtifacts { report, preview });
     };
 
-    let bounds = component_bounds(&component, bare.width);
-    let width_mm = f64::from(bounds[2] - bounds[0] + 1) * x_scale;
-    let height_mm = f64::from(bounds[3] - bounds[1] + 1) * y_scale;
-    let (width_mm, length_mm) = if width_mm <= height_mm {
-        (width_mm, height_mm)
-    } else {
-        (height_mm, width_mm)
-    };
+    let geometry = component_oriented_geometry(
+        &component,
+        &difference,
+        bare.width,
+        pixel_error_to_machine_mm,
+        center,
+    );
+    let width_mm = geometry.width_mm;
+    let length_mm = geometry.length_mm;
     let error_x_px = center[0] - frame_center_px[0];
     let error_y_px = center[1] - frame_center_px[1];
     let correction_x_mm =
@@ -148,7 +181,7 @@ pub fn inspect_held_part_difference(
     let correction_y_mm =
         pixel_error_to_machine_mm[1][0] * error_x_px + pixel_error_to_machine_mm[1][1] * error_y_px;
     let correction_mm = correction_x_mm.hypot(correction_y_mm);
-    let rotation_deg = component_rotation_deg(&component, &difference, bare.width, center);
+    let rotation_deg = Some(geometry.rotation_deg);
     let mean_difference_luma = component
         .iter()
         .map(|index| f64::from(difference[*index]))
@@ -171,6 +204,19 @@ pub fn inspect_held_part_difference(
     if size_passed && centered {
         findings.push("bottom-camera difference confirms a bounded held part".into());
     }
+    if alignment[0].abs() >= 0.25 || alignment[1].abs() >= 0.25 {
+        findings.push(format!(
+            "bare-nozzle reference aligned by X{:+.2} Y{:+.2} pixels",
+            alignment[0], alignment[1],
+        ));
+    }
+    findings.push(format!(
+        "held-part foreground is {} than the bare nozzle reference",
+        match foreground_polarity {
+            ForegroundPolarity::Brighter => "brighter",
+            ForegroundPolarity::Darker => "darker",
+        }
+    ));
     let contrast_score = (mean_difference_luma / 64.0).clamp(0.0, 1.0);
     let center_score = (1.0 - correction_mm / maximum_center_offset_mm).clamp(0.0, 1.0);
     let confidence = (0.65 * contrast_score + 0.35 * center_score).clamp(0.0, 1.0);
@@ -188,7 +234,14 @@ pub fn inspect_held_part_difference(
     report.confidence = confidence;
     report.passed = size_passed && centered && confidence >= 0.35;
     report.findings = findings;
-    draw_rectangle(&mut preview, bounds, [0, 255, 100]);
+    draw_polygon(&mut preview, &geometry.corners_px, [0, 210, 255]);
+    draw_component_outline(
+        &mut preview,
+        &component,
+        bare.width,
+        bare.height,
+        [0, 255, 100],
+    );
     draw_cross(
         &mut preview,
         center[0].round() as i32,
@@ -199,6 +252,156 @@ pub fn inspect_held_part_difference(
     Ok(HeldPartInspectionArtifacts { report, preview })
 }
 
+fn estimate_bare_alignment(
+    bare: &GrayFrame,
+    held: &GrayFrame,
+    frame_center_px: [f64; 2],
+    maximum_part_size_mm: f64,
+    mean_scale_mm_per_px: f64,
+) -> [f64; 2] {
+    let minimum_dimension = f64::from(bare.width.min(bare.height));
+    let inner_radius_px =
+        (0.55 * maximum_part_size_mm / mean_scale_mm_per_px).clamp(48.0, 0.30 * minimum_dimension);
+    let outer_radius_px = 0.46 * minimum_dimension;
+    if inner_radius_px >= outer_radius_px {
+        return [0.0, 0.0];
+    }
+
+    let left = (frame_center_px[0] - outer_radius_px).floor().max(1.0) as u32;
+    let right = (frame_center_px[0] + outer_radius_px)
+        .ceil()
+        .min(f64::from(held.width.saturating_sub(2))) as u32;
+    let top = (frame_center_px[1] - outer_radius_px).floor().max(1.0) as u32;
+    let bottom = (frame_center_px[1] + outer_radius_px)
+        .ceil()
+        .min(f64::from(held.height.saturating_sub(2))) as u32;
+    let mut samples = Vec::new();
+    for y in (top..=bottom).step_by(3) {
+        for x in (left..=right).step_by(3) {
+            let dx = f64::from(x) + 0.5 - frame_center_px[0];
+            let dy = f64::from(y) + 0.5 - frame_center_px[1];
+            let radius = dx.hypot(dy);
+            if radius < inner_radius_px || radius > outer_radius_px {
+                continue;
+            }
+            let index = (y * held.width + x) as usize;
+            let horizontal = held.pixels[index - 1].abs_diff(held.pixels[index + 1]);
+            let vertical = held.pixels[index - held.width as usize]
+                .abs_diff(held.pixels[index + held.width as usize]);
+            if u16::from(horizontal) + u16::from(vertical) >= 12 {
+                samples.push((x, y));
+            }
+        }
+    }
+    if samples.len() < 64 {
+        return [0.0, 0.0];
+    }
+
+    let step_count = (MAX_BARE_ALIGNMENT_SHIFT_PX / BARE_ALIGNMENT_STEP_PX).round() as i32;
+    let mut best = (f64::INFINITY, [0.0, 0.0]);
+    for shift_y_step in -step_count..=step_count {
+        for shift_x_step in -step_count..=step_count {
+            let shift = [
+                f64::from(shift_x_step) * BARE_ALIGNMENT_STEP_PX,
+                f64::from(shift_y_step) * BARE_ALIGNMENT_STEP_PX,
+            ];
+            let mut error = 0.0;
+            let mut count = 0_u32;
+            for (x, y) in &samples {
+                let Some(reference) =
+                    bilinear_luma(bare, f64::from(*x) - shift[0], f64::from(*y) - shift[1])
+                else {
+                    continue;
+                };
+                let observed = f64::from(held.pixels[(*y * held.width + *x) as usize]);
+                let residual = (observed - reference).abs().min(64.0);
+                error += residual * residual;
+                count += 1;
+            }
+            if count == 0 {
+                continue;
+            }
+            let score = error / f64::from(count) + 0.001 * shift[0].hypot(shift[1]);
+            if score < best.0 {
+                best = (score, shift);
+            }
+        }
+    }
+    best.1
+}
+
+fn aligned_foreground_difference(
+    bare: &GrayFrame,
+    held: &GrayFrame,
+    alignment: [f64; 2],
+    frame_center_px: [f64; 2],
+    maximum_center_offset_mm: f64,
+    mean_scale_mm_per_px: f64,
+) -> (Vec<u8>, ForegroundPolarity) {
+    let polarity_radius_px = (maximum_center_offset_mm / mean_scale_mm_per_px)
+        .clamp(8.0, 0.12 * f64::from(held.width.min(held.height)));
+    let mut signed = vec![0.0; held.pixels.len()];
+    let mut brighter_energy = 0.0;
+    let mut darker_energy = 0.0;
+    for y in 0..held.height {
+        for x in 0..held.width {
+            let Some(reference) = bilinear_luma(
+                bare,
+                f64::from(x) - alignment[0],
+                f64::from(y) - alignment[1],
+            ) else {
+                continue;
+            };
+            let index = (y * held.width + x) as usize;
+            let residual = f64::from(held.pixels[index]) - reference;
+            signed[index] = residual;
+            let dx = f64::from(x) + 0.5 - frame_center_px[0];
+            let dy = f64::from(y) + 0.5 - frame_center_px[1];
+            if dx.hypot(dy) <= polarity_radius_px {
+                brighter_energy += residual.max(0.0);
+                darker_energy += (-residual).max(0.0);
+            }
+        }
+    }
+    let polarity = if brighter_energy >= darker_energy {
+        ForegroundPolarity::Brighter
+    } else {
+        ForegroundPolarity::Darker
+    };
+    let difference = signed
+        .into_iter()
+        .map(|residual| {
+            match polarity {
+                ForegroundPolarity::Brighter => residual.max(0.0),
+                ForegroundPolarity::Darker => (-residual).max(0.0),
+            }
+            .round()
+            .clamp(0.0, 255.0) as u8
+        })
+        .collect();
+    (difference, polarity)
+}
+
+fn bilinear_luma(frame: &GrayFrame, x: f64, y: f64) -> Option<f64> {
+    if x < 0.0
+        || y < 0.0
+        || x > f64::from(frame.width.saturating_sub(1))
+        || y > f64::from(frame.height.saturating_sub(1))
+    {
+        return None;
+    }
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(frame.width - 1);
+    let y1 = (y0 + 1).min(frame.height - 1);
+    let tx = x - f64::from(x0);
+    let ty = y - f64::from(y0);
+    let pixel = |px: u32, py: u32| f64::from(frame.pixels[(py * frame.width + px) as usize]);
+    let top = pixel(x0, y0) * (1.0 - tx) + pixel(x1, y0) * tx;
+    let bottom = pixel(x0, y1) * (1.0 - tx) + pixel(x1, y1) * tx;
+    Some(top * (1.0 - ty) + bottom * ty)
+}
+
 fn dilate_mask(mask: &[bool], width: u32, height: u32) -> Vec<bool> {
     let mut output = vec![false; mask.len()];
     for y in 0..height {
@@ -206,6 +409,27 @@ fn dilate_mask(mask: &[bool], width: u32, height: u32) -> Vec<bool> {
             let index = (y * width + x) as usize;
             output[index] = (-1..=1).any(|dy| {
                 (-1..=1).any(|dx| {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    nx >= 0
+                        && ny >= 0
+                        && nx < width as i32
+                        && ny < height as i32
+                        && mask[(ny as u32 * width + nx as u32) as usize]
+                })
+            });
+        }
+    }
+    output
+}
+
+fn erode_mask(mask: &[bool], width: u32, height: u32) -> Vec<bool> {
+    let mut output = vec![false; mask.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y * width + x) as usize;
+            output[index] = (-1..=1).all(|dy| {
+                (-1..=1).all(|dx| {
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
                     nx >= 0
@@ -281,15 +505,17 @@ fn component_center(component: &[usize], difference: &[u8], width: u32) -> Optio
     })
 }
 
-fn component_bounds(component: &[usize], width: u32) -> [u32; 4] {
-    component.iter().fold(
+fn component_axis_fill_fraction(component: &[usize], width: u32) -> f64 {
+    let bounds = component.iter().fold(
         [u32::MAX, u32::MAX, 0, 0],
         |[min_x, min_y, max_x, max_y], index| {
             let x = *index as u32 % width;
             let y = *index as u32 / width;
             [min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y)]
         },
-    )
+    );
+    let bounds_area = u64::from(bounds[2] - bounds[0] + 1) * u64::from(bounds[3] - bounds[1] + 1);
+    component.len() as f64 / bounds_area as f64
 }
 
 fn component_rotation_deg(
@@ -315,6 +541,79 @@ fn component_rotation_deg(
     (total > 0.0).then(|| 0.5 * (2.0 * xy).atan2(xx - yy).to_degrees())
 }
 
+fn component_oriented_geometry(
+    component: &[usize],
+    difference: &[u8],
+    frame_width: u32,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    center: [f64; 2],
+) -> OrientedPartGeometry {
+    let mut rotation_deg =
+        component_rotation_deg(component, difference, frame_width, center).unwrap_or(0.0);
+    let rotation_rad = rotation_deg.to_radians();
+    let major_axis = [rotation_rad.cos(), rotation_rad.sin()];
+    let minor_axis = [-major_axis[1], major_axis[0]];
+    let mut major_min = f64::INFINITY;
+    let mut major_max = f64::NEG_INFINITY;
+    let mut minor_min = f64::INFINITY;
+    let mut minor_max = f64::NEG_INFINITY;
+    for index in component {
+        let point = [
+            f64::from(*index as u32 % frame_width) + 0.5 - center[0],
+            f64::from(*index as u32 / frame_width) + 0.5 - center[1],
+        ];
+        let major = point[0] * major_axis[0] + point[1] * major_axis[1];
+        let minor = point[0] * minor_axis[0] + point[1] * minor_axis[1];
+        major_min = major_min.min(major);
+        major_max = major_max.max(major);
+        minor_min = minor_min.min(minor);
+        minor_max = minor_max.max(minor);
+    }
+    major_min -= 0.5;
+    major_max += 0.5;
+    minor_min -= 0.5;
+    minor_max += 0.5;
+    let point = |major: f64, minor: f64| {
+        [
+            center[0] + major * major_axis[0] + minor * minor_axis[0],
+            center[1] + major * major_axis[1] + minor * minor_axis[1],
+        ]
+    };
+    let corners_px = [
+        point(major_min, minor_min),
+        point(major_max, minor_min),
+        point(major_max, minor_max),
+        point(major_min, minor_max),
+    ];
+    let mapped_scale = |axis: [f64; 2]| {
+        let machine_x =
+            pixel_error_to_machine_mm[0][0] * axis[0] + pixel_error_to_machine_mm[0][1] * axis[1];
+        let machine_y =
+            pixel_error_to_machine_mm[1][0] * axis[0] + pixel_error_to_machine_mm[1][1] * axis[1];
+        machine_x.hypot(machine_y)
+    };
+    let major_mm = (major_max - major_min) * mapped_scale(major_axis);
+    let minor_mm = (minor_max - minor_min) * mapped_scale(minor_axis);
+    let (width_mm, length_mm) = if minor_mm <= major_mm {
+        (minor_mm, major_mm)
+    } else {
+        rotation_deg += 90.0;
+        (major_mm, minor_mm)
+    };
+    while rotation_deg >= 90.0 {
+        rotation_deg -= 180.0;
+    }
+    while rotation_deg < -90.0 {
+        rotation_deg += 180.0;
+    }
+    OrientedPartGeometry {
+        width_mm,
+        length_mm,
+        rotation_deg,
+        corners_px,
+    }
+}
+
 fn grayscale_preview(frame: &GrayFrame) -> RgbFrame {
     let mut pixels = Vec::with_capacity(frame.pixels.len() * 3);
     for luma in &frame.pixels {
@@ -334,14 +633,60 @@ fn draw_cross(frame: &mut RgbFrame, x: i32, y: i32, color: [u8; 3], radius: i32)
     }
 }
 
-fn draw_rectangle(frame: &mut RgbFrame, bounds: [u32; 4], color: [u8; 3]) {
-    for x in bounds[0]..=bounds[2] {
-        set_pixel(frame, x as i32, bounds[1] as i32, color);
-        set_pixel(frame, x as i32, bounds[3] as i32, color);
+fn draw_polygon(frame: &mut RgbFrame, points: &[[f64; 2]], color: [u8; 3]) {
+    for index in 0..points.len() {
+        draw_line(
+            frame,
+            points[index],
+            points[(index + 1) % points.len()],
+            color,
+        );
     }
-    for y in bounds[1]..=bounds[3] {
-        set_pixel(frame, bounds[0] as i32, y as i32, color);
-        set_pixel(frame, bounds[2] as i32, y as i32, color);
+}
+
+fn draw_line(frame: &mut RgbFrame, start: [f64; 2], end: [f64; 2], color: [u8; 3]) {
+    let distance = (end[0] - start[0]).hypot(end[1] - start[1]);
+    let steps = distance.ceil().max(1.0) as u32;
+    for step in 0..=steps {
+        let fraction = f64::from(step) / f64::from(steps);
+        let x = start[0] + fraction * (end[0] - start[0]);
+        let y = start[1] + fraction * (end[1] - start[1]);
+        set_pixel(frame, x.round() as i32, y.round() as i32, color);
+    }
+}
+
+fn draw_component_outline(
+    frame: &mut RgbFrame,
+    component: &[usize],
+    width: u32,
+    height: u32,
+    color: [u8; 3],
+) {
+    let mut component_mask = vec![false; (width * height) as usize];
+    for index in component {
+        component_mask[*index] = true;
+    }
+    for index in component {
+        let x = *index as u32 % width;
+        let y = *index as u32 / width;
+        let boundary = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+            .into_iter()
+            .any(|(dx, dy)| {
+                let neighbor_x = x as i32 + dx;
+                let neighbor_y = y as i32 + dy;
+                neighbor_x < 0
+                    || neighbor_y < 0
+                    || neighbor_x >= width as i32
+                    || neighbor_y >= height as i32
+                    || !component_mask[(neighbor_y as u32 * width + neighbor_x as u32) as usize]
+            });
+        if boundary {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    set_pixel(frame, x as i32 + dx, y as i32 + dy, color);
+                }
+            }
+        }
     }
 }
 
@@ -363,6 +708,42 @@ mod tests {
             height: 240,
             pixels: vec![value; 320 * 240],
         }
+    }
+
+    fn draw_ring(frame: &mut GrayFrame, center: [i32; 2], inner: f64, outer: f64, value: u8) {
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                let distance =
+                    (f64::from(x as i32 - center[0])).hypot(f64::from(y as i32 - center[1]));
+                if distance >= inner && distance <= outer {
+                    frame.pixels[(y * frame.width + x) as usize] = value;
+                }
+            }
+        }
+    }
+
+    fn translated(frame: &GrayFrame, shift: [i32; 2], fill: u8) -> GrayFrame {
+        let mut output = GrayFrame {
+            width: frame.width,
+            height: frame.height,
+            pixels: vec![fill; frame.pixels.len()],
+        };
+        for y in 0..frame.height as i32 {
+            for x in 0..frame.width as i32 {
+                let destination_x = x + shift[0];
+                let destination_y = y + shift[1];
+                if destination_x >= 0
+                    && destination_y >= 0
+                    && destination_x < frame.width as i32
+                    && destination_y < frame.height as i32
+                {
+                    output.pixels
+                        [(destination_y as u32 * frame.width + destination_x as u32) as usize] =
+                        frame.pixels[(y as u32 * frame.width + x as u32) as usize];
+                }
+            }
+        }
+        output
     }
 
     #[test]
@@ -399,6 +780,117 @@ mod tests {
         let result = inspect_held_part_difference(
             &bare,
             &bare,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(!result.report.detected);
+        assert!(!result.report.passed);
+    }
+
+    #[test]
+    fn aligns_a_shifted_nozzle_before_measuring_the_part() {
+        let mut bare = frame(40);
+        draw_ring(&mut bare, [160, 120], 82.0, 88.0, 180);
+        let mut held = translated(&bare, [2, -1], 40);
+        for y in 104..134 {
+            for x in 132..192 {
+                held.pixels[y * 320 + x] = 210;
+            }
+        }
+
+        let result = inspect_held_part_difference(
+            &bare,
+            &held,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!(result.report.width_mm.unwrap() < 0.8);
+        assert!(result.report.length_mm.unwrap() < 1.4);
+        assert!(result
+            .report
+            .findings
+            .iter()
+            .any(|finding| finding.contains("aligned by X+2.00 Y-1.00")));
+    }
+
+    #[test]
+    fn detects_a_darker_part_against_the_bare_nozzle() {
+        let mut bare = frame(160);
+        draw_ring(&mut bare, [160, 120], 82.0, 88.0, 210);
+        let mut held = translated(&bare, [-1, 2], 160);
+        for y in 107..137 {
+            for x in 129..189 {
+                held.pixels[y * 320 + x] = 25;
+            }
+        }
+
+        let result = inspect_held_part_difference(
+            &bare,
+            &held,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!(result.report.width_mm.unwrap() < 0.8);
+        assert!(result.report.length_mm.unwrap() < 1.4);
+        assert!(result
+            .report
+            .findings
+            .iter()
+            .any(|finding| finding.contains("foreground is darker")));
+    }
+
+    #[test]
+    fn rejects_a_shifted_nozzle_without_a_part() {
+        let mut bare = frame(40);
+        draw_ring(&mut bare, [160, 120], 82.0, 88.0, 180);
+        let held = translated(&bare, [2, -1], 40);
+
+        let result = inspect_held_part_difference(
+            &bare,
+            &held,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(!result.report.detected);
+        assert!(!result.report.passed);
+    }
+
+    #[test]
+    fn rejects_a_changed_nozzle_ring_without_a_part() {
+        let mut bare = frame(40);
+        draw_ring(&mut bare, [160, 120], 45.0, 55.0, 80);
+        let mut held = bare.clone();
+        draw_ring(&mut held, [160, 120], 45.0, 55.0, 180);
+
+        let result = inspect_held_part_difference(
+            &bare,
+            &held,
             [160.0, 120.0],
             [[0.02, 0.0], [0.0, 0.02]],
             1.0,

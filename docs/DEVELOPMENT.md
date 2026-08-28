@@ -677,6 +677,15 @@ return target is invalid. A daemon restart marks an incomplete run failed.
 The retained report includes pickup samples, held and release samples,
 bottom-camera measurements, disposition, findings, and three PNG artifacts.
 
+Held-part inspection aligns the bare-nozzle reference within an 8 pixel bound
+before subtraction. It selects the brighter or darker foreground polarity
+from the nozzle-axis region. Closing joins a package body, and opening removes
+narrow nozzle reflections. A minimum filled-area gate rejects circular nozzle
+rings. The report uses the oriented foreground bounds for width, length,
+rotation, and center offset. In the overlay, green follows the measured pixel
+contour, cyan shows the oriented measurement box, and orange marks the nozzle
+axis.
+
 A passed qualification stores pickup Z. It creates an active strip `Feeder`
 only when the draft also has a part key and orientation. Tape indexing remains
 a separate hardware gate.

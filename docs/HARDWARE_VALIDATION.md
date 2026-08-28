@@ -2209,6 +2209,16 @@ Normal disconnect `2c411232-e2c1-4bff-9400-9002ffca012a` left the controller
 disconnected, unhomed, and fault-free. Vacuum and lights were off. No emergency
 stop was used.
 
+On 2026-08-27, the retained bare and held frames were replayed after review
+showed that version 1 measured the inner nozzle as a 4.94 by 5.20 mm square.
+Version 2 first aligned the bare reference by X+0.50 and Y+1.50 pixels. Signed
+foreground selection and a bounded opening removed the nozzle ring. The same
+capture then measured the component as 3.36 by 1.57 mm at 2.33 degrees, with a
+0.471 mm nozzle-axis offset and 0.835 confidence. The green contour follows the
+component, and the cyan oriented box no longer contains the nozzle ring. The
+replay caused no machine motion. Its downloaded overlay SHA-256 is
+`3b4f1756796986a89f332f532c9f4f89d2a5705b608befb836e1563cd32e23e3`.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
