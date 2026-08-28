@@ -1165,6 +1165,7 @@ paths:
               properties:
                 lease_id: { type: string, format: uuid }
                 nozzle_id: { type: string }
+                pocket_index: { type: [integer, "null"], minimum: 0 }
                 fallback_drop_surface_machine_mm:
                   oneOf:
                     - { $ref: "#/components/schemas/Point2d" }
@@ -1263,6 +1264,53 @@ paths:
                   description: Current snapshot whose validated motion corrections are applied.
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /jobs/{id}/placement-executions:
+    post:
+      operationId: startGuardedSinglePlacement
+      description: >-
+        Executes exactly one plan step through the calibrated motion planner.
+        The current implementation accepts the simulator only. Physical use
+        remains disabled until feeder-sequence and board-surface gates pass.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - lease_id
+                - calibration_id
+                - confirmed_external_safety_checks
+              properties:
+                lease_id: { type: string, format: uuid }
+                calibration_id: { type: string, format: uuid }
+                step_index: { type: integer, minimum: 0, default: 0 }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202":
+          description: Guarded single placement accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [execution, operation]
+                properties:
+                  execution: { $ref: "#/components/schemas/PlacementExecutionRun" }
+                  operation: { $ref: "#/components/schemas/Operation" }
+  /placement-executions/{id}:
+    get:
+      operationId: getPlacementExecution
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Persistent guarded single-placement execution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlacementExecutionRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /inspections:
     get:
       operationId: listInspections
@@ -2477,6 +2525,8 @@ components:
         - active_feeder_id
         - latest_live_holdout_id
         - latest_pickup_qualification_id
+        - pickup_sequence_passed
+        - latest_pickup_sequence_qualification_ids
         - vision_confidence
         - vision_review_required
         - findings
@@ -2529,6 +2579,10 @@ components:
         active_feeder_id: { type: [string, "null"], format: uuid }
         latest_live_holdout_id: { type: [string, "null"], format: uuid }
         latest_pickup_qualification_id: { type: [string, "null"], format: uuid }
+        pickup_sequence_passed: { type: boolean }
+        latest_pickup_sequence_qualification_ids:
+          type: array
+          items: { type: string, format: uuid }
         vision_confidence: { type: number, minimum: 0, maximum: 1 }
         vision_review_required: { type: boolean }
         findings:
@@ -2731,6 +2785,28 @@ components:
           items: { $ref: "#/components/schemas/HeldPartAlignmentObservation" }
         artifact_names: { type: array, items: { type: string } }
         findings: { type: array, items: { type: string } }
+    NozzleReleaseVerificationReport:
+      type: object
+      required:
+        - algorithm_version
+        - attempt_count
+        - retry_performed
+        - nozzle_clear
+        - passed
+        - observations
+        - artifact_names
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        attempt_count: { type: integer, minimum: 1, maximum: 2 }
+        retry_performed: { type: boolean }
+        nozzle_clear: { type: boolean }
+        passed: { type: boolean }
+        observations:
+          type: array
+          items: { $ref: "#/components/schemas/HeldPartInspectionReport" }
+        artifact_names: { type: array, items: { type: string } }
+        findings: { type: array, items: { type: string } }
     StripFeederPocketReturnReport:
       type: object
       required:
@@ -2807,6 +2883,7 @@ components:
         - release_surface_machine_mm
         - release_raw_values
         - released
+        - nozzle_release_verification
         - return_verification
         - passed
         - artifact_names
@@ -2844,6 +2921,10 @@ components:
             - type: "null"
         release_raw_values: { type: array, items: { type: integer } }
         released: { type: boolean }
+        nozzle_release_verification:
+          oneOf:
+            - { $ref: "#/components/schemas/NozzleReleaseVerificationReport" }
+            - type: "null"
         return_verification:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPocketReturnReport" }
@@ -2885,6 +2966,81 @@ components:
         report:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }
+            - type: "null"
+        message: { type: [string, "null"] }
+    PlacementExecutionStageReport:
+      type: object
+      required: [stage, passed, message]
+      properties:
+        stage:
+          type: string
+          enum:
+            - preflight
+            - pick_approach
+            - pickup
+            - bottom_inspection
+            - place_approach
+            - placement
+            - release
+            - top_inspection
+            - complete
+        passed: { type: boolean }
+        message: { type: string }
+    PlacementExecutionReport:
+      type: object
+      required:
+        - algorithm_version
+        - simulated
+        - placement_reference
+        - part_key
+        - feeder_id
+        - nozzle_id
+        - feeder_pick
+        - board_place
+        - corrected_move_count
+        - passed
+        - stages
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        simulated: { type: boolean }
+        placement_reference: { type: string }
+        part_key: { type: string }
+        feeder_id: { type: string, format: uuid }
+        nozzle_id: { type: string }
+        feeder_pick: { $ref: "#/components/schemas/Pose" }
+        board_place: { $ref: "#/components/schemas/Pose" }
+        corrected_move_count: { type: integer, minimum: 0 }
+        passed: { type: boolean }
+        stages:
+          type: array
+          items: { $ref: "#/components/schemas/PlacementExecutionStageReport" }
+        findings: { type: array, items: { type: string } }
+    PlacementExecutionRun:
+      type: object
+      required:
+        - id
+        - operation_id
+        - job_id
+        - step_index
+        - calibration_id
+        - status
+        - created_at
+        - updated_at
+        - report
+        - message
+      properties:
+        id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        step_index: { type: integer, minimum: 0 }
+        calibration_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, running, succeeded, failed, cancelled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        report:
+          oneOf:
+            - { $ref: "#/components/schemas/PlacementExecutionReport" }
             - type: "null"
         message: { type: [string, "null"] }
     Point2d:

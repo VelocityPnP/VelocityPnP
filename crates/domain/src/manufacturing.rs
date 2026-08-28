@@ -371,6 +371,23 @@ pub struct HeldPartAlignmentReport {
     pub findings: Vec<String>,
 }
 
+/// Bottom-camera evidence that a released component is no longer attached to
+/// the nozzle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NozzleReleaseVerificationReport {
+    pub algorithm_version: String,
+    pub attempt_count: u32,
+    pub retry_performed: bool,
+    pub nozzle_clear: bool,
+    pub passed: bool,
+    #[serde(default)]
+    pub observations: Vec<HeldPartInspectionReport>,
+    #[serde(default)]
+    pub artifact_names: Vec<String>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// Top-camera evidence that a returned part is present in its source pocket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederPocketReturnReport {
@@ -427,6 +444,8 @@ pub struct StripFeederPickupQualificationReport {
     pub release_raw_values: Vec<i64>,
     pub released: bool,
     #[serde(default)]
+    pub nozzle_release_verification: Option<NozzleReleaseVerificationReport>,
+    #[serde(default)]
     pub return_verification: Option<StripFeederPocketReturnReport>,
     pub passed: bool,
     pub artifact_names: Vec<String>,
@@ -458,8 +477,9 @@ pub struct StripFeederPickupQualificationRun {
 
 /// Persistent feeder setup state derived from retained workspace evidence.
 ///
-/// `Ready` is reserved for a later live camera and pickup-Z workflow. Creating
-/// a draft cannot create or enable a production `Feeder`.
+/// `Ready` requires a current live holdout and three successful pickup-return
+/// cycles at distinct pockets with one nozzle. Creating a draft cannot create
+/// or enable a production `Feeder`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederRegistration {
     pub id: Uuid,
@@ -503,6 +523,10 @@ pub struct StripFeederRegistration {
     pub latest_live_holdout_id: Option<Uuid>,
     #[serde(default)]
     pub latest_pickup_qualification_id: Option<Uuid>,
+    #[serde(default)]
+    pub pickup_sequence_passed: bool,
+    #[serde(default)]
+    pub latest_pickup_sequence_qualification_ids: Vec<Uuid>,
     pub vision_confidence: f64,
     pub vision_review_required: bool,
     #[serde(default)]
@@ -598,6 +622,63 @@ pub struct Job {
     pub name: String,
     pub boards: Vec<BoardInstance>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementExecutionStage {
+    Preflight,
+    PickApproach,
+    Pickup,
+    BottomInspection,
+    PlaceApproach,
+    Placement,
+    Release,
+    TopInspection,
+    Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementExecutionStageReport {
+    pub stage: PlacementExecutionStage,
+    pub passed: bool,
+    pub message: String,
+}
+
+/// Evidence from one guarded placement-plan step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementExecutionReport {
+    pub algorithm_version: String,
+    pub simulated: bool,
+    pub placement_reference: String,
+    pub part_key: String,
+    pub feeder_id: Uuid,
+    pub nozzle_id: String,
+    pub feeder_pick: Pose,
+    pub board_place: Pose,
+    pub corrected_move_count: u32,
+    pub passed: bool,
+    #[serde(default)]
+    pub stages: Vec<PlacementExecutionStageReport>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Persistent state for one guarded placement-plan step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementExecutionRun {
+    pub id: Uuid,
+    pub operation_id: Uuid,
+    pub job_id: Uuid,
+    pub step_index: u32,
+    pub calibration_id: Uuid,
+    pub status: OperationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub report: Option<PlacementExecutionReport>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

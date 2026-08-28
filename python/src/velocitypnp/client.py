@@ -428,6 +428,7 @@ class Client:
         lease_id: str | uuid.UUID,
         *,
         nozzle_id: str = "N1",
+        pocket_index: int | None = None,
         fallback_drop_surface_machine_mm: tuple[float, float] | None = None,
         safety_checks_confirmed: bool = False,
     ) -> dict[str, Any]:
@@ -441,6 +442,8 @@ class Client:
             )
         if not nozzle_id.strip():
             raise ValueError("nozzle_id must not be empty")
+        if pocket_index is not None and pocket_index < 0:
+            raise ValueError("pocket_index must not be negative")
         fallback = None
         if fallback_drop_surface_machine_mm is not None:
             fallback = list(fallback_drop_surface_machine_mm)
@@ -453,10 +456,64 @@ class Client:
             {
                 "lease_id": str(lease_id),
                 "nozzle_id": nozzle_id,
+                "pocket_index": pocket_index,
                 "fallback_drop_surface_machine_mm": fallback,
                 "confirmed_external_safety_checks": True,
             },
         )
+
+    def qualify_strip_feeder_sequence(
+        self,
+        registration_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        cycle_count: int = 3,
+        nozzle_id: str = "N1",
+        fallback_drop_surface_machine_mm: tuple[float, float] | None = None,
+        safety_checks_confirmed: bool = False,
+        poll_interval: float = 0.1,
+    ) -> dict[str, Any]:
+        """Run three to five pickup-return checks on different pockets."""
+        if not 3 <= cycle_count <= 5:
+            raise ValueError("cycle_count must be between 3 and 5")
+        registration = self.strip_feeder_draft(registration_id)
+        pockets = [
+            pocket for pocket in registration.get("pockets", [])
+            if pocket.get("status") == "available"
+            and pocket.get("occupancy") == "occupied"
+        ]
+        if len(pockets) < cycle_count:
+            raise ValueError(
+                f"sequence needs {cycle_count} distinct available occupied pockets"
+            )
+        runs: list[dict[str, Any]] = []
+        for pocket in pockets[:cycle_count]:
+            started = self.start_strip_feeder_pickup_qualification(
+                registration_id,
+                lease_id,
+                nozzle_id=nozzle_id,
+                pocket_index=int(pocket["pocket_index"]),
+                fallback_drop_surface_machine_mm=fallback_drop_surface_machine_mm,
+                safety_checks_confirmed=safety_checks_confirmed,
+            )
+            try:
+                self.wait(started["operation"], poll_interval=poll_interval)
+            except OperationFailed:
+                pass
+            run = self.strip_feeder_pickup_qualification(
+                started["qualification"]["id"]
+            )
+            runs.append(run)
+            if (run.get("report") or {}).get("passed") is not True:
+                break
+        return {
+            "registration_id": str(registration_id),
+            "requested_cycle_count": cycle_count,
+            "completed_cycle_count": len(runs),
+            "passed": len(runs) == cycle_count
+            and all((run.get("report") or {}).get("passed") is True for run in runs),
+            "qualifications": runs,
+        }
 
     def strip_feeder_pickup_qualification(
         self, qualification_id: str | uuid.UUID,
@@ -1350,6 +1407,40 @@ class Client:
         return self.wait(
             self._request("POST", f"/jobs/{job_id}/simulate", request),
         )
+
+    def start_guarded_single_placement(
+        self,
+        job_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        calibration_id: str | uuid.UUID,
+        *,
+        step_index: int = 0,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Start one simulation-gated placement-plan step."""
+        if step_index < 0:
+            raise ValueError("step_index must not be negative")
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "single placement requires explicit confirmation that feeders "
+                "and the PCB are fixed, both nozzles are level, the envelope "
+                "is clear, and power isolation is reachable"
+            )
+        return self._request(
+            "POST",
+            f"/jobs/{job_id}/placement-executions",
+            {
+                "lease_id": str(lease_id),
+                "calibration_id": str(calibration_id),
+                "step_index": step_index,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+
+    def placement_execution(
+        self, execution_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request("GET", f"/placement-executions/{execution_id}")
 
     def inspections(self) -> list[dict[str, Any]]:
         return self._request("GET", "/inspections")["inspections"]

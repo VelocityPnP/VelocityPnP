@@ -8,9 +8,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationSnapshot, CameraProfile,
-    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, StripFeederLiveHoldoutRun,
-    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketStatus,
-    StripFeederRegistration, StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
+    CameraRole, Feeder, InspectionReport, Job, MachineEvent, Operation, PlacementExecutionRun,
+    StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun, StripFeederPocketOutcome,
+    StripFeederPocketStatus, StripFeederRegistration, StripPocketOccupancy,
+    WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -767,6 +768,18 @@ impl Store {
         self.get("job", id)
     }
 
+    pub fn put_placement_execution(&self, run: &PlacementExecutionRun) -> Result<()> {
+        self.put("placement_execution", run.id, run)
+    }
+
+    pub fn list_placement_executions(&self) -> Result<Vec<PlacementExecutionRun>> {
+        self.list("placement_execution")
+    }
+
+    pub fn get_placement_execution(&self, id: Uuid) -> Result<Option<PlacementExecutionRun>> {
+        self.get("placement_execution", id)
+    }
+
     pub fn put_inspection(&self, inspection: &InspectionReport) -> Result<()> {
         self.put("inspection", inspection.id, inspection)
     }
@@ -993,6 +1006,8 @@ mod tests {
             active_feeder_id: None,
             latest_live_holdout_id: None,
             latest_pickup_qualification_id: None,
+            pickup_sequence_passed: false,
+            latest_pickup_sequence_qualification_ids: Vec::new(),
             vision_confidence: 0.9,
             vision_review_required: false,
             findings: Vec::new(),
@@ -1132,6 +1147,27 @@ mod tests {
         let restored = store.get_calibration_run(run.id).unwrap().unwrap();
         assert_eq!(restored.phase, CalibrationRunPhase::VisualHomingValidation);
         assert_eq!(restored.operation_id, run.operation_id);
+    }
+
+    #[test]
+    fn placement_execution_round_trip_retains_pending_state() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let run = PlacementExecutionRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            step_index: 2,
+            calibration_id: Uuid::new_v4(),
+            status: velocitypnp_domain::OperationStatus::Pending,
+            created_at: now,
+            updated_at: now,
+            report: None,
+            message: None,
+        };
+        store.put_placement_execution(&run).unwrap();
+
+        assert_eq!(store.get_placement_execution(run.id).unwrap(), Some(run));
     }
 
     #[test]

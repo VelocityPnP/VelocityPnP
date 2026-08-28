@@ -683,6 +683,13 @@ restores the pickup nozzle angle, returns to the exact source head pose, and
 releases at the detected pickup Z. A supplied fallback point is used only
 when the source return target is invalid.
 
+After release, the runner moves the nozzle to the same bottom-camera pose used
+for its bare reference. Any detected component means that release is not
+complete, even when the vacuum sensor reads its off state. The runner returns
+to the same source pose and retries once. It then captures a second
+bottom-camera view. Two failed attempts leave the disposition as
+`not_released` and quarantine the pocket.
+
 The top camera records the pocket before pickup and after release. Version 3
 measures the package center in each view and compares a package-sized image
 patch before and after pickup. The cyan cross is the nominal pickup coordinate.
@@ -708,6 +715,23 @@ The API route is
 The Python client uses `reanalyze_strip_feeder_return()`. A rejected result
 marks the source pocket as uncertain and needing review. It also removes an
 active feeder that depends on the rejected qualification.
+
+Run a short qualification on three to five distinct occupied pockets:
+
+```bash
+cargo run --release -p velocitypnp -- qualify-strip-feeder-sequence \
+  DRAFT_UUID --lease LEASE_UUID --cycles 3 --nozzle N1 \
+  --confirm-safety-checks
+```
+
+The Python client uses `qualify_strip_feeder_sequence()`. Each cycle is a
+normal persistent pickup qualification with its own operation and artifacts.
+The client chooses distinct available occupied pockets and stops on the first
+failure. The API also accepts `pocket_index` on an individual pickup request,
+so another headless client can implement the same bounded policy. The daemon
+applies the current live-holdout correction to the fitted pocket lattice. A
+feeder becomes ready only after the latest three attempts pass at distinct
+pockets with one nozzle.
 
 Held-part inspection aligns the bare-nozzle reference within an 8 pixel bound
 before subtraction. It selects the brighter or darker foreground polarity
@@ -751,6 +775,30 @@ A passed qualification stores pickup Z and measured part width, length,
 rotation, and confidence. It creates an active strip `Feeder` only when the
 draft also has a part key and orientation. Passive strip advancement is a
 logical next-pocket operation; it does not move the tape.
+
+### Guarded single-placement execution
+
+Execute one job-plan step in the simulator:
+
+```bash
+cargo run --release -p velocitypnp -- execute-single-placement JOB_UUID \
+  --lease LEASE_UUID --calibration CALIBRATION_UUID --step 0 \
+  --confirm-safety-checks
+```
+
+The API route is `POST /jobs/JOB_UUID/placement-executions`. The Python client
+uses `start_guarded_single_placement()`. The executor requires a homed
+simulator, a current local direction-response calibration, a registered board
+transform and surface Z, and an active strip feeder whose latest qualification
+sequence includes three distinct passed cycles with the planned nozzle. Each
+cycle must include passed nozzle-clear and pocket-return evidence.
+
+The persistent run records preflight, pick approach, pickup, retained
+bottom-inspection gate, place approach, placement, release, top-inspection
+pose, and completion. Every move uses calibrated logical coordinates. The
+simulator does not consume a pocket and does not claim that it captured live
+vision. Physical requests are rejected before motion until the short feeder
+sequence, PCB fixation, board-surface, and live executor feedback gates pass.
 
 ### Automatic board registration
 

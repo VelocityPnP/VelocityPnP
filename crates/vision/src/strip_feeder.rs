@@ -3845,6 +3845,8 @@ mod tests {
             active_feeder_id: None,
             latest_live_holdout_id: None,
             latest_pickup_qualification_id: None,
+            pickup_sequence_passed: false,
+            latest_pickup_sequence_qualification_ids: Vec::new(),
             vision_confidence: 0.9,
             vision_review_required: false,
             findings: Vec::new(),

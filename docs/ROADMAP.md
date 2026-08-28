@@ -89,12 +89,17 @@ The project is organized by measurable gates rather than calendar estimates.
   present/absent feed-position counts across compatible focused scans
 - [x] Add persistent vision-assisted strip setup through live pocket,
   bounded pickup Z, vacuum hold, bottom inspection, and release
+- [x] Verify release with bottom-camera nozzle-clear evidence, one bounded
+  retry, and fail-closed top-camera pocket confirmation
 - [x] Add persistent per-pocket reservation, evidence-gated consumption,
   empty-pocket skipping, retry limits, and restart recovery
+- [x] Add three-to-five-cycle qualification across distinct occupied pockets
+- [x] Add a persistent, simulator-only guarded single-placement executor that
+  uses the calibrated motion planner and records each execution stage
 - [ ] Validate deterministic next-pocket advancement during physical job use
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
-- [ ] Add vacuum and bottom-vision feedback to the physical job executor
+- [ ] Add live vacuum and bottom-vision feedback to the physical job executor
 - [ ] Route the future physical job executor through the validated motion
   planner without enabling compensation for calibration or manual jog
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds

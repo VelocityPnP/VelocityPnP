@@ -482,6 +482,7 @@ class ClientTests(unittest.TestCase):
             {
                 "lease_id": "lease",
                 "nozzle_id": "N1",
+                "pocket_index": None,
                 "fallback_drop_surface_machine_mm": [220.0, 68.0],
                 "confirmed_external_safety_checks": True,
             },
@@ -491,6 +492,57 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.start_strip_feeder_pickup_qualification(
                 "draft", "lease", fallback_drop_surface_machine_mm=(1.0, float("nan")),
+                safety_checks_confirmed=True,
+            )
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_pickup_qualification(
+                "draft", "lease", pocket_index=-1,
+                safety_checks_confirmed=True,
+            )
+
+        sequence_draft = {
+            "pockets": [
+                {"pocket_index": index, "status": "available", "occupancy": "occupied"}
+                for index in range(3)
+            ]
+        }
+        sequence_runs = [
+            {"id": f"pickup-{index}", "report": {"passed": True}}
+            for index in range(3)
+        ]
+        with (
+            patch.object(client, "strip_feeder_draft", return_value=sequence_draft),
+            patch.object(
+                client,
+                "start_strip_feeder_pickup_qualification",
+                side_effect=[
+                    {
+                        "qualification": {"id": f"pickup-{index}"},
+                        "operation": {"id": f"operation-{index}", "status": "succeeded"},
+                    }
+                    for index in range(3)
+                ],
+            ) as start,
+            patch.object(client, "wait"),
+            patch.object(
+                client,
+                "strip_feeder_pickup_qualification",
+                side_effect=sequence_runs,
+            ),
+        ):
+            sequence = client.qualify_strip_feeder_sequence(
+                "draft", "lease", cycle_count=3,
+                safety_checks_confirmed=True,
+            )
+        self.assertTrue(sequence["passed"])
+        self.assertEqual(sequence["completed_cycle_count"], 3)
+        self.assertEqual(
+            [call.kwargs["pocket_index"] for call in start.call_args_list],
+            [0, 1, 2],
+        )
+        with self.assertRaises(ValueError):
+            client.qualify_strip_feeder_sequence(
+                "draft", "lease", cycle_count=2,
                 safety_checks_confirmed=True,
             )
 
@@ -1057,6 +1109,45 @@ class ClientTests(unittest.TestCase):
         send.assert_called_once_with("POST", "/jobs/job/simulate", {
             "lease_id": "lease",
         })
+
+    def test_guarded_single_placement_requires_explicit_scope(self):
+        client = Client(timeout=1)
+        started = {
+            "execution": {"id": "execution"},
+            "operation": {"id": "operation", "status": "pending"},
+        }
+        with patch.object(client, "_request", return_value=started) as send:
+            self.assertEqual(
+                client.start_guarded_single_placement(
+                    "job", "lease", "calibration", step_index=2,
+                    safety_checks_confirmed=True,
+                ),
+                started,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/jobs/job/placement-executions",
+            {
+                "lease_id": "lease",
+                "calibration_id": "calibration",
+                "step_index": 2,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        with self.assertRaises(ValueError):
+            client.start_guarded_single_placement(
+                "job", "lease", "calibration",
+            )
+        with self.assertRaises(ValueError):
+            client.start_guarded_single_placement(
+                "job", "lease", "calibration", step_index=-1,
+                safety_checks_confirmed=True,
+            )
+
+        execution = {"id": "execution", "status": "succeeded"}
+        with patch.object(client, "_request", return_value=execution) as send:
+            self.assertEqual(client.placement_execution("execution"), execution)
+        send.assert_called_once_with("GET", "/placement-executions/execution")
 
 
 if __name__ == "__main__":

@@ -151,6 +151,27 @@ enum Command {
         lease: Uuid,
         #[arg(long, default_value = "N1")]
         nozzle: String,
+        #[arg(long)]
+        pocket: Option<u32>,
+        /// Fallback surface X. Supply this with --drop-y.
+        #[arg(long, requires = "drop_y")]
+        drop_x: Option<f64>,
+        /// Fallback surface Y. Supply this with --drop-x.
+        #[arg(long, requires = "drop_x")]
+        drop_y: Option<f64>,
+        /// Confirm uncovered fixed tape, level nozzles, a clear envelope and
+        /// fallback target, and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    QualifyStripFeederSequence {
+        registration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value = "N1")]
+        nozzle: String,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(3..=5))]
+        cycles: u32,
         /// Fallback surface X. Supply this with --drop-y.
         #[arg(long, requires = "drop_y")]
         drop_x: Option<f64>,
@@ -168,6 +189,22 @@ enum Command {
     /// Recheck retained before/after return images without machine motion.
     ReanalyzeStripFeederReturn {
         qualification: Uuid,
+    },
+    ExecuteSinglePlacement {
+        job: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long)]
+        calibration: Uuid,
+        #[arg(long, default_value_t = 0)]
+        step: u32,
+        /// Confirm fixed feeders and PCB, level nozzles, a clear envelope,
+        /// and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    PlacementExecution {
+        execution: Uuid,
     },
     SetWorkspaceBaseline {
         scan: Uuid,
@@ -636,6 +673,7 @@ async fn main() -> Result<()> {
             registration,
             lease,
             nozzle,
+            pocket,
             drop_x,
             drop_y,
             confirm_safety_checks,
@@ -646,11 +684,85 @@ async fn main() -> Result<()> {
                 Some(json!({
                     "lease_id": lease,
                     "nozzle_id": nozzle,
+                    "pocket_index": pocket,
                     "fallback_drop_surface_machine_mm": drop_x.zip(drop_y).map(|(x, y)| [x, y]),
                     "confirmed_external_safety_checks": confirm_safety_checks,
                 })),
             )
             .await?
+        }
+        Command::QualifyStripFeederSequence {
+            registration,
+            lease,
+            nozzle,
+            cycles,
+            drop_x,
+            drop_y,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "pickup sequence requires --confirm-safety-checks after inspecting the uncovered tape, level nozzles, travel envelope, fallback target, and power isolation"
+                );
+            }
+            let draft = get(
+                &client,
+                &format!("{base}/strip-feeder-registrations/{registration}"),
+            )
+            .await?;
+            let pockets = draft["pockets"]
+                .as_array()
+                .context("strip feeder draft has no pocket state")?
+                .iter()
+                .filter(|pocket| {
+                    pocket["status"] == "available" && pocket["occupancy"] == "occupied"
+                })
+                .filter_map(|pocket| pocket["pocket_index"].as_u64())
+                .take(cycles as usize)
+                .collect::<Vec<_>>();
+            if pockets.len() != cycles as usize {
+                bail!("pickup sequence does not have {cycles} distinct available pockets");
+            }
+            let mut qualifications = Vec::new();
+            for pocket in pockets {
+                let started = post(
+                    &client,
+                    &format!(
+                        "{base}/strip-feeder-registrations/{registration}/pickup-qualifications"
+                    ),
+                    Some(json!({
+                        "lease_id": lease,
+                        "nozzle_id": nozzle,
+                        "pocket_index": pocket,
+                        "fallback_drop_surface_machine_mm": drop_x.zip(drop_y).map(|(x, y)| [x, y]),
+                        "confirmed_external_safety_checks": true,
+                    })),
+                )
+                .await?;
+                let qualification_id = started["qualification"]["id"]
+                    .as_str()
+                    .context("pickup response did not contain a qualification ID")?;
+                let operation_result =
+                    run_operation(&client, base, started["operation"].clone()).await;
+                let qualification = get(
+                    &client,
+                    &format!("{base}/strip-feeder-pickup-qualifications/{qualification_id}"),
+                )
+                .await?;
+                let passed = qualification["report"]["passed"] == true;
+                qualifications.push(qualification);
+                if operation_result.is_err() || !passed {
+                    break;
+                }
+            }
+            json!({
+                "registration_id": registration,
+                "requested_cycle_count": cycles,
+                "completed_cycle_count": qualifications.len(),
+                "passed": qualifications.len() == cycles as usize
+                    && qualifications.iter().all(|run| run["report"]["passed"] == true),
+                "qualifications": qualifications,
+            })
         }
         Command::StripFeederPickupQualification { qualification } => {
             get(
@@ -668,6 +780,42 @@ async fn main() -> Result<()> {
                 None,
             )
             .await?
+        }
+        Command::ExecuteSinglePlacement {
+            job,
+            lease,
+            calibration,
+            step,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "single placement requires --confirm-safety-checks after inspecting the fixed feeders and PCB, level nozzles, travel envelope, and power isolation"
+                );
+            }
+            let started = post(
+                &client,
+                &format!("{base}/jobs/{job}/placement-executions"),
+                Some(json!({
+                    "lease_id": lease,
+                    "calibration_id": calibration,
+                    "step_index": step,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?;
+            let execution_id = started["execution"]["id"]
+                .as_str()
+                .context("placement response did not contain an execution ID")?;
+            run_operation(&client, base, started["operation"].clone()).await?;
+            get(
+                &client,
+                &format!("{base}/placement-executions/{execution_id}"),
+            )
+            .await?
+        }
+        Command::PlacementExecution { execution } => {
+            get(&client, &format!("{base}/placement-executions/{execution}")).await?
         }
         Command::SetWorkspaceBaseline { scan } => {
             post(

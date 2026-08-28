@@ -2,7 +2,7 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, SensorReading, StripFeederLiveHoldoutRun,
+  Operation, PlacementExecutionRun, SensorReading, StripFeederLiveHoldoutRun,
   StripFeederPickupQualificationRun, StripFeederRegistration,
   StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
   WorkspaceBoardDiscoveryReport,
@@ -245,6 +245,7 @@ export const api = {
   startStripFeederPickupQualification: (
     registrationId: string, leaseId: string,
     nozzleId = "N1", fallbackDropSurfaceMachineMm?: [number, number],
+    pocketIndex?: number,
   ) => jsonPost<{
     qualification: StripFeederPickupQualificationRun;
     operation: Operation;
@@ -253,6 +254,7 @@ export const api = {
     {
       lease_id: leaseId,
       nozzle_id: nozzleId,
+      pocket_index: pocketIndex ?? null,
       fallback_drop_surface_machine_mm: fallbackDropSurfaceMachineMm ?? null,
       confirmed_external_safety_checks: true,
     },
@@ -261,6 +263,19 @@ export const api = {
     request<StripFeederPickupQualificationRun>(
       `/strip-feeder-pickup-qualifications/${qualificationId}`,
     ),
+  startGuardedSinglePlacement: (
+    jobId: string, leaseId: string, calibrationId: string, stepIndex = 0,
+  ) => jsonPost<{ execution: PlacementExecutionRun; operation: Operation }>(
+    `/jobs/${jobId}/placement-executions`,
+    {
+      lease_id: leaseId,
+      calibration_id: calibrationId,
+      step_index: stepIndex,
+      confirmed_external_safety_checks: true,
+    },
+  ),
+  placementExecution: (executionId: string) =>
+    request<PlacementExecutionRun>(`/placement-executions/${executionId}`),
   reanalyzeStripFeederReturn: (qualificationId: string) =>
     jsonPost<StripFeederPickupQualificationRun>(
       `/strip-feeder-pickup-qualifications/${qualificationId}/reanalyze-return`,

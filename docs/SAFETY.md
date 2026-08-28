@@ -44,10 +44,23 @@ return reanalysis causes no machine motion. A rejected reanalysis marks the
 pocket uncertain and removes any active feeder that depended on that pickup
 qualification.
 
+Vacuum-off state alone does not prove that a component left the nozzle. The
+pickup runner compares a post-release bottom-camera frame with the bare-nozzle
+reference. It retries the same release once if the sensor is not off or a
+component remains visible. A clear nozzle with no part in the source pocket is
+a lost-part failure. The pocket becomes uncertain and needs review.
+
 Held-part alignment moves only after vacuum hold and initial bottom-camera
 evidence pass. The profile limits it to two X/Y and angle corrections. The
 runner restores the nozzle angle before it returns to the exact pickup pose.
 It fails closed if the requested angle exceeds the configured bound.
+
+The guarded single-placement endpoint is simulator-only. It rejects physical
+mode before motion. It also requires one explicit plan index, calibrated
+motion, a measured board surface, and three current pickup-return cycles at
+distinct pockets with the planned nozzle. Each cycle needs nozzle-clear and
+pocket-return evidence. Simulation records the intended inspection stages but
+does not claim live camera evidence or consume feeder inventory.
 
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the

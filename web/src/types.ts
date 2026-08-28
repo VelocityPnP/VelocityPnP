@@ -843,6 +843,8 @@ export interface StripFeederRegistration {
   active_feeder_id: string | null;
   latest_live_holdout_id: string | null;
   latest_pickup_qualification_id: string | null;
+  pickup_sequence_passed: boolean;
+  latest_pickup_sequence_qualification_ids: string[];
   vision_confidence: number;
   vision_review_required: boolean;
   findings: string[];
@@ -946,6 +948,16 @@ export interface StripFeederPickupQualificationReport {
   release_surface_machine_mm: [number, number] | null;
   release_raw_values: number[];
   released: boolean;
+  nozzle_release_verification: {
+    algorithm_version: string;
+    attempt_count: number;
+    retry_performed: boolean;
+    nozzle_clear: boolean;
+    passed: boolean;
+    observations: HeldPartInspectionReport[];
+    artifact_names: string[];
+    findings: string[];
+  } | null;
   return_verification: {
     algorithm_version: string;
     nominal_center_machine_mm: [number, number] | null;
@@ -983,6 +995,40 @@ export interface StripFeederPickupQualificationRun {
   pocket_index: number;
   fallback_drop_surface_machine_mm: [number, number] | null;
   report: StripFeederPickupQualificationReport | null;
+  message: string | null;
+}
+
+export interface PlacementExecutionReport {
+  algorithm_version: string;
+  simulated: boolean;
+  placement_reference: string;
+  part_key: string;
+  feeder_id: string;
+  nozzle_id: string;
+  feeder_pick: Pose;
+  board_place: Pose;
+  corrected_move_count: number;
+  passed: boolean;
+  stages: Array<{
+    stage: "preflight" | "pick_approach" | "pickup" | "bottom_inspection"
+      | "place_approach" | "placement" | "release" | "top_inspection"
+      | "complete";
+    passed: boolean;
+    message: string;
+  }>;
+  findings: string[];
+}
+
+export interface PlacementExecutionRun {
+  id: string;
+  operation_id: string;
+  job_id: string;
+  step_index: number;
+  calibration_id: string;
+  status: Operation["status"];
+  created_at: string;
+  updated_at: string;
+  report: PlacementExecutionReport | null;
   message: string | null;
 }
 
