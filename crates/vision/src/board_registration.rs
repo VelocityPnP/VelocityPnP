@@ -41,7 +41,7 @@ pub fn detect_board_fiducial_near(
     }
     let minimum_diameter_px = expected_diameter_px - diameter_tolerance_px;
     let maximum_diameter_px = expected_diameter_px + diameter_tolerance_px;
-    let local_search_radius_px = search_radius_px.min(expected_diameter_px);
+    let bright_search_radius_px = search_radius_px.min(expected_diameter_px);
     let bright = BOARD_FIDUCIAL_THRESHOLDS
         .into_iter()
         .flat_map(|threshold| {
@@ -49,7 +49,7 @@ pub fn detect_board_fiducial_near(
         })
         .filter(|target| {
             (target.x_px - expected_x_px).hypot(target.y_px - expected_y_px)
-                <= local_search_radius_px
+                <= bright_search_radius_px
         })
         .min_by(|left, right| {
             let score = |target: &FiducialDetection| {
@@ -66,7 +66,7 @@ pub fn detect_board_fiducial_near(
             frame,
             expected_x_px,
             expected_y_px,
-            local_search_radius_px,
+            search_radius_px,
             expected_diameter_px,
         )
     })
@@ -282,7 +282,7 @@ mod tests {
                 frame.pixels[(y * frame.width + x) as usize] = value;
             }
         }
-        let detection = detect_board_fiducial_near(&frame, 200.0, 160.0, 150.0, 60.0, 25.0)
+        let detection = detect_board_fiducial_near(&frame, 300.0, 160.0, 150.0, 60.0, 25.0)
             .expect("mask circle");
         assert!((detection.x_px - 190.0).abs() < 3.0);
         assert!((detection.y_px - 150.0).abs() < 3.0);

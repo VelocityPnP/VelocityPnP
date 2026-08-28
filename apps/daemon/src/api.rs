@@ -31,7 +31,7 @@ use velocitypnp_domain::{
     CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId, CameraProfile,
     CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
     HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
-    HeldPartAlignmentReport, InspectionReport, InspectionStatus,
+    HeldPartAlignmentReport, HeldPartInspectionReport, InspectionReport, InspectionStatus,
     InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
     InstalledPlateRegistrationReport, Job, JogTarget, LinearAxis, LocalXyAxisDirectionReport,
     LocalXyAxisEstimate, LocalXyCompensationHoldout, LocalXyDirectionResponseReport,
@@ -107,10 +107,13 @@ const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
-const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v3";
+const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v4";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v1";
-const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v1";
+const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v2";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
+const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.60;
+const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
+const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v1";
 const BARE_NOZZLE_ARTIFACT: &str = "bare-nozzle.png";
 const HELD_PART_ARTIFACT: &str = "held-part.png";
@@ -6715,7 +6718,8 @@ async fn execute_simulated_strip_feeder_pickup(
         POST_RELEASE_NOZZLE_INSPECTION_ARTIFACT,
         &post_release_inspection.preview,
     )?;
-    let nozzle_clear = !post_release_inspection.report.detected;
+    let nozzle_clear =
+        !post_release_matches_held_part(&inspection_report, &post_release_inspection.report);
     let passed = vacuum_held && alignment.passed && released && nozzle_clear;
     Ok(StripFeederPickupQualificationReport {
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
@@ -7148,6 +7152,7 @@ async fn execute_physical_strip_feeder_pickup(
             current_tip_offset,
             contact.controller_z_mm,
             &bare,
+            &inspection.report,
             bottom_pose,
             &camera_profile,
             &camera_path,
@@ -7280,6 +7285,7 @@ async fn release_and_verify_nozzle_clear(
     current_tip_offset: CurrentTipOffset,
     pickup_controller_z_mm: f64,
     bare: &GrayFrame,
+    held_part: &HeldPartInspectionReport,
     bottom_pose: Pose,
     camera_profile: &CameraProfile,
     camera_path: &str,
@@ -7360,7 +7366,12 @@ async fn release_and_verify_nozzle_clear(
         )?;
         artifact_names.push(raw_artifact);
         artifact_names.push(inspection_artifact);
-        let part_detected = inspection.report.detected;
+        let part_detected = post_release_matches_held_part(held_part, &inspection.report);
+        if inspection.report.detected && !part_detected {
+            findings.push(format!(
+                "post-release difference from attempt {attempt} did not match the held component size and contrast"
+            ));
+        }
         observations.push(inspection.report);
         nozzle_clear = nozzle_release_attempt_passed(sensor_released, part_detected);
         if nozzle_clear {
@@ -7402,6 +7413,38 @@ async fn release_and_verify_nozzle_clear(
 
 fn nozzle_release_attempt_passed(sensor_released: bool, part_detected: bool) -> bool {
     sensor_released && !part_detected
+}
+
+fn post_release_matches_held_part(
+    held: &HeldPartInspectionReport,
+    observed: &HeldPartInspectionReport,
+) -> bool {
+    if !observed.detected {
+        return false;
+    }
+    let size_matches = held
+        .width_mm
+        .zip(held.length_mm)
+        .zip(observed.width_mm.zip(observed.length_mm))
+        .is_some_and(
+            |((held_width, held_length), (observed_width, observed_length))| {
+                observed_width >= MINIMUM_RETAINED_PART_DIMENSION_RATIO * held_width
+                    && observed_length >= MINIMUM_RETAINED_PART_DIMENSION_RATIO * held_length
+            },
+        );
+    let pixel_ratio = if held.changed_pixel_count == 0 {
+        0.0
+    } else {
+        f64::from(observed.changed_pixel_count) / f64::from(held.changed_pixel_count)
+    };
+    let luma_ratio = if held.mean_difference_luma <= 0.0 {
+        0.0
+    } else {
+        observed.mean_difference_luma / held.mean_difference_luma
+    };
+    size_matches
+        && (pixel_ratio >= MINIMUM_RETAINED_PART_PIXEL_RATIO
+            || luma_ratio >= MINIMUM_RETAINED_PART_LUMA_RATIO)
 }
 
 async fn release_pickup_part(
@@ -23070,6 +23113,47 @@ mod tests {
         assert!(!nozzle_release_attempt_passed(false, false));
         assert!(!nozzle_release_attempt_passed(true, true));
         assert!(!nozzle_release_attempt_passed(false, true));
+    }
+
+    #[test]
+    fn release_shape_matching_rejects_a_small_nozzle_reflection() {
+        let held = HeldPartInspectionReport {
+            algorithm_version: "fixture".into(),
+            detected: true,
+            center_x_px: Some(640.0),
+            center_y_px: Some(360.0),
+            centering_correction_x_mm: Some(0.0),
+            centering_correction_y_mm: Some(0.0),
+            centering_correction_mm: Some(0.0),
+            width_mm: Some(1.088),
+            length_mm: Some(2.156),
+            rotation_deg: Some(0.0),
+            changed_pixel_count: 1_642,
+            mean_difference_luma: 103.3,
+            confidence: 0.99,
+            passed: true,
+            artifact_name: "held.png".into(),
+            findings: Vec::new(),
+        };
+        let reflection = HeldPartInspectionReport {
+            width_mm: Some(0.797),
+            length_mm: Some(1.367),
+            changed_pixel_count: 457,
+            mean_difference_luma: 18.7,
+            artifact_name: "released.png".into(),
+            ..held.clone()
+        };
+        let retained_part = HeldPartInspectionReport {
+            width_mm: Some(1.02),
+            length_mm: Some(2.01),
+            changed_pixel_count: 900,
+            mean_difference_luma: 72.0,
+            artifact_name: "retained.png".into(),
+            ..held.clone()
+        };
+
+        assert!(!post_release_matches_held_part(&held, &reflection));
+        assert!(post_release_matches_held_part(&held, &retained_part));
     }
 
     #[tokio::test]

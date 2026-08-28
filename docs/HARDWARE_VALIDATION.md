@@ -2303,6 +2303,50 @@ The physical daemon disconnected normally as operation
 `f0501c35-f7e2-40b8-83fc-361f03268573`. The reanalysis daemon used simulation
 mode and did not open the controller.
 
+### FTP-board relocation and resistor pickup release
+
+On 2026-08-28, height-aware scan
+`fe80f3b4-84ae-49a1-b6a0-7d5747eef55e` found 22 feeder-7 pockets and all
+29 feeder-8 pockets after the operator moved both tapes. Fast scan
+`badf767f-967f-4ef0-91d7-2401dc1292ac` relocated the FTP PCB after the
+operator removed and replaced it to add double-sided tape.
+
+Coarse home `639b78cc-13b9-478c-be11-f3a59ab7bf78` and fine home
+`616ddbe3-38e5-44b2-a47b-141e95bfc0b5` passed. Fine home detected the
+installed N24 tip on N2 and refined the datum contact from controller Z59.2
+to Z59.1. Board registration
+`7a84d68f-1377-4808-936f-50fec50b7d92` measured three FTP fiducials. It
+passed with a 0.047 mm RMS residual, a 0.065 mm maximum residual, and a
+0.076 degree board angle. A fallback mask-circle detector needed the full
+configured 2.5 mm search radius because the scan seed was more than one
+fiducial diameter from the local measurement.
+
+Feeder-8 draft `e719d20a-2bfc-40d8-9c04-1eae273bf7eb` describes the FTP
+0603 resistors. Holdout `cf8cab4a-b32e-4fdf-adde-a533c3cf6583` passed with
+four sprocket centers, 0.060 mm pitch residual, and 0.954 occupied-pocket
+confidence. It measured a +0.464 mm X and -0.038 mm Y correction.
+
+Pickup `d43f4e0d-4aea-422d-b6f0-dee625b4979f` returned its part, but the
+original nozzle-clear gate treated a small nozzle reflection as a retained
+component. Release verification version 2 now compares post-release size,
+changed-pixel support, and contrast with the held component. This keeps a
+real retained component as a failure while it rejects the smaller, faint
+reflection.
+
+Pickup `ea354d22-0c58-4d39-b550-4d43e7cb99fa` then found a real retained
+resistor after both bounded release attempts. The vacuum sensor was at its
+off value, but bottom vision still showed a 1.86 by 0.99 mm part. The operator
+removed the part, returned it to the tape, and cleaned the N045 tip with
+alcohol.
+
+Pickup `90773d84-c748-416d-bd1e-5247cdf849d2` passed after cleaning. Bottom
+vision measured the resistor as 2.262 by 1.263 mm. Closed-loop correction
+ended with a 0.043 mm center residual and a 0.024 degree axis residual. The
+part released on the first attempt. Top vision measured a 0.036 mm return
+shift and confirmed the same pocket occupied. The machine returned to level
+Z with vacuum off. The next two distinct pickup-and-return passes remain
+required before feeder 8 can become ready for guarded placement.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
