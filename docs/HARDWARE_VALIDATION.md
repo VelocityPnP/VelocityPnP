@@ -2399,6 +2399,53 @@ uncertainty. It passed and updated board registration
 `7a84d68f-1377-4808-936f-50fec50b7d92`. The persistent report SHA-256 is
 `cdc2caafed686a3b310ef4a0ed84da077c942c8bff897381c9c43b3932770dd6`.
 
+### First guarded FTP resistor placements
+
+On 2026-08-28, coarse home
+`06a7af51-4da4-413f-b871-b83ac58c3596` and fine home
+`f332563a-fce8-4c28-8978-9f909fc2087e` passed. The first `R2` execution,
+`6cb1a18f-cb19-47d0-9498-b63b62acbd34`, picked feeder pocket 2 and detected
+the resistor. It stopped before board motion because the required 48.334
+degree turn exceeded the former 30 degree alignment limit. Recovery returned
+the part to its source pocket.
+
+Execution `20f7e97d-b173-4192-b4c6-681407cd04be` selected pocket 3 for `R3`.
+Vacuum contact occurred at nozzle Z4.1. Bottom vision aligned the part to the
+planned 0.076 degree board angle with a 0.052 mm center residual. The machine
+reached component-center Z4.007 and turned vacuum off. The later bottom-camera
+move incorrectly requested the pre-alignment nozzle angle, so the normal-jog
+rotation interlock stopped the run. A separate top capture confirmed the
+resistor on the `R3` pads. Its SHA-256 is
+`56f77b7370490e0319f9c3c87e8d1cd42959a1bd9929cc0636b4b2f7d0e6dac0`.
+The feeder count was corrected from 27 to 26. Pocket 3 remains conservatively
+marked `needs_review`.
+
+Release inspection now uses translation-only motion and preserves the nozzle
+angle. The package-axis bound is 90 degrees, which covers all orientations of
+a 180-degree-symmetric package while remaining below the driver's validated
+165 degree rotation envelope.
+
+After the daemon restart, coarse home
+`94fa9af4-47a8-40d2-a33b-ad0c69950190` and fine home
+`5d165c22-0a89-478b-9c46-187b02a60995` passed. Execution
+`fd503af2-43c8-49b5-a955-a5e873a6df61` then completed the guarded `R2`
+placement from pocket 4. Vacuum contact occurred at nozzle Z3.9. Bottom vision
+aligned the resistor to 45.076 degrees with a 0.066 mm center residual. Three
+job moves used the validated local direction compensation.
+
+Vacuum release passed on the first attempt, and bottom vision confirmed a
+clear nozzle. Top vision detected the placed resistor. The executor marked
+pocket 4 consumed, set its occupancy to empty, and reduced feeder inventory
+from 26 to 25. It retained ten PNG artifacts. The top-inspection overlay
+SHA-256 is
+`ac6e450e1dd27655ea083cbcf1ccd246c546d1771bada56222d1b8721d1f0699`.
+
+The top difference detector passed, but its 0.525 mm center result and -68.6
+degree angle do not agree with the visually coherent 45 degree placement.
+Board inspection therefore needs a board-specific package-template pose fit
+before it can enforce placement accuracy. SQLite integrity validation returned
+`ok`. The machine ended ready and homed at safe Z with vacuum off.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

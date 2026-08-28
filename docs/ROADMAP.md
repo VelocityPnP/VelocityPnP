@@ -96,7 +96,7 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add three-to-five-cycle qualification across distinct occupied pockets
 - [x] Add a persistent guarded single-placement executor with simulator and
   gated live pickup, alignment, release, and inspection paths
-- [ ] Validate deterministic next-pocket advancement during physical job use
+- [x] Validate deterministic next-pocket advancement during physical job use
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
 - [x] Add live vacuum and bottom-vision feedback to the physical job executor
