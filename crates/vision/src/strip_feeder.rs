@@ -12,11 +12,14 @@ use velocitypnp_domain::{
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v2";
-pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v3";
+pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v4";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
 const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
 const MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY: f64 = 0.55;
+const POCKET_RETURN_INTERIOR_SCALE: f64 = 0.60;
+const MAXIMUM_POCKET_RETURN_APPEARANCE_SHIFT_MM: f64 = 0.16;
+const MAXIMUM_POCKET_RETURN_APPEARANCE_ROTATION_DEG: i32 = 15;
 const LIVE_HOLDOUT_ALONG_SPAN_MM: f64 = 20.0;
 const LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL: f64 = 0.04;
 const LIVE_HOLDOUT_TRACK_TOLERANCE_MM: f64 = 1.25;
@@ -180,16 +183,21 @@ pub fn inspect_strip_feeder_pocket_return(
     let return_center_shift_mm = before_machine
         .zip(after_machine)
         .map(|(before, after)| (after[0] - before[0]).hypot(after[1] - before[1]));
-    let appearance_similarity = before_center.zip(after_center).and_then(|(before, after)| {
+    let appearance_match = before_center.zip(after_center).and_then(|(before, after)| {
         let patch_half_span_mm = pocket_return_patch_half_span_mm(registration, cross, along);
+        let interior_half_span_mm = [
+            patch_half_span_mm[0] * POCKET_RETURN_INTERIOR_SCALE,
+            patch_half_span_mm[1] * POCKET_RETURN_INTERIOR_SCALE,
+        ];
         centered_pocket_patch_similarity(
             &before_crop,
             before.center_px,
             &after_crop,
             after.center_px,
-            patch_half_span_mm,
+            interior_half_span_mm,
         )
     });
+    let appearance_similarity = appearance_match.map(|measurement| measurement.similarity);
     let maximum_nominal_offset_mm = registration.tape_pitch_mm * 0.45;
     let maximum_return_shift_mm = registration.tape_pitch_mm * 0.25;
     let centers_passed = before_offset
@@ -226,6 +234,15 @@ pub fn inspect_strip_feeder_pocket_return(
         findings.push(format!(
             "the after-release pocket did not match the before-pickup package appearance at \
              {MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY:.2} or better",
+        ));
+    }
+    if let Some(measurement) = appearance_match.filter(|measurement| {
+        measurement.shift_cross_mm.hypot(measurement.shift_along_mm) > 0.02
+            || measurement.rotation_deg.abs() > 0.5
+    }) {
+        findings.push(format!(
+            "package appearance aligned by cross {:+.3} mm, along {:+.3} mm, and {:+.1} degrees",
+            measurement.shift_cross_mm, measurement.shift_along_mm, measurement.rotation_deg,
         ));
     }
     if passed {
@@ -276,6 +293,14 @@ struct PocketImageCenter {
     center_px: [f64; 2],
     center_mm: [f64; 2],
     confidence: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PocketPatchMatch {
+    similarity: f64,
+    shift_cross_mm: f64,
+    shift_along_mm: f64,
+    rotation_deg: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1107,7 +1132,7 @@ fn centered_pocket_patch_similarity(
     after: &GrayFrame,
     after_center_px: [f64; 2],
     half_span_mm: [f64; 2],
-) -> Option<f64> {
+) -> Option<PocketPatchMatch> {
     if before.width != after.width || before.height != after.height {
         return None;
     }
@@ -1116,30 +1141,61 @@ fn centered_pocket_patch_similarity(
     if half_cross_px < 5 || half_along_px < 5 {
         return None;
     }
-    let patch = |frame: &GrayFrame, center: [f64; 2]| {
-        if center[0] - f64::from(half_cross_px) < 1.0
-            || center[1] - f64::from(half_along_px) < 1.0
-            || center[0] + f64::from(half_cross_px) >= f64::from(frame.width - 1)
-            || center[1] + f64::from(half_along_px) >= f64::from(frame.height - 1)
-        {
-            return None;
-        }
+    let patch = |frame: &GrayFrame, center: [f64; 2], shift: [f64; 2], rotation_deg: f64| {
+        let angle = rotation_deg.to_radians();
+        let (sin, cos) = angle.sin_cos();
         let mut values =
             Vec::with_capacity(((2 * half_cross_px + 1) * (2 * half_along_px + 1)) as usize);
         for y in -half_along_px..=half_along_px {
             for x in -half_cross_px..=half_cross_px {
-                values.push(f64::from(bilinear_luma(
-                    frame,
-                    center[0] + f64::from(x),
-                    center[1] + f64::from(y),
-                )));
+                let x = f64::from(x);
+                let y = f64::from(y);
+                let sample_x = center[0] + shift[0] + cos * x - sin * y;
+                let sample_y = center[1] + shift[1] + sin * x + cos * y;
+                if sample_x < 1.0
+                    || sample_y < 1.0
+                    || sample_x >= f64::from(frame.width - 1)
+                    || sample_y >= f64::from(frame.height - 1)
+                {
+                    return None;
+                }
+                values.push(f64::from(bilinear_luma(frame, sample_x, sample_y)));
             }
         }
         Some(values)
     };
-    let before = patch(before, before_center_px)?;
-    let after = patch(after, after_center_px)?;
-    normalized_patch_correlation(&before, &after)
+    let before = patch(before, before_center_px, [0.0, 0.0], 0.0)?;
+    let maximum_shift_px = (MAXIMUM_POCKET_RETURN_APPEARANCE_SHIFT_MM
+        / LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL)
+        .round() as i32;
+    let mut best: Option<PocketPatchMatch> = None;
+    for shift_along_px in -maximum_shift_px..=maximum_shift_px {
+        for shift_cross_px in -maximum_shift_px..=maximum_shift_px {
+            for rotation_deg in -MAXIMUM_POCKET_RETURN_APPEARANCE_ROTATION_DEG
+                ..=MAXIMUM_POCKET_RETURN_APPEARANCE_ROTATION_DEG
+            {
+                let after = patch(
+                    after,
+                    after_center_px,
+                    [f64::from(shift_cross_px), f64::from(shift_along_px)],
+                    f64::from(rotation_deg),
+                )?;
+                let Some(similarity) = normalized_patch_correlation(&before, &after) else {
+                    continue;
+                };
+                let candidate = PocketPatchMatch {
+                    similarity,
+                    shift_cross_mm: f64::from(shift_cross_px) * LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL,
+                    shift_along_mm: f64::from(shift_along_px) * LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL,
+                    rotation_deg: f64::from(rotation_deg),
+                };
+                if best.is_none_or(|best| candidate.similarity > best.similarity) {
+                    best = Some(candidate);
+                }
+            }
+        }
+    }
+    best
 }
 
 fn pocket_return_patch_half_span_mm(
@@ -3746,8 +3802,56 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matching > 0.99);
-        assert!(missing < MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY);
+        assert!(matching.similarity > 0.99);
+        assert!(missing.similarity < MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY);
+    }
+
+    #[test]
+    fn return_similarity_aligns_a_small_package_pose_change() {
+        let width = 160_u32;
+        let height = 120_u32;
+        let center = [80.0, 60.0];
+        let before = GrayFrame {
+            width,
+            height,
+            pixels: (0..width * height)
+                .map(|index| {
+                    let x = f64::from(index % width) - center[0];
+                    let y = f64::from(index / width) - center[1];
+                    if x.abs() <= 24.0 && y.abs() <= 11.0 {
+                        if x < -8.0 && y < -3.0 {
+                            220
+                        } else {
+                            75
+                        }
+                    } else {
+                        145
+                    }
+                })
+                .collect(),
+        };
+        let angle = 8.0_f64.to_radians();
+        let (sin, cos) = angle.sin_cos();
+        let mut after = GrayFrame {
+            width,
+            height,
+            pixels: vec![145; (width * height) as usize],
+        };
+        for y in 0..height {
+            for x in 0..width {
+                let output_x = f64::from(x) - center[0] - 3.0;
+                let output_y = f64::from(y) - center[1] + 2.0;
+                let source_x = center[0] + cos * output_x + sin * output_y;
+                let source_y = center[1] - sin * output_x + cos * output_y;
+                after.pixels[(y * width + x) as usize] = bilinear_luma(&before, source_x, source_y);
+            }
+        }
+
+        let measurement =
+            centered_pocket_patch_similarity(&before, center, &after, center, [1.2, 0.7]).unwrap();
+
+        assert!(measurement.similarity > 0.90, "{measurement:?}");
+        assert!(measurement.rotation_deg.abs() >= 6.0, "{measurement:?}");
     }
 
     #[test]

@@ -2344,8 +2344,33 @@ vision measured the resistor as 2.262 by 1.263 mm. Closed-loop correction
 ended with a 0.043 mm center residual and a 0.024 degree axis residual. The
 part released on the first attempt. Top vision measured a 0.036 mm return
 shift and confirmed the same pocket occupied. The machine returned to level
-Z with vacuum off. The next two distinct pickup-and-return passes remain
-required before feeder 8 can become ready for guarded placement.
+Z with vacuum off.
+
+Pocket-3 pickup `4a33564d-0e9e-4ee2-ab95-5cb6f866a2c2` also released on
+the first attempt and left the nozzle clear. Top vision found the pocket
+occupied with 0.982 confidence and measured a 0.123 mm center shift. The
+fixed-pixel appearance check still rejected the return at 0.404 similarity.
+Direct inspection showed the resistor in the correct pocket with a small pose
+change.
+
+Return version 4 searches only a component-interior patch over at most
+0.16 mm of local translation and 15 degrees of rotation. No-motion replay
+scored the returned resistor at 0.591. The exact earlier empty-pocket failure
+from qualification `d31c0c2e-0f8e-43b1-98de-f0f796e12149` scored 0.405 and
+remained rejected by the unchanged 0.55 gate. Reanalysis then passed pocket 3
+without adding a physical pickup attempt.
+
+Release-daemon restart invalidated homing as designed. Coarse home
+`a997c457-6770-4cd7-9f52-24cd77baaff8` and fine home
+`4498d4f8-0cd1-442f-8368-c5c818e83a70` passed. Fine home detected N2 with
+its N24 tip and reset the datum contact from controller Z59.2 to Z59.1.
+
+Pocket-4 pickup `34cab48d-ebfb-4f93-b74d-10e35f1e23df` passed at nozzle
+Z4.0. Bottom vision ended at a 0.068 mm center residual. The part released on
+the first attempt. Top vision measured a 0.046 mm return shift and 0.843
+aligned appearance similarity. Pockets 2, 3, and 4 are distinct passed
+returns. Feeder 8 is ready as active feeder
+`15080231-ec84-4b6b-a341-11a24ca6bcfb`.
 
 ## Procedure sources
 
