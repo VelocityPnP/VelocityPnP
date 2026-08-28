@@ -502,6 +502,14 @@ class ClientTests(unittest.TestCase):
         send.assert_called_once_with(
             "GET", "/strip-feeder-pickup-qualifications/pickup",
         )
+        with patch.object(client, "_request", return_value=pickup) as send:
+            self.assertEqual(
+                client.reanalyze_strip_feeder_return("pickup"), pickup,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/strip-feeder-pickup-qualifications/pickup/reanalyze-return",
+        )
         with patch.object(
             client, "_request_bytes", return_value=b"pickup",
         ) as send:

@@ -261,6 +261,10 @@ export const api = {
     request<StripFeederPickupQualificationRun>(
       `/strip-feeder-pickup-qualifications/${qualificationId}`,
     ),
+  reanalyzeStripFeederReturn: (qualificationId: string) =>
+    jsonPost<StripFeederPickupQualificationRun>(
+      `/strip-feeder-pickup-qualifications/${qualificationId}/reanalyze-return`,
+    ),
   stripFeederDraft: (registrationId: string) =>
     request<StripFeederRegistration>(
       `/strip-feeder-registrations/${registrationId}`,

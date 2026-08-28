@@ -377,12 +377,16 @@ pub struct StripFeederPocketReturnReport {
     pub algorithm_version: String,
     #[serde(default)]
     pub nominal_center_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub before_camera_pose: Option<Pose>,
     pub before_occupancy: StripPocketOccupancy,
     pub before_confidence: f64,
     #[serde(default)]
     pub before_measured_center_machine_mm: Option<[f64; 2]>,
     #[serde(default)]
     pub before_center_offset_mm: Option<f64>,
+    #[serde(default)]
+    pub after_camera_pose: Option<Pose>,
     pub after_occupancy: StripPocketOccupancy,
     pub after_confidence: f64,
     #[serde(default)]
@@ -391,6 +395,8 @@ pub struct StripFeederPocketReturnReport {
     pub after_center_offset_mm: Option<f64>,
     #[serde(default)]
     pub return_center_shift_mm: Option<f64>,
+    #[serde(default)]
+    pub appearance_similarity: Option<f64>,
     pub passed: bool,
     pub artifact_name: String,
     #[serde(default)]

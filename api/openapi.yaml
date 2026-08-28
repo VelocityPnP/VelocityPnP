@@ -1195,6 +1195,23 @@ paths:
               schema:
                 { $ref: "#/components/schemas/StripFeederPickupQualificationRun" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /strip-feeder-pickup-qualifications/{id}/reanalyze-return:
+    post:
+      operationId: reanalyzeStripFeederPickupReturn
+      description: >-
+        Rechecks retained before-pickup and after-release images with the
+        current deterministic return gate. This causes no machine motion. A
+        rejected result marks the source pocket as needing review.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Updated persistent pickup qualification
+          content:
+            application/json:
+              schema:
+                { $ref: "#/components/schemas/StripFeederPickupQualificationRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /strip-feeder-pickup-qualifications/{id}/artifacts/{name}:
     get:
       operationId: getStripFeederPickupQualificationArtifact
@@ -2719,15 +2736,18 @@ components:
       required:
         - algorithm_version
         - nominal_center_machine_mm
+        - before_camera_pose
         - before_occupancy
         - before_confidence
         - before_measured_center_machine_mm
         - before_center_offset_mm
+        - after_camera_pose
         - after_occupancy
         - after_confidence
         - after_measured_center_machine_mm
         - after_center_offset_mm
         - return_center_shift_mm
+        - appearance_similarity
         - passed
         - artifact_name
         - findings
@@ -2737,6 +2757,10 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/Point2d" }
             - type: "null"
+        before_camera_pose:
+          oneOf:
+            - { $ref: "#/components/schemas/Pose" }
+            - type: "null"
         before_occupancy: { type: string, enum: [occupied, empty, uncertain] }
         before_confidence: { type: number, minimum: 0, maximum: 1 }
         before_measured_center_machine_mm:
@@ -2744,6 +2768,10 @@ components:
             - { $ref: "#/components/schemas/Point2d" }
             - type: "null"
         before_center_offset_mm: { type: [number, "null"], minimum: 0 }
+        after_camera_pose:
+          oneOf:
+            - { $ref: "#/components/schemas/Pose" }
+            - type: "null"
         after_occupancy: { type: string, enum: [occupied, empty, uncertain] }
         after_confidence: { type: number, minimum: 0, maximum: 1 }
         after_measured_center_machine_mm:
@@ -2752,6 +2780,8 @@ components:
             - type: "null"
         after_center_offset_mm: { type: [number, "null"], minimum: 0 }
         return_center_shift_mm: { type: [number, "null"], minimum: 0 }
+        appearance_similarity:
+          { type: [number, "null"], minimum: -1, maximum: 1 }
         passed: { type: boolean }
         artifact_name: { type: string }
         findings: { type: array, items: { type: string } }

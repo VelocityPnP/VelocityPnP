@@ -688,6 +688,10 @@ pub fn router(state: AppState) -> Router {
             get(get_strip_feeder_pickup_qualification),
         )
         .route(
+            "/api/v1/strip-feeder-pickup-qualifications/{id}/reanalyze-return",
+            post(reanalyze_strip_feeder_pickup_return),
+        )
+        .route(
             "/api/v1/strip-feeder-pickup-qualifications/{id}/artifacts/{name}",
             get(get_strip_feeder_pickup_artifact),
         )
@@ -6615,15 +6619,18 @@ async fn execute_simulated_strip_feeder_pickup(
         return_verification: Some(velocitypnp_domain::StripFeederPocketReturnReport {
             algorithm_version: "strip_feeder_pocket_return.simulated".into(),
             nominal_center_machine_mm: prepared.registration.selected_pocket_machine_mm,
+            before_camera_pose: None,
             before_occupancy: StripPocketOccupancy::Occupied,
             before_confidence: 1.0,
             before_measured_center_machine_mm: prepared.registration.selected_pocket_machine_mm,
             before_center_offset_mm: Some(0.0),
+            after_camera_pose: None,
             after_occupancy: StripPocketOccupancy::Occupied,
             after_confidence: 1.0,
             after_measured_center_machine_mm: prepared.registration.selected_pocket_machine_mm,
             after_center_offset_mm: Some(0.0),
             return_center_shift_mm: Some(0.0),
+            appearance_similarity: Some(1.0),
             passed: true,
             artifact_name: POCKET_RETURN_INSPECTION_ARTIFACT.into(),
             findings: vec!["simulator retained the source-pocket return state".into()],
@@ -7655,6 +7662,14 @@ fn update_registration_after_pickup(
             }
         }
     } else {
+        if let Some(feeder_id) = registration.active_feeder_id.take() {
+            state
+                .store
+                .delete_feeder(feeder_id)
+                .map_err(|error| error.to_string())?;
+        }
+        registration.pickup_z_mm = None;
+        registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
         registration
             .findings
             .push("latest pickup qualification did not pass".into());
@@ -7811,6 +7826,170 @@ async fn get_strip_feeder_pickup_qualification(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("strip feeder pickup qualification not found"))
+}
+
+async fn reanalyze_strip_feeder_pickup_return(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<StripFeederPickupQualificationRun>> {
+    let mut run = state
+        .store
+        .get_strip_feeder_pickup_qualification(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder pickup qualification not found"))?;
+    if matches!(
+        run.status,
+        OperationStatus::Pending | OperationStatus::Running
+    ) {
+        return Err(ApiError::bad_request(
+            "pickup return evidence is not complete",
+        ));
+    }
+    let mut report = run
+        .report
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("pickup qualification has no retained report"))?;
+    if report.disposition != StripFeederPickupDisposition::ReturnedToPocket || !report.released {
+        return Err(ApiError::bad_request(
+            "pickup qualification has no completed source-pocket return",
+        ));
+    }
+    let prior_verification = report
+        .return_verification
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("pickup qualification has no return evidence"))?;
+    let registration = state
+        .store
+        .get_strip_feeder_registration(run.registration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
+    if registration.latest_pickup_qualification_id != Some(run.id) {
+        return Err(ApiError::bad_request(
+            "only the latest pickup qualification can change pocket state",
+        ));
+    }
+    let load_frame = |name: &str| -> ApiResult<GrayFrame> {
+        let (media_type, data) = state
+            .store
+            .get_strip_feeder_pickup_artifact(id, name)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found(format!("pickup artifact {name} not found")))?;
+        if media_type != "image/png" {
+            return Err(ApiError::bad_request(format!(
+                "pickup artifact {name} is not a PNG"
+            )));
+        }
+        decode_gray_png(&data).map_err(ApiError::internal)
+    };
+    let before = load_frame(SOURCE_POCKET_BEFORE_ARTIFACT)?;
+    let after = load_frame(SOURCE_POCKET_AFTER_ARTIFACT)?;
+    let (_, camera_model) = load_workspace_camera_model(&state, run.calibration_id)?;
+    let nominal = prior_verification
+        .nominal_center_machine_mm
+        .unwrap_or(report.pocket_machine_mm);
+    let fallback_pose = Pose {
+        x_mm: nominal[0],
+        y_mm: nominal[1],
+        z_mm: state.profile.safe_z_mm,
+        rotation_deg: 0.0,
+    };
+    let before_pose = prior_verification
+        .before_camera_pose
+        .unwrap_or(fallback_pose);
+    let after_pose = prior_verification
+        .after_camera_pose
+        .unwrap_or(fallback_pose);
+    let artifact_name = prior_verification.artifact_name.clone();
+    let verification = tokio::task::spawn_blocking(move || {
+        inspect_strip_feeder_pocket_return(
+            &before,
+            before_pose,
+            &after,
+            after_pose,
+            &camera_model,
+            &registration,
+            nominal,
+            &artifact_name,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    persist_pickup_rgb_artifact(
+        &state,
+        id,
+        &verification.report.artifact_name,
+        &verification.preview,
+    )
+    .map_err(ApiError::internal)?;
+
+    report.findings.retain(|finding| {
+        !prior_verification.findings.contains(finding)
+            && !finding.contains("pickup, transfer, bottom inspection, release")
+            && !finding.contains("retained return reanalysis")
+    });
+    report.findings.extend(verification.report.findings.clone());
+    report.return_verification = Some(verification.report.clone());
+    report.passed = report.vacuum_acquired
+        && report.vacuum_held_after_transfer
+        && report
+            .inspection
+            .as_ref()
+            .is_some_and(|inspection| inspection.passed)
+        && report
+            .alignment
+            .as_ref()
+            .is_none_or(|alignment| alignment.passed)
+        && report.released
+        && verification.report.passed;
+    let message = if report.passed {
+        report
+            .findings
+            .push("retained return reanalysis passed".into());
+        "Retained source-pocket return reanalysis passed".to_string()
+    } else {
+        report
+            .findings
+            .push("retained return reanalysis rejected the release outcome".into());
+        "Retained source-pocket return reanalysis failed".to_string()
+    };
+    run.status = if report.passed {
+        OperationStatus::Succeeded
+    } else {
+        OperationStatus::Failed
+    };
+    run.report = Some(report.clone());
+    run.message = Some(message.clone());
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_strip_feeder_pickup_qualification(&run)
+        .map_err(ApiError::internal)?;
+    let outcome = if verification.report.passed {
+        StripFeederPocketOutcome::Returned
+    } else {
+        StripFeederPocketOutcome::ReleaseUncertain
+    };
+    let registration = state
+        .store
+        .reconcile_strip_feeder_pocket_qualification(run.registration_id, run.id, outcome)
+        .map_err(ApiError::internal)?;
+    update_registration_after_pickup(&state, registration, run.id, &report)
+        .map_err(ApiError::internal)?;
+    if let Some(mut operation) = state
+        .store
+        .get_operation(run.operation_id)
+        .map_err(ApiError::internal)?
+    {
+        operation.status = run.status;
+        operation.message = Some(message);
+        operation.updated_at = Utc::now();
+        state
+            .store
+            .put_operation(&operation)
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(run))
 }
 
 async fn get_strip_feeder_pickup_artifact(

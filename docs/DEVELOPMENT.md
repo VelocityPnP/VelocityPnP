@@ -683,15 +683,31 @@ restores the pickup nozzle angle, returns to the exact source head pose, and
 releases at the detected pickup Z. A supplied fallback point is used only
 when the source return target is invalid.
 
-The top camera records the pocket before pickup and after release. Version 2
-measures the package center in each view. The cyan cross is the nominal pickup
-coordinate. The green circle is the measured package center. A passed return
-requires occupied evidence in both views and less than one-quarter pitch of
-measured center shift. The retained report includes pickup samples, held and
-release samples, bottom-camera measurements, alignment observations, return
-evidence, disposition, and PNG artifacts. Use
-`strip_feeder_return_preview()` to get the before/after return overlay from
-Python.
+The top camera records the pocket before pickup and after release. Version 3
+measures the package center in each view and compares a package-sized image
+patch before and after pickup. The cyan cross is the nominal pickup coordinate.
+The green circle is the measured package center. A failed appearance match is
+red. A passed return requires occupied evidence in both views, less than one
+quarter pitch of measured center shift, and at least 0.55 normalized package
+appearance similarity. This rejects an exposed pocket floor that has strong
+edges but no returned package.
+
+The retained report includes pickup samples, held and release samples,
+bottom-camera measurements, alignment observations, return evidence,
+disposition, and PNG artifacts. Use `strip_feeder_return_preview()` to get the
+before/after overlay from Python. Recheck retained evidence after a vision
+update without machine motion:
+
+```bash
+cargo run --release -p velocitypnp -- reanalyze-strip-feeder-return \
+  QUALIFICATION_UUID
+```
+
+The API route is
+`POST /strip-feeder-pickup-qualifications/QUALIFICATION_UUID/reanalyze-return`.
+The Python client uses `reanalyze_strip_feeder_return()`. A rejected result
+marks the source pocket as uncertain and needing review. It also removes an
+active feeder that depends on the rejected qualification.
 
 Held-part inspection aligns the bare-nozzle reference within an 8 pixel bound
 before subtraction. It selects the brighter or darker foreground polarity

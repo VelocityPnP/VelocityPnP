@@ -38,8 +38,11 @@ fallback point is used only if that source pose is invalid. A failed cleanup
 disables vacuum and faults the operation; it does not use emergency stop.
 The source pocket is reserved before motion. It is not marked consumed without
 vacuum and bottom-camera evidence. A normal return also needs a top-camera
-occupied-pocket check. Restart recovery marks an unresolved reservation as
-needing review.
+occupied-pocket check and a direct before-and-after package appearance match.
+Restart recovery marks an unresolved reservation as needing review. Retained
+return reanalysis causes no machine motion. A rejected reanalysis marks the
+pocket uncertain and removes any active feeder that depended on that pickup
+qualification.
 
 Held-part alignment moves only after vacuum hold and initial bottom-camera
 evidence pass. The profile limits it to two X/Y and angle corrections. The

@@ -12,10 +12,11 @@ use velocitypnp_domain::{
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v2";
-pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v2";
+pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v3";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
 const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
+const MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY: f64 = 0.55;
 const LIVE_HOLDOUT_ALONG_SPAN_MM: f64 = 20.0;
 const LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL: f64 = 0.04;
 const LIVE_HOLDOUT_TRACK_TOLERANCE_MM: f64 = 1.25;
@@ -179,6 +180,16 @@ pub fn inspect_strip_feeder_pocket_return(
     let return_center_shift_mm = before_machine
         .zip(after_machine)
         .map(|(before, after)| (after[0] - before[0]).hypot(after[1] - before[1]));
+    let appearance_similarity = before_center.zip(after_center).and_then(|(before, after)| {
+        let patch_half_span_mm = pocket_return_patch_half_span_mm(registration, cross, along);
+        centered_pocket_patch_similarity(
+            &before_crop,
+            before.center_px,
+            &after_crop,
+            after.center_px,
+            patch_half_span_mm,
+        )
+    });
     let maximum_nominal_offset_mm = registration.tape_pitch_mm * 0.45;
     let maximum_return_shift_mm = registration.tape_pitch_mm * 0.25;
     let centers_passed = before_offset
@@ -191,7 +202,9 @@ pub fn inspect_strip_feeder_pocket_return(
         });
     let passed = before_occupancy == StripPocketOccupancy::Occupied
         && after_occupancy == StripPocketOccupancy::Occupied
-        && centers_passed;
+        && centers_passed
+        && appearance_similarity
+            .is_some_and(|similarity| similarity >= MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY);
     let mut findings = Vec::new();
     if before_occupancy != StripPocketOccupancy::Occupied {
         findings.push("the source pocket was not occupied before pickup".into());
@@ -207,6 +220,14 @@ pub fn inspect_strip_feeder_pocket_return(
             "the returned center shifted more than {maximum_return_shift_mm:.3} mm"
         ));
     }
+    if appearance_similarity
+        .is_none_or(|similarity| similarity < MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY)
+    {
+        findings.push(format!(
+            "the after-release pocket did not match the before-pickup package appearance at \
+             {MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY:.2} or better",
+        ));
+    }
     if passed {
         findings.push("top vision confirmed the returned part in its source pocket".into());
     }
@@ -215,6 +236,8 @@ pub fn inspect_strip_feeder_pocket_return(
         &after_crop,
         before_occupancy,
         after_occupancy,
+        appearance_similarity
+            .is_some_and(|similarity| similarity >= MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY),
         before_center.map(|measurement| measurement.center_px),
         after_center.map(|measurement| measurement.center_px),
     );
@@ -222,15 +245,18 @@ pub fn inspect_strip_feeder_pocket_return(
         report: StripFeederPocketReturnReport {
             algorithm_version: STRIP_FEEDER_POCKET_RETURN_ALGORITHM.into(),
             nominal_center_machine_mm: Some(pocket_machine_mm),
+            before_camera_pose: Some(before_camera_pose),
             before_occupancy,
             before_confidence,
             before_measured_center_machine_mm: before_machine,
             before_center_offset_mm: before_offset,
+            after_camera_pose: Some(after_camera_pose),
             after_occupancy,
             after_confidence,
             after_measured_center_machine_mm: after_machine,
             after_center_offset_mm: after_offset,
             return_center_shift_mm,
+            appearance_similarity,
             passed,
             artifact_name: artifact_name.into(),
             findings,
@@ -1075,6 +1101,76 @@ fn measure_pocket_image_center(
     })
 }
 
+fn centered_pocket_patch_similarity(
+    before: &GrayFrame,
+    before_center_px: [f64; 2],
+    after: &GrayFrame,
+    after_center_px: [f64; 2],
+    half_span_mm: [f64; 2],
+) -> Option<f64> {
+    if before.width != after.width || before.height != after.height {
+        return None;
+    }
+    let half_cross_px = (half_span_mm[0] / LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL).round() as i32;
+    let half_along_px = (half_span_mm[1] / LIVE_HOLDOUT_OUTPUT_MM_PER_PIXEL).round() as i32;
+    if half_cross_px < 5 || half_along_px < 5 {
+        return None;
+    }
+    let patch = |frame: &GrayFrame, center: [f64; 2]| {
+        if center[0] - f64::from(half_cross_px) < 1.0
+            || center[1] - f64::from(half_along_px) < 1.0
+            || center[0] + f64::from(half_cross_px) >= f64::from(frame.width - 1)
+            || center[1] + f64::from(half_along_px) >= f64::from(frame.height - 1)
+        {
+            return None;
+        }
+        let mut values =
+            Vec::with_capacity(((2 * half_cross_px + 1) * (2 * half_along_px + 1)) as usize);
+        for y in -half_along_px..=half_along_px {
+            for x in -half_cross_px..=half_cross_px {
+                values.push(f64::from(bilinear_luma(
+                    frame,
+                    center[0] + f64::from(x),
+                    center[1] + f64::from(y),
+                )));
+            }
+        }
+        Some(values)
+    };
+    let before = patch(before, before_center_px)?;
+    let after = patch(after, after_center_px)?;
+    normalized_patch_correlation(&before, &after)
+}
+
+fn pocket_return_patch_half_span_mm(
+    registration: &StripFeederRegistration,
+    cross_axis: [f64; 2],
+    along_axis: [f64; 2],
+) -> [f64; 2] {
+    let measured = registration
+        .measured_part_size_mm
+        .or(registration.surveyed_part_size_mm)
+        .zip(registration.measured_part_rotation_deg);
+    if let Some(([width_mm, length_mm], rotation_deg)) = measured {
+        let radians = rotation_deg.to_radians();
+        let length_axis = [radians.cos(), radians.sin()];
+        let width_axis = [-length_axis[1], length_axis[0]];
+        let projected_half_span = |axis: [f64; 2]| {
+            0.5 * (length_mm * dot(length_axis, axis).abs()
+                + width_mm * dot(width_axis, axis).abs())
+                + 0.15
+        };
+        return [
+            projected_half_span(cross_axis).clamp(0.35, registration.tape_width_mm * 0.35),
+            projected_half_span(along_axis).clamp(0.30, registration.tape_pitch_mm * 0.40),
+        ];
+    }
+    [
+        (registration.tape_width_mm * 0.18).clamp(0.6, 1.5),
+        (registration.tape_pitch_mm * 0.18).clamp(0.4, 1.0),
+    ]
+}
+
 fn pocket_occupancy_from_evidence(confidence: f64) -> StripPocketOccupancy {
     if confidence >= 0.42 {
         StripPocketOccupancy::Occupied
@@ -1090,6 +1186,7 @@ fn render_pocket_return_preview(
     after: &GrayFrame,
     before_occupancy: StripPocketOccupancy,
     after_occupancy: StripPocketOccupancy,
+    appearance_matches: bool,
     before_center_px: Option<[f64; 2]>,
     after_center_px: Option<[f64; 2]>,
 ) -> RgbFrame {
@@ -1151,7 +1248,11 @@ fn render_pocket_return_preview(
             after_center_px[1],
         ],
         radius,
-        color(after_occupancy),
+        if appearance_matches {
+            color(after_occupancy)
+        } else {
+            [245, 70, 65]
+        },
     );
     frame
 }
@@ -3600,6 +3701,53 @@ mod tests {
 
         assert!((normalized_patch_correlation(&reference, &matching).unwrap() - 1.0).abs() < 1e-9);
         assert!(normalized_patch_correlation(&reference, &unrelated).unwrap() < 0.5);
+    }
+
+    #[test]
+    fn return_similarity_rejects_an_empty_textured_pocket() {
+        let width = 160_u32;
+        let height = 120_u32;
+        let mut empty = GrayFrame {
+            width,
+            height,
+            pixels: (0..width * height)
+                .map(|index| 105 + ((index * 17 + index / width * 11) % 31) as u8)
+                .collect(),
+        };
+        for y in 40..80 {
+            for x in 38..122 {
+                if x == 38 || x == 121 || y == 40 || y == 79 {
+                    empty.pixels[(y * width + x) as usize] = 190;
+                }
+            }
+        }
+        let mut occupied = empty.clone();
+        for y in 49..71 {
+            for x in 47..113 {
+                occupied.pixels[(y * width + x) as usize] =
+                    if !(53..107).contains(&x) { 230 } else { 165 };
+            }
+        }
+
+        let matching = centered_pocket_patch_similarity(
+            &occupied,
+            [80.0, 60.0],
+            &occupied,
+            [80.0, 60.0],
+            [1.7, 0.9],
+        )
+        .unwrap();
+        let missing = centered_pocket_patch_similarity(
+            &occupied,
+            [80.0, 60.0],
+            &empty,
+            [80.0, 60.0],
+            [1.7, 0.9],
+        )
+        .unwrap();
+
+        assert!(matching > 0.99);
+        assert!(missing < MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY);
     }
 
     #[test]

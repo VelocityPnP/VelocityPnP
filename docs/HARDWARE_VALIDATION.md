@@ -2266,6 +2266,43 @@ Normal disconnect `31d1d944-4edc-4f22-a22b-58f6d54c95bb` left the
 controller disconnected, unhomed, and fault-free. Vacuum and lights were off.
 No emergency stop was used.
 
+### Closed-loop pickup alignment and failed return detection
+
+On 2026-08-28, coarse home
+`f172a921-c9cd-439f-abdc-ba288a5990ce` and fine home
+`f475db46-44ad-4690-b0a2-b5ac03d8cd00` passed. Fine home detected N2 with
+its N24 tip and retained the Z59.100 mm datum contact.
+
+Live holdout `26abc741-e5c9-46c8-9949-04ec4583101f` selected feeder 1 pocket
+12. Its predicted center was X85.807, Y154.297 mm. Local vision measured
+X85.945, Y154.228 mm, a 0.154 mm correction. It found four sprocket holes
+with 0.035 mm pitch residual and 0.820 occupied confidence.
+
+Pickup qualification `d31c0c2e-0f8e-43b1-98de-f0f796e12149` acquired
+vacuum at Z4.3 and retained a raw value of 227 after transfer. Bottom vision
+measured an initial 0.519 mm center offset and -4.637 degree package angle.
+Closed-loop correction reduced the center residual to 0.051 mm and the axis
+residual to 0.282 degrees.
+
+The original return gate incorrectly passed. Direct image review showed a
+component in the before image and an empty pocket floor in the after image.
+The vacuum sensor was zero after release, so the component was not held on the
+nozzle. Its final location was not observed.
+
+Return algorithm version 3 adds a package-sized, normalized before-and-after
+appearance check. No-motion reanalysis measured 0.347 similarity, below the
+0.55 gate. It changed the qualification and operation to `failed`, changed
+pocket 12 to `uncertain` and `needs_review`, and recorded
+`release_uncertain`. It did not add a physical pickup attempt. The selected
+safe pocket reverted to pocket 10. SQLite integrity validation returned `ok`.
+
+The corrected return overlay marks the rejected after image in red. Its
+SHA-256 is
+`278e6ef57614da15a5afea4fd5ee9df8638b18bb7c005603abe697c117670c31`.
+The physical daemon disconnected normally as operation
+`f0501c35-f7e2-40b8-83fc-361f03268573`. The reanalysis daemon used simulation
+mode and did not open the controller.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

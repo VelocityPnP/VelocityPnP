@@ -466,6 +466,16 @@ class Client:
             f"/strip-feeder-pickup-qualifications/{qualification_id}",
         )
 
+    def reanalyze_strip_feeder_return(
+        self, qualification_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        """Recheck retained pocket-return images without machine motion."""
+        return self._request(
+            "POST",
+            f"/strip-feeder-pickup-qualifications/{qualification_id}/"
+            "reanalyze-return",
+        )
+
     def strip_feeder_pickup_preview(
         self, qualification_id: str | uuid.UUID,
     ) -> bytes:

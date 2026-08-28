@@ -365,6 +365,14 @@ impl Store {
         self.list("feeder")
     }
 
+    pub fn delete_feeder(&self, id: Uuid) -> Result<()> {
+        self.connection.lock().execute(
+            "DELETE FROM entities WHERE kind = ?1 AND id = ?2",
+            params!["feeder", id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn put_strip_feeder_registration(
         &self,
         registration: &StripFeederRegistration,
@@ -493,6 +501,13 @@ impl Store {
             | StripFeederPocketOutcome::Interrupted => {
                 pocket.consecutive_failure_count =
                     pocket.consecutive_failure_count.saturating_add(1);
+                if matches!(
+                    outcome,
+                    StripFeederPocketOutcome::ReleaseUncertain
+                        | StripFeederPocketOutcome::Interrupted
+                ) {
+                    pocket.occupancy = StripPocketOccupancy::Uncertain;
+                }
                 pocket.status = if outcome == StripFeederPocketOutcome::RetryableFailure
                     && pocket.consecutive_failure_count < 3
                 {
@@ -500,6 +515,90 @@ impl Store {
                 } else {
                     StripFeederPocketStatus::NeedsReview
                 };
+            }
+        }
+        if registration.selected_pocket_index == Some(pocket.pocket_index)
+            && pocket.status != StripFeederPocketStatus::Available
+        {
+            let next = registration.next_available_pocket(None).map(|pocket| {
+                (
+                    pocket.pocket_index,
+                    pocket
+                        .measured_center_machine_mm
+                        .unwrap_or(pocket.nominal_center_machine_mm),
+                )
+            });
+            registration.selected_pocket_index = next.map(|item| item.0);
+            registration.selected_pocket_machine_mm = next.map(|item| item.1);
+        }
+        registration.updated_at = Utc::now();
+        transaction.execute(
+            r#"UPDATE entities
+               SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), document = ?3
+               WHERE kind = ?1 AND id = ?2"#,
+            params![
+                "strip_feeder_registration",
+                registration_id.to_string(),
+                serde_json::to_string(&registration)?,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(registration)
+    }
+
+    /// Replaces a completed pocket outcome after deterministic evidence
+    /// reanalysis. This does not add another physical pickup attempt.
+    pub fn reconcile_strip_feeder_pocket_qualification(
+        &self,
+        registration_id: Uuid,
+        qualification_id: Uuid,
+        outcome: StripFeederPocketOutcome,
+    ) -> Result<StripFeederRegistration> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let document: String = transaction
+            .query_row(
+                "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
+                params!["strip_feeder_registration", registration_id.to_string()],
+                |row| row.get(0),
+            )
+            .context("strip feeder registration not found")?;
+        let mut registration: StripFeederRegistration =
+            serde_json::from_str(&document).context("decoding strip feeder registration")?;
+        registration.ensure_pocket_state();
+        let pocket = registration
+            .pockets
+            .iter_mut()
+            .find(|pocket| pocket.last_qualification_id == Some(qualification_id))
+            .context("strip feeder qualification has no settled pocket")?;
+        anyhow::ensure!(
+            pocket.reservation_id.is_none(),
+            "strip feeder qualification pocket is still reserved"
+        );
+        let prior_outcome = pocket.last_outcome;
+        pocket.last_outcome = Some(outcome);
+        pocket.updated_at = Utc::now();
+        match outcome {
+            StripFeederPocketOutcome::Returned => {
+                pocket.consecutive_failure_count = 0;
+                pocket.occupancy = StripPocketOccupancy::Occupied;
+                pocket.status = StripFeederPocketStatus::Available;
+            }
+            StripFeederPocketOutcome::Consumed => {
+                pocket.consecutive_failure_count = 0;
+                pocket.occupancy = StripPocketOccupancy::Empty;
+                pocket.status = StripFeederPocketStatus::Consumed;
+            }
+            StripFeederPocketOutcome::RetryableFailure
+            | StripFeederPocketOutcome::ReleaseUncertain
+            | StripFeederPocketOutcome::Interrupted => {
+                if prior_outcome != Some(outcome) {
+                    pocket.consecutive_failure_count =
+                        pocket.consecutive_failure_count.saturating_add(1);
+                }
+                pocket.consecutive_failure_count = pocket.consecutive_failure_count.max(1);
+                pocket.occupancy = StripPocketOccupancy::Uncertain;
+                pocket.status = StripFeederPocketStatus::NeedsReview;
             }
         }
         if registration.selected_pocket_index == Some(pocket.pocket_index)
@@ -976,6 +1075,25 @@ mod tests {
         assert_eq!(
             interrupted.pockets[3].status,
             StripFeederPocketStatus::NeedsReview
+        );
+        assert_eq!(
+            interrupted.pockets[3].occupancy,
+            StripPocketOccupancy::Uncertain
+        );
+        let reconciled = store
+            .reconcile_strip_feeder_pocket_qualification(
+                registration_id,
+                interrupted_reservation,
+                StripFeederPocketOutcome::Returned,
+            )
+            .unwrap();
+        assert_eq!(
+            reconciled.pockets[3].status,
+            StripFeederPocketStatus::Available
+        );
+        assert_eq!(
+            reconciled.pockets[3].occupancy,
+            StripPocketOccupancy::Occupied
         );
     }
 

@@ -165,6 +165,10 @@ enum Command {
     StripFeederPickupQualification {
         qualification: Uuid,
     },
+    /// Recheck retained before/after return images without machine motion.
+    ReanalyzeStripFeederReturn {
+        qualification: Uuid,
+    },
     SetWorkspaceBaseline {
         scan: Uuid,
     },
@@ -652,6 +656,16 @@ async fn main() -> Result<()> {
             get(
                 &client,
                 &format!("{base}/strip-feeder-pickup-qualifications/{qualification}"),
+            )
+            .await?
+        }
+        Command::ReanalyzeStripFeederReturn { qualification } => {
+            post(
+                &client,
+                &format!(
+                    "{base}/strip-feeder-pickup-qualifications/{qualification}/reanalyze-return"
+                ),
+                None,
             )
             .await?
         }

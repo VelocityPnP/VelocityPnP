@@ -949,15 +949,18 @@ export interface StripFeederPickupQualificationReport {
   return_verification: {
     algorithm_version: string;
     nominal_center_machine_mm: [number, number] | null;
+    before_camera_pose: Pose | null;
     before_occupancy: "occupied" | "empty" | "uncertain";
     before_confidence: number;
     before_measured_center_machine_mm: [number, number] | null;
     before_center_offset_mm: number | null;
+    after_camera_pose: Pose | null;
     after_occupancy: "occupied" | "empty" | "uncertain";
     after_confidence: number;
     after_measured_center_machine_mm: [number, number] | null;
     after_center_offset_mm: number | null;
     return_center_shift_mm: number | null;
+    appearance_similarity: number | null;
     passed: boolean;
     artifact_name: string;
     findings: string[];
