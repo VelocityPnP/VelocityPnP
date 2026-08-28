@@ -2219,6 +2219,40 @@ component, and the cyan oriented box no longer contains the nozzle ring. The
 replay caused no machine motion. Its downloaded overlay SHA-256 is
 `3b4f1756796986a89f332f532c9f4f89d2a5705b608befb836e1563cd32e23e3`.
 
+### Persistent pocket state and verified return
+
+On 2026-08-27, release build validation used the same exposed feeder 1.
+Coarse home `23a7d292-6542-4c4e-9b5d-b93a0ad4a7bc` passed at X0, Y0, and
+Z31.5. Fine home `95cfc469-2101-4e84-b7fd-89aad5baf4dc` detected N2 with
+its N24 tip. It reset the datum contact from Z59.4 to Z59.1.
+
+Holdout `46bc9b97-9242-4957-afe1-b15243449ab7` passed with four sprocket
+centers. It measured 0.071 mm pitch residual, 0.884 mm total correction, and
+0.683 occupied-pocket confidence. It selected pocket 12 at X85.891 and
+Y155.177 mm. The store marked only that occupied pocket available.
+
+Pickup qualification `9758c19b-ef6b-4257-81b5-369243016371` reserved pocket
+12 before motion. N1 reached its vacuum threshold at Z3.6. The held median was
+228. The released samples were all zero. Bottom inspection version 3 measured
+the part as 1.530 by 3.144 mm at 0.281 degrees. Its center offset was 0.452 mm,
+and its confidence was 0.842.
+
+Top vision found the source pocket occupied before pickup at 0.473 confidence
+and after release at 0.533 confidence. The return check passed. The persistent
+pocket state records one attempt, zero consecutive failures, a `returned`
+outcome, and no active reservation. The pocket remains available. The feeder
+registration stores the measured part size, rotation, and confidence.
+
+Version 3 removes a narrow nozzle reflection that remains connected to a
+package edge. Its retained held-part overlay SHA-256 is
+`baeef45dc1502075fb7df710bc07829eb331883cbf9ec3ba551f19a89dbe6ec5`.
+The retained before-and-after return overlay SHA-256 is
+`8c09dab4389f2966b5cfbc815d72bf44edd80a0d45e1169345e290ab8fb484fc`.
+
+Normal disconnect `31d1d944-4edc-4f22-a22b-58f6d54c95bb` left the
+controller disconnected, unhomed, and fault-free. Vacuum and lights were off.
+No emergency stop was used.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

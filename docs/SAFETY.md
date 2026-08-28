@@ -36,6 +36,10 @@ vacuum thresholds. Its Z search stops above the datum-board contact. Vacuum is
 on before descent. Any detected contact returns to the exact source pose. A
 fallback point is used only if that source pose is invalid. A failed cleanup
 disables vacuum and faults the operation; it does not use emergency stop.
+The source pocket is reserved before motion. It is not marked consumed without
+vacuum and bottom-camera evidence. A normal return also needs a top-camera
+occupied-pocket check. Restart recovery marks an unresolved reservation as
+needing review.
 
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the

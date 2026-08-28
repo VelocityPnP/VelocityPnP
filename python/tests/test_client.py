@@ -514,6 +514,19 @@ class ClientTests(unittest.TestCase):
             "artifacts/held-part-inspection.png",
             "image/png",
         )
+        with patch.object(
+            client, "_request_bytes", return_value=b"return",
+        ) as send:
+            self.assertEqual(
+                client.strip_feeder_return_preview("pickup"),
+                b"return",
+            )
+        send.assert_called_once_with(
+            "GET",
+            "/strip-feeder-pickup-qualifications/pickup/"
+            "artifacts/pocket-return-inspection.png",
+            "image/png",
+        )
 
         with patch.object(client, "_request", return_value=report) as send:
             self.assertEqual(

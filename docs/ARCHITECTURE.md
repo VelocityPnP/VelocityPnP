@@ -143,6 +143,13 @@ Streaming surveys also require two consistent neighboring registrations before
 they apply a correction. This prevents an isolated match on a repetitive plate
 grid from moving one tile away from its calibrated pose.
 
+Strip-feeder registrations retain per-pocket occupancy and operational state.
+The store reserves one occupied pocket in a SQLite transaction. Pickup evidence
+settles that reservation as returned, consumed, retryable, or in need of
+review. Consumption requires both vacuum and bottom-camera evidence. A returned
+part also requires a top-camera occupied-pocket check. Restart recovery does
+not guess: it quarantines any interrupted reservation.
+
 Large survey scans keep one V4L2 stream open across the motion path. The
 streaming mosaic builder keeps only the current and prior full-resolution tile
 rows. It samples them directly into lower-resolution corrected and nominal

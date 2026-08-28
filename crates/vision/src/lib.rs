@@ -35,9 +35,10 @@ pub use held_part::{
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use strip_feeder::{
     analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate,
-    StripFeederLiveHoldoutArtifacts, StripFeederVisionArtifacts,
-    STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM, STRIP_FEEDER_SPROCKET_PITCH_MM,
-    STRIP_FEEDER_VISION_ALGORITHM,
+    inspect_strip_feeder_pocket_return, StripFeederLiveHoldoutArtifacts,
+    StripFeederPocketReturnArtifacts, StripFeederVisionArtifacts,
+    STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM, STRIP_FEEDER_POCKET_RETURN_ALGORITHM,
+    STRIP_FEEDER_SPROCKET_PITCH_MM, STRIP_FEEDER_VISION_ALGORITHM,
 };
 pub use strip_feeder_inventory::{
     build_strip_feeder_inventory, StripFeederInventoryArtifacts, StripFeederInventoryBuild,

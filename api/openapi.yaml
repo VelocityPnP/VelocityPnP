@@ -2448,9 +2448,14 @@ components:
         - tape_rotation_deg
         - pick_centerline_machine_mm
         - pocket_centers_machine_mm
+        - pockets
         - selected_pocket_machine_mm
         - selected_pocket_index
         - pickup_z_mm
+        - surveyed_part_size_mm
+        - measured_part_size_mm
+        - measured_part_rotation_deg
+        - measured_part_confidence
         - active_feeder_id
         - latest_live_holdout_id
         - latest_pickup_qualification_id
@@ -2484,12 +2489,25 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/Point2d" }
+        pockets:
+          type: array
+          items: { $ref: "#/components/schemas/StripFeederPocketState" }
         selected_pocket_machine_mm:
           oneOf:
             - { $ref: "#/components/schemas/Point2d" }
             - type: "null"
         selected_pocket_index: { type: [integer, "null"], minimum: 0 }
         pickup_z_mm: { type: [number, "null"] }
+        surveyed_part_size_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        measured_part_size_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        measured_part_rotation_deg: { type: [number, "null"] }
+        measured_part_confidence: { type: [number, "null"], minimum: 0, maximum: 1 }
         active_feeder_id: { type: [string, "null"], format: uuid }
         latest_live_holdout_id: { type: [string, "null"], format: uuid }
         latest_pickup_qualification_id: { type: [string, "null"], format: uuid }
@@ -2498,6 +2516,41 @@ components:
         findings:
           type: array
           items: { type: string }
+    StripFeederPocketState:
+      type: object
+      required:
+        - pocket_index
+        - nominal_center_machine_mm
+        - measured_center_machine_mm
+        - occupancy
+        - occupancy_confidence
+        - status
+        - attempt_count
+        - consecutive_failure_count
+        - reservation_id
+        - last_qualification_id
+        - last_outcome
+        - updated_at
+      properties:
+        pocket_index: { type: integer, minimum: 0 }
+        nominal_center_machine_mm: { $ref: "#/components/schemas/Point2d" }
+        measured_center_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        occupancy: { type: string, enum: [occupied, empty, uncertain] }
+        occupancy_confidence: { type: number, minimum: 0, maximum: 1 }
+        status:
+          type: string
+          enum: [available, empty, reserved, consumed, needs_review]
+        attempt_count: { type: integer, minimum: 0 }
+        consecutive_failure_count: { type: integer, minimum: 0 }
+        reservation_id: { type: [string, "null"], format: uuid }
+        last_qualification_id: { type: [string, "null"], format: uuid }
+        last_outcome:
+          type: [string, "null"]
+          enum: [returned, consumed, retryable_failure, release_uncertain, interrupted, null]
+        updated_at: { type: string, format: date-time }
     StripFeederLiveHoldoutReport:
       type: object
       required:
@@ -2620,6 +2673,26 @@ components:
         raw_values: { type: array, items: { type: integer } }
         median_raw_value: { type: number }
         signal_delta_counts: { type: number, minimum: 0 }
+    StripFeederPocketReturnReport:
+      type: object
+      required:
+        - algorithm_version
+        - before_occupancy
+        - before_confidence
+        - after_occupancy
+        - after_confidence
+        - passed
+        - artifact_name
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        before_occupancy: { type: string, enum: [occupied, empty, uncertain] }
+        before_confidence: { type: number, minimum: 0, maximum: 1 }
+        after_occupancy: { type: string, enum: [occupied, empty, uncertain] }
+        after_confidence: { type: number, minimum: 0, maximum: 1 }
+        passed: { type: boolean }
+        artifact_name: { type: string }
+        findings: { type: array, items: { type: string } }
     StripFeederPickupQualificationReport:
       type: object
       required:
@@ -2641,6 +2714,7 @@ components:
         - release_surface_machine_mm
         - release_raw_values
         - released
+        - return_verification
         - passed
         - artifact_names
         - findings
@@ -2673,6 +2747,10 @@ components:
             - type: "null"
         release_raw_values: { type: array, items: { type: integer } }
         released: { type: boolean }
+        return_verification:
+          oneOf:
+            - { $ref: "#/components/schemas/StripFeederPocketReturnReport" }
+            - type: "null"
         passed: { type: boolean }
         artifact_names: { type: array, items: { type: string } }
         findings: { type: array, items: { type: string } }
@@ -2688,6 +2766,7 @@ components:
         - created_at
         - updated_at
         - nozzle_id
+        - pocket_index
         - fallback_drop_surface_machine_mm
         - report
         - message
@@ -2701,6 +2780,7 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         nozzle_id: { type: string }
+        pocket_index: { type: integer, minimum: 0 }
         fallback_drop_surface_machine_mm:
           oneOf:
             - { $ref: "#/components/schemas/Point2d" }

@@ -3,7 +3,7 @@ use anyhow::{ensure, Result};
 use std::collections::VecDeque;
 use velocitypnp_domain::HeldPartInspectionReport;
 
-pub const HELD_PART_INSPECTION_ALGORITHM: &str = "held_part_difference.v2";
+pub const HELD_PART_INSPECTION_ALGORITHM: &str = "held_part_difference.v3";
 const MAX_BARE_ALIGNMENT_SHIFT_PX: f64 = 8.0;
 const BARE_ALIGNMENT_STEP_PX: f64 = 0.5;
 
@@ -164,6 +164,8 @@ pub fn inspect_held_part_difference(
         report.findings = findings;
         return Ok(HeldPartInspectionArtifacts { report, preview });
     };
+    let component = trim_narrow_axis_protrusions(&component, &difference, bare.width, center);
+    let center = component_center(&component, &difference, bare.width).unwrap_or(center);
 
     let geometry = component_oriented_geometry(
         &component,
@@ -518,6 +520,88 @@ fn component_axis_fill_fraction(component: &[usize], width: u32) -> f64 {
     component.len() as f64 / bounds_area as f64
 }
 
+/// Removes narrow end protrusions after the package body has been selected.
+/// Reflections from the nozzle can touch a package but have much less support
+/// across either package axis than the body itself.
+fn trim_narrow_axis_protrusions(
+    component: &[usize],
+    difference: &[u8],
+    width: u32,
+    center: [f64; 2],
+) -> Vec<usize> {
+    let rotation_deg = component_rotation_deg(component, difference, width, center).unwrap_or(0.0);
+    let rotation_rad = rotation_deg.to_radians();
+    let axes = [
+        [rotation_rad.cos(), rotation_rad.sin()],
+        [-rotation_rad.sin(), rotation_rad.cos()],
+    ];
+    let bounds = axes.map(|axis| component_supported_axis_bounds(component, width, center, axis));
+    let trimmed = component
+        .iter()
+        .copied()
+        .filter(|index| {
+            let point = [
+                f64::from(*index as u32 % width) + 0.5 - center[0],
+                f64::from(*index as u32 / width) + 0.5 - center[1],
+            ];
+            axes.iter().zip(bounds).all(|(axis, [minimum, maximum])| {
+                let projection = point[0] * axis[0] + point[1] * axis[1];
+                projection >= minimum && projection < maximum
+            })
+        })
+        .collect::<Vec<_>>();
+    if trimmed.len() * 2 >= component.len() {
+        trimmed
+    } else {
+        component.to_vec()
+    }
+}
+
+fn component_supported_axis_bounds(
+    component: &[usize],
+    width: u32,
+    center: [f64; 2],
+    axis: [f64; 2],
+) -> [f64; 2] {
+    let projections = component
+        .iter()
+        .map(|index| {
+            let x = f64::from(*index as u32 % width) + 0.5 - center[0];
+            let y = f64::from(*index as u32 / width) + 0.5 - center[1];
+            x * axis[0] + y * axis[1]
+        })
+        .collect::<Vec<_>>();
+    let minimum_bin = projections
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min)
+        .floor() as i32;
+    let maximum_bin = projections
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max)
+        .floor() as i32;
+    let mut support = vec![0_u32; (maximum_bin - minimum_bin + 1).max(1) as usize];
+    for projection in projections {
+        let index = (projection.floor() as i32 - minimum_bin) as usize;
+        support[index] = support[index].saturating_add(1);
+    }
+    let maximum_support = support.iter().copied().max().unwrap_or(1);
+    let minimum_support = (f64::from(maximum_support) * 0.30).ceil() as u32;
+    let first = support
+        .iter()
+        .position(|count| *count >= minimum_support)
+        .unwrap_or(0) as i32;
+    let last = support
+        .iter()
+        .rposition(|count| *count >= minimum_support)
+        .unwrap_or(support.len() - 1) as i32;
+    [
+        f64::from(minimum_bin + first),
+        f64::from(minimum_bin + last + 1),
+    ]
+}
+
 fn component_rotation_deg(
     component: &[usize],
     difference: &[u8],
@@ -771,6 +855,38 @@ mod tests {
         assert!(result.report.passed, "{:?}", result.report.findings);
         assert!(result.report.centering_correction_mm.unwrap() < 0.05);
         assert!((result.report.width_mm.unwrap() - 0.68).abs() < 0.15);
+        assert!((result.report.length_mm.unwrap() - 1.28).abs() < 0.15);
+    }
+
+    #[test]
+    fn trims_a_narrow_nozzle_reflection_touching_the_package() {
+        let bare = frame(80);
+        let mut held = bare.clone();
+        for y in 105..135 {
+            for x in 130..190 {
+                held.pixels[y * 320 + x] = 190;
+            }
+        }
+        for y in 85..105 {
+            for x in 154..166 {
+                held.pixels[y * 320 + x] = 190;
+            }
+        }
+
+        let result = inspect_held_part_difference(
+            &bare,
+            &held,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!(result.report.width_mm.unwrap() < 0.8);
         assert!((result.report.length_mm.unwrap() - 1.28).abs() < 0.15);
     }
 

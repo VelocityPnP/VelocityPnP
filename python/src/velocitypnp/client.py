@@ -476,6 +476,17 @@ class Client:
             "image/png",
         )
 
+    def strip_feeder_return_preview(
+        self, qualification_id: str | uuid.UUID,
+    ) -> bytes:
+        """Get the before/after top-camera pocket-return evidence."""
+        return self._request_bytes(
+            "GET",
+            f"/strip-feeder-pickup-qualifications/{qualification_id}/"
+            "artifacts/pocket-return-inspection.png",
+            "image/png",
+        )
+
     def start_board_registration(
         self,
         scan_id: str | uuid.UUID,

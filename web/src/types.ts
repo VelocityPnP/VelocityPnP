@@ -819,9 +819,27 @@ export interface StripFeederRegistration {
   tape_rotation_deg: number;
   pick_centerline_machine_mm: [[number, number], [number, number]];
   pocket_centers_machine_mm: Array<[number, number]>;
+  pockets: Array<{
+    pocket_index: number;
+    nominal_center_machine_mm: [number, number];
+    measured_center_machine_mm: [number, number] | null;
+    occupancy: "occupied" | "empty" | "uncertain";
+    occupancy_confidence: number;
+    status: "available" | "empty" | "reserved" | "consumed" | "needs_review";
+    attempt_count: number;
+    consecutive_failure_count: number;
+    reservation_id: string | null;
+    last_qualification_id: string | null;
+    last_outcome: "returned" | "consumed" | "retryable_failure" | "release_uncertain" | "interrupted" | null;
+    updated_at: string;
+  }>;
   selected_pocket_machine_mm: [number, number] | null;
   selected_pocket_index: number | null;
   pickup_z_mm: number | null;
+  surveyed_part_size_mm: [number, number] | null;
+  measured_part_size_mm: [number, number] | null;
+  measured_part_rotation_deg: number | null;
+  measured_part_confidence: number | null;
   active_feeder_id: string | null;
   latest_live_holdout_id: string | null;
   latest_pickup_qualification_id: string | null;
@@ -908,6 +926,16 @@ export interface StripFeederPickupQualificationReport {
   release_surface_machine_mm: [number, number] | null;
   release_raw_values: number[];
   released: boolean;
+  return_verification: {
+    algorithm_version: string;
+    before_occupancy: "occupied" | "empty" | "uncertain";
+    before_confidence: number;
+    after_occupancy: "occupied" | "empty" | "uncertain";
+    after_confidence: number;
+    passed: boolean;
+    artifact_name: string;
+    findings: string[];
+  } | null;
   passed: boolean;
   artifact_names: string[];
   findings: string[];
@@ -923,6 +951,7 @@ export interface StripFeederPickupQualificationRun {
   created_at: string;
   updated_at: string;
   nozzle_id: string;
+  pocket_index: number;
   fallback_drop_surface_machine_mm: [number, number] | null;
   report: StripFeederPickupQualificationReport | null;
   message: string | null;

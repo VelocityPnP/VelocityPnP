@@ -39,8 +39,9 @@ use velocitypnp_domain::{
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
     Residuals, SensorReading, StripFeederInventoryReport, StripFeederInventorySummary,
     StripFeederLiveHoldoutRun, StripFeederPickupDisposition, StripFeederPickupQualificationReport,
-    StripFeederPickupQualificationRun, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederVisionReport, VacuumProbeReport, VacuumProbeSample,
+    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketState,
+    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
     VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
     VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
     WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
@@ -70,10 +71,11 @@ use velocitypnp_vision::{
     detect_camera_target, detect_installed_plate_hole, discover_workspace_objects, encode_gray_png,
     encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
     fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
-    inspect_held_part_difference, interpolate_planar_camera_model, mean_nozzle_detection,
-    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, reanalyze_workspace_seam_health, render_board_fiducial_evidence,
+    inspect_held_part_difference, inspect_strip_feeder_pocket_return,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_workspace_parallax,
+    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
+    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    reanalyze_workspace_seam_health, render_board_fiducial_evidence,
     render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
@@ -105,6 +107,9 @@ const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v1";
 const BARE_NOZZLE_ARTIFACT: &str = "bare-nozzle.png";
 const HELD_PART_ARTIFACT: &str = "held-part.png";
 const HELD_PART_INSPECTION_ARTIFACT: &str = "held-part-inspection.png";
+const SOURCE_POCKET_BEFORE_ARTIFACT: &str = "source-pocket-before.png";
+const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
+const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const REUSED_TOP_PLANAR_REPORT: &str = "reused_top_camera_planar_report";
 const REUSED_BOTTOM_PLANAR_REPORT: &str = "reused_bottom_camera_planar_report";
 const REUSED_INSTALLED_GEOMETRY_SOURCE_RUN: &str = "reused_installed_geometry_source_run";
@@ -227,6 +232,18 @@ impl AppState {
                     %error,
                     qualification_id = %run.id,
                     "failed to recover strip feeder pickup"
+                );
+            }
+            if let Err(error) = self.store.settle_strip_feeder_pocket(
+                run.registration_id,
+                run.id,
+                StripFeederPocketOutcome::Interrupted,
+                false,
+            ) {
+                tracing::warn!(
+                    %error,
+                    qualification_id = %run.id,
+                    "interrupted pickup had no current pocket reservation"
                 );
             }
             match self.store.get_operation(run.operation_id) {
@@ -5435,6 +5452,40 @@ async fn create_strip_feeder_registration(
         } else {
             StripFeederRegistrationStatus::VisionDraft
         };
+    let now = Utc::now();
+    let pockets = proposal
+        .pocket_centers_machine_mm
+        .iter()
+        .enumerate()
+        .filter_map(|(index, center)| {
+            let pocket_index = u32::try_from(index).ok()?;
+            let observation = proposal
+                .pocket_observations
+                .iter()
+                .find(|observation| observation.pocket_index == pocket_index);
+            let occupancy = observation
+                .map(|observation| observation.occupancy)
+                .unwrap_or(StripPocketOccupancy::Uncertain);
+            Some(StripFeederPocketState {
+                pocket_index,
+                nominal_center_machine_mm: *center,
+                measured_center_machine_mm: observation.map(|item| item.center_machine_mm),
+                occupancy,
+                occupancy_confidence: observation.map_or(0.0, |item| item.confidence),
+                status: match occupancy {
+                    StripPocketOccupancy::Occupied => StripFeederPocketStatus::Available,
+                    StripPocketOccupancy::Empty => StripFeederPocketStatus::Empty,
+                    StripPocketOccupancy::Uncertain => StripFeederPocketStatus::NeedsReview,
+                },
+                attempt_count: 0,
+                consecutive_failure_count: 0,
+                reservation_id: None,
+                last_qualification_id: None,
+                last_outcome: None,
+                updated_at: now,
+            })
+        })
+        .collect();
     let mut findings = proposal.findings;
     if part_key.is_none() {
         findings.push("part identity is not assigned".into());
@@ -5443,7 +5494,6 @@ async fn create_strip_feeder_registration(
         findings.push("part orientation is not assigned".into());
     }
     findings.push("live pocket occupancy and pickup Z are not measured".into());
-    let now = Utc::now();
     let registration = StripFeederRegistration {
         id: Uuid::new_v4(),
         profile_id: scan.profile_id,
@@ -5462,9 +5512,14 @@ async fn create_strip_feeder_registration(
         tape_rotation_deg: proposal.tape_rotation_deg,
         pick_centerline_machine_mm,
         pocket_centers_machine_mm: proposal.pocket_centers_machine_mm,
+        pockets,
         selected_pocket_machine_mm: None,
         selected_pocket_index: None,
         pickup_z_mm: None,
+        surveyed_part_size_mm: proposal.component_size_mm,
+        measured_part_size_mm: None,
+        measured_part_rotation_deg: None,
+        measured_part_confidence: None,
         active_feeder_id: None,
         latest_live_holdout_id: None,
         latest_pickup_qualification_id: None,
@@ -5779,6 +5834,23 @@ async fn execute_strip_feeder_live_holdout_task(
                     report.predicted_pocket_machine_mm,
                 )
                 .or(Some(run.pocket_index));
+                registration.ensure_pocket_state();
+                if let Some(pocket) = registration
+                    .pockets
+                    .iter_mut()
+                    .find(|pocket| Some(pocket.pocket_index) == registration.selected_pocket_index)
+                {
+                    pocket.measured_center_machine_mm = report.measured_pocket_machine_mm;
+                    pocket.occupancy = report.occupancy;
+                    pocket.occupancy_confidence = report.occupancy_confidence;
+                    if !matches!(
+                        pocket.status,
+                        StripFeederPocketStatus::Consumed | StripFeederPocketStatus::Reserved
+                    ) {
+                        pocket.status = StripFeederPocketStatus::Available;
+                    }
+                    pocket.updated_at = Utc::now();
+                }
                 registration.findings.retain(|finding| {
                     !finding.contains("live pocket occupancy") && !finding.contains("live holdout")
                 });
@@ -5991,6 +6063,9 @@ struct PreparedStripFeederPickup {
     height_model_has_working_plane_transfer: bool,
     reference_contact: VacuumProbeReport,
     vacuum_characterization: VacuumSensorCharacterizationReport,
+    top_camera_model: PlanarCameraModel,
+    top_camera_profile: CameraProfile,
+    top_camera_path: String,
 }
 
 async fn start_strip_feeder_pickup_qualification(
@@ -6080,6 +6155,9 @@ async fn start_strip_feeder_pickup_qualification(
         .bottom_vision
         .as_ref()
         .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?;
+    let (_, top_camera_model) = load_workspace_camera_model(&state, registration.calibration_id)?;
+    let top_camera_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let top_camera_path = camera_path_for_role(CameraRole::TopCamera)?;
     let nozzle = bottom
         .nozzles
         .iter()
@@ -6205,7 +6283,7 @@ async fn start_strip_feeder_pickup_qualification(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let operation = Operation::pending("vision.strip_feeder_pickup_qualification");
     let now = Utc::now();
-    let run = StripFeederPickupQualificationRun {
+    let mut run = StripFeederPickupQualificationRun {
         id: Uuid::new_v4(),
         operation_id: operation.id,
         registration_id,
@@ -6215,18 +6293,29 @@ async fn start_strip_feeder_pickup_qualification(
         created_at: now,
         updated_at: now,
         nozzle_id: body.nozzle_id,
+        pocket_index: registration.selected_pocket_index.unwrap_or_default(),
         fallback_drop_surface_machine_mm: body.fallback_drop_surface_machine_mm,
         report: None,
         message: None,
     };
-    state
+    let registration = state
+        .store
+        .reserve_strip_feeder_pocket(registration.id, run.id, registration.selected_pocket_index)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    run.pocket_index = registration.selected_pocket_index.unwrap_or_default();
+    if let Err(error) = state
         .store
         .put_operation(&operation)
-        .map_err(ApiError::internal)?;
-    state
-        .store
-        .put_strip_feeder_pickup_qualification(&run)
-        .map_err(ApiError::internal)?;
+        .and_then(|_| state.store.put_strip_feeder_pickup_qualification(&run))
+    {
+        let _ = state.store.settle_strip_feeder_pocket(
+            registration.id,
+            run.id,
+            StripFeederPocketOutcome::RetryableFailure,
+            false,
+        );
+        return Err(ApiError::internal(error));
+    }
     drop(admission_guard);
     let response = StartStripFeederPickupQualificationResponse {
         qualification: run.clone(),
@@ -6243,6 +6332,9 @@ async fn start_strip_feeder_pickup_qualification(
         height_model_has_working_plane_transfer,
         reference_contact,
         vacuum_characterization,
+        top_camera_model,
+        top_camera_profile,
+        top_camera_path,
     };
     spawn_prepared_operation(
         state,
@@ -6273,7 +6365,7 @@ async fn execute_strip_feeder_pickup_task(
             let passed = report.passed;
             let message = if passed {
                 format!(
-                    "Pickup qualification passed at nozzle Z{:.3}; bottom vision and release passed",
+                    "Pickup qualification passed at nozzle Z{:.3}; bottom vision and verified return passed",
                     report.pickup_nozzle_z_mm.unwrap_or_default(),
                 )
             } else {
@@ -6294,12 +6386,13 @@ async fn execute_strip_feeder_pickup_task(
                 .store
                 .put_strip_feeder_pickup_qualification(&prepared.run)
                 .map_err(|error| error.to_string())?;
-            update_registration_after_pickup(
+            let registration = settle_registration_after_pickup(
                 &state,
-                prepared.registration,
+                prepared.run.registration_id,
                 prepared.run.id,
                 &report,
             )?;
+            update_registration_after_pickup(&state, registration, prepared.run.id, &report)?;
             if passed {
                 Ok(Some(message))
             } else {
@@ -6307,6 +6400,20 @@ async fn execute_strip_feeder_pickup_task(
             }
         }
         Err(error) => {
+            if !state.machine.status().simulated {
+                if let Err(cleanup_error) = state
+                    .machine
+                    .disable_actuator(prepared.vacuum_characterization.sensor_id.clone())
+                    .await
+                {
+                    tracing::error!(%cleanup_error, qualification_id = %prepared.run.id, "failed to disable vacuum after pickup error");
+                }
+                if let Err(cleanup_error) =
+                    lift_and_restore_after_pickup(&state, prepared.lease_id).await
+                {
+                    tracing::error!(%cleanup_error, qualification_id = %prepared.run.id, "failed to restore level visual home after pickup error");
+                }
+            }
             prepared.run.status = OperationStatus::Failed;
             prepared.run.message = Some(error.clone());
             prepared.run.updated_at = Utc::now();
@@ -6316,9 +6423,68 @@ async fn execute_strip_feeder_pickup_task(
             {
                 tracing::error!(%store_error, qualification_id = %prepared.run.id, "failed to persist pickup failure");
             }
+            if let Err(store_error) = state.store.settle_strip_feeder_pocket(
+                prepared.run.registration_id,
+                prepared.run.id,
+                StripFeederPocketOutcome::Interrupted,
+                false,
+            ) {
+                tracing::error!(%store_error, qualification_id = %prepared.run.id, "failed to quarantine interrupted feeder pocket");
+            }
             Err(error)
         }
     }
+}
+
+fn settle_registration_after_pickup(
+    state: &AppState,
+    registration_id: Uuid,
+    qualification_id: Uuid,
+    report: &StripFeederPickupQualificationReport,
+) -> Result<StripFeederRegistration, String> {
+    let pickup_evidence_passed = report.vacuum_acquired
+        && report.vacuum_held_after_transfer
+        && report
+            .inspection
+            .as_ref()
+            .is_some_and(|inspection| inspection.passed);
+    let outcome = match report.disposition {
+        StripFeederPickupDisposition::ReturnedToPocket
+            if report.released
+                && report
+                    .return_verification
+                    .as_ref()
+                    .is_some_and(|verification| verification.passed)
+                && pickup_evidence_passed =>
+        {
+            StripFeederPocketOutcome::Returned
+        }
+        StripFeederPickupDisposition::ReturnedToPocket
+            if report.released
+                && report
+                    .return_verification
+                    .as_ref()
+                    .is_some_and(|verification| verification.passed) =>
+        {
+            StripFeederPocketOutcome::RetryableFailure
+        }
+        StripFeederPickupDisposition::DroppedAtFallback if pickup_evidence_passed => {
+            StripFeederPocketOutcome::Consumed
+        }
+        StripFeederPickupDisposition::NotReleased if !report.vacuum_acquired => {
+            StripFeederPocketOutcome::RetryableFailure
+        }
+        _ => StripFeederPocketOutcome::ReleaseUncertain,
+    };
+    state
+        .store
+        .settle_strip_feeder_pocket(
+            registration_id,
+            qualification_id,
+            outcome,
+            pickup_evidence_passed,
+        )
+        .map_err(|error| error.to_string())
 }
 
 async fn execute_simulated_strip_feeder_pickup(
@@ -6370,6 +6536,14 @@ async fn execute_simulated_strip_feeder_pickup(
         HELD_PART_INSPECTION_ARTIFACT,
         &inspection.preview,
     )?;
+    persist_pickup_gray_artifact(state, prepared.run.id, SOURCE_POCKET_BEFORE_ARTIFACT, &held)?;
+    persist_pickup_gray_artifact(state, prepared.run.id, SOURCE_POCKET_AFTER_ARTIFACT, &held)?;
+    persist_pickup_rgb_artifact(
+        state,
+        prepared.run.id,
+        POCKET_RETURN_INSPECTION_ARTIFACT,
+        &inspection.preview,
+    )?;
     let open = prepared
         .vacuum_characterization
         .pump_on_open
@@ -6413,11 +6587,24 @@ async fn execute_simulated_strip_feeder_pickup(
         release_surface_machine_mm: prepared.registration.selected_pocket_machine_mm,
         release_raw_values: prepared.vacuum_characterization.pump_off.raw_values.clone(),
         released,
+        return_verification: Some(velocitypnp_domain::StripFeederPocketReturnReport {
+            algorithm_version: "strip_feeder_pocket_return.simulated".into(),
+            before_occupancy: StripPocketOccupancy::Occupied,
+            before_confidence: 1.0,
+            after_occupancy: StripPocketOccupancy::Occupied,
+            after_confidence: 1.0,
+            passed: true,
+            artifact_name: POCKET_RETURN_INSPECTION_ARTIFACT.into(),
+            findings: vec!["simulator retained the source-pocket return state".into()],
+        }),
         passed,
         artifact_names: vec![
             BARE_NOZZLE_ARTIFACT.into(),
             HELD_PART_ARTIFACT.into(),
             HELD_PART_INSPECTION_ARTIFACT.into(),
+            SOURCE_POCKET_BEFORE_ARTIFACT.into(),
+            SOURCE_POCKET_AFTER_ARTIFACT.into(),
+            POCKET_RETURN_INSPECTION_ARTIFACT.into(),
         ],
         findings: vec![
             "simulator exercised pickup persistence, inspection, and release policy".into(),
@@ -6488,6 +6675,20 @@ async fn execute_physical_strip_feeder_pickup(
     .await?;
     persist_pickup_gray_artifact(state, prepared.run.id, BARE_NOZZLE_ARTIFACT, &bare)?;
     artifact_names.push(BARE_NOZZLE_ARTIFACT.into());
+    let (source_before, source_before_pose) = capture_top_pocket_mean(
+        state,
+        prepared,
+        pocket_machine_mm,
+        pickup_profile.inspection_sample_count,
+    )
+    .await?;
+    persist_pickup_gray_artifact(
+        state,
+        prepared.run.id,
+        SOURCE_POCKET_BEFORE_ARTIFACT,
+        &source_before,
+    )?;
+    artifact_names.push(SOURCE_POCKET_BEFORE_ARTIFACT.into());
 
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
     let height_correction = prepared
@@ -6593,6 +6794,7 @@ async fn execute_physical_strip_feeder_pickup(
             release_surface_machine_mm: None,
             release_raw_values: Vec::new(),
             released: true,
+            return_verification: None,
             passed: false,
             artifact_names,
             findings,
@@ -6720,14 +6922,70 @@ async fn execute_physical_strip_feeder_pickup(
         )
         .await?
     };
-    lift_and_restore_after_pickup(state, prepared.lease_id).await?;
+    let return_verification =
+        if disposition == StripFeederPickupDisposition::ReturnedToPocket && released {
+            let (source_after, source_after_pose) = capture_top_pocket_mean(
+                state,
+                prepared,
+                pocket_machine_mm,
+                pickup_profile.inspection_sample_count,
+            )
+            .await?;
+            persist_pickup_gray_artifact(
+                state,
+                prepared.run.id,
+                SOURCE_POCKET_AFTER_ARTIFACT,
+                &source_after,
+            )?;
+            let registration = prepared.registration.clone();
+            let camera_model = prepared.top_camera_model.clone();
+            let verification = tokio::task::spawn_blocking(move || {
+                inspect_strip_feeder_pocket_return(
+                    &source_before,
+                    source_before_pose,
+                    &source_after,
+                    source_after_pose,
+                    &camera_model,
+                    &registration,
+                    pocket_machine_mm,
+                    POCKET_RETURN_INSPECTION_ARTIFACT,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            persist_pickup_rgb_artifact(
+                state,
+                prepared.run.id,
+                POCKET_RETURN_INSPECTION_ARTIFACT,
+                &verification.preview,
+            )?;
+            artifact_names.push(SOURCE_POCKET_AFTER_ARTIFACT.into());
+            artifact_names.push(POCKET_RETURN_INSPECTION_ARTIFACT.into());
+            Some(verification.report)
+        } else {
+            None
+        };
+    restore_level_visual_home(state, prepared.lease_id).await?;
     if !released {
         findings.push("vacuum release did not reach the calibrated off state".into());
     }
-    let passed =
-        vacuum_acquired && vacuum_held_after_transfer && inspection.report.passed && released;
+    if let Some(verification) = &return_verification {
+        findings.extend(verification.findings.clone());
+    }
+    let passed = vacuum_acquired
+        && vacuum_held_after_transfer
+        && inspection.report.passed
+        && released
+        && disposition == StripFeederPickupDisposition::ReturnedToPocket
+        && return_verification
+            .as_ref()
+            .is_some_and(|verification| verification.passed);
     if passed {
-        findings.push("pickup, transfer, bottom inspection, and release passed".into());
+        findings.push(
+            "pickup, transfer, bottom inspection, release, and top return verification passed"
+                .into(),
+        );
     }
     Ok(StripFeederPickupQualificationReport {
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
@@ -6748,6 +7006,7 @@ async fn execute_physical_strip_feeder_pickup(
         release_surface_machine_mm,
         release_raw_values,
         released,
+        return_verification,
         passed,
         artifact_names,
         findings,
@@ -6928,6 +7187,56 @@ async fn release_pickup_part(
     release_result
 }
 
+async fn capture_top_pocket_mean(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    pocket_machine_mm: [f64; 2],
+    sample_count: u32,
+) -> Result<(GrayFrame, Pose), String> {
+    let target = Pose {
+        x_mm: pocket_machine_mm[0],
+        y_mm: pocket_machine_mm[1],
+        z_mm: state.profile.safe_z_mm,
+        rotation_deg: state
+            .machine
+            .status()
+            .pose
+            .map_or(0.0, |pose| pose.rotation_deg),
+    };
+    let visual = state.profile.visual_homing.as_ref().unwrap();
+    let measured_pose =
+        jog_board_registration_target(state, prepared.lease_id, target, visual).await?;
+    if prepared.top_camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(prepared.lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let capture = capture_profiled_frames(
+        state,
+        &prepared.top_camera_profile,
+        &prepared.top_camera_path,
+        sample_count,
+    )
+    .await
+    .map_err(|error| error.message)
+    .and_then(|frames| mean_gray_frames(&frames));
+    let lights_off = if prepared.top_camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    match (capture, lights_off) {
+        (Ok(frame), Ok(())) => Ok((frame, measured_pose)),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(format!("top-camera light cleanup failed: {error}")),
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{error}; top-camera light cleanup also failed: {cleanup_error}"
+        )),
+    }
+}
+
 async fn capture_bottom_mean_with_lights(
     state: &AppState,
     lease_id: Uuid,
@@ -6998,6 +7307,18 @@ fn update_registration_after_pickup(
     registration
         .findings
         .retain(|finding| !finding.contains("pickup qualification"));
+    if let Some(inspection) = report
+        .inspection
+        .as_ref()
+        .filter(|inspection| inspection.passed)
+    {
+        registration.measured_part_size_mm = inspection
+            .width_mm
+            .zip(inspection.length_mm)
+            .map(|(width, length)| [width, length]);
+        registration.measured_part_rotation_deg = inspection.rotation_deg;
+        registration.measured_part_confidence = Some(inspection.confidence);
+    }
     if report.passed {
         registration.pickup_z_mm = report.pickup_nozzle_z_mm;
         let selected_pocket_reference =
@@ -7025,12 +7346,16 @@ fn update_registration_after_pickup(
         ) {
             (Some(part_key), Some(part_rotation_deg)) => {
                 let feeder_id = registration.active_feeder_id.unwrap_or_else(Uuid::new_v4);
-                let pocket_index = registration.selected_pocket_index.unwrap_or_default();
                 let remaining = registration
-                    .pocket_centers_machine_mm
-                    .len()
-                    .checked_sub(pocket_index as usize)
-                    .and_then(|value| u32::try_from(value).ok());
+                    .pockets
+                    .iter()
+                    .filter(|pocket| {
+                        pocket.status == StripFeederPocketStatus::Available
+                            && pocket.occupancy == StripPocketOccupancy::Occupied
+                    })
+                    .count()
+                    .try_into()
+                    .ok();
                 let first_pick = Pose {
                     x_mm: report.pocket_machine_mm[0],
                     y_mm: report.pocket_machine_mm[1],
@@ -7054,7 +7379,7 @@ fn update_registration_after_pickup(
                 registration.active_feeder_id = Some(feeder_id);
                 registration.status = StripFeederRegistrationStatus::Ready;
                 registration.findings.push(
-                    "pickup Z, vacuum hold, bottom inspection, release, and active indexing passed"
+                    "pickup Z, vacuum hold, bottom inspection, and verified pocket return passed"
                         .into(),
                 );
             }
@@ -20170,6 +20495,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             nozzle_id: "N1".into(),
+            pocket_index: 0,
             fallback_drop_surface_machine_mm: None,
             report: None,
             message: None,

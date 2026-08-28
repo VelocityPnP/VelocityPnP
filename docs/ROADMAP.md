@@ -89,7 +89,9 @@ The project is organized by measurable gates rather than calendar estimates.
   present/absent feed-position counts across compatible focused scans
 - [x] Add persistent vision-assisted strip setup through live pocket,
   bounded pickup Z, vacuum hold, bottom inspection, and release
-- [ ] Validate strip indexing and deterministic next-pocket advancement
+- [x] Add persistent per-pocket reservation, evidence-gated consumption,
+  empty-pocket skipping, retry limits, and restart recovery
+- [ ] Validate deterministic next-pocket advancement during physical job use
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
 - [ ] Add vacuum and bottom-vision feedback to the physical job executor

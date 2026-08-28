@@ -673,22 +673,46 @@ The runner lifts the part to level Z, transfers it to the exact bare-nozzle
 bottom-camera pose, and checks both retained vacuum and a frame-difference
 part outline. It then returns to the exact source head pose and releases at
 the detected pickup Z. A supplied fallback point is used only when the source
-return target is invalid. A daemon restart marks an incomplete run failed.
+return target is invalid. The top camera records the pocket before pickup and
+after release. A passed cycle requires occupied-pocket evidence in both views.
 The retained report includes pickup samples, held and release samples,
-bottom-camera measurements, disposition, findings, and three PNG artifacts.
+bottom-camera measurements, return evidence, disposition, and six PNG
+artifacts. Use `strip_feeder_return_preview()` to get the before/after return
+overlay from Python.
 
 Held-part inspection aligns the bare-nozzle reference within an 8 pixel bound
 before subtraction. It selects the brighter or darker foreground polarity
 from the nozzle-axis region. Closing joins a package body, and opening removes
-narrow nozzle reflections. A minimum filled-area gate rejects circular nozzle
-rings. The report uses the oriented foreground bounds for width, length,
-rotation, and center offset. In the overlay, green follows the measured pixel
-contour, cyan shows the oriented measurement box, and orange marks the nozzle
-axis.
+narrow nozzle reflections. An axis-support trim removes a narrow reflection
+that remains connected to a package edge. A minimum filled-area gate rejects
+circular nozzle rings. The report uses the oriented foreground bounds for
+width, length, rotation, and center offset. In the overlay, green follows the
+measured pixel contour, cyan shows the oriented measurement box, and orange
+marks the nozzle axis.
 
-A passed qualification stores pickup Z. It creates an active strip `Feeder`
-only when the draft also has a part key and orientation. Tape indexing remains
-a separate hardware gate.
+Replay two retained bottom-camera frames without machine motion:
+
+```bash
+cargo run --release -p velocitypnp-vision --example inspect_held_part -- \
+  BARE.png HELD.png OUTPUT.png CENTER_X CENTER_Y XX XY YX YY
+```
+
+The last four values are the calibrated bottom-camera millimeters-per-pixel
+matrix in row-major order. The command writes the inspection report to
+standard output and writes the annotated image to `OUTPUT.png`.
+
+A draft stores each feed position as available, empty, reserved, consumed, or
+in need of review. Reservation and settlement are atomic. Selection skips
+known empty and consumed pockets. A returned part becomes available only after
+top vision confirms it. Consumption requires vacuum acquisition, retained
+vacuum, and passed bottom vision. A failed operation can retry twice. A third
+failure or an uncertain release requires review. A daemon restart quarantines
+its reserved pocket.
+
+A passed qualification stores pickup Z and measured part width, length,
+rotation, and confidence. It creates an active strip `Feeder` only when the
+draft also has a part key and orientation. Passive strip advancement is a
+logical next-pocket operation; it does not move the tape.
 
 ### Automatic board registration
 

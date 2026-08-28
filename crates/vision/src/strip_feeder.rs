@@ -6,12 +6,13 @@ use opencv::imgproc;
 use std::f64::consts::PI;
 use velocitypnp_domain::{
     PlanarCameraModel, Pose, StripFeederLaneProposal, StripFeederLiveHoldoutReport,
-    StripFeederPocketObservation, StripFeederRegistration, StripFeederRejectedLattice,
-    StripPocketOccupancy, WorkspaceBoardCandidate,
+    StripFeederPocketObservation, StripFeederPocketReturnReport, StripFeederRegistration,
+    StripFeederRejectedLattice, StripPocketOccupancy, WorkspaceBoardCandidate,
 };
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v1";
+pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
 const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
@@ -57,6 +58,109 @@ pub struct StripFeederVisionArtifacts {
 pub struct StripFeederLiveHoldoutArtifacts {
     pub report: StripFeederLiveHoldoutReport,
     pub preview: RgbFrame,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripFeederPocketReturnArtifacts {
+    pub report: StripFeederPocketReturnReport,
+    pub preview: RgbFrame,
+}
+
+/// Checks the same pocket before pickup and after a return operation.
+#[allow(clippy::too_many_arguments)]
+pub fn inspect_strip_feeder_pocket_return(
+    before: &GrayFrame,
+    before_camera_pose: Pose,
+    after: &GrayFrame,
+    after_camera_pose: Pose,
+    camera_model: &PlanarCameraModel,
+    registration: &StripFeederRegistration,
+    pocket_machine_mm: [f64; 2],
+    artifact_name: &str,
+) -> Result<StripFeederPocketReturnArtifacts> {
+    ensure!(
+        camera_model.role == velocitypnp_domain::CameraRole::TopCamera,
+        "pocket return inspection requires a top-camera model"
+    );
+    ensure!(
+        before.width == after.width && before.height == after.height,
+        "pocket return frames changed dimensions"
+    );
+    let along = normalized(subtract(
+        registration.pick_centerline_machine_mm[1],
+        registration.pick_centerline_machine_mm[0],
+    ))
+    .ok_or_else(|| anyhow::anyhow!("pocket return centerline has no direction"))?;
+    let cross = [-along[1], along[0]];
+    let cross_span_mm = registration.tape_width_mm + 2.0 * LIVE_HOLDOUT_CROSS_MARGIN_MM;
+    let along_span_mm = (registration.tape_pitch_mm * 3.0).max(12.0);
+    let before_crop = rectify_live_tape_frames(
+        std::slice::from_ref(before),
+        &[before_camera_pose],
+        camera_model,
+        pocket_machine_mm,
+        cross,
+        along,
+        cross_span_mm,
+        along_span_mm,
+    )?;
+    let after_crop = rectify_live_tape_frames(
+        std::slice::from_ref(after),
+        &[after_camera_pose],
+        camera_model,
+        pocket_machine_mm,
+        cross,
+        along,
+        cross_span_mm,
+        along_span_mm,
+    )?;
+    let center_cross_mm = cross_span_mm * 0.5;
+    let center_along_mm = along_span_mm * 0.5;
+    let before_confidence = pocket_occupancy_evidence(
+        &before_crop,
+        center_cross_mm,
+        center_along_mm,
+        cross_span_mm,
+        along_span_mm,
+        registration.tape_pitch_mm,
+    );
+    let after_confidence = pocket_occupancy_evidence(
+        &after_crop,
+        center_cross_mm,
+        center_along_mm,
+        cross_span_mm,
+        along_span_mm,
+        registration.tape_pitch_mm,
+    );
+    let before_occupancy = pocket_occupancy_from_evidence(before_confidence);
+    let after_occupancy = pocket_occupancy_from_evidence(after_confidence);
+    let passed = before_occupancy == StripPocketOccupancy::Occupied
+        && after_occupancy == StripPocketOccupancy::Occupied;
+    let mut findings = Vec::new();
+    if before_occupancy != StripPocketOccupancy::Occupied {
+        findings.push("the source pocket was not occupied before pickup".into());
+    }
+    if after_occupancy != StripPocketOccupancy::Occupied {
+        findings.push("the source pocket was not occupied after release".into());
+    }
+    if passed {
+        findings.push("top vision confirmed the returned part in its source pocket".into());
+    }
+    let preview =
+        render_pocket_return_preview(&before_crop, &after_crop, before_occupancy, after_occupancy);
+    Ok(StripFeederPocketReturnArtifacts {
+        report: StripFeederPocketReturnReport {
+            algorithm_version: STRIP_FEEDER_POCKET_RETURN_ALGORITHM.into(),
+            before_occupancy,
+            before_confidence,
+            after_occupancy,
+            after_confidence,
+            passed,
+            artifact_name: artifact_name.into(),
+            findings,
+        },
+        preview,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -421,13 +525,7 @@ pub fn analyze_live_strip_feeder_holdout(
         .iter()
         .max_by(|first, second| first.2.total_cmp(&second.2));
     let occupancy_confidence = selected.map_or(0.0, |item| item.2);
-    let occupancy = if occupancy_confidence >= 0.42 {
-        StripPocketOccupancy::Occupied
-    } else if occupancy_confidence <= 0.16 {
-        StripPocketOccupancy::Empty
-    } else {
-        StripPocketOccupancy::Uncertain
-    };
+    let occupancy = pocket_occupancy_from_evidence(occupancy_confidence);
     let selected_index = selected.map_or(0, |item| item.0);
     let selected_along_mm = selected.map_or(center_along_mm + along_delta_mm, |item| item.1);
     let selected_predicted = add(
@@ -774,6 +872,65 @@ fn pocket_occupancy_evidence(
         + 0.35 * (contrast / 30.0).clamp(0.0, 1.0)
         + 0.25 * (edge / 24.0).clamp(0.0, 1.0))
     .clamp(0.0, 1.0)
+}
+
+fn pocket_occupancy_from_evidence(confidence: f64) -> StripPocketOccupancy {
+    if confidence >= 0.42 {
+        StripPocketOccupancy::Occupied
+    } else if confidence <= 0.16 {
+        StripPocketOccupancy::Empty
+    } else {
+        StripPocketOccupancy::Uncertain
+    }
+}
+
+fn render_pocket_return_preview(
+    before: &GrayFrame,
+    after: &GrayFrame,
+    before_occupancy: StripPocketOccupancy,
+    after_occupancy: StripPocketOccupancy,
+) -> RgbFrame {
+    let width = before.width + after.width;
+    let height = before.height.max(after.height);
+    let mut frame = RgbFrame {
+        width,
+        height,
+        pixels: vec![0; (width * height * 3) as usize],
+    };
+    for (offset_x, source) in [(0, before), (before.width, after)] {
+        for y in 0..source.height {
+            for x in 0..source.width {
+                let luma = source.pixels[(y * source.width + x) as usize];
+                let destination = ((y * width + offset_x + x) * 3) as usize;
+                frame.pixels[destination..destination + 3].fill(luma);
+            }
+        }
+    }
+    let color = |occupancy| match occupancy {
+        StripPocketOccupancy::Occupied => [50, 235, 120],
+        StripPocketOccupancy::Empty => [245, 70, 65],
+        StripPocketOccupancy::Uncertain => [255, 190, 40],
+    };
+    let radius = f64::from(before.width.min(before.height)) * 0.10;
+    draw_circle(
+        &mut frame,
+        [
+            f64::from(before.width) * 0.5,
+            f64::from(before.height) * 0.5,
+        ],
+        radius,
+        color(before_occupancy),
+    );
+    draw_circle(
+        &mut frame,
+        [
+            f64::from(before.width) + f64::from(after.width) * 0.5,
+            f64::from(after.height) * 0.5,
+        ],
+        radius,
+        color(after_occupancy),
+    );
+    frame
 }
 
 fn render_live_holdout_preview(
@@ -3283,9 +3440,14 @@ mod tests {
             pocket_centers_machine_mm: (0..11)
                 .map(|index| [112.0, 82.0 - f64::from(index) * 2.0])
                 .collect(),
+            pockets: Vec::new(),
             selected_pocket_machine_mm: None,
             selected_pocket_index: None,
             pickup_z_mm: None,
+            surveyed_part_size_mm: None,
+            measured_part_size_mm: None,
+            measured_part_rotation_deg: None,
+            measured_part_confidence: None,
             active_feeder_id: None,
             latest_live_holdout_id: None,
             latest_pickup_qualification_id: None,
@@ -3300,7 +3462,7 @@ mod tests {
             rotation_deg: 0.0,
         };
         let result = analyze_live_strip_feeder_holdout(
-            &[frame.clone(), frame.clone(), frame],
+            &[frame.clone(), frame.clone(), frame.clone()],
             &[pose, pose, pose],
             &model,
             &registration,
@@ -3315,6 +3477,43 @@ mod tests {
         assert!(result.report.correction_magnitude_mm < 0.15);
         assert_eq!(result.preview.width, 350);
         assert_eq!(result.preview.height, 500);
+
+        let returned = inspect_strip_feeder_pocket_return(
+            &frame,
+            pose,
+            &frame,
+            pose,
+            &model,
+            &registration,
+            [112.0, 72.0],
+            "return.png",
+        )
+        .unwrap();
+        assert!(returned.report.passed, "{:?}", returned.report.findings);
+        assert_eq!(
+            returned.report.after_occupancy,
+            StripPocketOccupancy::Occupied
+        );
+        assert_eq!(returned.preview.width, 700);
+
+        let empty = GrayFrame {
+            width,
+            height,
+            pixels: vec![105; (width * height) as usize],
+        };
+        let missing = inspect_strip_feeder_pocket_return(
+            &frame,
+            pose,
+            &empty,
+            pose,
+            &model,
+            &registration,
+            [112.0, 72.0],
+            "return.png",
+        )
+        .unwrap();
+        assert!(!missing.report.passed);
+        assert_eq!(missing.report.after_occupancy, StripPocketOccupancy::Empty);
     }
 
     #[test]

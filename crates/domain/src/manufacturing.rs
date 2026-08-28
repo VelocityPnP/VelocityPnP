@@ -223,6 +223,51 @@ pub enum StripPocketOccupancy {
     Uncertain,
 }
 
+/// Persistent operational state for one strip-feeder pocket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StripFeederPocketStatus {
+    Available,
+    Empty,
+    Reserved,
+    Consumed,
+    NeedsReview,
+}
+
+/// Last completed action for one strip-feeder pocket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StripFeederPocketOutcome {
+    Returned,
+    Consumed,
+    RetryableFailure,
+    ReleaseUncertain,
+    Interrupted,
+}
+
+/// Persistent evidence and reservation state for one feed position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederPocketState {
+    pub pocket_index: u32,
+    pub nominal_center_machine_mm: [f64; 2],
+    #[serde(default)]
+    pub measured_center_machine_mm: Option<[f64; 2]>,
+    pub occupancy: StripPocketOccupancy,
+    pub occupancy_confidence: f64,
+    pub status: StripFeederPocketStatus,
+    #[serde(default)]
+    pub attempt_count: u32,
+    #[serde(default)]
+    pub consecutive_failure_count: u32,
+    #[serde(default)]
+    pub reservation_id: Option<Uuid>,
+    #[serde(default)]
+    pub last_qualification_id: Option<Uuid>,
+    #[serde(default)]
+    pub last_outcome: Option<StripFeederPocketOutcome>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// One fresh top-camera check of a retained strip-feeder draft.
 ///
 /// The holdout measures local tape position and selects a visible occupied
@@ -299,6 +344,20 @@ pub struct HeldPartInspectionReport {
     pub findings: Vec<String>,
 }
 
+/// Top-camera evidence that a returned part is present in its source pocket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederPocketReturnReport {
+    pub algorithm_version: String,
+    pub before_occupancy: StripPocketOccupancy,
+    pub before_confidence: f64,
+    pub after_occupancy: StripPocketOccupancy,
+    pub after_confidence: f64,
+    pub passed: bool,
+    pub artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// Evidence from one bounded pickup, bottom inspection, and release cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StripFeederPickupQualificationReport {
@@ -320,6 +379,8 @@ pub struct StripFeederPickupQualificationReport {
     pub release_surface_machine_mm: Option<[f64; 2]>,
     pub release_raw_values: Vec<i64>,
     pub released: bool,
+    #[serde(default)]
+    pub return_verification: Option<StripFeederPocketReturnReport>,
     pub passed: bool,
     pub artifact_names: Vec<String>,
     #[serde(default)]
@@ -338,6 +399,8 @@ pub struct StripFeederPickupQualificationRun {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub nozzle_id: String,
+    #[serde(default)]
+    pub pocket_index: u32,
     #[serde(default)]
     pub fallback_drop_surface_machine_mm: Option<[f64; 2]>,
     #[serde(default)]
@@ -372,11 +435,21 @@ pub struct StripFeederRegistration {
     pub pick_centerline_machine_mm: [[f64; 2]; 2],
     pub pocket_centers_machine_mm: Vec<[f64; 2]>,
     #[serde(default)]
+    pub pockets: Vec<StripFeederPocketState>,
+    #[serde(default)]
     pub selected_pocket_machine_mm: Option<[f64; 2]>,
     #[serde(default)]
     pub selected_pocket_index: Option<u32>,
     #[serde(default)]
     pub pickup_z_mm: Option<f64>,
+    #[serde(default)]
+    pub surveyed_part_size_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub measured_part_size_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub measured_part_rotation_deg: Option<f64>,
+    #[serde(default)]
+    pub measured_part_confidence: Option<f64>,
     #[serde(default)]
     pub active_feeder_id: Option<Uuid>,
     #[serde(default)]
@@ -387,6 +460,73 @@ pub struct StripFeederRegistration {
     pub vision_review_required: bool,
     #[serde(default)]
     pub findings: Vec<String>,
+}
+
+impl StripFeederRegistration {
+    /// Adds conservative pocket state when reading a registration from an
+    /// older database document.
+    pub fn ensure_pocket_state(&mut self) {
+        if !self.pockets.is_empty() {
+            return;
+        }
+        let now = Utc::now();
+        self.pockets = self
+            .pocket_centers_machine_mm
+            .iter()
+            .enumerate()
+            .filter_map(|(index, center)| {
+                let pocket_index = u32::try_from(index).ok()?;
+                let selected = self.selected_pocket_index == Some(pocket_index);
+                Some(StripFeederPocketState {
+                    pocket_index,
+                    nominal_center_machine_mm: *center,
+                    measured_center_machine_mm: selected
+                        .then_some(self.selected_pocket_machine_mm)
+                        .flatten(),
+                    occupancy: if selected {
+                        StripPocketOccupancy::Occupied
+                    } else {
+                        StripPocketOccupancy::Uncertain
+                    },
+                    occupancy_confidence: if selected { 1.0 } else { 0.0 },
+                    status: if selected {
+                        StripFeederPocketStatus::Available
+                    } else {
+                        StripFeederPocketStatus::NeedsReview
+                    },
+                    attempt_count: 0,
+                    consecutive_failure_count: 0,
+                    reservation_id: None,
+                    last_qualification_id: None,
+                    last_outcome: None,
+                    updated_at: now,
+                })
+            })
+            .collect();
+    }
+
+    pub fn next_available_pocket(
+        &self,
+        preferred_index: Option<u32>,
+    ) -> Option<&StripFeederPocketState> {
+        preferred_index
+            .and_then(|index| {
+                self.pockets.iter().find(|pocket| {
+                    pocket.pocket_index == index
+                        && pocket.status == StripFeederPocketStatus::Available
+                        && pocket.occupancy == StripPocketOccupancy::Occupied
+                })
+            })
+            .or_else(|| {
+                self.pockets
+                    .iter()
+                    .filter(|pocket| {
+                        pocket.status == StripFeederPocketStatus::Available
+                            && pocket.occupancy == StripPocketOccupancy::Occupied
+                    })
+                    .min_by_key(|pocket| pocket.pocket_index)
+            })
+    }
 }
 
 impl Feeder {
