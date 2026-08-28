@@ -409,6 +409,50 @@ pub struct HeldPartInspectionReport {
     pub findings: Vec<String>,
 }
 
+/// Top-camera evidence for one placed package at its planned board pose.
+///
+/// This report is separate from held-part inspection. The detector matches a
+/// known package body and does not infer the pose from package markings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacedPartInspectionReport {
+    pub algorithm_version: String,
+    pub detected: bool,
+    #[serde(default)]
+    pub expected_center_x_px: f64,
+    #[serde(default)]
+    pub expected_center_y_px: f64,
+    #[serde(default)]
+    pub expected_width_mm: f64,
+    #[serde(default)]
+    pub expected_length_mm: f64,
+    #[serde(default)]
+    pub expected_rotation_deg: f64,
+    pub center_x_px: Option<f64>,
+    pub center_y_px: Option<f64>,
+    #[serde(default)]
+    pub offset_x_mm: Option<f64>,
+    #[serde(default)]
+    pub offset_y_mm: Option<f64>,
+    #[serde(default)]
+    pub offset_mm: Option<f64>,
+    pub width_mm: Option<f64>,
+    pub length_mm: Option<f64>,
+    pub rotation_deg: Option<f64>,
+    #[serde(default)]
+    pub rotation_error_deg: Option<f64>,
+    pub changed_pixel_count: u32,
+    pub mean_difference_luma: f64,
+    #[serde(default)]
+    pub body_change_fraction: f64,
+    #[serde(default)]
+    pub change_containment: f64,
+    pub confidence: f64,
+    pub passed: bool,
+    pub artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// One retained bottom-camera observation during held-part alignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeldPartAlignmentObservation {
@@ -729,7 +773,7 @@ pub struct PlacementExecutionReport {
     #[serde(default)]
     pub pickup_report: Option<StripFeederPickupQualificationReport>,
     #[serde(default)]
-    pub top_inspection: Option<HeldPartInspectionReport>,
+    pub top_inspection: Option<PlacedPartInspectionReport>,
     #[serde(default)]
     pub artifact_names: Vec<String>,
     pub corrected_move_count: u32,

@@ -254,7 +254,7 @@ pub fn inspect_held_part_difference(
     Ok(HeldPartInspectionArtifacts { report, preview })
 }
 
-fn estimate_bare_alignment(
+pub(crate) fn estimate_bare_alignment(
     bare: &GrayFrame,
     held: &GrayFrame,
     frame_center_px: [f64; 2],
@@ -384,7 +384,7 @@ fn aligned_foreground_difference(
     (difference, polarity)
 }
 
-fn bilinear_luma(frame: &GrayFrame, x: f64, y: f64) -> Option<f64> {
+pub(crate) fn bilinear_luma(frame: &GrayFrame, x: f64, y: f64) -> Option<f64> {
     if x < 0.0
         || y < 0.0
         || x > f64::from(frame.width.saturating_sub(1))
@@ -699,7 +699,7 @@ fn component_oriented_geometry(
     }
 }
 
-fn grayscale_preview(frame: &GrayFrame) -> RgbFrame {
+pub(crate) fn grayscale_preview(frame: &GrayFrame) -> RgbFrame {
     let mut pixels = Vec::with_capacity(frame.pixels.len() * 3);
     for luma in &frame.pixels {
         pixels.extend_from_slice(&[*luma, *luma, *luma]);
@@ -711,14 +711,14 @@ fn grayscale_preview(frame: &GrayFrame) -> RgbFrame {
     }
 }
 
-fn draw_cross(frame: &mut RgbFrame, x: i32, y: i32, color: [u8; 3], radius: i32) {
+pub(crate) fn draw_cross(frame: &mut RgbFrame, x: i32, y: i32, color: [u8; 3], radius: i32) {
     for offset in -radius..=radius {
         set_pixel(frame, x + offset, y, color);
         set_pixel(frame, x, y + offset, color);
     }
 }
 
-fn draw_polygon(frame: &mut RgbFrame, points: &[[f64; 2]], color: [u8; 3]) {
+pub(crate) fn draw_polygon(frame: &mut RgbFrame, points: &[[f64; 2]], color: [u8; 3]) {
     for index in 0..points.len() {
         draw_line(
             frame,

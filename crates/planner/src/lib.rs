@@ -34,6 +34,9 @@ pub struct PlanStep {
     pub part_key: String,
     pub feeder_id: Uuid,
     pub nozzle_id: String,
+    pub part_height_mm: f64,
+    pub body_width_mm: f64,
+    pub body_length_mm: f64,
     pub feeder_pick: Pose,
     pub board_place: Pose,
     pub safe_z_mm: f64,
@@ -118,6 +121,27 @@ pub fn plan_job(
                 errors.push(format!("{} has no valid part height", placement.reference));
                 continue;
             };
+            let body_width_mm = parts
+                .get(&part_key)
+                .and_then(|part| part.body_width_mm)
+                .filter(|width| width.is_finite() && *width > 0.0);
+            let body_length_mm = parts
+                .get(&part_key)
+                .and_then(|part| part.body_length_mm)
+                .filter(|length| length.is_finite() && *length > 0.0);
+            let (Some(body_width_mm), Some(body_length_mm)) = (body_width_mm, body_length_mm)
+            else {
+                errors.push(format!(
+                    "{} has no valid package body dimensions",
+                    placement.reference
+                ));
+                continue;
+            };
+            let (body_width_mm, body_length_mm) = if body_width_mm <= body_length_mm {
+                (body_width_mm, body_length_mm)
+            } else {
+                (body_length_mm, body_width_mm)
+            };
             let nozzle_id = parts
                 .get(&part_key)
                 .and_then(|part| select_compatible_nozzle(part, profile))
@@ -153,6 +177,9 @@ pub fn plan_job(
                 part_key,
                 feeder_id: feeder.id(),
                 nozzle_id,
+                part_height_mm: height_mm,
+                body_width_mm,
+                body_length_mm,
                 feeder_pick,
                 board_place,
                 safe_z_mm: profile.safe_z_mm,

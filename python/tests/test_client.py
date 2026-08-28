@@ -1184,6 +1184,13 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(client.placement_execution("execution"), execution)
         send.assert_called_once_with("GET", "/placement-executions/execution")
 
+        with patch.object(client, "_request", return_value=execution) as send:
+            self.assertEqual(client.reanalyze_placement("execution"), execution)
+        send.assert_called_once_with(
+            "POST",
+            "/placement-executions/execution/reanalyze-placement",
+        )
+
     def test_part_library_endpoints(self):
         client = Client(timeout=1)
         with patch.object(

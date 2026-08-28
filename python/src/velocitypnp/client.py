@@ -1517,6 +1517,15 @@ class Client:
     ) -> dict[str, Any]:
         return self._request("GET", f"/placement-executions/{execution_id}")
 
+    def reanalyze_placement(
+        self, execution_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        """Recheck retained board images without machine motion."""
+        return self._request(
+            "POST",
+            f"/placement-executions/{execution_id}/reanalyze-placement",
+        )
+
     def inspections(self) -> list[dict[str, Any]]:
         return self._request("GET", "/inspections")["inspections"]
 

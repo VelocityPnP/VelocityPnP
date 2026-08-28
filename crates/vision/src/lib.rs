@@ -5,6 +5,7 @@
 mod board_registration;
 mod held_part;
 mod opencv_backend;
+mod placed_part;
 mod strip_feeder;
 mod strip_feeder_inventory;
 mod workspace_board_discovery;
@@ -33,6 +34,9 @@ pub use held_part::{
     inspect_held_part_difference, HeldPartInspectionArtifacts, HELD_PART_INSPECTION_ALGORITHM,
 };
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
+pub use placed_part::{
+    inspect_placed_part, PlacedPartInspectionArtifacts, PLACED_PART_INSPECTION_ALGORITHM,
+};
 pub use strip_feeder::{
     analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate,
     inspect_strip_feeder_pocket_return, StripFeederLiveHoldoutArtifacts,

@@ -796,11 +796,20 @@ pocket-return evidence. Set a job's `placement_references` list to run a
 deliberate subset of board parts.
 
 The persistent run records preflight, live pickup, bottom alignment, calibrated
-placement motion, bounded release verification, and top inspection. Physical
-success consumes the reserved feeder pocket only after release evidence. A
-failure before confirmed release tries to return the held part to its source
-pocket and quarantines the reservation. The simulator does not consume a
-pocket and does not claim live camera evidence.
+placement motion, bounded release verification, and top inspection. Top
+inspection registers the retained before and after board views. It then matches
+the part-library body dimensions near the planned pose and angle. Package text
+can provide change evidence, but it cannot define the detected body. Use
+`POST /placement-executions/EXECUTION_UUID/reanalyze-placement` or the Python
+client's `reanalyze_placement()` method to apply the current detector to saved
+evidence without machine motion.
+
+Physical success consumes the reserved feeder pocket only after release
+evidence. A failure before confirmed release tries to return the held part to
+its source pocket and quarantines the reservation. The simulator does not
+consume a pocket and does not claim live camera evidence. Job preflight requires
+part height, body width, and body length. The planned component-center Z is the
+measured board surface plus the nominal part height.
 
 ### Automatic board registration
 

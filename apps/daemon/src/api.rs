@@ -75,7 +75,7 @@ use velocitypnp_vision::{
     detect_camera_target, detect_installed_plate_hole, discover_workspace_objects, encode_gray_png,
     encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
     fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
-    inspect_held_part_difference, inspect_strip_feeder_pocket_return,
+    inspect_held_part_difference, inspect_placed_part, inspect_strip_feeder_pocket_return,
     interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
@@ -107,6 +107,7 @@ const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
 const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
+const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 8.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
 const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v4";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v1";
@@ -832,6 +833,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/placement-executions/{id}",
             get(get_placement_execution),
+        )
+        .route(
+            "/api/v1/placement-executions/{id}/reanalyze-placement",
+            post(reanalyze_placement_execution),
         )
         .route(
             "/api/v1/placement-executions/{id}/artifacts/{name}",
@@ -21146,7 +21151,10 @@ async fn execute_physical_guarded_placement(
             prepared.top_camera_model.center_y_px,
         )
         .ok_or_else(|| "top-camera placement mapping is invalid".to_string())?;
-        let top_inspection = inspect_held_part_difference(
+        let placement_center_tolerance_mm = (0.5 * step.body_width_mm)
+            .max(0.25)
+            .min(pickup.maximum_part_offset_mm);
+        let top_inspection = inspect_placed_part(
             &board_before,
             &board_after,
             [
@@ -21154,9 +21162,11 @@ async fn execute_physical_guarded_placement(
                 prepared.top_camera_model.center_y_px,
             ],
             top_mapping,
-            pickup.maximum_part_offset_mm,
-            pickup.minimum_part_size_mm,
-            pickup.maximum_part_size_mm,
+            step.body_width_mm,
+            step.body_length_mm,
+            step.board_place.rotation_deg,
+            placement_center_tolerance_mm,
+            MAX_PLACED_PART_ROTATION_ERROR_DEG,
             BOARD_PLACEMENT_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
@@ -21899,6 +21909,152 @@ async fn get_placement_execution(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("placement execution not found"))
+}
+
+async fn reanalyze_placement_execution(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<PlacementExecutionRun>> {
+    let mut run = state
+        .store
+        .get_placement_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement execution not found"))?;
+    if matches!(
+        run.status,
+        OperationStatus::Pending | OperationStatus::Running
+    ) {
+        return Err(ApiError::bad_request("placement evidence is not complete"));
+    }
+    let report = run
+        .report
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("placement has no retained report"))?;
+    if report.simulated {
+        return Err(ApiError::bad_request(
+            "simulated placement has no retained camera evidence",
+        ));
+    }
+    let part = state
+        .store
+        .list_parts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|part| part.key == report.part_key)
+        .ok_or_else(|| ApiError::bad_request("placement part is not in the part library"))?;
+    let body_width_mm = part
+        .body_width_mm
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| ApiError::bad_request("placement part has no valid body width"))?;
+    let body_length_mm = part
+        .body_length_mm
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| ApiError::bad_request("placement part has no valid body length"))?;
+    let (body_width_mm, body_length_mm) = if body_width_mm <= body_length_mm {
+        (body_width_mm, body_length_mm)
+    } else {
+        (body_length_mm, body_width_mm)
+    };
+    let load_frame = |name: &str| -> ApiResult<GrayFrame> {
+        let (media_type, data) = state
+            .store
+            .get_placement_execution_artifact(id, name)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found(format!("placement artifact {name} not found")))?;
+        if media_type != "image/png" {
+            return Err(ApiError::bad_request(format!(
+                "placement artifact {name} is not a PNG"
+            )));
+        }
+        decode_gray_png(&data).map_err(ApiError::internal)
+    };
+    let before = load_frame(BOARD_PLACEMENT_BEFORE_ARTIFACT)?;
+    let after = load_frame(BOARD_PLACEMENT_AFTER_ARTIFACT)?;
+    let (_, top_camera_model) = load_workspace_camera_model(&state, run.calibration_id)?;
+    let expected_center_px = [top_camera_model.center_x_px, top_camera_model.center_y_px];
+    let top_mapping = local_planar_camera_mapping(
+        &top_camera_model,
+        expected_center_px[0],
+        expected_center_px[1],
+    )
+    .ok_or_else(|| ApiError::bad_request("top-camera placement mapping is invalid"))?;
+    let pickup_center_offset_mm = state
+        .profile
+        .strip_feeder_pickup
+        .as_ref()
+        .map(|profile| profile.maximum_part_offset_mm)
+        .unwrap_or(1.0);
+    let maximum_center_offset_mm = (0.5 * body_width_mm).max(0.25).min(pickup_center_offset_mm);
+    let inspection = tokio::task::spawn_blocking(move || {
+        inspect_placed_part(
+            &before,
+            &after,
+            expected_center_px,
+            top_mapping,
+            body_width_mm,
+            body_length_mm,
+            report.board_place.rotation_deg,
+            maximum_center_offset_mm,
+            MAX_PLACED_PART_ROTATION_ERROR_DEG,
+            BOARD_PLACEMENT_INSPECTION_ARTIFACT,
+        )
+        .map(|inspection| (report, inspection))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    let (mut report, inspection) = inspection;
+    persist_placement_rgb_artifact(
+        &state,
+        id,
+        BOARD_PLACEMENT_INSPECTION_ARTIFACT,
+        &inspection.preview,
+    )
+    .map_err(ApiError::internal)?;
+    report.top_inspection = Some(inspection.report.clone());
+    if let Some(stage) = report
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage == PlacementExecutionStage::TopInspection)
+    {
+        stage.passed = inspection.report.passed;
+        stage.message = if inspection.report.passed {
+            "package-aware top vision confirmed the placed component".into()
+        } else {
+            "package-aware top vision did not confirm the placed component".into()
+        };
+    }
+    report
+        .findings
+        .retain(|finding| !finding.contains("retained package-aware placement reanalysis"));
+    report.findings.push(if inspection.report.passed {
+        "retained package-aware placement reanalysis passed".into()
+    } else {
+        "retained package-aware placement reanalysis failed".into()
+    });
+    report.passed = inspection.report.passed
+        && report
+            .stages
+            .iter()
+            .filter(|stage| stage.stage != PlacementExecutionStage::Complete)
+            .all(|stage| stage.passed);
+    run.status = if report.passed {
+        OperationStatus::Succeeded
+    } else {
+        OperationStatus::Failed
+    };
+    run.message = Some(if report.passed {
+        "Retained package-aware placement reanalysis passed".into()
+    } else {
+        "Retained package-aware placement reanalysis failed".into()
+    });
+    run.report = Some(report);
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_placement_execution(&run)
+        .map_err(ApiError::internal)?;
+    Ok(Json(run))
 }
 
 async fn get_placement_execution_artifact(
@@ -23059,6 +23215,9 @@ mod tests {
             part_key: "R_0603:10k".into(),
             feeder_id: Uuid::new_v4(),
             nozzle_id: "N1".into(),
+            part_height_mm: 0.55,
+            body_width_mm: 0.8,
+            body_length_mm: 1.6,
             feeder_pick: Pose {
                 x_mm: 100.0,
                 y_mm: 100.0,
