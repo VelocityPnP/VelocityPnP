@@ -21325,7 +21325,7 @@ async fn release_part_at_board_and_verify(
             .machine
             .jog(
                 lease_id,
-                acquired.bottom_pose.into(),
+                translation_only_jog_target(acquired.bottom_pose),
                 bottom.feed_mm_per_min,
             )
             .await
@@ -21406,6 +21406,15 @@ async fn release_part_at_board_and_verify(
         },
         corrected_move_count,
     })
+}
+
+fn translation_only_jog_target(pose: Pose) -> JogTarget {
+    JogTarget {
+        x_mm: pose.x_mm,
+        y_mm: pose.y_mm,
+        z_mm: pose.z_mm,
+        rotation_deg: None,
+    }
 }
 
 async fn acquire_physical_placement_part(
@@ -25390,6 +25399,34 @@ mod tests {
         assert!(!nozzle_release_attempt_passed(false, false));
         assert!(!nozzle_release_attempt_passed(true, true));
         assert!(!nozzle_release_attempt_passed(false, true));
+    }
+
+    #[test]
+    fn bottom_release_inspection_preserves_the_nozzle_angle() {
+        let target = translation_only_jog_target(Pose {
+            x_mm: 242.5,
+            y_mm: 215.6,
+            z_mm: 31.5,
+            rotation_deg: 726.36,
+        });
+
+        assert_eq!(target.rotation_deg, None);
+        assert_eq!(target.x_mm, 242.5);
+        assert_eq!(target.y_mm, 215.6);
+        assert_eq!(target.z_mm, 31.5);
+    }
+
+    #[test]
+    fn attached_profile_allows_a_full_symmetric_package_axis_turn() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let maximum = profile
+            .strip_feeder_pickup
+            .as_ref()
+            .unwrap()
+            .alignment_max_rotation_correction_deg;
+
+        assert_eq!(maximum, 90.0);
     }
 
     #[test]

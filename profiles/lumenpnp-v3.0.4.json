@@ -189,7 +189,7 @@
     "alignment_max_iterations": 2,
     "alignment_translation_tolerance_mm": 0.10,
     "alignment_rotation_tolerance_deg": 1.0,
-    "alignment_max_rotation_correction_deg": 30.0
+    "alignment_max_rotation_correction_deg": 90.0
   },
   "local_xy_direction_response": {
     "approach_distances_mm": [1.0, 5.0],
