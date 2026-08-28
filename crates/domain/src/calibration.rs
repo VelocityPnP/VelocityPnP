@@ -1290,7 +1290,7 @@ pub struct CameraRayTransferReport {
     pub passed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VacuumProbeSample {
     pub nozzle_z_mm: f64,
     pub controller_z_mm: f64,

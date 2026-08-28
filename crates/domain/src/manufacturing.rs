@@ -383,6 +383,7 @@ pub struct StripFeederLiveHoldoutRun {
 pub enum StripFeederPickupDisposition {
     ReturnedToPocket,
     DroppedAtFallback,
+    PlacedOnBoard,
     NotReleased,
 }
 
@@ -485,7 +486,7 @@ pub struct StripFeederPocketReturnReport {
 }
 
 /// Evidence from one bounded pickup, bottom inspection, and release cycle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederPickupQualificationReport {
     pub algorithm_version: String,
     pub nozzle_id: String,
@@ -685,6 +686,9 @@ pub struct Job {
     pub id: Uuid,
     pub name: String,
     pub boards: Vec<BoardInstance>,
+    /// Limits a job to named placements when it is not empty.
+    #[serde(default)]
+    pub placement_references: Vec<String>,
     pub status: String,
 }
 
@@ -720,6 +724,14 @@ pub struct PlacementExecutionReport {
     pub nozzle_id: String,
     pub feeder_pick: Pose,
     pub board_place: Pose,
+    #[serde(default)]
+    pub pocket_index: Option<u32>,
+    #[serde(default)]
+    pub pickup_report: Option<StripFeederPickupQualificationReport>,
+    #[serde(default)]
+    pub top_inspection: Option<HeldPartInspectionReport>,
+    #[serde(default)]
+    pub artifact_names: Vec<String>,
     pub corrected_move_count: u32,
     pub passed: bool,
     #[serde(default)]

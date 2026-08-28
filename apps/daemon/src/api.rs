@@ -38,7 +38,7 @@ use velocitypnp_domain::{
     LocalXyAxisEstimate, LocalXyCompensationHoldout, LocalXyDirectionResponseReport,
     LocalXyDirectionResponseSample, MachineProfile, MachineState, NozzleHeightModel,
     NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample,
-    Operation, OperationStatus, PlacementExecutionReport, PlacementExecutionRun,
+    Operation, OperationStatus, Part, PlacementExecutionReport, PlacementExecutionRun,
     PlacementExecutionStage, PlacementExecutionStageReport, PlanarCameraCalibrationReport,
     PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
     StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
@@ -130,6 +130,9 @@ const POST_RELEASE_NOZZLE_INSPECTION_ARTIFACT: &str = "post-release-nozzle-inspe
 const SOURCE_POCKET_BEFORE_ARTIFACT: &str = "source-pocket-before.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
+const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
+const BOARD_PLACEMENT_AFTER_ARTIFACT: &str = "board-placement-after.png";
+const BOARD_PLACEMENT_INSPECTION_ARTIFACT: &str = "board-placement-inspection.png";
 const REUSED_TOP_PLANAR_REPORT: &str = "reused_top_camera_planar_report";
 const REUSED_BOTTOM_PLANAR_REPORT: &str = "reused_bottom_camera_planar_report";
 const REUSED_INSTALLED_GEOMETRY_SOURCE_RUN: &str = "reused_installed_geometry_source_run";
@@ -781,6 +784,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/boards/{id}", get(get_board))
         .route("/api/v1/import/openpnp", post(import_openpnp_config))
         .route("/api/v1/feeders", get(list_feeders).post(put_feeder))
+        .route("/api/v1/parts", get(list_parts).post(put_part))
+        .route("/api/v1/parts/{id}", get(get_part))
         .route(
             "/api/v1/strip-feeder-registrations",
             get(list_strip_feeder_registrations).post(create_strip_feeder_registration),
@@ -827,6 +832,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/placement-executions/{id}",
             get(get_placement_execution),
+        )
+        .route(
+            "/api/v1/placement-executions/{id}/artifacts/{name}",
+            get(get_placement_execution_artifact),
         )
         .route(
             "/api/v1/inspections",
@@ -6233,6 +6242,13 @@ struct PreparedStripFeederPickup {
     top_camera_model: PlanarCameraModel,
     top_camera_profile: CameraProfile,
     top_camera_path: String,
+    artifact_target: TransferArtifactTarget,
+}
+
+#[derive(Clone, Copy)]
+enum TransferArtifactTarget {
+    PickupQualification(Uuid),
+    PlacementExecution(Uuid),
 }
 
 async fn start_strip_feeder_pickup_qualification(
@@ -6516,6 +6532,7 @@ async fn start_strip_feeder_pickup_qualification(
         operation: operation.clone(),
     };
     let task_state = state.clone();
+    let artifact_target = TransferArtifactTarget::PickupQualification(run.id);
     let prepared = PreparedStripFeederPickup {
         run,
         registration,
@@ -6529,6 +6546,7 @@ async fn start_strip_feeder_pickup_qualification(
         top_camera_model,
         top_camera_profile,
         top_camera_path,
+        artifact_target,
     };
     spawn_prepared_operation(
         state,
@@ -6729,7 +6747,7 @@ async fn execute_simulated_strip_feeder_pickup(
         HELD_PART_INSPECTION_ARTIFACT,
     )
     .map_err(|error| error.to_string())?;
-    persist_pickup_gray_artifact(state, prepared.run.id, BARE_NOZZLE_ARTIFACT, &bare)?;
+    persist_transfer_gray_artifact(state, prepared, BARE_NOZZLE_ARTIFACT, &bare)?;
     persist_pickup_gray_artifact(state, prepared.run.id, HELD_PART_ARTIFACT, &held)?;
     persist_pickup_rgb_artifact(
         state,
@@ -6938,7 +6956,7 @@ async fn execute_physical_strip_feeder_pickup(
         pickup_profile.inspection_sample_count,
     )
     .await?;
-    persist_pickup_gray_artifact(state, prepared.run.id, BARE_NOZZLE_ARTIFACT, &bare)?;
+    persist_transfer_gray_artifact(state, prepared, BARE_NOZZLE_ARTIFACT, &bare)?;
     artifact_names.push(BARE_NOZZLE_ARTIFACT.into());
     let (source_before, source_before_pose) = capture_top_pocket_mean(
         state,
@@ -6947,9 +6965,9 @@ async fn execute_physical_strip_feeder_pickup(
         pickup_profile.inspection_sample_count,
     )
     .await?;
-    persist_pickup_gray_artifact(
+    persist_transfer_gray_artifact(
         state,
-        prepared.run.id,
+        prepared,
         SOURCE_POCKET_BEFORE_ARTIFACT,
         &source_before,
     )?;
@@ -7118,7 +7136,7 @@ async fn execute_physical_strip_feeder_pickup(
             pickup_profile.inspection_sample_count,
         )
         .await?;
-        persist_pickup_gray_artifact(state, prepared.run.id, HELD_PART_ARTIFACT, &held)?;
+        persist_transfer_gray_artifact(state, prepared, HELD_PART_ARTIFACT, &held)?;
         let initial_inspection = inspect_held_part_difference(
             &bare,
             &held,
@@ -7130,9 +7148,9 @@ async fn execute_physical_strip_feeder_pickup(
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
-        persist_pickup_rgb_artifact(
+        persist_transfer_rgb_artifact(
             state,
-            prepared.run.id,
+            prepared,
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
             &initial_inspection.preview,
         )?;
@@ -7263,9 +7281,9 @@ async fn execute_physical_strip_feeder_pickup(
             pickup_profile.inspection_sample_count,
         )
         .await?;
-        persist_pickup_gray_artifact(
+        persist_transfer_gray_artifact(
             state,
-            prepared.run.id,
+            prepared,
             SOURCE_POCKET_AFTER_ARTIFACT,
             &source_after,
         )?;
@@ -7286,9 +7304,9 @@ async fn execute_physical_strip_feeder_pickup(
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-        persist_pickup_rgb_artifact(
+        persist_transfer_rgb_artifact(
             state,
-            prepared.run.id,
+            prepared,
             POCKET_RETURN_INSPECTION_ARTIFACT,
             &verification.preview,
         )?;
@@ -7433,7 +7451,7 @@ async fn release_and_verify_nozzle_clear(
         } else {
             format!("post-release-nozzle-inspection-attempt-{attempt}.png")
         };
-        persist_pickup_gray_artifact(state, prepared.run.id, &raw_artifact, &post_release)?;
+        persist_transfer_gray_artifact(state, prepared, &raw_artifact, &post_release)?;
         let inspection = inspect_held_part_difference(
             bare,
             &post_release,
@@ -7445,12 +7463,7 @@ async fn release_and_verify_nozzle_clear(
             &inspection_artifact,
         )
         .map_err(|error| error.to_string())?;
-        persist_pickup_rgb_artifact(
-            state,
-            prepared.run.id,
-            &inspection_artifact,
-            &inspection.preview,
-        )?;
+        persist_transfer_rgb_artifact(state, prepared, &inspection_artifact, &inspection.preview)?;
         artifact_names.push(raw_artifact);
         artifact_names.push(inspection_artifact);
         let part_detected = post_release_matches_held_part(held_part, &inspection.report);
@@ -7764,9 +7777,9 @@ async fn align_held_part(
             }
             if current.report.artifact_name != HELD_PART_INSPECTION_ARTIFACT {
                 current.report.artifact_name = HELD_PART_INSPECTION_ARTIFACT.into();
-                persist_pickup_rgb_artifact(
+                persist_transfer_rgb_artifact(
                     state,
-                    prepared.run.id,
+                    prepared,
                     HELD_PART_INSPECTION_ARTIFACT,
                     &current.preview,
                 )?;
@@ -7844,7 +7857,7 @@ async fn align_held_part(
             pickup.inspection_sample_count,
         )
         .await?;
-        persist_pickup_gray_artifact(state, prepared.run.id, HELD_PART_ALIGNED_ARTIFACT, &held)?;
+        persist_transfer_gray_artifact(state, prepared, HELD_PART_ALIGNED_ARTIFACT, &held)?;
         if !artifact_names
             .iter()
             .any(|name| name == HELD_PART_ALIGNED_ARTIFACT)
@@ -7862,9 +7875,9 @@ async fn align_held_part(
             HELD_PART_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
-        persist_pickup_rgb_artifact(
+        persist_transfer_rgb_artifact(
             state,
-            prepared.run.id,
+            prepared,
             HELD_PART_INSPECTION_ARTIFACT,
             &current.preview,
         )?;
@@ -8298,6 +8311,38 @@ fn persist_pickup_rgb_artifact(
         .store
         .put_strip_feeder_pickup_artifact(run_id, name, "image/png", &data)
         .map_err(|error| error.to_string())
+}
+
+fn persist_transfer_gray_artifact(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    name: &str,
+    frame: &GrayFrame,
+) -> Result<(), String> {
+    match prepared.artifact_target {
+        TransferArtifactTarget::PickupQualification(id) => {
+            persist_pickup_gray_artifact(state, id, name, frame)
+        }
+        TransferArtifactTarget::PlacementExecution(id) => {
+            persist_placement_gray_artifact(state, id, name, frame)
+        }
+    }
+}
+
+fn persist_transfer_rgb_artifact(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    name: &str,
+    frame: &RgbFrame,
+) -> Result<(), String> {
+    match prepared.artifact_target {
+        TransferArtifactTarget::PickupQualification(id) => {
+            persist_pickup_rgb_artifact(state, id, name, frame)
+        }
+        TransferArtifactTarget::PlacementExecution(id) => {
+            persist_placement_rgb_artifact(state, id, name, frame)
+        }
+    }
 }
 
 fn mean_gray_frames(frames: &[GrayFrame]) -> Result<GrayFrame, String> {
@@ -19784,6 +19829,45 @@ async fn put_feeder(
     Ok((StatusCode::CREATED, Json(feeder)))
 }
 
+async fn put_part(
+    State(state): State<AppState>,
+    Json(part): Json<Part>,
+) -> ApiResult<(StatusCode, Json<Part>)> {
+    if part.key.trim().is_empty()
+        || part.package.trim().is_empty()
+        || part
+            .height_mm
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+        || part
+            .body_width_mm
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+        || part
+            .body_length_mm
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err(ApiError::bad_request(
+            "part key, package, height, and body dimensions must be valid",
+        ));
+    }
+    state.store.put_part(&part).map_err(ApiError::internal)?;
+    Ok((StatusCode::CREATED, Json(part)))
+}
+
+async fn list_parts(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "parts": state.store.list_parts().map_err(ApiError::internal)?,
+    })))
+}
+
+async fn get_part(State(state): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Json<Part>> {
+    state
+        .store
+        .get_part(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("part not found"))
+}
+
 async fn list_feeders(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(
         json!({"feeders": state.store.list_feeders().map_err(ApiError::internal)?}),
@@ -19837,6 +19921,15 @@ async fn put_job(
             "a job must contain at least one board instance",
         ));
     }
+    if job
+        .placement_references
+        .iter()
+        .any(|reference| reference.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "job placement references cannot be empty",
+        ));
+    }
     for instance in &job.boards {
         if state
             .store
@@ -19877,8 +19970,15 @@ async fn get_job_plan(
         .map(|board| (board.id, board))
         .collect::<HashMap<_, _>>();
     let feeders = state.store.list_feeders().map_err(ApiError::internal)?;
+    let parts = state
+        .store
+        .list_parts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|part| (part.key.clone(), part))
+        .collect::<HashMap<_, _>>();
     Ok(Json(json!({
-        "plan": plan_job(&job, &boards, &feeders, &state.profile)
+        "plan": plan_job(&job, &boards, &feeders, &parts, &state.profile)
     })))
 }
 
@@ -19921,7 +20021,14 @@ async fn simulate_job(
         .map(|board| (board.id, board))
         .collect::<HashMap<_, _>>();
     let feeders = state.store.list_feeders().map_err(ApiError::internal)?;
-    let plan = plan_job(&job, &boards, &feeders, &state.profile);
+    let parts = state
+        .store
+        .list_parts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|part| (part.key.clone(), part))
+        .collect::<HashMap<_, _>>();
+    let plan = plan_job(&job, &boards, &feeders, &parts, &state.profile);
     if !plan.report.ready {
         return Err(ApiError::bad_request(format!(
             "job preflight failed: {}",
@@ -19930,7 +20037,7 @@ async fn simulate_job(
     }
     let motion_calibration = body
         .calibration_id
-        .map(|id| load_simulation_motion_calibration(&state, id))
+        .map(|id| load_job_motion_calibration(&state, id))
         .transpose()?;
     let motion_mode = if motion_calibration.is_some() {
         MotionMode::Calibrated
@@ -20072,18 +20179,19 @@ async fn start_guarded_placement_execution(
         ));
     }
     let status = state.machine.status();
-    if !status.simulated {
-        return Err(ApiError::bad_request(
-            "physical single-placement execution is disabled until the short feeder sequence and board-surface gates pass",
-        ));
-    }
     status
         .assert_lease(body.lease_id, Utc::now())
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
         return Err(ApiError::bad_request(
-            "single-placement simulation requires a homed ready simulator",
+            "single placement requires a homed ready machine",
         ));
+    }
+    if !status.simulated && status.calibration_revision != Some(body.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "physical single placement requires fine XYZ homing with calibration {}",
+            body.calibration_id,
+        )));
     }
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
     ensure_no_active_workspace_scans(&state)?;
@@ -20105,7 +20213,14 @@ async fn start_guarded_placement_execution(
         .map(|board| (board.id, board))
         .collect::<HashMap<_, _>>();
     let feeders = state.store.list_feeders().map_err(ApiError::internal)?;
-    let plan = plan_job(&job, &boards, &feeders, &state.profile);
+    let parts = state
+        .store
+        .list_parts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|part| (part.key.clone(), part))
+        .collect::<HashMap<_, _>>();
+    let plan = plan_job(&job, &boards, &feeders, &parts, &state.profile);
     if !plan.report.ready {
         return Err(ApiError::bad_request(format!(
             "single-placement preflight failed: {}",
@@ -20117,10 +20232,22 @@ async fn start_guarded_placement_execution(
         .get(body.step_index as usize)
         .cloned()
         .ok_or_else(|| ApiError::bad_request("placement step index is outside the job plan"))?;
-    validate_guarded_strip_feeder(&state, &step)?;
-    let motion_calibration = load_simulation_motion_calibration(&state, body.calibration_id)?;
+    let feeder_registration = validate_guarded_strip_feeder(&state, &step)?;
+    if !status.simulated {
+        if feeder_registration.calibration_id != body.calibration_id {
+            return Err(ApiError::bad_request(
+                "physical placement feeder calibration does not match the fine-home revision",
+            ));
+        }
+        validate_guarded_board_surface(&state, &step, body.calibration_id)?;
+    }
+    let motion_calibration = load_job_motion_calibration(&state, body.calibration_id)?;
     let motion_planner = MotionPlanner::new(state.profile.bounds, Some(motion_calibration));
-    let operation = Operation::pending("job.single_placement.simulate");
+    let operation = Operation::pending(if status.simulated {
+        "job.single_placement.simulate"
+    } else {
+        "job.single_placement.physical"
+    });
     let now = Utc::now();
     let run = PlacementExecutionRun {
         id: Uuid::new_v4(),
@@ -20135,10 +20262,36 @@ async fn start_guarded_placement_execution(
         message: None,
     };
     state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let physical = if status.simulated {
+        None
+    } else {
+        Some(prepare_physical_placement_pickup(
+            &state,
+            &run,
+            feeder_registration,
+            &step,
+            body.lease_id,
+        )?)
+    };
+    let store_result = state
         .store
         .put_operation(&operation)
-        .and_then(|_| state.store.put_placement_execution(&run))
-        .map_err(ApiError::internal)?;
+        .and_then(|_| state.store.put_placement_execution(&run));
+    if let Err(error) = store_result {
+        if let Some(prepared) = &physical {
+            let _ = state.store.settle_strip_feeder_pocket(
+                prepared.registration.id,
+                run.id,
+                StripFeederPocketOutcome::RetryableFailure,
+                false,
+            );
+        }
+        return Err(ApiError::internal(error));
+    }
     drop(admission_guard);
     let response = StartGuardedPlacementExecutionResponse {
         execution: run.clone(),
@@ -20148,12 +20301,238 @@ async fn start_guarded_placement_execution(
     spawn_prepared_operation(
         state,
         operation,
-        execute_guarded_placement_task(task_state, run, step, body.lease_id, motion_planner),
+        execute_guarded_placement_task(
+            task_state,
+            run,
+            step,
+            body.lease_id,
+            motion_planner,
+            physical,
+        ),
     );
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
-fn validate_guarded_strip_feeder(state: &AppState, step: &PlanStep) -> ApiResult<()> {
+fn validate_guarded_board_surface(
+    state: &AppState,
+    step: &PlanStep,
+    calibration_id: Uuid,
+) -> ApiResult<()> {
+    let registration = state
+        .store
+        .list_board_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|registration| {
+            registration
+                .board_instance
+                .as_ref()
+                .is_some_and(|board| board.id == step.board_instance_id)
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request("placement board has no persistent visual registration")
+        })?;
+    let measurement_id = registration.latest_surface_measurement_id.ok_or_else(|| {
+        ApiError::bad_request("placement board has no current surface measurement")
+    })?;
+    let measurement = state
+        .store
+        .get_board_surface_measurement(measurement_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::bad_request("board surface measurement is missing"))?;
+    let report = measurement
+        .report
+        .as_ref()
+        .filter(|report| report.passed)
+        .ok_or_else(|| ApiError::bad_request("board surface measurement did not pass"))?;
+    let registered_surface_z_mm = registration
+        .board_instance
+        .as_ref()
+        .and_then(|board| board.surface_z_mm);
+    if measurement.status != OperationStatus::Succeeded
+        || measurement.calibration_id != calibration_id
+        || measurement.nozzle_id != step.nozzle_id
+        || registered_surface_z_mm != Some(report.surface_z_mm)
+    {
+        return Err(ApiError::bad_request(
+            "placement board surface is not current for the planned calibration and nozzle",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_physical_placement_pickup(
+    state: &AppState,
+    placement_run: &PlacementExecutionRun,
+    registration: StripFeederRegistration,
+    step: &PlanStep,
+    lease_id: Uuid,
+) -> ApiResult<PreparedStripFeederPickup> {
+    let pickup_profile = state.profile.strip_feeder_pickup.as_ref().ok_or_else(|| {
+        ApiError::bad_request("active profile does not define strip-feeder pickup")
+    })?;
+    pickup_profile.validate().map_err(ApiError::bad_request)?;
+    let selected_pocket = registration
+        .next_available_pocket(None)
+        .ok_or_else(|| ApiError::bad_request("strip feeder has no available occupied pocket"))?;
+    let selected_pocket_index = selected_pocket.pocket_index;
+    let nominal_center = selected_pocket.nominal_center_machine_mm;
+    let latest_holdout = registration
+        .latest_live_holdout_id
+        .and_then(|id| state.store.get_strip_feeder_live_holdout(id).ok().flatten())
+        .filter(|holdout| {
+            holdout.status == OperationStatus::Succeeded
+                && holdout.calibration_id == registration.calibration_id
+        })
+        .ok_or_else(|| ApiError::bad_request("placement feeder has no current live holdout"))?;
+    let holdout = latest_holdout
+        .report
+        .as_ref()
+        .filter(|report| report.passed)
+        .ok_or_else(|| ApiError::bad_request("placement feeder live holdout did not pass"))?;
+    let pocket_machine_mm = [
+        nominal_center[0] + holdout.correction_x_mm,
+        nominal_center[1] + holdout.correction_y_mm,
+    ];
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?;
+    let nozzle = bottom
+        .nozzles
+        .iter()
+        .find(|nozzle| nozzle.nozzle_id == step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("planned placement nozzle is unknown"))?;
+    let (mut snapshot, top_camera_model) =
+        load_workspace_camera_model(state, registration.calibration_id)?;
+    let artifacts_changed =
+        crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)
+            .map_err(ApiError::bad_request)?;
+    let runtime_artifact = CalibrationArtifactId::runtime_tip_transform(&step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("planned placement nozzle is unknown"))?;
+    let contact_artifact = CalibrationArtifactId::vacuum_contact(&step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("planned placement nozzle is unknown"))?;
+    let characterization_artifact = CalibrationArtifactId::vacuum_characterization(&step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("planned placement nozzle is unknown"))?;
+    for (artifact, message) in [
+        (runtime_artifact, "current runtime tip transform"),
+        (contact_artifact, "current reference contact"),
+        (characterization_artifact, "current vacuum characterization"),
+    ] {
+        if !crate::calibration_artifacts::artifact_tree_is_current(state, &snapshot, artifact) {
+            return Err(ApiError::bad_request(format!(
+                "physical placement requires a {message}"
+            )));
+        }
+    }
+    let reference_contact: VacuumProbeReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(&snapshot, contact_artifact)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored placement contact is invalid"))?;
+    let vacuum_characterization: VacuumSensorCharacterizationReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(&snapshot, characterization_artifact)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored placement vacuum reference is invalid"))?;
+    if !reference_contact.passed
+        || reference_contact.contact_nozzle_z_mm.is_none()
+        || !vacuum_characterization.passed
+        || !vacuum_characterization.reference_seal_validated
+    {
+        return Err(ApiError::bad_request(
+            "physical placement requires passing contact and vacuum references",
+        ));
+    }
+    let geometry = calibrated_nozzle_geometry(&snapshot, &step.nozzle_id)?;
+    if geometry.tip_id != nozzle.expected_tip_id {
+        return Err(ApiError::bad_request(
+            "planned placement tip does not match the calibrated nozzle",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let head_reference = calibrated_head_reference(&snapshot, visual.pixel_error_to_machine_mm)?;
+    let height_model = calibrated_nozzle_height_model(&snapshot, &step.nozzle_id)?;
+    let height_model_has_working_plane_transfer = height_model
+        .as_ref()
+        .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
+    if !height_model_has_working_plane_transfer
+        || height_model
+            .as_ref()
+            .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
+            .is_none()
+    {
+        return Err(ApiError::bad_request(
+            "physical placement needs a height model that supports the placement Z",
+        ));
+    }
+    if artifacts_changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    let top_camera_profile = stored_camera_profile(state, CameraRole::TopCamera)?;
+    let top_camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let synthetic_pickup_run = StripFeederPickupQualificationRun {
+        id: placement_run.id,
+        operation_id: placement_run.operation_id,
+        registration_id: registration.id,
+        profile_id: state.profile.id.clone(),
+        calibration_id: registration.calibration_id,
+        status: OperationStatus::Pending,
+        created_at: placement_run.created_at,
+        updated_at: placement_run.updated_at,
+        nozzle_id: step.nozzle_id.clone(),
+        pocket_index: selected_pocket_index,
+        fallback_drop_surface_machine_mm: None,
+        report: None,
+        message: None,
+    };
+    let mut registration = state
+        .store
+        .reserve_strip_feeder_pocket(
+            registration.id,
+            placement_run.id,
+            Some(selected_pocket_index),
+        )
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    registration.selected_pocket_machine_mm = Some(pocket_machine_mm);
+    if let Err(error) = state.store.put_strip_feeder_registration(&registration) {
+        let _ = state.store.settle_strip_feeder_pocket(
+            registration.id,
+            placement_run.id,
+            StripFeederPocketOutcome::RetryableFailure,
+            false,
+        );
+        return Err(ApiError::internal(error));
+    }
+    Ok(PreparedStripFeederPickup {
+        run: synthetic_pickup_run,
+        registration,
+        lease_id,
+        geometry,
+        head_reference,
+        height_model,
+        height_model_has_working_plane_transfer,
+        reference_contact,
+        vacuum_characterization,
+        top_camera_model,
+        top_camera_profile,
+        top_camera_path,
+        artifact_target: TransferArtifactTarget::PlacementExecution(placement_run.id),
+    })
+}
+
+fn validate_guarded_strip_feeder(
+    state: &AppState,
+    step: &PlanStep,
+) -> ApiResult<StripFeederRegistration> {
     let feeder = state
         .store
         .list_feeders()
@@ -20229,7 +20608,7 @@ fn validate_guarded_strip_feeder(state: &AppState, step: &PlanStep) -> ApiResult
             "placement feeder needs current nozzle-clear and pocket-return evidence",
         ));
     }
-    Ok(())
+    Ok(registration)
 }
 
 async fn execute_guarded_placement_task(
@@ -20238,19 +20617,24 @@ async fn execute_guarded_placement_task(
     step: PlanStep,
     lease_id: Uuid,
     motion_planner: MotionPlanner,
+    physical: Option<PreparedStripFeederPickup>,
 ) -> Result<Option<String>, String> {
     let _motion_guard = state.workspace_scan_motion_lock.lock().await;
     run.status = OperationStatus::Running;
     run.updated_at = Utc::now();
     let mut report = PlacementExecutionReport {
         algorithm_version: PLACEMENT_EXECUTION_ALGORITHM.into(),
-        simulated: true,
+        simulated: physical.is_none(),
         placement_reference: step.placement_reference.clone(),
         part_key: step.part_key.clone(),
         feeder_id: step.feeder_id,
         nozzle_id: step.nozzle_id.clone(),
         feeder_pick: step.feeder_pick,
         board_place: step.board_place,
+        pocket_index: physical.as_ref().map(|prepared| prepared.run.pocket_index),
+        pickup_report: None,
+        top_inspection: None,
+        artifact_names: Vec::new(),
         corrected_move_count: 0,
         passed: false,
         stages: vec![PlacementExecutionStageReport {
@@ -20258,35 +20642,59 @@ async fn execute_guarded_placement_task(
             passed: true,
             message: "job, board, feeder, calibration, and single-step gates passed".into(),
         }],
-        findings: vec![
-            "simulation does not consume a physical feeder pocket or place a component".into(),
-        ],
+        findings: if physical.is_none() {
+            vec!["simulation does not consume a physical feeder pocket or place a component".into()]
+        } else {
+            Vec::new()
+        },
     };
     run.report = Some(report.clone());
     state
         .store
         .put_placement_execution(&run)
         .map_err(|error| error.to_string())?;
-    let result = execute_guarded_placement_motion(
-        &state,
-        &run,
-        &step,
-        lease_id,
-        &motion_planner,
-        &mut report,
-    )
-    .await;
+    let result = if let Some(prepared) = physical.as_ref() {
+        execute_physical_guarded_placement(
+            &state,
+            &run,
+            &step,
+            lease_id,
+            &motion_planner,
+            prepared,
+            &mut report,
+        )
+        .await
+    } else {
+        execute_guarded_placement_motion(
+            &state,
+            &run,
+            &step,
+            lease_id,
+            &motion_planner,
+            &mut report,
+        )
+        .await
+    };
     match result {
         Ok(()) => {
             report.passed = true;
             report.stages.push(PlacementExecutionStageReport {
                 stage: PlacementExecutionStage::Complete,
                 passed: true,
-                message: "one guarded simulated placement completed".into(),
+                message: if physical.is_some() {
+                    "one guarded physical placement completed".into()
+                } else {
+                    "one guarded simulated placement completed".into()
+                },
             });
             run.status = OperationStatus::Succeeded;
             run.message = Some(format!(
-                "Simulated guarded placement {}",
+                "{} guarded placement {}",
+                if physical.is_some() {
+                    "Completed"
+                } else {
+                    "Simulated"
+                },
                 step.placement_reference
             ));
             run.report = Some(report);
@@ -20310,6 +20718,28 @@ async fn execute_guarded_placement_task(
                 .store
                 .put_placement_execution(&run)
                 .map_err(|store_error| store_error.to_string())?;
+            if let Some(prepared) = physical.as_ref() {
+                let reservation_is_active = state
+                    .store
+                    .get_strip_feeder_registration(prepared.registration.id)
+                    .map_err(|store_error| store_error.to_string())?
+                    .is_some_and(|registration| {
+                        registration.pockets.iter().any(|pocket| {
+                            pocket.reservation_id == Some(run.id)
+                                && pocket.pocket_index == prepared.run.pocket_index
+                        })
+                    });
+                if reservation_is_active {
+                    if let Err(store_error) = state.store.settle_strip_feeder_pocket(
+                        prepared.registration.id,
+                        run.id,
+                        StripFeederPocketOutcome::Interrupted,
+                        false,
+                    ) {
+                        tracing::error!(%store_error, execution_id = %run.id, "failed to quarantine interrupted placement pocket");
+                    }
+                }
+            }
             Err(error)
         }
     }
@@ -20486,6 +20916,936 @@ async fn execute_guarded_placement_motion(
     Ok(())
 }
 
+struct AcquiredPlacementPart {
+    current_tip_offset: CurrentTipOffset,
+    bottom_pose: Pose,
+    bare: GrayFrame,
+    pickup_head_machine_mm: [f64; 2],
+    contact: VacuumProbeSample,
+    open_nozzle_raw_values: Vec<i64>,
+    pickup_samples: Vec<VacuumProbeSample>,
+    held_raw_values: Vec<i64>,
+    held_median_raw_value: Option<f64>,
+    inspection: HeldPartInspectionReport,
+    alignment: HeldPartAlignmentReport,
+    artifact_names: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_physical_guarded_placement(
+    state: &AppState,
+    run: &PlacementExecutionRun,
+    step: &PlanStep,
+    lease_id: Uuid,
+    planner: &MotionPlanner,
+    prepared: &PreparedStripFeederPickup,
+    report: &mut PlacementExecutionReport,
+) -> Result<(), String> {
+    let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let sensor_id = prepared.vacuum_characterization.sensor_id.as_str();
+    let pocket_machine_mm = prepared
+        .registration
+        .selected_pocket_machine_mm
+        .ok_or_else(|| "physical placement has no reserved pocket center".to_string())?;
+    let (board_before, _) = capture_top_pocket_mean(
+        state,
+        prepared,
+        [step.board_place.x_mm, step.board_place.y_mm],
+        pickup.inspection_sample_count,
+    )
+    .await?;
+    persist_placement_gray_artifact(
+        state,
+        run.id,
+        BOARD_PLACEMENT_BEFORE_ARTIFACT,
+        &board_before,
+    )?;
+    report
+        .artifact_names
+        .push(BOARD_PLACEMENT_BEFORE_ARTIFACT.into());
+    persist_placement_progress(state, run, report)?;
+
+    let acquired =
+        acquire_physical_placement_part(state, prepared, step.board_place.rotation_deg).await?;
+    report.feeder_pick = Pose {
+        x_mm: pocket_machine_mm[0],
+        y_mm: pocket_machine_mm[1],
+        z_mm: acquired.contact.nozzle_z_mm,
+        rotation_deg: prepared.registration.part_rotation_deg.unwrap_or(0.0),
+    };
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::PickApproach,
+        passed: true,
+        message: format!(
+            "reserved pocket {} and used the live holdout correction",
+            prepared.run.pocket_index,
+        ),
+    });
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::Pickup,
+        passed: true,
+        message: format!(
+            "vacuum acquired the part at nozzle Z{:.3}",
+            acquired.contact.nozzle_z_mm,
+        ),
+    });
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::BottomInspection,
+        passed: acquired.inspection.passed && acquired.alignment.passed,
+        message: format!(
+            "bottom vision aligned the part to {:.3} degrees with {:.3} mm center residual",
+            step.board_place.rotation_deg,
+            acquired
+                .alignment
+                .final_centering_residual_mm
+                .unwrap_or_default(),
+        ),
+    });
+    report
+        .artifact_names
+        .extend(acquired.artifact_names.clone());
+    persist_placement_progress(state, run, report)?;
+
+    let mut release_confirmed = false;
+    let placement_result: Result<(), String> = async {
+        let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+        let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
+        let height_correction = prepared
+            .height_model
+            .as_ref()
+            .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
+            .ok_or_else(|| "placement Z is outside the calibrated height model".to_string())?;
+        let final_inspection = acquired
+            .alignment
+            .observations
+            .last()
+            .map(|observation| &observation.inspection)
+            .ok_or_else(|| "held-part alignment has no final observation".to_string())?;
+        let remaining_x_mm = final_inspection.centering_correction_x_mm.unwrap_or(0.0);
+        let remaining_y_mm = final_inspection.centering_correction_y_mm.unwrap_or(0.0);
+        let place_head_x_mm =
+            step.board_place.x_mm - acquired.current_tip_offset.x_mm - height_correction[0]
+                + acquired.alignment.commanded_x_mm
+                + remaining_x_mm;
+        let place_head_y_mm =
+            step.board_place.y_mm - acquired.current_tip_offset.y_mm - height_correction[1]
+                + acquired.alignment.commanded_y_mm
+                + remaining_y_mm;
+        let place_controller_z_mm = z_kinematics
+            .controller_z(&step.nozzle_id, step.board_place.z_mm)
+            .ok_or_else(|| "placement Z is outside controller bounds".to_string())?;
+        let current_pose = state
+            .machine
+            .status()
+            .pose
+            .ok_or_else(|| "physical placement lost the controller pose".to_string())?;
+        let mut motion_state = planner
+            .initial_state(current_pose)
+            .map_err(|error| error.to_string())?;
+        let place_level = Pose {
+            x_mm: place_head_x_mm,
+            y_mm: place_head_y_mm,
+            z_mm: z_kinematics.level_controller_z_mm,
+            rotation_deg: current_pose.rotation_deg,
+        };
+        let place_contact = Pose {
+            z_mm: place_controller_z_mm,
+            ..place_level
+        };
+        let planned = execute_job_motion(
+            &state.machine,
+            lease_id,
+            planner,
+            &mut motion_state,
+            place_level,
+            vacuum.xy_feed_mm_per_min,
+            MotionMode::Calibrated,
+        )
+        .await?;
+        report.corrected_move_count += u32::from(planned.correction.applied());
+        report.stages.push(PlacementExecutionStageReport {
+            stage: PlacementExecutionStage::PlaceApproach,
+            passed: true,
+            message: "moved the aligned part above the registered board target".into(),
+        });
+        let planned = execute_job_motion(
+            &state.machine,
+            lease_id,
+            planner,
+            &mut motion_state,
+            place_contact,
+            vacuum.z_approach_feed_mm_per_min,
+            MotionMode::Calibrated,
+        )
+        .await?;
+        report.corrected_move_count += u32::from(planned.correction.applied());
+        report.stages.push(PlacementExecutionStageReport {
+            stage: PlacementExecutionStage::Placement,
+            passed: true,
+            message: format!(
+                "reached the planned component-center Z{:.3}",
+                step.board_place.z_mm,
+            ),
+        });
+        persist_placement_progress(state, run, report)?;
+
+        let board_release = release_part_at_board_and_verify(
+            state,
+            run.id,
+            step,
+            lease_id,
+            planner,
+            place_level,
+            place_contact,
+            prepared,
+            &acquired,
+        )
+        .await?;
+        report.corrected_move_count += board_release.corrected_move_count;
+        let nozzle_clear = board_release.verification.nozzle_clear;
+        let release_raw_values = board_release.release_raw_values;
+        let release_verification = board_release.verification;
+        report
+            .artifact_names
+            .extend(release_verification.artifact_names.clone());
+        report.stages.push(PlacementExecutionStageReport {
+            stage: PlacementExecutionStage::Release,
+            passed: nozzle_clear,
+            message: release_verification.findings[0].clone(),
+        });
+        if !nozzle_clear {
+            report.pickup_report = Some(build_placement_pickup_report(
+                prepared,
+                &acquired,
+                [step.board_place.x_mm, step.board_place.y_mm],
+                release_raw_values,
+                release_verification,
+                false,
+            ));
+            persist_placement_progress(state, run, report)?;
+            return Err("placement release did not confirm a clear nozzle".into());
+        }
+        release_confirmed = true;
+
+        let (board_after, _) = capture_top_pocket_mean(
+            state,
+            prepared,
+            [step.board_place.x_mm, step.board_place.y_mm],
+            pickup.inspection_sample_count,
+        )
+        .await?;
+        persist_placement_gray_artifact(
+            state,
+            run.id,
+            BOARD_PLACEMENT_AFTER_ARTIFACT,
+            &board_after,
+        )?;
+        let top_mapping = local_planar_camera_mapping(
+            &prepared.top_camera_model,
+            prepared.top_camera_model.center_x_px,
+            prepared.top_camera_model.center_y_px,
+        )
+        .ok_or_else(|| "top-camera placement mapping is invalid".to_string())?;
+        let top_inspection = inspect_held_part_difference(
+            &board_before,
+            &board_after,
+            [
+                prepared.top_camera_model.center_x_px,
+                prepared.top_camera_model.center_y_px,
+            ],
+            top_mapping,
+            pickup.maximum_part_offset_mm,
+            pickup.minimum_part_size_mm,
+            pickup.maximum_part_size_mm,
+            BOARD_PLACEMENT_INSPECTION_ARTIFACT,
+        )
+        .map_err(|error| error.to_string())?;
+        persist_placement_rgb_artifact(
+            state,
+            run.id,
+            BOARD_PLACEMENT_INSPECTION_ARTIFACT,
+            &top_inspection.preview,
+        )?;
+        report.artifact_names.extend([
+            BOARD_PLACEMENT_AFTER_ARTIFACT.into(),
+            BOARD_PLACEMENT_INSPECTION_ARTIFACT.into(),
+        ]);
+        report.top_inspection = Some(top_inspection.report.clone());
+        report.pickup_report = Some(build_placement_pickup_report(
+            prepared,
+            &acquired,
+            [step.board_place.x_mm, step.board_place.y_mm],
+            release_raw_values,
+            release_verification,
+            true,
+        ));
+        report.stages.push(PlacementExecutionStageReport {
+            stage: PlacementExecutionStage::TopInspection,
+            passed: top_inspection.report.passed,
+            message: if top_inspection.report.passed {
+                "top vision detected the placed component at the planned location".into()
+            } else {
+                "top vision did not confirm the placed component".into()
+            },
+        });
+        state
+            .store
+            .settle_strip_feeder_pocket(
+                prepared.registration.id,
+                run.id,
+                StripFeederPocketOutcome::Consumed,
+                true,
+            )
+            .map_err(|error| error.to_string())?;
+        decrement_feeder_remaining(state, step.feeder_id)?;
+        persist_placement_progress(state, run, report)?;
+        if !top_inspection.report.passed {
+            return Err("top vision did not confirm the physical placement".into());
+        }
+        report.findings.push(format!(
+            "consumed feeder pocket {} only after pickup and release evidence passed",
+            prepared.run.pocket_index,
+        ));
+        Ok(())
+    }
+    .await;
+    match placement_result {
+        Ok(()) => Ok(()),
+        Err(error) if release_confirmed => Err(error),
+        Err(error) => {
+            let cleanup = return_interrupted_pickup(
+                state,
+                prepared,
+                sensor_id,
+                acquired.pickup_head_machine_mm,
+                acquired.current_tip_offset,
+                acquired.contact.controller_z_mm,
+            )
+            .await;
+            Err(match cleanup {
+                Ok(()) => format!("{error}; the held part was returned to its source pocket"),
+                Err(cleanup) => format!("{error}; placement recovery also failed: {cleanup}"),
+            })
+        }
+    }
+}
+
+struct VerifiedBoardRelease {
+    release_raw_values: Vec<i64>,
+    verification: NozzleReleaseVerificationReport,
+    corrected_move_count: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn release_part_at_board_and_verify(
+    state: &AppState,
+    execution_id: Uuid,
+    step: &PlanStep,
+    lease_id: Uuid,
+    planner: &MotionPlanner,
+    place_level: Pose,
+    place_contact: Pose,
+    prepared: &PreparedStripFeederPickup,
+    acquired: &AcquiredPlacementPart,
+) -> Result<VerifiedBoardRelease, String> {
+    let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
+    let bottom = state.profile.bottom_vision.as_ref().unwrap();
+    let sensor_id = prepared.vacuum_characterization.sensor_id.as_str();
+    let bottom_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let bottom_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let mut release_raw_values = Vec::new();
+    let mut observations = Vec::new();
+    let mut artifact_names = Vec::new();
+    let mut findings = Vec::new();
+    let mut nozzle_clear = false;
+    let mut corrected_move_count = 0;
+
+    for attempt in 1..=MAXIMUM_RELEASE_ATTEMPTS {
+        if attempt > 1 {
+            let current_pose =
+                state.machine.status().pose.ok_or_else(|| {
+                    "placement release retry lost the controller pose".to_string()
+                })?;
+            let mut motion_state = planner
+                .initial_state(current_pose)
+                .map_err(|error| error.to_string())?;
+            for (target, feed) in [
+                (place_level, vacuum.xy_feed_mm_per_min),
+                (place_contact, vacuum.z_approach_feed_mm_per_min),
+            ] {
+                let planned = execute_job_motion(
+                    &state.machine,
+                    lease_id,
+                    planner,
+                    &mut motion_state,
+                    target,
+                    feed,
+                    MotionMode::Calibrated,
+                )
+                .await?;
+                corrected_move_count += u32::from(planned.correction.applied());
+            }
+        }
+        state
+            .machine
+            .disable_actuator(sensor_id.into())
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(pickup.release_settle_ms)).await;
+        let raw_values =
+            collect_sensor_values(state, lease_id, sensor_id, pickup.release_sample_count).await?;
+        let sensor_released = median_raw(&raw_values).is_some_and(|value| {
+            vacuum_value_is_released(&prepared.vacuum_characterization, value)
+        });
+        release_raw_values.extend(raw_values);
+
+        let current_pose = state
+            .machine
+            .status()
+            .pose
+            .ok_or_else(|| "placement release lost the controller pose".to_string())?;
+        let mut motion_state = planner
+            .initial_state(current_pose)
+            .map_err(|error| error.to_string())?;
+        let planned = execute_job_motion(
+            &state.machine,
+            lease_id,
+            planner,
+            &mut motion_state,
+            place_level,
+            vacuum.z_approach_feed_mm_per_min,
+            MotionMode::Calibrated,
+        )
+        .await?;
+        corrected_move_count += u32::from(planned.correction.applied());
+        state
+            .machine
+            .jog(
+                lease_id,
+                acquired.bottom_pose.into(),
+                bottom.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let post_release = capture_bottom_mean_with_lights(
+            state,
+            lease_id,
+            &bottom_profile,
+            &bottom_path,
+            pickup.inspection_sample_count,
+        )
+        .await?;
+        let raw_artifact = if attempt == 1 {
+            POST_RELEASE_NOZZLE_ARTIFACT.to_string()
+        } else {
+            format!("post-release-nozzle-attempt-{attempt}.png")
+        };
+        let inspection_artifact = if attempt == 1 {
+            POST_RELEASE_NOZZLE_INSPECTION_ARTIFACT.to_string()
+        } else {
+            format!("post-release-nozzle-inspection-attempt-{attempt}.png")
+        };
+        persist_placement_gray_artifact(state, execution_id, &raw_artifact, &post_release)?;
+        let inspection = inspect_held_part_difference(
+            &acquired.bare,
+            &post_release,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            prepared.head_reference.bottom_camera_mapping,
+            pickup.maximum_part_offset_mm,
+            pickup.minimum_part_size_mm,
+            pickup.maximum_part_size_mm,
+            &inspection_artifact,
+        )
+        .map_err(|error| error.to_string())?;
+        persist_placement_rgb_artifact(
+            state,
+            execution_id,
+            &inspection_artifact,
+            &inspection.preview,
+        )?;
+        let retained_part =
+            post_release_matches_held_part(&acquired.inspection, &inspection.report);
+        nozzle_clear = nozzle_release_attempt_passed(sensor_released, retained_part);
+        observations.push(inspection.report);
+        artifact_names.extend([raw_artifact, inspection_artifact]);
+        if nozzle_clear {
+            findings.push(format!(
+                "bottom vision confirmed a clear nozzle after board release attempt {attempt}"
+            ));
+            break;
+        }
+        if attempt < MAXIMUM_RELEASE_ATTEMPTS {
+            findings.push(format!(
+                "board release attempt {attempt} did not confirm a clear nozzle; retrying once"
+            ));
+        }
+    }
+    state
+        .machine
+        .calibration_rotate_nozzle(lease_id, step.nozzle_id.clone(), 0.0)
+        .await
+        .map_err(|error| format!("placement rotation restore failed: {error}"))?;
+    if !nozzle_clear {
+        findings.push("bounded board release attempts did not prove a clear nozzle".into());
+    }
+    let attempt_count = observations.len() as u32;
+    Ok(VerifiedBoardRelease {
+        release_raw_values,
+        verification: NozzleReleaseVerificationReport {
+            algorithm_version: NOZZLE_RELEASE_VERIFICATION_ALGORITHM.into(),
+            attempt_count,
+            retry_performed: attempt_count > 1,
+            nozzle_clear,
+            passed: nozzle_clear,
+            observations,
+            artifact_names,
+            findings,
+        },
+        corrected_move_count,
+    })
+}
+
+async fn acquire_physical_placement_part(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    target_rotation_deg: f64,
+) -> Result<AcquiredPlacementPart, String> {
+    let nozzle_id = &prepared.run.nozzle_id;
+    let sensor_id = &prepared.vacuum_characterization.sensor_id;
+    let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
+    let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+    let bottom = state.profile.bottom_vision.as_ref().unwrap();
+    let camera_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let camera_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let pocket_machine_mm = prepared.registration.selected_pocket_machine_mm.unwrap();
+    let contact_z_mm = prepared
+        .reference_contact
+        .contact_nozzle_z_mm
+        .ok_or_else(|| "placement pickup has no reference contact".to_string())?;
+    let search = VacuumProbeSearch {
+        start_nozzle_z_mm: contact_z_mm + pickup.search_start_above_reference_mm,
+        end_nozzle_z_mm: contact_z_mm + pickup.search_end_above_reference_mm,
+    };
+    state
+        .machine
+        .disable_actuator(sensor_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id: prepared.lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let current_tip_offset = measure_current_tip_offset(
+        state,
+        prepared.lease_id,
+        nozzle_id,
+        &prepared.head_reference,
+    )
+    .await?;
+    let bottom_pose = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "placement pickup lost the bottom-camera pose".to_string())?;
+    let bare = capture_bottom_mean_with_lights(
+        state,
+        prepared.lease_id,
+        &camera_profile,
+        &camera_path,
+        pickup.inspection_sample_count,
+    )
+    .await?;
+    persist_transfer_gray_artifact(state, prepared, BARE_NOZZLE_ARTIFACT, &bare)?;
+    let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
+    let height_correction = prepared
+        .height_model
+        .as_ref()
+        .filter(|_| prepared.height_model_has_working_plane_transfer)
+        .and_then(|model| model.tip_offset_correction_at(alignment_nozzle_z_mm))
+        .ok_or_else(|| "placement pickup Z is outside the height model".to_string())?;
+    let pickup_head = [
+        pocket_machine_mm[0] - current_tip_offset.x_mm - height_correction[0],
+        pocket_machine_mm[1] - current_tip_offset.y_mm - height_correction[1],
+    ];
+    let approach_controller_z_mm = z_kinematics
+        .controller_z(nozzle_id, search.start_nozzle_z_mm)
+        .ok_or_else(|| "placement pickup approach Z is outside bounds".to_string())?;
+    let level_target = JogTarget {
+        x_mm: pickup_head[0],
+        y_mm: pickup_head[1],
+        z_mm: z_kinematics.level_controller_z_mm,
+        rotation_deg: None,
+    };
+    state
+        .machine
+        .jog(prepared.lease_id, level_target, vacuum.xy_feed_mm_per_min)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .machine
+        .jog(
+            prepared.lease_id,
+            JogTarget {
+                z_mm: approach_controller_z_mm,
+                ..level_target
+            },
+            vacuum.z_approach_feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .machine
+        .actuate(prepared.lease_id, sensor_id.clone(), true)
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::time::sleep(Duration::from_millis(vacuum.vacuum_settle_ms)).await;
+    let descent = execute_vacuum_probe_descent(
+        state,
+        prepared.lease_id,
+        nozzle_id,
+        sensor_id,
+        pickup_head[0],
+        pickup_head[1],
+        search,
+        Some(&prepared.vacuum_characterization),
+    )
+    .await;
+    let (open_nozzle_raw_values, pickup_samples, contact) = match descent {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(cleanup_unconfirmed_pickup(state, prepared, sensor_id, error).await)
+        }
+    };
+    let Some(contact) = contact else {
+        return Err(cleanup_unconfirmed_pickup(
+            state,
+            prepared,
+            sensor_id,
+            "placement pickup found no vacuum transition".into(),
+        )
+        .await);
+    };
+    if !vacuum_value_is_acquired(&prepared.vacuum_characterization, contact.median_raw_value) {
+        return Err(cleanup_unconfirmed_pickup(
+            state,
+            prepared,
+            sensor_id,
+            "placement pickup did not pass the calibrated acquire threshold".into(),
+        )
+        .await);
+    }
+    let pickup_controller_z_mm = contact.controller_z_mm;
+    let result: Result<AcquiredPlacementPart, String> = async {
+        state
+            .machine
+            .jog(
+                prepared.lease_id,
+                level_target,
+                vacuum.z_approach_feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        state
+            .machine
+            .jog(
+                prepared.lease_id,
+                JogTarget {
+                    x_mm: bottom_pose.x_mm,
+                    y_mm: bottom_pose.y_mm,
+                    z_mm: bottom_pose.z_mm,
+                    rotation_deg: None,
+                },
+                bottom.feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let held_raw_values = collect_sensor_values(
+            state,
+            prepared.lease_id,
+            sensor_id,
+            pickup.held_sample_count,
+        )
+        .await?;
+        let held_median_raw_value = median_raw(&held_raw_values);
+        if !held_median_raw_value
+            .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value))
+        {
+            return Err("placement pickup did not retain calibrated vacuum hold".into());
+        }
+        let held = capture_bottom_mean_with_lights(
+            state,
+            prepared.lease_id,
+            &camera_profile,
+            &camera_path,
+            pickup.inspection_sample_count,
+        )
+        .await?;
+        persist_transfer_gray_artifact(state, prepared, HELD_PART_ARTIFACT, &held)?;
+        let initial = inspect_held_part_difference(
+            &bare,
+            &held,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            prepared.head_reference.bottom_camera_mapping,
+            pickup.maximum_part_offset_mm,
+            pickup.minimum_part_size_mm,
+            pickup.maximum_part_size_mm,
+            HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+        )
+        .map_err(|error| error.to_string())?;
+        persist_transfer_rgb_artifact(
+            state,
+            prepared,
+            HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+            &initial.preview,
+        )?;
+        if !initial.report.passed {
+            return Err("bottom vision did not confirm the held part".into());
+        }
+        state
+            .machine
+            .calibration_rotation_reference(prepared.lease_id, nozzle_id.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let (_, alignment) = align_held_part(
+            state,
+            prepared,
+            &bare,
+            initial,
+            bottom_pose,
+            &camera_profile,
+            &camera_path,
+            target_rotation_deg,
+            true,
+        )
+        .await?;
+        if !alignment.passed {
+            return Err("bottom vision did not align the held part".into());
+        }
+        let inspection = alignment
+            .observations
+            .last()
+            .map(|observation| observation.inspection.clone())
+            .ok_or_else(|| "held-part alignment has no inspection".to_string())?;
+        let mut artifact_names = vec![
+            BARE_NOZZLE_ARTIFACT.into(),
+            HELD_PART_ARTIFACT.into(),
+            HELD_PART_INITIAL_INSPECTION_ARTIFACT.into(),
+        ];
+        for name in &alignment.artifact_names {
+            if !artifact_names.contains(name) {
+                artifact_names.push(name.clone());
+            }
+        }
+        Ok(AcquiredPlacementPart {
+            current_tip_offset,
+            bottom_pose,
+            bare,
+            pickup_head_machine_mm: pickup_head,
+            contact,
+            open_nozzle_raw_values,
+            pickup_samples,
+            held_raw_values,
+            held_median_raw_value,
+            inspection,
+            alignment,
+            artifact_names,
+        })
+    }
+    .await;
+    match result {
+        Ok(acquired) => Ok(acquired),
+        Err(error) => {
+            let cleanup = return_interrupted_pickup(
+                state,
+                prepared,
+                sensor_id,
+                pickup_head,
+                current_tip_offset,
+                pickup_controller_z_mm,
+            )
+            .await;
+            Err(match cleanup {
+                Ok(()) => format!("{error}; the part was returned to its source pocket"),
+                Err(cleanup) => format!("{error}; pickup recovery also failed: {cleanup}"),
+            })
+        }
+    }
+}
+
+async fn cleanup_unconfirmed_pickup(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    sensor_id: &str,
+    error: String,
+) -> String {
+    let disable = state
+        .machine
+        .disable_actuator(sensor_id.into())
+        .await
+        .err()
+        .map(|failure| failure.to_string());
+    let lift = lift_and_restore_after_pickup(state, prepared.lease_id)
+        .await
+        .err();
+    let cleanup = [disable, lift]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if cleanup.is_empty() {
+        error
+    } else {
+        format!("{error}; pickup cleanup also failed: {cleanup}")
+    }
+}
+
+async fn return_interrupted_pickup(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    sensor_id: &str,
+    pickup_head_machine_mm: [f64; 2],
+    current_tip_offset: CurrentTipOffset,
+    pickup_controller_z_mm: f64,
+) -> Result<(), String> {
+    let mut last_error = None;
+    for _ in 0..MAXIMUM_RELEASE_ATTEMPTS {
+        match release_pickup_part(
+            state,
+            prepared,
+            sensor_id,
+            pickup_head_machine_mm,
+            current_tip_offset,
+            pickup_controller_z_mm,
+        )
+        .await
+        {
+            Ok((_, _, _, true)) => {
+                let _ = state
+                    .machine
+                    .calibration_rotate_nozzle(
+                        prepared.lease_id,
+                        prepared.run.nozzle_id.clone(),
+                        0.0,
+                    )
+                    .await;
+                return Ok(());
+            }
+            Ok(_) => last_error = Some("vacuum did not confirm release".into()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let _ = state.machine.disable_actuator(sensor_id.into()).await;
+    Err(last_error.unwrap_or_else(|| "pickup recovery did not run".into()))
+}
+
+fn build_placement_pickup_report(
+    prepared: &PreparedStripFeederPickup,
+    acquired: &AcquiredPlacementPart,
+    release_surface_machine_mm: [f64; 2],
+    release_raw_values: Vec<i64>,
+    release_verification: NozzleReleaseVerificationReport,
+    released: bool,
+) -> StripFeederPickupQualificationReport {
+    let mut artifact_names = acquired.artifact_names.clone();
+    for name in &release_verification.artifact_names {
+        if !artifact_names.contains(name) {
+            artifact_names.push(name.clone());
+        }
+    }
+    StripFeederPickupQualificationReport {
+        algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+        nozzle_id: prepared.run.nozzle_id.clone(),
+        tip_id: prepared.geometry.tip_id.clone(),
+        sensor_id: prepared.vacuum_characterization.sensor_id.clone(),
+        pocket_machine_mm: prepared.registration.selected_pocket_machine_mm.unwrap(),
+        pickup_nozzle_z_mm: Some(acquired.contact.nozzle_z_mm),
+        pickup_controller_z_mm: Some(acquired.contact.controller_z_mm),
+        open_nozzle_raw_values: acquired.open_nozzle_raw_values.clone(),
+        pickup_samples: acquired.pickup_samples.clone(),
+        held_raw_values: acquired.held_raw_values.clone(),
+        held_median_raw_value: acquired.held_median_raw_value,
+        vacuum_acquired: true,
+        vacuum_held_after_transfer: true,
+        inspection: Some(acquired.inspection.clone()),
+        alignment: Some(acquired.alignment.clone()),
+        disposition: if released {
+            StripFeederPickupDisposition::PlacedOnBoard
+        } else {
+            StripFeederPickupDisposition::NotReleased
+        },
+        release_surface_machine_mm: Some(release_surface_machine_mm),
+        release_raw_values,
+        released,
+        nozzle_release_verification: Some(release_verification),
+        return_verification: None,
+        passed: released,
+        artifact_names,
+        findings: vec!["physical placement used live pickup and bottom-vision evidence".into()],
+    }
+}
+
+fn local_planar_camera_mapping(
+    model: &PlanarCameraModel,
+    x_px: f64,
+    y_px: f64,
+) -> Option<[[f64; 2]; 2]> {
+    let center = model.correction_at(x_px, y_px)?;
+    let x = model.correction_at(x_px + 1.0, y_px)?;
+    let y = model.correction_at(x_px, y_px + 1.0)?;
+    Some([
+        [x[0] - center[0], y[0] - center[0]],
+        [x[1] - center[1], y[1] - center[1]],
+    ])
+}
+
+fn decrement_feeder_remaining(state: &AppState, feeder_id: Uuid) -> Result<(), String> {
+    let feeder = state
+        .store
+        .list_feeders()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|feeder| feeder.id() == feeder_id)
+        .ok_or_else(|| "placement feeder disappeared".to_string())?;
+    let feeder = match feeder {
+        Feeder::Strip {
+            id,
+            name,
+            part_key,
+            first_pick,
+            tape_pitch_mm,
+            tape_width_mm,
+            tape_rotation_deg,
+            remaining,
+        } => Feeder::Strip {
+            id,
+            name,
+            part_key,
+            first_pick,
+            tape_pitch_mm,
+            tape_width_mm,
+            tape_rotation_deg,
+            remaining: remaining.map(|value| value.saturating_sub(1)),
+        },
+        _ => return Err("physical placement feeder is not a strip feeder".into()),
+    };
+    state
+        .store
+        .put_feeder(&feeder)
+        .map_err(|error| error.to_string())
+}
+
 fn persist_placement_progress(
     state: &AppState,
     run: &PlacementExecutionRun,
@@ -20532,7 +21892,50 @@ async fn get_placement_execution(
         .ok_or_else(|| ApiError::not_found("placement execution not found"))
 }
 
-fn load_simulation_motion_calibration(
+async fn get_placement_execution_artifact(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    let (media_type, data) = state
+        .store
+        .get_placement_execution_artifact(id, &name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement execution artifact not found"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(data))
+        .map_err(ApiError::internal)
+}
+
+fn persist_placement_gray_artifact(
+    state: &AppState,
+    execution_id: Uuid,
+    name: &str,
+    frame: &GrayFrame,
+) -> Result<(), String> {
+    let encoded = encode_gray_png(frame).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_placement_execution_artifact(execution_id, name, "image/png", &encoded)
+        .map_err(|error| error.to_string())
+}
+
+fn persist_placement_rgb_artifact(
+    state: &AppState,
+    execution_id: Uuid,
+    name: &str,
+    frame: &RgbFrame,
+) -> Result<(), String> {
+    let encoded = encode_rgb_png(frame).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_placement_execution_artifact(execution_id, name, "image/png", &encoded)
+        .map_err(|error| error.to_string())
+}
+
+fn load_job_motion_calibration(
     state: &AppState,
     calibration_id: Uuid,
 ) -> ApiResult<MotionCalibration> {
@@ -21683,6 +23086,10 @@ mod tests {
             nozzle_id: step.nozzle_id.clone(),
             feeder_pick: step.feeder_pick,
             board_place: step.board_place,
+            pocket_index: None,
+            pickup_report: None,
+            top_inspection: None,
+            artifact_names: Vec::new(),
             corrected_move_count: 0,
             passed: false,
             stages: Vec::new(),
@@ -24765,6 +26172,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "bad".into(),
             boards: vec![],
+            placement_references: Vec::new(),
             status: "draft".into(),
         };
         let response = router(test_state())

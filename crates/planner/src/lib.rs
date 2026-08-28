@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 use velocitypnp_domain::{
-    top_side_placement_rotation_deg, BoardDesign, BoardSide, Feeder, Job, MachineProfile,
+    top_side_placement_rotation_deg, BoardDesign, BoardSide, Feeder, Job, MachineProfile, Part,
     Placement, Pose,
 };
 
@@ -43,12 +43,22 @@ pub fn plan_job(
     job: &Job,
     boards: &HashMap<Uuid, BoardDesign>,
     feeders: &[Feeder],
+    parts: &HashMap<String, Part>,
     profile: &MachineProfile,
 ) -> PlacementPlan {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut steps = Vec::new();
     let mut feeder_uses = BTreeMap::<Uuid, u32>::new();
+    let selected_references = job
+        .placement_references
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    if selected_references.len() != job.placement_references.len() {
+        errors.push("job placement references must be unique".into());
+    }
 
     for instance in &job.boards {
         let Some(board) = boards.get(&instance.board_id) else {
@@ -67,8 +77,27 @@ pub fn plan_job(
                 instance.label
             ));
         }
+        if !selected_references.is_empty() {
+            for reference in &selected_references {
+                if !board.placements.iter().any(|placement| {
+                    placement.reference == *reference
+                        && placement.enabled
+                        && !placement.fiducial
+                        && placement.side == instance.side
+                }) {
+                    errors.push(format!(
+                        "{} does not have enabled placement {reference} on the selected side",
+                        instance.label
+                    ));
+                }
+            }
+        }
         for placement in board.placements.iter().filter(|placement| {
-            placement.enabled && !placement.fiducial && placement.side == instance.side
+            placement.enabled
+                && !placement.fiducial
+                && placement.side == instance.side
+                && (selected_references.is_empty()
+                    || selected_references.contains(placement.reference.as_str()))
         }) {
             let part_key = placement_part_key(placement);
             let Some(feeder) = feeders.iter().find(|feeder| feeder.part_key() == part_key) else {
@@ -78,15 +107,21 @@ pub fn plan_job(
                 ));
                 continue;
             };
-            let Some(height_mm) = placement
+            let height_mm = placement
                 .properties
                 .get("Height")
                 .and_then(|height| height.parse::<f64>().ok())
                 .filter(|height| height.is_finite() && *height > 0.0)
+                .or_else(|| parts.get(&part_key).and_then(|part| part.height_mm));
+            let Some(height_mm) = height_mm.filter(|height| height.is_finite() && *height > 0.0)
             else {
                 errors.push(format!("{} has no valid part height", placement.reference));
                 continue;
             };
+            let nozzle_id = parts
+                .get(&part_key)
+                .and_then(|part| select_compatible_nozzle(part, profile))
+                .unwrap_or_else(|| "N1".into());
             let Some(transform) = instance.design_to_machine else {
                 continue;
             };
@@ -117,7 +152,7 @@ pub fn plan_job(
                 placement_reference: placement.reference.clone(),
                 part_key,
                 feeder_id: feeder.id(),
-                nozzle_id: "N1".into(),
+                nozzle_id,
                 feeder_pick,
                 board_place,
                 safe_z_mm: profile.safe_z_mm,
@@ -144,6 +179,23 @@ pub fn plan_job(
         steps,
         report,
     }
+}
+
+fn select_compatible_nozzle(part: &Part, profile: &MachineProfile) -> Option<String> {
+    if part.compatible_tips.is_empty() {
+        return None;
+    }
+    profile
+        .bottom_vision
+        .as_ref()?
+        .nozzles
+        .iter()
+        .find_map(|nozzle| {
+            part.compatible_tips
+                .iter()
+                .any(|tip| tip == &nozzle.expected_tip_id)
+                .then(|| nozzle.nozzle_id.clone())
+        })
 }
 
 pub fn placement_part_key(placement: &Placement) -> String {
@@ -239,6 +291,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "job".into(),
             status: "draft".into(),
+            placement_references: Vec::new(),
             boards: vec![BoardInstance {
                 id: Uuid::new_v4(),
                 board_id,
@@ -248,9 +301,104 @@ mod tests {
                 surface_z_mm: None,
             }],
         };
-        let plan = plan_job(&job, &HashMap::from([(board_id, board)]), &[], &profile());
+        let plan = plan_job(
+            &job,
+            &HashMap::from([(board_id, board)]),
+            &[],
+            &HashMap::new(),
+            &profile(),
+        );
         assert!(!plan.report.ready);
         assert_eq!(plan.report.errors.len(), 3);
+    }
+
+    #[test]
+    fn plan_can_select_one_named_placement() {
+        let board_id = Uuid::new_v4();
+        let part_key = "R0603:10k".to_string();
+        let placements = ["R1", "R2"].map(|reference| Placement {
+            reference: reference.into(),
+            value: "10k".into(),
+            package: "R0603".into(),
+            side: BoardSide::Top,
+            pose: Pose {
+                x_mm: 1.0,
+                y_mm: 2.0,
+                z_mm: 0.0,
+                rotation_deg: 0.0,
+            },
+            enabled: true,
+            fiducial: false,
+            properties: BTreeMap::new(),
+        });
+        let board = BoardDesign {
+            id: board_id,
+            name: "board".into(),
+            source_format: "kicad_pcb".into(),
+            source_version: None,
+            width_mm: Some(10.0),
+            height_mm: Some(10.0),
+            outline_bounds: None,
+            placements: placements.into(),
+            warnings: vec![],
+        };
+        let job = Job {
+            id: Uuid::new_v4(),
+            name: "one placement".into(),
+            boards: vec![BoardInstance {
+                id: Uuid::new_v4(),
+                board_id,
+                label: "A1".into(),
+                side: BoardSide::Top,
+                design_to_machine: Some(velocitypnp_domain::Transform2d::rigid(100.0, 100.0, 0.0)),
+                surface_z_mm: Some(3.0),
+            }],
+            placement_references: vec!["R2".into()],
+            status: "ready".into(),
+        };
+        let feeder = Feeder::Strip {
+            id: Uuid::new_v4(),
+            name: "resistors".into(),
+            part_key: part_key.clone(),
+            first_pick: Pose {
+                x_mm: 10.0,
+                y_mm: 20.0,
+                z_mm: 4.0,
+                rotation_deg: 0.0,
+            },
+            tape_pitch_mm: 4.0,
+            tape_width_mm: 8.0,
+            tape_rotation_deg: 0.0,
+            remaining: Some(2),
+        };
+        let parts = HashMap::from([(
+            part_key.clone(),
+            Part {
+                id: Uuid::new_v4(),
+                key: part_key,
+                manufacturer_part_number: None,
+                package: "R0603".into(),
+                height_mm: Some(0.55),
+                body_width_mm: Some(0.8),
+                body_length_mm: Some(1.6),
+                compatible_tips: vec!["N045".into()],
+                vision_profile: None,
+            },
+        )]);
+
+        let plan = plan_job(
+            &job,
+            &HashMap::from([(board_id, board)]),
+            &[feeder],
+            &parts,
+            &profile(),
+        );
+
+        assert!(plan.report.ready, "{:?}", plan.report.errors);
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].placement_reference, "R2");
+        assert_eq!(plan.steps[0].nozzle_id, "N1");
+        assert!((plan.steps[0].board_place.z_mm - 3.55).abs() < 1e-9);
     }
 
     #[test]

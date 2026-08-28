@@ -778,7 +778,7 @@ logical next-pocket operation; it does not move the tape.
 
 ### Guarded single-placement execution
 
-Execute one job-plan step in the simulator:
+Execute one job-plan step in the simulator or on gated hardware:
 
 ```bash
 cargo run --release -p velocitypnp -- execute-single-placement JOB_UUID \
@@ -787,18 +787,20 @@ cargo run --release -p velocitypnp -- execute-single-placement JOB_UUID \
 ```
 
 The API route is `POST /jobs/JOB_UUID/placement-executions`. The Python client
-uses `start_guarded_single_placement()`. The executor requires a homed
-simulator, a current local direction-response calibration, a registered board
-transform and surface Z, and an active strip feeder whose latest qualification
-sequence includes three distinct passed cycles with the planned nozzle. Each
-cycle must include passed nozzle-clear and pocket-return evidence.
+uses `start_guarded_single_placement()`. The executor requires a homed machine,
+a current local direction-response calibration, a registered board transform
+and measured surface Z, a part-library height, and an active strip feeder. The
+latest feeder qualification sequence must include three distinct passed cycles
+with the planned nozzle. Each cycle must include passed nozzle-clear and
+pocket-return evidence. Set a job's `placement_references` list to run a
+deliberate subset of board parts.
 
-The persistent run records preflight, pick approach, pickup, retained
-bottom-inspection gate, place approach, placement, release, top-inspection
-pose, and completion. Every move uses calibrated logical coordinates. The
-simulator does not consume a pocket and does not claim that it captured live
-vision. Physical requests are rejected before motion until the short feeder
-sequence, PCB fixation, board-surface, and live executor feedback gates pass.
+The persistent run records preflight, live pickup, bottom alignment, calibrated
+placement motion, bounded release verification, and top inspection. Physical
+success consumes the reserved feeder pocket only after release evidence. A
+failure before confirmed release tries to return the held part to its source
+pocket and quarantines the reservation. The simulator does not consume a
+pocket and does not claim live camera evidence.
 
 ### Automatic board registration
 

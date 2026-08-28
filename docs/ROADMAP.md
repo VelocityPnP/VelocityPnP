@@ -94,14 +94,14 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add persistent per-pocket reservation, evidence-gated consumption,
   empty-pocket skipping, retry limits, and restart recovery
 - [x] Add three-to-five-cycle qualification across distinct occupied pockets
-- [x] Add a persistent, simulator-only guarded single-placement executor that
-  uses the calibrated motion planner and records each execution stage
+- [x] Add a persistent guarded single-placement executor with simulator and
+  gated live pickup, alignment, release, and inspection paths
 - [ ] Validate deterministic next-pocket advancement during physical job use
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
-- [ ] Add live vacuum and bottom-vision feedback to the physical job executor
-- [ ] Route the future physical job executor through the validated motion
-  planner without enabling compensation for calibration or manual jog
+- [x] Add live vacuum and bottom-vision feedback to the physical job executor
+- [x] Route the physical job executor through the validated motion planner
+  without enabling compensation for calibration or manual jog
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
 
 ## Gate 5 — Inspection and newer machines
@@ -149,6 +149,5 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles
 
-The physical job execution endpoint remains absent until Gates 1–4 pass. The
-simulator endpoint exists specifically to exercise job state and path planning
-without turning an unvalidated workflow into machine motion.
+The physical job endpoint is limited to one explicit, guarded plan step. Full
+job execution remains unavailable until Gate 4 hardware validation passes.

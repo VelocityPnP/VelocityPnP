@@ -1450,6 +1450,15 @@ class Client:
     def put_feeder(self, feeder: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/feeders", feeder)
 
+    def parts(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/parts")["parts"]
+
+    def put_part(self, part: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/parts", part)
+
+    def part(self, part_id: str | uuid.UUID) -> dict[str, Any]:
+        return self._request("GET", f"/parts/{part_id}")
+
     def jobs(self) -> list[dict[str, Any]]:
         return self._request("GET", "/jobs")["jobs"]
 

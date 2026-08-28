@@ -9,9 +9,9 @@ use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, BoardSurfaceMeasurementRun,
     CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job, MachineEvent,
-    Operation, PlacementExecutionRun, StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun,
-    StripFeederPocketOutcome, StripFeederPocketStatus, StripFeederRegistration,
-    StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
+    Operation, Part, PlacementExecutionRun, StripFeederLiveHoldoutRun,
+    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketStatus,
+    StripFeederRegistration, StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -123,6 +123,16 @@ impl Store {
             );
             INSERT OR IGNORE INTO schema_version(version, applied_at)
                 VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            CREATE TABLE IF NOT EXISTS placement_execution_artifacts (
+                execution_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(execution_id, name)
+            );
+            INSERT OR IGNORE INTO schema_version(version, applied_at)
+                VALUES (7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             "#,
         )?;
         Ok(())
@@ -206,6 +216,45 @@ impl Store {
                 "SELECT media_type, data FROM board_surface_measurement_artifacts \
                  WHERE measurement_id = ?1 AND name = ?2",
                 params![measurement_id.to_string(), name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn put_placement_execution_artifact(
+        &self,
+        execution_id: Uuid,
+        name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(!name.is_empty(), "placement artifact name is empty");
+        anyhow::ensure!(!media_type.is_empty(), "placement media type is empty");
+        self.connection.lock().execute(
+            r#"INSERT INTO placement_execution_artifacts(
+                 execution_id, name, media_type, data, created_at
+               ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ON CONFLICT(execution_id, name) DO UPDATE SET
+                 media_type = excluded.media_type,
+                 data = excluded.data,
+                 created_at = excluded.created_at"#,
+            params![execution_id.to_string(), name, media_type, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_placement_execution_artifact(
+        &self,
+        execution_id: Uuid,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT media_type, data FROM placement_execution_artifacts \
+                 WHERE execution_id = ?1 AND name = ?2",
+                params![execution_id.to_string(), name],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
@@ -430,6 +479,18 @@ impl Store {
 
     pub fn put_feeder(&self, feeder: &Feeder) -> Result<()> {
         self.put("feeder", feeder_id(feeder), feeder)
+    }
+
+    pub fn put_part(&self, part: &Part) -> Result<()> {
+        self.put("part", part.id, part)
+    }
+
+    pub fn list_parts(&self) -> Result<Vec<Part>> {
+        self.list("part")
+    }
+
+    pub fn get_part(&self, id: Uuid) -> Result<Option<Part>> {
+        self.get("part", id)
     }
 
     pub fn list_feeders(&self) -> Result<Vec<Feeder>> {
@@ -1279,6 +1340,29 @@ mod tests {
         store.put_placement_execution(&run).unwrap();
 
         assert_eq!(store.get_placement_execution(run.id).unwrap(), Some(run));
+    }
+
+    #[test]
+    fn placement_execution_artifact_round_trip_retains_evidence() {
+        let store = Store::memory().unwrap();
+        let execution_id = Uuid::new_v4();
+        let data = [5, 4, 3, 2, 1];
+
+        store
+            .put_placement_execution_artifact(
+                execution_id,
+                "held-part-inspection.png",
+                "image/png",
+                &data,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_placement_execution_artifact(execution_id, "held-part-inspection.png")
+                .unwrap(),
+            Some(("image/png".into(), data.to_vec()))
+        );
     }
 
     #[test]

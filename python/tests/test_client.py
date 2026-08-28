@@ -1184,6 +1184,25 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(client.placement_execution("execution"), execution)
         send.assert_called_once_with("GET", "/placement-executions/execution")
 
+    def test_part_library_endpoints(self):
+        client = Client(timeout=1)
+        with patch.object(
+            client,
+            "_request",
+            return_value={"parts": [{"id": "part"}]},
+        ) as send:
+            self.assertEqual(client.parts(), [{"id": "part"}])
+        send.assert_called_once_with("GET", "/parts")
+
+        part = {"id": "part", "key": "R0603:10k"}
+        with patch.object(client, "_request", return_value=part) as send:
+            self.assertEqual(client.put_part(part), part)
+        send.assert_called_once_with("POST", "/parts", part)
+
+        with patch.object(client, "_request", return_value=part) as send:
+            self.assertEqual(client.part("part"), part)
+        send.assert_called_once_with("GET", "/parts/part")
+
 
 if __name__ == "__main__":
     unittest.main()
