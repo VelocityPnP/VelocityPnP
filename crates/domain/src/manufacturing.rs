@@ -52,6 +52,9 @@ pub struct BoardInstance {
     pub side: BoardSide,
     pub design_to_machine: Option<Transform2d>,
     pub surface_z_mm: Option<f64>,
+    /// Added height above the measured board datum, such as adhesive or paste.
+    #[serde(default)]
+    pub placement_surface_offset_mm: f64,
 }
 
 /// One measured design fiducial used to register a physical board.
@@ -234,6 +237,9 @@ pub struct Part {
     pub height_mm: Option<f64>,
     pub body_width_mm: Option<f64>,
     pub body_length_mm: Option<f64>,
+    /// Signed process adjustment. A positive value stops the nozzle higher.
+    #[serde(default)]
+    pub placement_seating_offset_mm: Option<f64>,
     pub compatible_tips: Vec<String>,
     pub vision_profile: Option<String>,
 }
@@ -733,6 +739,9 @@ pub struct Job {
     /// Limits a job to named placements when it is not empty.
     #[serde(default)]
     pub placement_references: Vec<String>,
+    /// Optional job-wide override for the part seating process adjustment.
+    #[serde(default)]
+    pub placement_seating_offset_mm: Option<f64>,
     pub status: String,
 }
 
@@ -768,6 +777,12 @@ pub struct PlacementExecutionReport {
     pub nozzle_id: String,
     pub feeder_pick: Pose,
     pub board_place: Pose,
+    #[serde(default)]
+    pub part_height_mm: f64,
+    #[serde(default)]
+    pub placement_surface_offset_mm: f64,
+    #[serde(default)]
+    pub placement_seating_offset_mm: f64,
     #[serde(default)]
     pub pocket_index: Option<u32>,
     #[serde(default)]

@@ -9008,6 +9008,7 @@ async fn measure_board_registration(
                     side: BoardSide::Top,
                     design_to_machine: Some(fit.design_to_machine),
                     surface_z_mm: None,
+                    placement_surface_offset_mm: 0.0,
                 };
                 run.selected_rotation_deg = Some(fit.rotation_deg);
                 run.fit_residuals = Some(fit.residuals);
@@ -19849,9 +19850,12 @@ async fn put_part(
         || part
             .body_length_mm
             .is_some_and(|value| !value.is_finite() || value <= 0.0)
+        || part
+            .placement_seating_offset_mm
+            .is_some_and(|value| !value.is_finite() || !(-0.25..=0.5).contains(&value))
     {
         return Err(ApiError::bad_request(
-            "part key, package, height, and body dimensions must be valid",
+            "part key, package, geometry, and seating offset must be valid",
         ));
     }
     state.store.put_part(&part).map_err(ApiError::internal)?;
@@ -19935,7 +19939,22 @@ async fn put_job(
             "job placement references cannot be empty",
         ));
     }
+    if job
+        .placement_seating_offset_mm
+        .is_some_and(|offset| !offset.is_finite() || !(-0.25..=0.5).contains(&offset))
+    {
+        return Err(ApiError::bad_request(
+            "job placement seating offset must be from -0.25 to +0.50 mm",
+        ));
+    }
     for instance in &job.boards {
+        if !instance.placement_surface_offset_mm.is_finite()
+            || !(0.0..=5.0).contains(&instance.placement_surface_offset_mm)
+        {
+            return Err(ApiError::bad_request(
+                "board placement surface offset must be from 0 to 5 mm",
+            ));
+        }
         if state
             .store
             .get_board(instance.board_id)
@@ -20636,6 +20655,9 @@ async fn execute_guarded_placement_task(
         nozzle_id: step.nozzle_id.clone(),
         feeder_pick: step.feeder_pick,
         board_place: step.board_place,
+        part_height_mm: step.part_height_mm,
+        placement_surface_offset_mm: step.placement_surface_offset_mm,
+        placement_seating_offset_mm: step.placement_seating_offset_mm,
         pocket_index: physical.as_ref().map(|prepared| prepared.run.pocket_index),
         pickup_report: None,
         top_inspection: None,
@@ -21088,8 +21110,11 @@ async fn execute_physical_guarded_placement(
             stage: PlacementExecutionStage::Placement,
             passed: true,
             message: format!(
-                "reached the planned component-center Z{:.3}",
+                "reached nozzle-contact Z{:.3}: part {:.3}, surface offset {:+.3}, seating offset {:+.3} mm",
                 step.board_place.z_mm,
+                step.part_height_mm,
+                step.placement_surface_offset_mm,
+                step.placement_seating_offset_mm,
             ),
         });
         persist_placement_progress(state, run, report)?;
@@ -23218,6 +23243,8 @@ mod tests {
             part_height_mm: 0.55,
             body_width_mm: 0.8,
             body_length_mm: 1.6,
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: 0.0,
             feeder_pick: Pose {
                 x_mm: 100.0,
                 y_mm: 100.0,
@@ -23254,6 +23281,9 @@ mod tests {
             nozzle_id: step.nozzle_id.clone(),
             feeder_pick: step.feeder_pick,
             board_place: step.board_place,
+            part_height_mm: step.part_height_mm,
+            placement_surface_offset_mm: step.placement_surface_offset_mm,
+            placement_seating_offset_mm: step.placement_seating_offset_mm,
             pocket_index: None,
             pickup_report: None,
             top_inspection: None,
@@ -26369,6 +26399,7 @@ mod tests {
             name: "bad".into(),
             boards: vec![],
             placement_references: Vec::new(),
+            placement_seating_offset_mm: None,
             status: "draft".into(),
         };
         let response = router(test_state())

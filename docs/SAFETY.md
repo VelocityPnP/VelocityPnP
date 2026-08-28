@@ -63,13 +63,19 @@ runner restores the nozzle angle before it returns to the exact pickup pose.
 It fails closed if the requested angle exceeds the configured bound.
 
 The guarded single-placement endpoint requires one explicit plan index,
-calibrated motion, a measured board surface, a part height, and three current
-pickup-return cycles at distinct pockets with the planned nozzle. Each cycle
-needs nozzle-clear and pocket-return evidence. Physical execution reserves one
+calibrated motion, a measured board surface, complete part geometry, and
+three current pickup-return cycles at distinct pockets with the planned nozzle.
+Each cycle needs nozzle-clear and pocket-return evidence. Physical execution
+reserves one
 known occupied pocket, uses live vacuum and bottom vision, verifies release in
 at most two attempts, and then uses top vision. A failure before confirmed
 release tries to return the part to the source pocket. Simulation records the
 intended stages but does not claim live evidence or consume feeder inventory.
+
+Placement Z keeps the measured board datum, a nonnegative board surface
+offset, nominal part height, and a bounded signed seating offset as separate
+terms. A positive seating offset stops higher. This prevents tape thickness or
+nozzle compression tuning from changing calibration evidence.
 
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the

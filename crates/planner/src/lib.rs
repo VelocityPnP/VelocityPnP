@@ -37,6 +37,8 @@ pub struct PlanStep {
     pub part_height_mm: f64,
     pub body_width_mm: f64,
     pub body_length_mm: f64,
+    pub placement_surface_offset_mm: f64,
+    pub placement_seating_offset_mm: f64,
     pub feeder_pick: Pose,
     pub board_place: Pose,
     pub safe_z_mm: f64,
@@ -62,6 +64,12 @@ pub fn plan_job(
     if selected_references.len() != job.placement_references.len() {
         errors.push("job placement references must be unique".into());
     }
+    if job
+        .placement_seating_offset_mm
+        .is_some_and(|offset| !offset.is_finite() || !(-0.25..=0.5).contains(&offset))
+    {
+        errors.push("job placement seating offset is invalid".into());
+    }
 
     for instance in &job.boards {
         let Some(board) = boards.get(&instance.board_id) else {
@@ -77,6 +85,14 @@ pub fn plan_job(
         if instance.surface_z_mm.is_none() {
             errors.push(format!(
                 "{} has no measured board surface Z",
+                instance.label
+            ));
+        }
+        if !instance.placement_surface_offset_mm.is_finite()
+            || !(0.0..=5.0).contains(&instance.placement_surface_offset_mm)
+        {
+            errors.push(format!(
+                "{} has an invalid placement surface offset",
                 instance.label
             ));
         }
@@ -142,6 +158,33 @@ pub fn plan_job(
             } else {
                 (body_length_mm, body_width_mm)
             };
+            let seating_property = placement.properties.get("Placement Seating Offset");
+            let placement_seating_offset_mm = if let Some(value) = seating_property {
+                let Ok(offset) = value.parse::<f64>() else {
+                    errors.push(format!(
+                        "{} has an invalid placement seating offset",
+                        placement.reference
+                    ));
+                    continue;
+                };
+                offset
+            } else {
+                job.placement_seating_offset_mm.unwrap_or_else(|| {
+                    parts
+                        .get(&part_key)
+                        .and_then(|part| part.placement_seating_offset_mm)
+                        .unwrap_or(0.0)
+                })
+            };
+            if !placement_seating_offset_mm.is_finite()
+                || !(-0.25..=0.5).contains(&placement_seating_offset_mm)
+            {
+                errors.push(format!(
+                    "{} has an invalid placement seating offset",
+                    placement.reference
+                ));
+                continue;
+            }
             let nozzle_id = parts
                 .get(&part_key)
                 .and_then(|part| select_compatible_nozzle(part, profile))
@@ -155,7 +198,10 @@ pub fn plan_job(
             let board_place = transformed_pose(
                 placement.pose,
                 transform,
-                surface_z_mm + height_mm,
+                surface_z_mm
+                    + instance.placement_surface_offset_mm
+                    + height_mm
+                    + placement_seating_offset_mm,
                 instance.side,
             );
             if !profile.bounds.contains(Pose {
@@ -180,6 +226,8 @@ pub fn plan_job(
                 part_height_mm: height_mm,
                 body_width_mm,
                 body_length_mm,
+                placement_surface_offset_mm: instance.placement_surface_offset_mm,
+                placement_seating_offset_mm,
                 feeder_pick,
                 board_place,
                 safe_z_mm: profile.safe_z_mm,
@@ -319,6 +367,7 @@ mod tests {
             name: "job".into(),
             status: "draft".into(),
             placement_references: Vec::new(),
+            placement_seating_offset_mm: None,
             boards: vec![BoardInstance {
                 id: Uuid::new_v4(),
                 board_id,
@@ -326,6 +375,7 @@ mod tests {
                 side: BoardSide::Top,
                 design_to_machine: None,
                 surface_z_mm: None,
+                placement_surface_offset_mm: 0.0,
             }],
         };
         let plan = plan_job(
@@ -343,20 +393,26 @@ mod tests {
     fn plan_can_select_one_named_placement() {
         let board_id = Uuid::new_v4();
         let part_key = "R0603:10k".to_string();
-        let placements = ["R1", "R2"].map(|reference| Placement {
-            reference: reference.into(),
-            value: "10k".into(),
-            package: "R0603".into(),
-            side: BoardSide::Top,
-            pose: Pose {
-                x_mm: 1.0,
-                y_mm: 2.0,
-                z_mm: 0.0,
-                rotation_deg: 0.0,
-            },
-            enabled: true,
-            fiducial: false,
-            properties: BTreeMap::new(),
+        let placements = ["R1", "R2"].map(|reference| {
+            let mut properties = BTreeMap::new();
+            if reference == "R2" {
+                properties.insert("Placement Seating Offset".into(), "0.07".into());
+            }
+            Placement {
+                reference: reference.into(),
+                value: "10k".into(),
+                package: "R0603".into(),
+                side: BoardSide::Top,
+                pose: Pose {
+                    x_mm: 1.0,
+                    y_mm: 2.0,
+                    z_mm: 0.0,
+                    rotation_deg: 0.0,
+                },
+                enabled: true,
+                fiducial: false,
+                properties,
+            }
         });
         let board = BoardDesign {
             id: board_id,
@@ -379,8 +435,10 @@ mod tests {
                 side: BoardSide::Top,
                 design_to_machine: Some(velocitypnp_domain::Transform2d::rigid(100.0, 100.0, 0.0)),
                 surface_z_mm: Some(3.0),
+                placement_surface_offset_mm: 0.10,
             }],
             placement_references: vec!["R2".into()],
+            placement_seating_offset_mm: Some(0.06),
             status: "ready".into(),
         };
         let feeder = Feeder::Strip {
@@ -408,6 +466,7 @@ mod tests {
                 height_mm: Some(0.55),
                 body_width_mm: Some(0.8),
                 body_length_mm: Some(1.6),
+                placement_seating_offset_mm: Some(0.05),
                 compatible_tips: vec!["N045".into()],
                 vision_profile: None,
             },
@@ -425,7 +484,10 @@ mod tests {
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].placement_reference, "R2");
         assert_eq!(plan.steps[0].nozzle_id, "N1");
-        assert!((plan.steps[0].board_place.z_mm - 3.55).abs() < 1e-9);
+        assert!((plan.steps[0].board_place.z_mm - 3.72).abs() < 1e-9);
+        assert_eq!(plan.steps[0].part_height_mm, 0.55);
+        assert_eq!(plan.steps[0].placement_surface_offset_mm, 0.10);
+        assert_eq!(plan.steps[0].placement_seating_offset_mm, 0.07);
     }
 
     #[test]

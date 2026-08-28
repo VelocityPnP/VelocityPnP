@@ -808,8 +808,26 @@ Physical success consumes the reserved feeder pocket only after release
 evidence. A failure before confirmed release tries to return the held part to
 its source pocket and quarantines the reservation. The simulator does not
 consume a pocket and does not claim live camera evidence. Job preflight requires
-part height, body width, and body length. The planned component-center Z is the
-measured board surface plus the nominal part height.
+part height, body width, and body length.
+
+The planned nozzle-contact Z keeps four terms separate:
+
+```text
+measured board surface
++ board-instance placement_surface_offset_mm
++ nominal part height_mm
++ resolved placement_seating_offset_mm
+```
+
+Use the board-instance surface offset for a known layer above the measured
+datum, such as tape or paste. Use the part seating offset only as a process
+adjustment. A positive seating offset stops the nozzle higher and reduces
+compression. The part default can be from -0.25 to +0.50 mm. A KiCad placement
+property named `Placement Seating Offset` overrides that default for one
+reference. A job-level `placement_seating_offset_mm` overrides the part default
+and supports controlled tuning runs. The per-reference property has the highest
+priority. Preflight records every term in the plan, and each physical run copies
+them into its retained report.
 
 ### Automatic board registration
 
