@@ -2493,6 +2493,51 @@ a polarized part. Polarized parts require a separate full-angle profile that
 combines KiCad pad direction, feeder direction, and package-mark detection.
 Preflight must reject polarized placement until that direction is known.
 
+### Orientation-aware pickup and R13 release stop
+
+On 2026-08-28, the resistor part received the explicit `axis_symmetric`
+orientation policy. Retained R12 bottom-camera frames also exercised the
+`brighter_end` and `darker_end` policies without motion. They resolved opposite
+package directions with 30.50 luma of end contrast. This validates the directed
+detector on retained evidence, but it is not a physical LED polarity test.
+
+The first v5 pickup qualification,
+`0fabec62-c507-4a43-a6ae-498aa1a61c46`, returned its part but stopped at a
+1.337 degree final angle residual. The 1 degree gate was smaller than the
+0.10 mm translation effect allowed for this 0603 package. The profile now uses
+a 2 degree residual limit without weakening the separate 180 degree phase
+check.
+
+Coarse home `34fc0ada-1ae1-4af5-a618-d58f821e9f00` and fine home
+`ab0dac5c-308c-4478-82bf-206f55eb01ab` passed. Pickup qualifications
+`661e7319-fae0-43df-ba7d-4e6bcc4b6e51`,
+`ee6c8a98-eac4-483a-bf5f-7cdd76a1df8a`, and
+`03ba7ba8-7c3b-44f2-9e2e-591191416ad1` then passed at distinct pockets. Their
+final center residuals were 0.085, 0.073, and 0.072 mm. Their angle residuals
+were -0.759, +0.394, and -0.564 degrees.
+
+R13 execution `1ff38bf5-d4ff-49be-8908-d529578ca051` stopped before transfer
+because pocket 9 had no vacuum transition. It exposed a difference between the
+planned strip position and the first available runtime reservation. Guarded
+placement v3 now reserves the available pocket at the planned position. It
+also captures that pocket immediately before pickup and uses the detected
+component center for the nozzle move.
+
+After deployment, coarse home `09b5413c-8172-498d-a849-cd7a6bc86276` and fine
+home `30193f42-4879-4b52-9186-53c68ee5ace8` passed. R13 execution
+`e59defa0-83e0-4647-a92b-c431e0286e14` reserved pocket 12. Top vision applied
+a +0.312 mm X and +0.119 mm Y pickup correction. Vacuum contact occurred at
+nozzle Z3.8. Bottom vision aligned the resistor to the +0.076 degree board
+target with a 0.087 mm center residual and a -1.637 degree angle residual.
+
+The tool reached nozzle Z4.107 at R13 and pneumatic release passed. Bottom
+vision found the same resistor on N1 after both bounded release attempts. The
+operation correctly stopped without claiming placement success or consuming
+the feeder pocket. Pocket 12 is `needs_review`. The machine ended ready and
+homed at safe Z over the solid datum-board area, with vacuum off and no
+controller fault. The resistor remains mechanically attached to N1 and needs
+removal or a validated stuck-part release process.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
