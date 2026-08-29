@@ -31,7 +31,8 @@ pub use board_registration::{
     BoardRegistrationFit,
 };
 pub use held_part::{
-    inspect_held_part_difference, HeldPartInspectionArtifacts, HELD_PART_INSPECTION_ALGORITHM,
+    inspect_held_part_difference, inspect_held_part_difference_with_orientation,
+    HeldPartInspectionArtifacts, HELD_PART_INSPECTION_ALGORITHM,
 };
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use placed_part::{

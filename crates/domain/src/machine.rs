@@ -672,7 +672,7 @@ impl StripFeederPickupProfile {
             || !(1..=3).contains(&self.alignment_max_iterations)
             || !(0.02..=0.25).contains(&self.alignment_translation_tolerance_mm)
             || !(0.2..=3.0).contains(&self.alignment_rotation_tolerance_deg)
-            || !(5.0..=90.0).contains(&self.alignment_max_rotation_correction_deg)
+            || !(5.0..=180.0).contains(&self.alignment_max_rotation_correction_deg)
         {
             return Err("strip-feeder pickup profile is invalid");
         }

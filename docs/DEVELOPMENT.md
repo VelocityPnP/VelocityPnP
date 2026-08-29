@@ -678,10 +678,37 @@ The runner lifts the part to level Z, transfers it to the exact bare-nozzle
 bottom-camera pose, and checks both retained vacuum and a frame-difference
 part outline. It applies at most two bounded X/Y and nozzle-angle corrections.
 Each correction gets a new camera measurement. The final gate requires a
-0.10 mm center residual and a 1 degree package-axis residual. The runner then
+0.10 mm center residual and a 1 degree package-rotation residual. The runner then
 restores the pickup nozzle angle, returns to the exact source head pose, and
 releases at the detected pickup Z. A supplied fallback point is used only
 when the source return target is invalid.
+
+Every production part needs an orientation policy. `axis_symmetric` treats
+angles 180 degrees apart as equivalent. This is suitable for non-polar
+two-terminal parts. `feeder_referenced` keeps the full angle assigned during
+feeder registration and resolves the measured package axis against that
+source angle. `brighter_end` and `darker_end` measure both ends of the held
+package. They require a configured luma separation and can apply a package
+zero-angle offset. Weak end contrast stops before rotation or board motion.
+
+For example, a package whose darker end defines its zero-degree direction can
+use this part field:
+
+```json
+{
+  "orientation": {
+    "mode": "darker_end",
+    "minimum_contrast_luma": 8.0,
+    "rotation_offset_deg": 0.0
+  }
+}
+```
+
+The older `rectangular_passive` vision profile maps to `axis_symmetric` for
+stored part compatibility. New part records must provide an explicit policy.
+Job preflight rejects a part with no valid orientation policy. A change to the
+part policy or feeder source angle also makes older pickup-angle evidence
+ineligible for placement.
 
 After release, the runner moves the nozzle to the same bottom-camera pose used
 for its bare reference. Any detected component means that release is not
@@ -752,7 +779,10 @@ cargo run --release -p velocitypnp-vision --example inspect_held_part -- \
 
 The last four values are the calibrated bottom-camera millimeters-per-pixel
 matrix in row-major order. The command writes the inspection report to
-standard output and writes the annotated image to `OUTPUT.png`.
+standard output and writes the annotated image to `OUTPUT.png`. Append
+`brighter_end`, `darker_end`, or `feeder_referenced`, followed by minimum luma
+contrast and rotation offset, to replay directed orientation. The magenta line
+points toward the detected package end.
 
 Replay two retained top-camera pocket views without machine motion:
 
@@ -794,6 +824,14 @@ latest feeder qualification sequence must include three distinct passed cycles
 with the planned nozzle. Each cycle must include passed nozzle-clear and
 pocket-return evidence. Set a job's `placement_references` list to run a
 deliberate subset of board parts.
+
+The plan carries the feeder's directed part angle separately from the KiCad
+board-placement angle. Bottom vision preserves or measures the 180-degree
+phase, calculates a full-angle residual for directed parts, and rotates the
+nozzle through the shorter path. The V3 profile permits the complete
+180-degree correction range. Its periodic runout model was measured at
+30-degree intervals from -165 through +165 degrees and remains defined at the
+shared -180/+180 endpoint.
 
 The persistent run records preflight, live pickup, bottom alignment, calibrated
 placement motion, bounded release verification, and top inspection. Top

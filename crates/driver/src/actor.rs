@@ -622,11 +622,18 @@ impl MachineActor {
             .as_ref()
             .context("active profile does not define bottom vision")?;
         let geometry = &bottom.head_geometry;
-        let max_offset = geometry
+        let calibration_sample_offset = geometry
             .rotation_angle_offsets_deg
             .iter()
             .map(|angle| angle.abs())
             .fold(0.0, f64::max);
+        let max_offset = self
+            .profile
+            .strip_feeder_pickup
+            .as_ref()
+            .map_or(calibration_sample_offset, |pickup| {
+                calibration_sample_offset.max(pickup.alignment_max_rotation_correction_deg)
+            });
         if angle_offset_deg.abs() > max_offset + 1e-6 {
             bail!("nozzle rotation target exceeds the {max_offset:.1} degree calibration bound");
         }
@@ -1094,17 +1101,17 @@ mod tests {
         assert_eq!(n2_reference, 0.0);
         assert_eq!(
             handle
-                .calibration_rotate_nozzle(lease.id, "N1".into(), 165.0)
+                .calibration_rotate_nozzle(lease.id, "N1".into(), 180.0)
                 .await
                 .unwrap(),
-            165.0
+            180.0
         );
         assert_eq!(
             handle
-                .calibration_rotate_nozzle(lease.id, "N2".into(), -165.0)
+                .calibration_rotate_nozzle(lease.id, "N2".into(), -180.0)
                 .await
                 .unwrap(),
-            -165.0
+            -180.0
         );
         assert_eq!(
             handle
@@ -1113,14 +1120,14 @@ mod tests {
                 .unwrap(),
             n1_reference
         );
-        assert_eq!(handle.status().pose.unwrap().rotation_deg, 165.0);
+        assert_eq!(handle.status().pose.unwrap().rotation_deg, 180.0);
 
         let error = handle
-            .calibration_rotate_nozzle(lease.id, "N1".into(), 165.1)
+            .calibration_rotate_nozzle(lease.id, "N1".into(), 180.1)
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("exceeds the 165.0 degree calibration bound"));
+        assert!(error.contains("exceeds the 180.0 degree calibration bound"));
         assert_eq!(handle.status().state, MachineState::Ready);
     }
 

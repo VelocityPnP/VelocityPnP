@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 use velocitypnp_domain::{
     top_side_placement_rotation_deg, BoardDesign, BoardSide, Feeder, Job, MachineProfile, Part,
-    Placement, Pose,
+    PartOrientation, Placement, Pose,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +37,8 @@ pub struct PlanStep {
     pub part_height_mm: f64,
     pub body_width_mm: f64,
     pub body_length_mm: f64,
+    pub part_orientation: PartOrientation,
+    pub feeder_part_rotation_deg: f64,
     pub placement_surface_offset_mm: f64,
     pub placement_seating_offset_mm: f64,
     pub feeder_pick: Pose,
@@ -126,24 +128,40 @@ pub fn plan_job(
                 ));
                 continue;
             };
+            let Some(part) = parts.get(&part_key) else {
+                errors.push(format!(
+                    "{} has no part-library definition for {part_key}",
+                    placement.reference
+                ));
+                continue;
+            };
+            let Some(part_orientation) = part.resolved_orientation() else {
+                errors.push(format!(
+                    "{} has no orientation-aware vision policy",
+                    placement.reference
+                ));
+                continue;
+            };
+            if let Err(error) = part_orientation.validate() {
+                errors.push(format!("{} {error}", placement.reference));
+                continue;
+            }
             let height_mm = placement
                 .properties
                 .get("Height")
                 .and_then(|height| height.parse::<f64>().ok())
                 .filter(|height| height.is_finite() && *height > 0.0)
-                .or_else(|| parts.get(&part_key).and_then(|part| part.height_mm));
+                .or(part.height_mm);
             let Some(height_mm) = height_mm.filter(|height| height.is_finite() && *height > 0.0)
             else {
                 errors.push(format!("{} has no valid part height", placement.reference));
                 continue;
             };
-            let body_width_mm = parts
-                .get(&part_key)
-                .and_then(|part| part.body_width_mm)
+            let body_width_mm = part
+                .body_width_mm
                 .filter(|width| width.is_finite() && *width > 0.0);
-            let body_length_mm = parts
-                .get(&part_key)
-                .and_then(|part| part.body_length_mm)
+            let body_length_mm = part
+                .body_length_mm
                 .filter(|length| length.is_finite() && *length > 0.0);
             let (Some(body_width_mm), Some(body_length_mm)) = (body_width_mm, body_length_mm)
             else {
@@ -169,12 +187,8 @@ pub fn plan_job(
                 };
                 offset
             } else {
-                job.placement_seating_offset_mm.unwrap_or_else(|| {
-                    parts
-                        .get(&part_key)
-                        .and_then(|part| part.placement_seating_offset_mm)
-                        .unwrap_or(0.0)
-                })
+                job.placement_seating_offset_mm
+                    .unwrap_or_else(|| part.placement_seating_offset_mm.unwrap_or(0.0))
             };
             if !placement_seating_offset_mm.is_finite()
                 || !(-0.25..=0.5).contains(&placement_seating_offset_mm)
@@ -185,10 +199,7 @@ pub fn plan_job(
                 ));
                 continue;
             }
-            let nozzle_id = parts
-                .get(&part_key)
-                .and_then(|part| select_compatible_nozzle(part, profile))
-                .unwrap_or_else(|| "N1".into());
+            let nozzle_id = select_compatible_nozzle(part, profile).unwrap_or_else(|| "N1".into());
             let Some(transform) = instance.design_to_machine else {
                 continue;
             };
@@ -216,6 +227,13 @@ pub fn plan_job(
             }
             let uses = feeder_uses.entry(feeder.id()).or_default();
             let feeder_pick = feeder_pick_pose(feeder, *uses);
+            if !feeder_pick.rotation_deg.is_finite() {
+                errors.push(format!(
+                    "{} feeder part rotation is invalid",
+                    placement.reference
+                ));
+                continue;
+            }
             *uses += 1;
             steps.push(PlanStep {
                 board_instance_id: instance.id,
@@ -226,6 +244,8 @@ pub fn plan_job(
                 part_height_mm: height_mm,
                 body_width_mm,
                 body_length_mm,
+                part_orientation,
+                feeder_part_rotation_deg: feeder_pick.rotation_deg,
                 placement_surface_offset_mm: instance.placement_surface_offset_mm,
                 placement_seating_offset_mm,
                 feeder_pick,
@@ -469,6 +489,7 @@ mod tests {
                 placement_seating_offset_mm: Some(0.05),
                 compatible_tips: vec!["N045".into()],
                 vision_profile: None,
+                orientation: Some(velocitypnp_domain::PartOrientation::AxisSymmetric),
             },
         )]);
 
@@ -486,6 +507,11 @@ mod tests {
         assert_eq!(plan.steps[0].nozzle_id, "N1");
         assert!((plan.steps[0].board_place.z_mm - 3.72).abs() < 1e-9);
         assert_eq!(plan.steps[0].part_height_mm, 0.55);
+        assert_eq!(
+            plan.steps[0].part_orientation,
+            PartOrientation::AxisSymmetric
+        );
+        assert_eq!(plan.steps[0].feeder_part_rotation_deg, 0.0);
         assert_eq!(plan.steps[0].placement_surface_offset_mm, 0.10);
         assert_eq!(plan.steps[0].placement_seating_offset_mm, 0.07);
     }

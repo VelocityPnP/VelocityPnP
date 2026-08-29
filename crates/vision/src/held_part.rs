@@ -1,9 +1,9 @@
 use crate::{GrayFrame, RgbFrame};
 use anyhow::{ensure, Result};
 use std::collections::VecDeque;
-use velocitypnp_domain::HeldPartInspectionReport;
+use velocitypnp_domain::{HeldPartInspectionReport, PartOrientation};
 
-pub const HELD_PART_INSPECTION_ALGORITHM: &str = "held_part_difference.v3";
+pub const HELD_PART_INSPECTION_ALGORITHM: &str = "held_part_difference.v4";
 const MAX_BARE_ALIGNMENT_SHIFT_PX: f64 = 8.0;
 const BARE_ALIGNMENT_STEP_PX: f64 = 0.5;
 
@@ -18,6 +18,8 @@ struct OrientedPartGeometry {
     width_mm: f64,
     length_mm: f64,
     rotation_deg: f64,
+    directed_rotation_deg: f64,
+    length_axis_px: [f64; 2],
     corners_px: [[f64; 2]; 4],
 }
 
@@ -36,6 +38,31 @@ pub fn inspect_held_part_difference(
     maximum_center_offset_mm: f64,
     minimum_part_size_mm: f64,
     maximum_part_size_mm: f64,
+    artifact_name: impl Into<String>,
+) -> Result<HeldPartInspectionArtifacts> {
+    inspect_held_part_difference_with_orientation(
+        bare,
+        held,
+        frame_center_px,
+        pixel_error_to_machine_mm,
+        maximum_center_offset_mm,
+        minimum_part_size_mm,
+        maximum_part_size_mm,
+        PartOrientation::AxisSymmetric,
+        artifact_name,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn inspect_held_part_difference_with_orientation(
+    bare: &GrayFrame,
+    held: &GrayFrame,
+    frame_center_px: [f64; 2],
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    maximum_center_offset_mm: f64,
+    minimum_part_size_mm: f64,
+    maximum_part_size_mm: f64,
+    orientation: PartOrientation,
     artifact_name: impl Into<String>,
 ) -> Result<HeldPartInspectionArtifacts> {
     ensure!(
@@ -58,7 +85,8 @@ pub fn inspect_held_part_difference(
             && minimum_part_size_mm.is_finite()
             && minimum_part_size_mm > 0.0
             && maximum_part_size_mm.is_finite()
-            && maximum_part_size_mm > minimum_part_size_mm,
+            && maximum_part_size_mm > minimum_part_size_mm
+            && orientation.validate().is_ok(),
         "held-part inspection policy is invalid"
     );
 
@@ -144,6 +172,9 @@ pub fn inspect_held_part_difference(
         width_mm: None,
         length_mm: None,
         rotation_deg: None,
+        orientation_rotation_deg: None,
+        orientation_contrast_luma: None,
+        orientation_confidence: 0.0,
         changed_pixel_count: 0,
         mean_difference_luma: 0.0,
         confidence: 0.0,
@@ -184,6 +215,61 @@ pub fn inspect_held_part_difference(
         pixel_error_to_machine_mm[1][0] * error_x_px + pixel_error_to_machine_mm[1][1] * error_y_px;
     let correction_mm = correction_x_mm.hypot(correction_y_mm);
     let rotation_deg = Some(geometry.rotation_deg);
+    let mut orientation_rotation_deg = None;
+    let mut orientation_contrast_luma = None;
+    let mut orientation_confidence = 0.0;
+    let mut orientation_passed = true;
+    let mut marker_axis_px = None;
+    match orientation {
+        PartOrientation::AxisSymmetric => {
+            findings.push("package rotation uses 180-degree axis symmetry".into());
+        }
+        PartOrientation::FeederReferenced => {
+            findings.push("full package rotation uses the registered feeder direction".into());
+        }
+        PartOrientation::BrighterEnd {
+            minimum_contrast_luma,
+            rotation_offset_deg,
+        }
+        | PartOrientation::DarkerEnd {
+            minimum_contrast_luma,
+            rotation_offset_deg,
+        } => {
+            let [negative_luma, positive_luma] =
+                component_end_mean_luma(&component, held, center, geometry.length_axis_px);
+            let signed_contrast = positive_luma - negative_luma;
+            let contrast = signed_contrast.abs();
+            let positive_is_marker = match orientation {
+                PartOrientation::BrighterEnd { .. } => signed_contrast >= 0.0,
+                PartOrientation::DarkerEnd { .. } => signed_contrast <= 0.0,
+                PartOrientation::AxisSymmetric | PartOrientation::FeederReferenced => {
+                    unreachable!()
+                }
+            };
+            let marker_rotation_deg =
+                geometry.directed_rotation_deg + if positive_is_marker { 0.0 } else { 180.0 };
+            orientation_rotation_deg = Some(normalize_rotation_deg(
+                marker_rotation_deg + rotation_offset_deg,
+            ));
+            orientation_contrast_luma = Some(contrast);
+            orientation_confidence = (contrast / minimum_contrast_luma).clamp(0.0, 1.0);
+            orientation_passed = contrast >= minimum_contrast_luma;
+            marker_axis_px = Some(if positive_is_marker {
+                geometry.length_axis_px
+            } else {
+                [-geometry.length_axis_px[0], -geometry.length_axis_px[1]]
+            });
+            if orientation_passed {
+                findings.push(format!(
+                    "package end direction passed with {contrast:.1} luma contrast"
+                ));
+            } else {
+                findings.push(format!(
+                    "package end contrast {contrast:.1} is below the required {minimum_contrast_luma:.1} luma"
+                ));
+            }
+        }
+    }
     let mean_difference_luma = component
         .iter()
         .map(|index| f64::from(difference[*index]))
@@ -231,10 +317,13 @@ pub fn inspect_held_part_difference(
     report.width_mm = Some(width_mm);
     report.length_mm = Some(length_mm);
     report.rotation_deg = rotation_deg;
+    report.orientation_rotation_deg = orientation_rotation_deg;
+    report.orientation_contrast_luma = orientation_contrast_luma;
+    report.orientation_confidence = orientation_confidence;
     report.changed_pixel_count = component.len() as u32;
     report.mean_difference_luma = mean_difference_luma;
     report.confidence = confidence;
-    report.passed = size_passed && centered && confidence >= 0.35;
+    report.passed = size_passed && centered && confidence >= 0.35 && orientation_passed;
     report.findings = findings;
     draw_polygon(&mut preview, &geometry.corners_px, [0, 210, 255]);
     draw_component_outline(
@@ -251,6 +340,14 @@ pub fn inspect_held_part_difference(
         [0, 255, 100],
         8,
     );
+    if let Some(axis) = marker_axis_px {
+        draw_line(
+            &mut preview,
+            center,
+            [center[0] + 24.0 * axis[0], center[1] + 24.0 * axis[1]],
+            [255, 0, 255],
+        );
+    }
     Ok(HeldPartInspectionArtifacts { report, preview })
 }
 
@@ -625,6 +722,54 @@ fn component_rotation_deg(
     (total > 0.0).then(|| 0.5 * (2.0 * xy).atan2(xx - yy).to_degrees())
 }
 
+fn component_end_mean_luma(
+    component: &[usize],
+    frame: &GrayFrame,
+    center: [f64; 2],
+    length_axis_px: [f64; 2],
+) -> [f64; 2] {
+    let projections = component
+        .iter()
+        .map(|index| {
+            let x = f64::from(*index as u32 % frame.width) + 0.5 - center[0];
+            let y = f64::from(*index as u32 / frame.width) + 0.5 - center[1];
+            (x * length_axis_px[0] + y * length_axis_px[1], *index)
+        })
+        .collect::<Vec<_>>();
+    let extent = projections
+        .iter()
+        .map(|(projection, _)| projection.abs())
+        .fold(0.0_f64, f64::max);
+    let end_start = 0.30 * extent;
+    let mean = |positive: bool| {
+        let values = projections
+            .iter()
+            .filter(|(projection, _)| {
+                if positive {
+                    *projection >= end_start
+                } else {
+                    *projection <= -end_start
+                }
+            })
+            .map(|(_, index)| f64::from(frame.pixels[*index]))
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            0.0
+        } else {
+            values.iter().sum::<f64>() / values.len() as f64
+        }
+    };
+    [mean(false), mean(true)]
+}
+
+fn normalize_rotation_deg(rotation_deg: f64) -> f64 {
+    let mut normalized = rotation_deg.rem_euclid(360.0);
+    if normalized >= 180.0 {
+        normalized -= 360.0;
+    }
+    normalized
+}
+
 fn component_oriented_geometry(
     component: &[usize],
     difference: &[u8],
@@ -679,12 +824,14 @@ fn component_oriented_geometry(
     let mapped_minor_axis = mapped_axis(minor_axis);
     let major_mm = (major_max - major_min) * mapped_major_axis[0].hypot(mapped_major_axis[1]);
     let minor_mm = (minor_max - minor_min) * mapped_minor_axis[0].hypot(mapped_minor_axis[1]);
-    let (width_mm, length_mm, length_axis) = if minor_mm <= major_mm {
-        (minor_mm, major_mm, mapped_major_axis)
+    let (width_mm, length_mm, length_axis, length_axis_px) = if minor_mm <= major_mm {
+        (minor_mm, major_mm, mapped_major_axis, major_axis)
     } else {
-        (major_mm, minor_mm, mapped_minor_axis)
+        (major_mm, minor_mm, mapped_minor_axis, minor_axis)
     };
-    rotation_deg = length_axis[1].atan2(length_axis[0]).to_degrees();
+    let directed_rotation_deg =
+        normalize_rotation_deg(length_axis[1].atan2(length_axis[0]).to_degrees());
+    rotation_deg = directed_rotation_deg;
     while rotation_deg >= 90.0 {
         rotation_deg -= 180.0;
     }
@@ -695,6 +842,8 @@ fn component_oriented_geometry(
         width_mm,
         length_mm,
         rotation_deg,
+        directed_rotation_deg,
+        length_axis_px,
         corners_px,
     }
 }
@@ -889,6 +1038,98 @@ mod tests {
         assert!(result.report.centering_correction_mm.unwrap() < 0.05);
         assert!((result.report.width_mm.unwrap() - 0.68).abs() < 0.15);
         assert!((result.report.length_mm.unwrap() - 1.28).abs() < 0.15);
+    }
+
+    #[test]
+    fn directs_a_polarized_package_toward_its_brighter_end() {
+        let bare = frame(80);
+        let mut held = bare.clone();
+        for y in 105..135 {
+            for x in 130..190 {
+                held.pixels[y * 320 + x] = if x >= 160 { 220 } else { 150 };
+            }
+        }
+
+        let result = inspect_held_part_difference_with_orientation(
+            &bare,
+            &held,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            PartOrientation::BrighterEnd {
+                minimum_contrast_luma: 20.0,
+                rotation_offset_deg: 0.0,
+            },
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!(result.report.orientation_contrast_luma.unwrap() > 60.0);
+        assert!(result.report.orientation_rotation_deg.unwrap().abs() < 1.0);
+    }
+
+    #[test]
+    fn directs_a_polarized_package_toward_its_darker_end() {
+        let bare = frame(80);
+        let mut held = bare.clone();
+        for y in 105..135 {
+            for x in 130..190 {
+                held.pixels[y * 320 + x] = if x >= 160 { 120 } else { 210 };
+            }
+        }
+
+        let result = inspect_held_part_difference_with_orientation(
+            &bare,
+            &held,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            PartOrientation::DarkerEnd {
+                minimum_contrast_luma: 20.0,
+                rotation_offset_deg: 0.0,
+            },
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!(result.report.orientation_rotation_deg.unwrap().abs() < 1.0);
+    }
+
+    #[test]
+    fn rejects_ambiguous_polarized_package_direction() {
+        let bare = frame(80);
+        let mut held = bare.clone();
+        for y in 105..135 {
+            for x in 130..190 {
+                held.pixels[y * 320 + x] = 190;
+            }
+        }
+
+        let result = inspect_held_part_difference_with_orientation(
+            &bare,
+            &held,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            1.0,
+            0.1,
+            12.0,
+            PartOrientation::BrighterEnd {
+                minimum_contrast_luma: 6.0,
+                rotation_offset_deg: 0.0,
+            },
+            "held.png",
+        )
+        .unwrap();
+
+        assert!(result.report.detected);
+        assert!(!result.report.passed);
+        assert_eq!(result.report.orientation_confidence, 0.0);
     }
 
     #[test]

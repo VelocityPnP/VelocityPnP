@@ -242,6 +242,114 @@ pub struct Part {
     pub placement_seating_offset_mm: Option<f64>,
     pub compatible_tips: Vec<String>,
     pub vision_profile: Option<String>,
+    /// Rotation semantics used by bottom vision and placement planning.
+    #[serde(default)]
+    pub orientation: Option<PartOrientation>,
+}
+
+/// How bottom vision resolves a package's directed rotation.
+///
+/// Axis-symmetric parts have no meaningful distinction between angles that
+/// differ by 180 degrees. Feeder-referenced parts retain the full angle that
+/// was assigned during feeder registration. End-marked parts measure a bright
+/// or dark end directly in the bottom-camera image.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum PartOrientation {
+    AxisSymmetric,
+    FeederReferenced,
+    BrighterEnd {
+        minimum_contrast_luma: f64,
+        #[serde(default)]
+        rotation_offset_deg: f64,
+    },
+    DarkerEnd {
+        minimum_contrast_luma: f64,
+        #[serde(default)]
+        rotation_offset_deg: f64,
+    },
+}
+
+impl Default for PartOrientation {
+    fn default() -> Self {
+        Self::AxisSymmetric
+    }
+}
+
+impl PartOrientation {
+    pub fn validate(self) -> Result<(), &'static str> {
+        match self {
+            Self::AxisSymmetric | Self::FeederReferenced => Ok(()),
+            Self::BrighterEnd {
+                minimum_contrast_luma,
+                rotation_offset_deg,
+            }
+            | Self::DarkerEnd {
+                minimum_contrast_luma,
+                rotation_offset_deg,
+            } if minimum_contrast_luma.is_finite()
+                && (2.0..=64.0).contains(&minimum_contrast_luma)
+                && rotation_offset_deg.is_finite()
+                && (-360.0..=360.0).contains(&rotation_offset_deg) =>
+            {
+                Ok(())
+            }
+            Self::BrighterEnd { .. } | Self::DarkerEnd { .. } => {
+                Err("part end-mark orientation policy is invalid")
+            }
+        }
+    }
+
+    pub fn is_directed(self) -> bool {
+        !matches!(self, Self::AxisSymmetric)
+    }
+
+    pub fn minimum_end_contrast_luma(self) -> Option<f64> {
+        match self {
+            Self::BrighterEnd {
+                minimum_contrast_luma,
+                ..
+            }
+            | Self::DarkerEnd {
+                minimum_contrast_luma,
+                ..
+            } => Some(minimum_contrast_luma),
+            Self::AxisSymmetric | Self::FeederReferenced => None,
+        }
+    }
+
+    pub fn rotation_offset_deg(self) -> f64 {
+        match self {
+            Self::BrighterEnd {
+                rotation_offset_deg,
+                ..
+            }
+            | Self::DarkerEnd {
+                rotation_offset_deg,
+                ..
+            } => rotation_offset_deg,
+            Self::AxisSymmetric | Self::FeederReferenced => 0.0,
+        }
+    }
+}
+
+impl Part {
+    /// Returns explicit orientation semantics or a compatible legacy profile.
+    pub fn resolved_orientation(&self) -> Option<PartOrientation> {
+        self.orientation.or(match self.vision_profile.as_deref() {
+            Some("rectangular_passive") => Some(PartOrientation::AxisSymmetric),
+            Some("rectangular_directional") => Some(PartOrientation::FeederReferenced),
+            Some("rectangular_polarized_bright_end") => Some(PartOrientation::BrighterEnd {
+                minimum_contrast_luma: 6.0,
+                rotation_offset_deg: 0.0,
+            }),
+            Some("rectangular_polarized_dark_end") => Some(PartOrientation::DarkerEnd {
+                minimum_contrast_luma: 6.0,
+                rotation_offset_deg: 0.0,
+            }),
+            _ => None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,7 +513,16 @@ pub struct HeldPartInspectionReport {
     pub centering_correction_mm: Option<f64>,
     pub width_mm: Option<f64>,
     pub length_mm: Option<f64>,
+    /// Undirected package-axis angle in machine coordinates.
     pub rotation_deg: Option<f64>,
+    /// Full-angle package direction when an end marker was recognized.
+    #[serde(default)]
+    pub orientation_rotation_deg: Option<f64>,
+    /// Absolute mean-luma separation between the two package ends.
+    #[serde(default)]
+    pub orientation_contrast_luma: Option<f64>,
+    #[serde(default)]
+    pub orientation_confidence: f64,
     pub changed_pixel_count: u32,
     pub mean_difference_luma: f64,
     pub confidence: f64,
@@ -488,12 +605,18 @@ pub struct HeldPartAlignmentObservation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeldPartAlignmentReport {
     pub algorithm_version: String,
+    #[serde(default)]
+    pub orientation: PartOrientation,
+    #[serde(default)]
+    pub source_rotation_deg: f64,
     pub target_rotation_deg: f64,
     pub commanded_x_mm: f64,
     pub commanded_y_mm: f64,
     pub commanded_rotation_deg: f64,
     pub final_centering_residual_mm: Option<f64>,
     pub final_rotation_residual_deg: Option<f64>,
+    #[serde(default)]
+    pub final_resolved_rotation_deg: Option<f64>,
     pub passed: bool,
     pub observations: Vec<HeldPartAlignmentObservation>,
     #[serde(default)]
@@ -791,6 +914,10 @@ pub struct PlacementExecutionReport {
     pub part_key: String,
     pub feeder_id: Uuid,
     pub nozzle_id: String,
+    #[serde(default)]
+    pub part_orientation: PartOrientation,
+    #[serde(default)]
+    pub feeder_part_rotation_deg: f64,
     pub feeder_pick: Pose,
     pub board_place: Pose,
     #[serde(default)]
@@ -1140,6 +1267,7 @@ mod tests {
             placement_seating_offset_mm: Some(0.10),
             compatible_tips: vec!["N045".into()],
             vision_profile: Some("rectangular_passive".into()),
+            orientation: None,
         }
     }
 
@@ -1164,6 +1292,26 @@ mod tests {
         let estimate = estimate_placement_process(&part, "N1", 0.0, &outcomes);
         assert!(estimate.ready);
         assert_eq!(estimate.recommended_seating_offset_mm, Some(0.10));
+    }
+
+    #[test]
+    fn legacy_rectangular_passive_profile_resolves_axis_symmetry() {
+        let part = part();
+        assert_eq!(
+            part.resolved_orientation(),
+            Some(PartOrientation::AxisSymmetric)
+        );
+    }
+
+    #[test]
+    fn explicit_directional_orientation_overrides_the_legacy_profile() {
+        let mut part = part();
+        part.orientation = Some(PartOrientation::BrighterEnd {
+            minimum_contrast_luma: 8.0,
+            rotation_offset_deg: 180.0,
+        });
+        assert_eq!(part.resolved_orientation(), part.orientation);
+        assert!(part.resolved_orientation().unwrap().validate().is_ok());
     }
 
     #[test]

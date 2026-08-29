@@ -884,6 +884,15 @@ export interface StripFeederLiveHoldoutRun {
   message: string | null;
 }
 
+export type PartOrientation =
+  | { mode: "axis_symmetric" }
+  | { mode: "feeder_referenced" }
+  | {
+      mode: "brighter_end" | "darker_end";
+      minimum_contrast_luma: number;
+      rotation_offset_deg: number;
+    };
+
 export interface HeldPartInspectionReport {
   algorithm_version: string;
   detected: boolean;
@@ -895,6 +904,9 @@ export interface HeldPartInspectionReport {
   width_mm: number | null;
   length_mm: number | null;
   rotation_deg: number | null;
+  orientation_rotation_deg: number | null;
+  orientation_contrast_luma: number | null;
+  orientation_confidence: number;
   changed_pixel_count: number;
   mean_difference_luma: number;
   confidence: number;
@@ -905,12 +917,15 @@ export interface HeldPartInspectionReport {
 
 export interface HeldPartAlignmentReport {
   algorithm_version: string;
+  orientation: PartOrientation;
+  source_rotation_deg: number;
   target_rotation_deg: number;
   commanded_x_mm: number;
   commanded_y_mm: number;
   commanded_rotation_deg: number;
   final_centering_residual_mm: number | null;
   final_rotation_residual_deg: number | null;
+  final_resolved_rotation_deg: number | null;
   passed: boolean;
   observations: Array<{
     iteration: number;
@@ -1005,6 +1020,8 @@ export interface PlacementExecutionReport {
   part_key: string;
   feeder_id: string;
   nozzle_id: string;
+  part_orientation: PartOrientation;
+  feeder_part_rotation_deg: number;
   feeder_pick: Pose;
   board_place: Pose;
   corrected_move_count: number;

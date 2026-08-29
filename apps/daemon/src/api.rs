@@ -39,7 +39,7 @@ use velocitypnp_domain::{
     LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
     MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
     NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample, Operation,
-    OperationStatus, Part, PlacementExecutionReport, PlacementExecutionRun,
+    OperationStatus, Part, PartOrientation, PlacementExecutionReport, PlacementExecutionRun,
     PlacementExecutionStage, PlacementExecutionStageReport, PlacementOutcomeDisposition,
     PlacementOutcomeRecord, PlacementProcessEstimate, PlanarCameraCalibrationReport,
     PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
@@ -77,11 +77,12 @@ use velocitypnp_vision::{
     detect_camera_target, detect_installed_plate_hole, discover_workspace_objects, encode_gray_png,
     encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
     fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
-    inspect_held_part_difference, inspect_placed_part, inspect_strip_feeder_pocket_return,
-    interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
-    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, reanalyze_workspace_seam_health, render_board_fiducial_evidence,
+    inspect_held_part_difference, inspect_held_part_difference_with_orientation,
+    inspect_placed_part, inspect_strip_feeder_pocket_return, interpolate_planar_camera_model,
+    mean_nozzle_detection, measure_known_feature_surface_fraction, measure_workspace_parallax,
+    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
+    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    reanalyze_workspace_seam_health, render_board_fiducial_evidence,
     render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
@@ -111,14 +112,14 @@ const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
-const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v4";
-const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v1";
+const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v5";
+const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v2";
 const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v2";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
 const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
 const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v1";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v2";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
 const BOARD_SURFACE_MAX_FRACTION_P95_DEVIATION: f64 = 0.10;
@@ -6258,6 +6259,8 @@ struct PreparedStripFeederPickup {
     top_camera_model: PlanarCameraModel,
     top_camera_profile: CameraProfile,
     top_camera_path: String,
+    part_orientation: PartOrientation,
+    source_rotation_deg: f64,
     artifact_target: TransferArtifactTarget,
 }
 
@@ -6265,6 +6268,37 @@ struct PreparedStripFeederPickup {
 enum TransferArtifactTarget {
     PickupQualification(Uuid),
     PlacementExecution(Uuid),
+}
+
+fn registration_part_orientation(
+    state: &AppState,
+    registration: &StripFeederRegistration,
+) -> ApiResult<(PartOrientation, f64)> {
+    let orientation = if let Some(part_key) = registration.part_key.as_deref() {
+        let part = state
+            .store
+            .list_parts()
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .find(|part| part.key == part_key)
+            .ok_or_else(|| ApiError::bad_request("feeder part is missing from the part library"))?;
+        part.resolved_orientation().ok_or_else(|| {
+            ApiError::bad_request("feeder part has no orientation-aware vision policy")
+        })?
+    } else {
+        PartOrientation::AxisSymmetric
+    };
+    orientation.validate().map_err(ApiError::bad_request)?;
+    let source_rotation_deg = registration.part_rotation_deg.unwrap_or(0.0);
+    if !source_rotation_deg.is_finite() {
+        return Err(ApiError::bad_request("feeder part rotation is invalid"));
+    }
+    if orientation.is_directed() && registration.part_rotation_deg.is_none() {
+        return Err(ApiError::bad_request(
+            "directed part orientation requires a registered feeder part angle",
+        ));
+    }
+    Ok((orientation, source_rotation_deg))
 }
 
 async fn start_strip_feeder_pickup_qualification(
@@ -6322,6 +6356,8 @@ async fn start_strip_feeder_pickup_qualification(
             "pickup registration uses a different machine profile",
         ));
     }
+    let (part_orientation, source_rotation_deg) =
+        registration_part_orientation(&state, &registration)?;
     if !status.simulated && status.calibration_revision != Some(registration.calibration_id) {
         return Err(ApiError::bad_request(format!(
             "pickup qualification requires fine XYZ homing with calibration {}",
@@ -6562,6 +6598,8 @@ async fn start_strip_feeder_pickup_qualification(
         top_camera_model,
         top_camera_profile,
         top_camera_path,
+        part_orientation,
+        source_rotation_deg,
         artifact_target,
     };
     spawn_prepared_operation(
@@ -6752,7 +6790,24 @@ async fn execute_simulated_strip_feeder_pickup(
             held.pixels[(y * width + x) as usize] = 190;
         }
     }
-    let inspection = inspect_held_part_difference(
+    match prepared.part_orientation {
+        PartOrientation::BrighterEnd { .. } => {
+            for y in 105..135 {
+                for x in 170..190 {
+                    held.pixels[(y * width + x) as usize] = 240;
+                }
+            }
+        }
+        PartOrientation::DarkerEnd { .. } => {
+            for y in 105..135 {
+                for x in 170..190 {
+                    held.pixels[(y * width + x) as usize] = 105;
+                }
+            }
+        }
+        PartOrientation::AxisSymmetric | PartOrientation::FeederReferenced => {}
+    }
+    let inspection = inspect_held_part_difference_with_orientation(
         &bare,
         &held,
         [160.0, 120.0],
@@ -6760,6 +6815,7 @@ async fn execute_simulated_strip_feeder_pickup(
         pickup.maximum_part_offset_mm,
         pickup.minimum_part_size_mm,
         pickup.maximum_part_size_mm,
+        prepared.part_orientation,
         HELD_PART_INSPECTION_ARTIFACT,
     )
     .map_err(|error| error.to_string())?;
@@ -6803,15 +6859,31 @@ async fn execute_simulated_strip_feeder_pickup(
         .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value));
     let released = true;
     let inspection_report = inspection.report;
+    let resolved_rotation_deg = resolved_held_part_rotation_deg(
+        &inspection_report,
+        prepared.part_orientation,
+        prepared.source_rotation_deg,
+    );
+    let rotation_residual_deg = resolved_rotation_deg.map(|measured| {
+        held_part_rotation_error_deg(
+            measured,
+            prepared.source_rotation_deg,
+            prepared.part_orientation,
+        )
+    });
     let alignment = HeldPartAlignmentReport {
         algorithm_version: "held_part_alignment.simulated".into(),
-        target_rotation_deg: 0.0,
+        orientation: prepared.part_orientation,
+        source_rotation_deg: prepared.source_rotation_deg,
+        target_rotation_deg: prepared.source_rotation_deg,
         commanded_x_mm: 0.0,
         commanded_y_mm: 0.0,
         commanded_rotation_deg: 0.0,
         final_centering_residual_mm: inspection_report.centering_correction_mm,
-        final_rotation_residual_deg: inspection_report.rotation_deg,
-        passed: inspection_report.passed,
+        final_rotation_residual_deg: rotation_residual_deg,
+        final_resolved_rotation_deg: resolved_rotation_deg,
+        passed: inspection_report.passed
+            && rotation_residual_deg.is_some_and(|error| error.abs() <= 1.0),
         observations: vec![HeldPartAlignmentObservation {
             iteration: 0,
             head_machine_mm: [0.0, 0.0],
@@ -7153,7 +7225,7 @@ async fn execute_physical_strip_feeder_pickup(
         )
         .await?;
         persist_transfer_gray_artifact(state, prepared, HELD_PART_ARTIFACT, &held)?;
-        let initial_inspection = inspect_held_part_difference(
+        let initial_inspection = inspect_held_part_difference_with_orientation(
             &bare,
             &held,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -7161,6 +7233,7 @@ async fn execute_physical_strip_feeder_pickup(
             pickup_profile.maximum_part_offset_mm,
             pickup_profile.minimum_part_size_mm,
             pickup_profile.maximum_part_size_mm,
+            prepared.part_orientation,
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
@@ -7794,10 +7867,14 @@ async fn align_held_part(
             inspection: current.report.clone(),
         });
         let center_residual = current.report.centering_correction_mm;
-        let rotation_residual = current
-            .report
-            .rotation_deg
-            .map(|measured| package_axis_rotation_error_deg(measured, target_rotation_deg));
+        let resolved_rotation = resolved_held_part_rotation_deg(
+            &current.report,
+            prepared.part_orientation,
+            prepared.source_rotation_deg + commanded_rotation_deg,
+        );
+        let rotation_residual = resolved_rotation.map(|measured| {
+            held_part_rotation_error_deg(measured, target_rotation_deg, prepared.part_orientation)
+        });
         let passed = current.report.passed
             && center_residual
                 .is_some_and(|value| value <= pickup.alignment_translation_tolerance_mm)
@@ -7836,12 +7913,15 @@ async fn align_held_part(
                 current,
                 HeldPartAlignmentReport {
                     algorithm_version: HELD_PART_ALIGNMENT_ALGORITHM.into(),
+                    orientation: prepared.part_orientation,
+                    source_rotation_deg: prepared.source_rotation_deg,
                     target_rotation_deg,
                     commanded_x_mm,
                     commanded_y_mm,
                     commanded_rotation_deg,
                     final_centering_residual_mm: center_residual,
                     final_rotation_residual_deg: rotation_residual,
+                    final_resolved_rotation_deg: resolved_rotation,
                     passed,
                     observations,
                     artifact_names,
@@ -7906,7 +7986,7 @@ async fn align_held_part(
         {
             artifact_names.push(HELD_PART_ALIGNED_ARTIFACT.into());
         }
-        current = inspect_held_part_difference(
+        current = inspect_held_part_difference_with_orientation(
             bare,
             &held,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -7914,6 +7994,7 @@ async fn align_held_part(
             pickup.maximum_part_offset_mm,
             pickup.minimum_part_size_mm,
             pickup.maximum_part_size_mm,
+            prepared.part_orientation,
             HELD_PART_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
@@ -7927,10 +8008,40 @@ async fn align_held_part(
     Err("held-part alignment ended without a report".into())
 }
 
-fn package_axis_rotation_error_deg(measured_deg: f64, target_deg: f64) -> f64 {
-    let mut error = (measured_deg - target_deg).rem_euclid(180.0);
-    if error > 90.0 {
-        error -= 180.0;
+fn resolved_held_part_rotation_deg(
+    inspection: &HeldPartInspectionReport,
+    orientation: PartOrientation,
+    expected_rotation_deg: f64,
+) -> Option<f64> {
+    match orientation {
+        PartOrientation::AxisSymmetric => inspection.rotation_deg,
+        PartOrientation::FeederReferenced => inspection
+            .rotation_deg
+            .map(|axis| unwrap_package_axis_deg(axis, expected_rotation_deg)),
+        PartOrientation::BrighterEnd { .. } | PartOrientation::DarkerEnd { .. } => {
+            inspection.orientation_rotation_deg
+        }
+    }
+}
+
+fn unwrap_package_axis_deg(axis_rotation_deg: f64, expected_rotation_deg: f64) -> f64 {
+    let turns = ((expected_rotation_deg - axis_rotation_deg) / 180.0).round();
+    axis_rotation_deg + 180.0 * turns
+}
+
+fn held_part_rotation_error_deg(
+    measured_deg: f64,
+    target_deg: f64,
+    orientation: PartOrientation,
+) -> f64 {
+    let period = if orientation.is_directed() {
+        360.0
+    } else {
+        180.0
+    };
+    let mut error = (measured_deg - target_deg).rem_euclid(period);
+    if error > 0.5 * period {
+        error -= period;
     }
     error
 }
@@ -19876,6 +19987,7 @@ async fn put_part(
     State(state): State<AppState>,
     Json(part): Json<Part>,
 ) -> ApiResult<(StatusCode, Json<Part>)> {
+    let existing = state.store.get_part(part.id).map_err(ApiError::internal)?;
     if part.key.trim().is_empty()
         || part.package.trim().is_empty()
         || part
@@ -19890,9 +20002,13 @@ async fn put_part(
         || part
             .placement_seating_offset_mm
             .is_some_and(|value| !value.is_finite() || !(-0.25..=0.5).contains(&value))
+        || part
+            .resolved_orientation()
+            .is_none_or(|orientation| orientation.validate().is_err())
+        || (part.orientation.is_none() && existing.is_none())
     {
         return Err(ApiError::bad_request(
-            "part key, package, geometry, and seating offset must be valid",
+            "part key, package, geometry, seating offset, and orientation must be valid",
         ));
     }
     state.store.put_part(&part).map_err(ApiError::internal)?;
@@ -20586,6 +20702,8 @@ fn prepare_physical_placement_pickup(
         top_camera_model,
         top_camera_profile,
         top_camera_path,
+        part_orientation: step.part_orientation,
+        source_rotation_deg: step.feeder_part_rotation_deg,
         artifact_target: TransferArtifactTarget::PlacementExecution(placement_run.id),
     })
 }
@@ -20656,6 +20774,51 @@ fn validate_guarded_strip_feeder(
             step.nozzle_id
         )));
     }
+    let alignment = report
+        .alignment
+        .as_ref()
+        .filter(|alignment| alignment.passed)
+        .ok_or_else(|| {
+            ApiError::bad_request("placement feeder has no passed alignment evidence")
+        })?;
+    if alignment.orientation != step.part_orientation
+        || held_part_rotation_error_deg(
+            alignment.source_rotation_deg,
+            step.feeder_part_rotation_deg,
+            PartOrientation::FeederReferenced,
+        )
+        .abs()
+            > 0.01
+    {
+        return Err(ApiError::bad_request(
+            "placement feeder orientation evidence is not current for the part and source angle",
+        ));
+    }
+    for qualification_id in &current_sequence_ids {
+        let sequence_alignment = state
+            .store
+            .get_strip_feeder_pickup_qualification(*qualification_id)
+            .map_err(ApiError::internal)?
+            .and_then(|qualification| qualification.report)
+            .and_then(|report| report.alignment)
+            .filter(|alignment| alignment.passed)
+            .ok_or_else(|| {
+                ApiError::bad_request("placement feeder sequence has no passed alignment evidence")
+            })?;
+        if sequence_alignment.orientation != step.part_orientation
+            || held_part_rotation_error_deg(
+                sequence_alignment.source_rotation_deg,
+                step.feeder_part_rotation_deg,
+                PartOrientation::FeederReferenced,
+            )
+            .abs()
+                > 0.01
+        {
+            return Err(ApiError::bad_request(
+                "placement feeder sequence orientation evidence is not current",
+            ));
+        }
+    }
     if !report
         .nozzle_release_verification
         .as_ref()
@@ -20690,6 +20853,8 @@ async fn execute_guarded_placement_task(
         part_key: step.part_key.clone(),
         feeder_id: step.feeder_id,
         nozzle_id: step.nozzle_id.clone(),
+        part_orientation: step.part_orientation,
+        feeder_part_rotation_deg: step.feeder_part_rotation_deg,
         feeder_pick: step.feeder_pick,
         board_place: step.board_place,
         part_height_mm: step.part_height_mm,
@@ -21687,7 +21852,7 @@ async fn acquire_physical_placement_part(
         )
         .await?;
         persist_transfer_gray_artifact(state, prepared, HELD_PART_ARTIFACT, &held)?;
-        let initial = inspect_held_part_difference(
+        let initial = inspect_held_part_difference_with_orientation(
             &bare,
             &held,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -21695,6 +21860,7 @@ async fn acquire_physical_placement_part(
             pickup.maximum_part_offset_mm,
             pickup.minimum_part_size_mm,
             pickup.maximum_part_size_mm,
+            prepared.part_orientation,
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
@@ -23459,6 +23625,8 @@ mod tests {
             part_height_mm: 0.55,
             body_width_mm: 0.8,
             body_length_mm: 1.6,
+            part_orientation: PartOrientation::AxisSymmetric,
+            feeder_part_rotation_deg: 0.0,
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: 0.0,
             feeder_pick: Pose {
@@ -23495,6 +23663,8 @@ mod tests {
             part_key: step.part_key.clone(),
             feeder_id: step.feeder_id,
             nozzle_id: step.nozzle_id.clone(),
+            part_orientation: step.part_orientation,
+            feeder_part_rotation_deg: step.feeder_part_rotation_deg,
             feeder_pick: step.feeder_pick,
             board_place: step.board_place,
             part_height_mm: step.part_height_mm,
@@ -25793,9 +25963,68 @@ mod tests {
 
     #[test]
     fn held_part_axis_error_uses_180_degree_package_symmetry() {
-        assert!((package_axis_rotation_error_deg(89.0, -89.0) + 2.0).abs() < 1e-12);
-        assert!((package_axis_rotation_error_deg(-89.0, 89.0) - 2.0).abs() < 1e-12);
-        assert!((package_axis_rotation_error_deg(46.0, 45.0) - 1.0).abs() < 1e-12);
+        let orientation = PartOrientation::AxisSymmetric;
+        assert!((held_part_rotation_error_deg(89.0, -89.0, orientation) + 2.0).abs() < 1e-12);
+        assert!((held_part_rotation_error_deg(-89.0, 89.0, orientation) - 2.0).abs() < 1e-12);
+        assert!((held_part_rotation_error_deg(46.0, 45.0, orientation) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn held_part_directed_error_preserves_the_180_degree_phase() {
+        let orientation = PartOrientation::FeederReferenced;
+        assert!((unwrap_package_axis_deg(-5.0, 176.0) - 175.0).abs() < 1e-12);
+        assert!((held_part_rotation_error_deg(175.0, -5.0, orientation) - 180.0).abs() < 1e-12);
+        assert!((held_part_rotation_error_deg(-179.0, 179.0, orientation) - 2.0).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn new_part_requires_an_explicit_orientation_policy() {
+        let app = router(test_state());
+        let part_id = Uuid::new_v4();
+        let part = json!({
+            "id": part_id,
+            "key": "LED_SMD:LED_0603:LED_Small",
+            "manufacturer_part_number": null,
+            "package": "LED_SMD:LED_0603",
+            "height_mm": 0.55,
+            "body_width_mm": 0.8,
+            "body_length_mm": 1.6,
+            "placement_seating_offset_mm": 0.1,
+            "compatible_tips": ["N045"],
+            "vision_profile": "rectangular_polarized_dark_end"
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/parts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(part.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let mut explicit = part;
+        explicit["orientation"] = json!({
+            "mode": "darker_end",
+            "minimum_contrast_luma": 8.0,
+            "rotation_offset_deg": 0.0
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/parts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(explicit.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 
     #[test]
@@ -25822,7 +26051,7 @@ mod tests {
     }
 
     #[test]
-    fn attached_profile_allows_a_full_symmetric_package_axis_turn() {
+    fn attached_profile_allows_a_full_directed_package_turn() {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
         let maximum = profile
@@ -25831,7 +26060,7 @@ mod tests {
             .unwrap()
             .alignment_max_rotation_correction_deg;
 
-        assert_eq!(maximum, 90.0);
+        assert_eq!(maximum, 180.0);
     }
 
     #[test]
@@ -25847,6 +26076,9 @@ mod tests {
             width_mm: Some(1.088),
             length_mm: Some(2.156),
             rotation_deg: Some(0.0),
+            orientation_rotation_deg: None,
+            orientation_contrast_luma: None,
+            orientation_confidence: 0.0,
             changed_pixel_count: 1_642,
             mean_difference_luma: 103.3,
             confidence: 0.99,
@@ -25888,6 +26120,9 @@ mod tests {
             width_mm: Some(1.318),
             length_mm: Some(2.268),
             rotation_deg: Some(0.57),
+            orientation_rotation_deg: None,
+            orientation_contrast_luma: None,
+            orientation_confidence: 0.0,
             changed_pixel_count: 1_877,
             mean_difference_luma: 106.84,
             confidence: 0.97,

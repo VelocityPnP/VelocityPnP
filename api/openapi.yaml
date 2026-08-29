@@ -1035,6 +1035,46 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
       responses:
         "201": { description: Stored feeder, content: { application/json: { schema: { type: object } } } }
+  /parts:
+    get:
+      operationId: listParts
+      responses:
+        "200":
+          description: Part-library records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [parts]
+                properties:
+                  parts:
+                    type: array
+                    items: { $ref: "#/components/schemas/Part" }
+    post:
+      operationId: putPart
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Part" }
+      responses:
+        "201":
+          description: Stored orientation-aware part
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Part" }
+  /parts/{id}:
+    get:
+      operationId: getPart
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Part-library record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Part" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /strip-feeder-registrations:
     get:
       operationId: listStripFeederRegistrations
@@ -1238,7 +1278,15 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
-        "200": { description: Deterministic plan and preflight report, content: { application/json: { schema: { type: object } } } }
+        "200":
+          description: Deterministic plan and preflight report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plan]
+                properties:
+                  plan: { $ref: "#/components/schemas/PlacementPlan" }
   /jobs/{id}/simulate:
     post:
       operationId: simulateJob
@@ -1426,6 +1474,107 @@ components:
       description: Resource not found
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
   schemas:
+    PartOrientation:
+      oneOf:
+        - type: object
+          required: [mode]
+          properties:
+            mode: { type: string, const: axis_symmetric }
+        - type: object
+          required: [mode]
+          properties:
+            mode: { type: string, const: feeder_referenced }
+        - type: object
+          required: [mode, minimum_contrast_luma, rotation_offset_deg]
+          properties:
+            mode: { type: string, const: brighter_end }
+            minimum_contrast_luma: { type: number, minimum: 2, maximum: 64 }
+            rotation_offset_deg: { type: number, minimum: -360, maximum: 360 }
+        - type: object
+          required: [mode, minimum_contrast_luma, rotation_offset_deg]
+          properties:
+            mode: { type: string, const: darker_end }
+            minimum_contrast_luma: { type: number, minimum: 2, maximum: 64 }
+            rotation_offset_deg: { type: number, minimum: -360, maximum: 360 }
+    Part:
+      type: object
+      required:
+        - id
+        - key
+        - manufacturer_part_number
+        - package
+        - height_mm
+        - body_width_mm
+        - body_length_mm
+        - placement_seating_offset_mm
+        - compatible_tips
+        - vision_profile
+        - orientation
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string, minLength: 1 }
+        manufacturer_part_number: { type: [string, "null"] }
+        package: { type: string, minLength: 1 }
+        height_mm: { type: [number, "null"], exclusiveMinimum: 0 }
+        body_width_mm: { type: [number, "null"], exclusiveMinimum: 0 }
+        body_length_mm: { type: [number, "null"], exclusiveMinimum: 0 }
+        placement_seating_offset_mm: { type: [number, "null"], minimum: -0.25, maximum: 0.5 }
+        compatible_tips: { type: array, items: { type: string } }
+        vision_profile: { type: [string, "null"] }
+        orientation:
+          oneOf:
+            - { $ref: "#/components/schemas/PartOrientation" }
+            - type: "null"
+    PlacementPlanStep:
+      type: object
+      required:
+        - board_instance_id
+        - placement_reference
+        - part_key
+        - feeder_id
+        - nozzle_id
+        - part_height_mm
+        - body_width_mm
+        - body_length_mm
+        - part_orientation
+        - feeder_part_rotation_deg
+        - placement_surface_offset_mm
+        - placement_seating_offset_mm
+        - feeder_pick
+        - board_place
+        - safe_z_mm
+      properties:
+        board_instance_id: { type: string, format: uuid }
+        placement_reference: { type: string }
+        part_key: { type: string }
+        feeder_id: { type: string, format: uuid }
+        nozzle_id: { type: string }
+        part_height_mm: { type: number, exclusiveMinimum: 0 }
+        body_width_mm: { type: number, exclusiveMinimum: 0 }
+        body_length_mm: { type: number, exclusiveMinimum: 0 }
+        part_orientation: { $ref: "#/components/schemas/PartOrientation" }
+        feeder_part_rotation_deg: { type: number }
+        placement_surface_offset_mm: { type: number }
+        placement_seating_offset_mm: { type: number }
+        feeder_pick: { $ref: "#/components/schemas/Pose" }
+        board_place: { $ref: "#/components/schemas/Pose" }
+        safe_z_mm: { type: number }
+    PlacementPlan:
+      type: object
+      required: [job_id, steps, report]
+      properties:
+        job_id: { type: string, format: uuid }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/PlacementPlanStep" }
+        report:
+          type: object
+          required: [ready, errors, warnings, placement_count]
+          properties:
+            ready: { type: boolean }
+            errors: { type: array, items: { type: string } }
+            warnings: { type: array, items: { type: string } }
+            placement_count: { type: integer, minimum: 0 }
     CameraRole:
       type: string
       enum: [top_camera, bottom_camera]
@@ -2779,6 +2928,9 @@ components:
         - width_mm
         - length_mm
         - rotation_deg
+        - orientation_rotation_deg
+        - orientation_contrast_luma
+        - orientation_confidence
         - changed_pixel_count
         - mean_difference_luma
         - confidence
@@ -2796,6 +2948,9 @@ components:
         width_mm: { type: [number, "null"], minimum: 0 }
         length_mm: { type: [number, "null"], minimum: 0 }
         rotation_deg: { type: [number, "null"] }
+        orientation_rotation_deg: { type: [number, "null"] }
+        orientation_contrast_luma: { type: [number, "null"], minimum: 0 }
+        orientation_confidence: { type: number, minimum: 0, maximum: 1 }
         changed_pixel_count: { type: integer, minimum: 0 }
         mean_difference_luma: { type: number, minimum: 0 }
         confidence: { type: number, minimum: 0, maximum: 1 }
@@ -2832,24 +2987,30 @@ components:
       type: object
       required:
         - algorithm_version
+        - orientation
+        - source_rotation_deg
         - target_rotation_deg
         - commanded_x_mm
         - commanded_y_mm
         - commanded_rotation_deg
         - final_centering_residual_mm
         - final_rotation_residual_deg
+        - final_resolved_rotation_deg
         - passed
         - observations
         - artifact_names
         - findings
       properties:
         algorithm_version: { type: string }
+        orientation: { $ref: "#/components/schemas/PartOrientation" }
+        source_rotation_deg: { type: number }
         target_rotation_deg: { type: number }
         commanded_x_mm: { type: number }
         commanded_y_mm: { type: number }
         commanded_rotation_deg: { type: number }
         final_centering_residual_mm: { type: [number, "null"], minimum: 0 }
         final_rotation_residual_deg: { type: [number, "null"] }
+        final_resolved_rotation_deg: { type: [number, "null"] }
         passed: { type: boolean }
         observations:
           type: array
@@ -3132,6 +3293,8 @@ components:
         - part_key
         - feeder_id
         - nozzle_id
+        - part_orientation
+        - feeder_part_rotation_deg
         - feeder_pick
         - board_place
         - part_height_mm
@@ -3152,6 +3315,8 @@ components:
         part_key: { type: string }
         feeder_id: { type: string, format: uuid }
         nozzle_id: { type: string }
+        part_orientation: { $ref: "#/components/schemas/PartOrientation" }
+        feeder_part_rotation_deg: { type: number }
         feeder_pick: { $ref: "#/components/schemas/Pose" }
         board_place: { $ref: "#/components/schemas/Pose" }
         part_height_mm: { type: number, format: double }
