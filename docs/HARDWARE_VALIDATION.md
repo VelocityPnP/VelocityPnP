@@ -2538,6 +2538,27 @@ homed at safe Z over the solid datum-board area, with vacuum off and no
 controller fault. The resistor remains mechanically attached to N1 and needs
 removal or a validated stuck-part release process.
 
+### R13 release-cycle experiments
+
+On 2026-08-29, N1 returned to the recorded pocket 12 pickup pose and lowered
+to the prior successful pickup height at nozzle Z3.8. It ran three cycles that
+enabled the pump and MOS2 valve for 250 ms, then disabled both for 500 ms. A
+final off command succeeded before the tool retracted to Z31.5. A bottom-camera
+capture still showed the resistor moving with N1. The combined cycles did not
+release the part.
+
+The V3.0.4 profile then gained an independent `blowoff_1` actuator. Driver tests
+verified that it sends only `M106 P1 S255` and `M107 P1`. After daemon restart,
+N1 remained physically at safe Z over pocket 12. The controller was connected
+but not re-homed. Three 250 ms valve-only pulses succeeded with the pump off,
+followed by explicit valve and combined-output off commands. Release remained
+pending bottom-camera confirmation. Standard XYZ home
+`04ae94a7-58fc-4862-8682-ec2aae242b51` and fine XYZ home
+`4c2d3fb8-f092-422e-a498-b1124258fb64` then passed. The bottom-camera frame was
+unchanged from the pre-pulse frame and still showed the resistor moving with
+N1. Valve-only cycling did not release the part and must not become an
+automatic retry sequence.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

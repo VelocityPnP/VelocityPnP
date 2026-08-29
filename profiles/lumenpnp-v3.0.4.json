@@ -38,7 +38,9 @@
   "actuators": [
     {"id": "lights", "display_name": "Top and bottom ring lights", "kind": "light"},
     {"id": "vacuum_1", "display_name": "Nozzle 1 vacuum", "kind": "vacuum"},
-    {"id": "vacuum_2", "display_name": "Nozzle 2 vacuum", "kind": "vacuum"}
+    {"id": "vacuum_2", "display_name": "Nozzle 2 vacuum", "kind": "vacuum"},
+    {"id": "blowoff_1", "display_name": "Nozzle 1 vacuum valve", "kind": "vacuum_valve"},
+    {"id": "blowoff_2", "display_name": "Nozzle 2 vacuum valve", "kind": "vacuum_valve"}
   ],
   "sensors": [
     {

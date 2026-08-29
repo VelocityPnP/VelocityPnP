@@ -465,6 +465,10 @@ fn actuator_commands(actuator_id: &str, enabled: bool) -> Result<&'static [&'sta
         ("vacuum_1", false) => Ok(&["M107 P1", "M107"]),
         ("vacuum_2", true) => Ok(&["M106 P2 S255", "M106 P3 S255"]),
         ("vacuum_2", false) => Ok(&["M107 P2", "M107 P3"]),
+        ("blowoff_1", true) => Ok(&["M106 P1 S255"]),
+        ("blowoff_1", false) => Ok(&["M107 P1"]),
+        ("blowoff_2", true) => Ok(&["M106 P2 S255"]),
+        ("blowoff_2", false) => Ok(&["M107 P2"]),
         _ => bail!("actuator {actuator_id} is not supported by the active profile"),
     }
 }
@@ -668,6 +672,16 @@ mod tests {
             actuator_commands("vacuum_2", false).unwrap(),
             ["M107 P2", "M107 P3"]
         );
+        assert_eq!(
+            actuator_commands("blowoff_1", true).unwrap(),
+            ["M106 P1 S255"]
+        );
+        assert_eq!(actuator_commands("blowoff_1", false).unwrap(), ["M107 P1"]);
+        assert_eq!(
+            actuator_commands("blowoff_2", true).unwrap(),
+            ["M106 P2 S255"]
+        );
+        assert_eq!(actuator_commands("blowoff_2", false).unwrap(), ["M107 P2"]);
         assert!(actuator_commands("unknown", false).is_err());
     }
 

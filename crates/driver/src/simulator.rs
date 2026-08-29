@@ -12,6 +12,8 @@ pub struct SimulatorDriver {
     safe_z_mm: f64,
     vacuum_1_enabled: bool,
     vacuum_2_enabled: bool,
+    blowoff_1_enabled: bool,
+    blowoff_2_enabled: bool,
     secondary_rotation_deg: f64,
 }
 
@@ -24,6 +26,8 @@ impl SimulatorDriver {
             safe_z_mm,
             vacuum_1_enabled: false,
             vacuum_2_enabled: false,
+            blowoff_1_enabled: false,
+            blowoff_2_enabled: false,
             secondary_rotation_deg: 0.0,
         }
     }
@@ -133,6 +137,14 @@ impl MachineDriver for SimulatorDriver {
             }
             "vacuum_2" => {
                 self.vacuum_2_enabled = enabled;
+                Ok(())
+            }
+            "blowoff_1" => {
+                self.blowoff_1_enabled = enabled;
+                Ok(())
+            }
+            "blowoff_2" => {
+                self.blowoff_2_enabled = enabled;
                 Ok(())
             }
             _ => bail!("unknown simulated actuator {actuator_id}"),

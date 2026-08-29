@@ -1141,6 +1141,15 @@ velocitypnp actuate --lease "$VELOCITYPNP_LEASE" vacuum_1 true
 velocitypnp actuate --lease "$VELOCITYPNP_LEASE" vacuum_1 false
 ```
 
+The same profile exposes `blowoff_1` and `blowoff_2` for independent MOS2
+valve control. These actuators do not enable the vacuum pump. Use them only for
+bounded release tests, and always send a final off command:
+
+```bash
+velocitypnp actuate --lease "$VELOCITYPNP_LEASE" blowoff_1 true
+velocitypnp actuate --lease "$VELOCITYPNP_LEASE" blowoff_1 false
+```
+
 Sensor readings are signed controller counts, not pressure units. Establish
 the ambient and sealed-nozzle distributions on the attached machine before
 using them for part detection. An actuator-on validation must always include
