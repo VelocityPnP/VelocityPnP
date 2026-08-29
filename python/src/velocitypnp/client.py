@@ -1526,6 +1526,121 @@ class Client:
             f"/placement-executions/{execution_id}/reanalyze-placement",
         )
 
+    def placement_outcomes(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/placement-outcomes")["outcomes"]
+
+    def placement_outcome(
+        self, execution_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET", f"/placement-executions/{execution_id}/outcome",
+        )
+
+    def review_placement_outcome(
+        self,
+        execution_id: str | uuid.UUID,
+        disposition: str,
+        *,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        valid = {"good", "offset", "rotated", "tombstoned", "missing", "uncertain"}
+        if disposition not in valid:
+            raise ValueError(f"placement disposition must be one of {sorted(valid)}")
+        return self._request(
+            "POST",
+            f"/placement-executions/{execution_id}/outcome",
+            {"disposition": disposition, "note": note},
+        )
+
+    def placement_process(
+        self,
+        part_id: str | uuid.UUID,
+        nozzle_id: str = "N1",
+        surface_offset_mm: float = 0.0,
+    ) -> dict[str, Any]:
+        if not nozzle_id:
+            raise ValueError("nozzle_id must not be empty")
+        if not math.isfinite(surface_offset_mm) or not 0.0 <= surface_offset_mm <= 10.0:
+            raise ValueError("surface_offset_mm must be between 0.0 and 10.0")
+        return self._request(
+            "GET",
+            f"/parts/{part_id}/placement-process/{nozzle_id}/surfaces/{surface_offset_mm}",
+        )
+
+    def qualify_placement_sequence(
+        self,
+        job_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        calibration_id: str | uuid.UUID,
+        step_indices: list[int],
+        *,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Run one to five guarded placements and stop after the first failure."""
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "placement sequence requires explicit confirmation that feeders "
+                "and the PCB are fixed, both nozzles are level, the envelope "
+                "is clear, and power isolation is reachable"
+            )
+        if not 1 <= len(step_indices) <= 5:
+            raise ValueError("placement sequence requires one to five steps")
+        if any(step < 0 for step in step_indices) or len(set(step_indices)) != len(step_indices):
+            raise ValueError("placement sequence steps must be distinct and nonnegative")
+        plan = self.plan_job(job_id)
+        try:
+            selected = [plan["steps"][step] for step in step_indices]
+        except IndexError as error:
+            raise ValueError("placement sequence step is outside the job plan") from error
+        keys = {
+            (
+                step["part_key"],
+                step["nozzle_id"],
+                step["placement_seating_offset_mm"],
+                step["placement_surface_offset_mm"],
+            )
+            for step in selected
+        }
+        if len(keys) != 1:
+            raise ValueError(
+                "placement sequence steps must use one part, nozzle, seating offset, "
+                "and surface offset"
+            )
+        executions = []
+        outcomes = []
+        for step_index in step_indices:
+            started = self.start_guarded_single_placement(
+                job_id,
+                lease_id,
+                calibration_id,
+                step_index=step_index,
+                safety_checks_confirmed=True,
+            )
+            operation_failed = False
+            try:
+                self.wait(started["operation"])
+            except OperationFailed:
+                operation_failed = True
+            execution_id = started["execution"]["id"]
+            execution = self.placement_execution(execution_id)
+            outcome = self.placement_outcome(execution_id)
+            executions.append(execution)
+            outcomes.append(outcome)
+            if operation_failed or outcome["automatic_disposition"] != "good":
+                break
+        return {
+            "job_id": str(job_id),
+            "requested_steps": step_indices,
+            "completed_count": len(executions),
+            "passed": len(executions) == len(step_indices)
+            and all(
+                outcome["automatic_disposition"] == "good"
+                for outcome in outcomes
+            ),
+            "executions": executions,
+            "outcomes": outcomes,
+        }
+
     def inspections(self) -> list[dict[str, Any]]:
         return self._request("GET", "/inspections")["inspections"]
 

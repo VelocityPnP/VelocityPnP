@@ -1269,8 +1269,8 @@ paths:
       operationId: startGuardedSinglePlacement
       description: >-
         Executes exactly one plan step through the calibrated motion planner.
-        The current implementation accepts the simulator only. Physical use
-        remains disabled until feeder-sequence and board-surface gates pass.
+        Physical use requires current fine homing, feeder qualification,
+        board registration, and a measured board surface.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -1311,6 +1311,77 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PlacementExecutionRun" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /placement-executions/{id}/reanalyze-placement:
+    post:
+      operationId: reanalyzePlacementExecution
+      description: Reanalyzes retained placement images without machine motion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Updated placement execution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlacementExecutionRun" }
+  /placement-executions/{id}/outcome:
+    get:
+      operationId: getPlacementOutcome
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Automatic and operator-reviewed placement outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlacementOutcomeRecord" }
+    post:
+      operationId: reviewPlacementOutcome
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disposition]
+              properties:
+                disposition: { $ref: "#/components/schemas/PlacementOutcomeDisposition" }
+                note: { type: [string, "null"], maxLength: 500 }
+      responses:
+        "200":
+          description: Reviewed placement outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlacementOutcomeRecord" }
+  /placement-outcomes:
+    get:
+      operationId: listPlacementOutcomes
+      responses:
+        "200":
+          description: Persistent placement outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outcomes]
+                properties:
+                  outcomes:
+                    type: array
+                    items: { $ref: "#/components/schemas/PlacementOutcomeRecord" }
+  /parts/{id}/placement-process/{nozzle_id}/surfaces/{surface_offset_mm}:
+    get:
+      operationId: getPartPlacementProcess
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: nozzle_id, in: path, required: true, schema: { type: string } }
+        - { name: surface_offset_mm, in: path, required: true, schema: { type: number, minimum: 0, maximum: 10 } }
+      responses:
+        "200":
+          description: Bounded seating-offset estimate from retained outcomes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlacementProcessEstimate" }
   /inspections:
     get:
       operationId: listInspections
@@ -3129,6 +3200,100 @@ components:
             - { $ref: "#/components/schemas/PlacementExecutionReport" }
             - type: "null"
         message: { type: [string, "null"] }
+    PlacementOutcomeDisposition:
+      type: string
+      enum: [good, offset, rotated, tombstoned, missing, uncertain]
+    PlacementOutcomeRecord:
+      type: object
+      required:
+        - id
+        - execution_id
+        - job_id
+        - placement_reference
+        - part_key
+        - package
+        - nozzle_id
+        - placement_surface_offset_mm
+        - placement_seating_offset_mm
+        - automatic_disposition
+        - automatic_confidence
+        - operator_disposition
+        - operator_note
+        - measured_offset_x_mm
+        - measured_offset_y_mm
+        - measured_rotation_error_deg
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        execution_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        placement_reference: { type: string }
+        part_key: { type: string }
+        package: { type: string }
+        nozzle_id: { type: string }
+        placement_surface_offset_mm: { type: number, format: double }
+        placement_seating_offset_mm: { type: number, format: double }
+        automatic_disposition: { $ref: "#/components/schemas/PlacementOutcomeDisposition" }
+        automatic_confidence: { type: number, minimum: 0, maximum: 1 }
+        operator_disposition:
+          oneOf:
+            - { $ref: "#/components/schemas/PlacementOutcomeDisposition" }
+            - type: "null"
+        operator_note: { type: [string, "null"] }
+        measured_offset_x_mm: { type: [number, "null"], format: double }
+        measured_offset_y_mm: { type: [number, "null"], format: double }
+        measured_rotation_error_deg: { type: [number, "null"], format: double }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PlacementOffsetSummary:
+      type: object
+      required:
+        - seating_offset_mm
+        - observation_count
+        - conclusive_count
+        - accepted_count
+        - rejected_count
+        - success_rate
+      properties:
+        seating_offset_mm: { type: number, format: double }
+        observation_count: { type: integer, minimum: 0 }
+        conclusive_count: { type: integer, minimum: 0 }
+        accepted_count: { type: integer, minimum: 0 }
+        rejected_count: { type: integer, minimum: 0 }
+        success_rate: { type: [number, "null"], minimum: 0, maximum: 1 }
+    PlacementProcessEstimate:
+      type: object
+      required:
+        - part_id
+        - part_key
+        - package
+        - nozzle_id
+        - placement_surface_offset_mm
+        - current_seating_offset_mm
+        - observation_count
+        - operator_review_count
+        - offset_summaries
+        - recommended_seating_offset_mm
+        - recommendation_confidence
+        - ready
+        - findings
+      properties:
+        part_id: { type: string, format: uuid }
+        part_key: { type: string }
+        package: { type: string }
+        nozzle_id: { type: string }
+        placement_surface_offset_mm: { type: number, format: double }
+        current_seating_offset_mm: { type: [number, "null"], format: double }
+        observation_count: { type: integer, minimum: 0 }
+        operator_review_count: { type: integer, minimum: 0 }
+        offset_summaries:
+          type: array
+          items: { $ref: "#/components/schemas/PlacementOffsetSummary" }
+        recommended_seating_offset_mm: { type: [number, "null"], format: double }
+        recommendation_confidence: { type: number, minimum: 0, maximum: 1 }
+        ready: { type: boolean }
+        findings: { type: array, items: { type: string } }
     Point2d:
       type: array
       minItems: 2

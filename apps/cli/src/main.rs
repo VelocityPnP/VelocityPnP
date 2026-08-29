@@ -203,8 +203,37 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    QualifyPlacementSequence {
+        job: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long)]
+        calibration: Uuid,
+        #[arg(long = "step", required = true, num_args = 1..=5)]
+        steps: Vec<u32>,
+        /// Confirm fixed feeders and PCB, level nozzles, a clear envelope,
+        /// and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
     PlacementExecution {
         execution: Uuid,
+    },
+    PlacementOutcome {
+        execution: Uuid,
+    },
+    ReviewPlacementOutcome {
+        execution: Uuid,
+        disposition: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    PlacementProcess {
+        part: Uuid,
+        #[arg(long, default_value = "N1")]
+        nozzle: String,
+        #[arg(long, default_value_t = 0.0)]
+        surface_offset: f64,
     },
     SetWorkspaceBaseline {
         scan: Uuid,
@@ -830,8 +859,146 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::QualifyPlacementSequence {
+            job,
+            lease,
+            calibration,
+            steps,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "placement sequence requires --confirm-safety-checks after inspecting the fixed feeders and PCB, level nozzles, travel envelope, and power isolation"
+                );
+            }
+            if !(1..=5).contains(&steps.len()) {
+                bail!("placement sequence requires one to five steps");
+            }
+            let distinct = steps
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            if distinct.len() != steps.len() {
+                bail!("placement sequence steps must be distinct");
+            }
+            let plan = get(&client, &format!("{base}/jobs/{job}/plan")).await?;
+            let plan_steps = plan["plan"]["steps"]
+                .as_array()
+                .context("job plan has no placement steps")?;
+            let selected = steps
+                .iter()
+                .map(|step| {
+                    plan_steps
+                        .get(*step as usize)
+                        .with_context(|| format!("placement step {step} is outside the job plan"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let qualification_key = selected.first().map(|step| {
+                (
+                    step["part_key"].clone(),
+                    step["nozzle_id"].clone(),
+                    step["placement_seating_offset_mm"].clone(),
+                    step["placement_surface_offset_mm"].clone(),
+                )
+            });
+            if selected.iter().any(|step| {
+                Some((
+                    step["part_key"].clone(),
+                    step["nozzle_id"].clone(),
+                    step["placement_seating_offset_mm"].clone(),
+                    step["placement_surface_offset_mm"].clone(),
+                )) != qualification_key
+            }) {
+                bail!(
+                    "placement sequence steps must use one part, nozzle, seating offset, and surface offset"
+                );
+            }
+            let mut executions = Vec::new();
+            let mut outcomes = Vec::new();
+            for step in &steps {
+                let started = post(
+                    &client,
+                    &format!("{base}/jobs/{job}/placement-executions"),
+                    Some(json!({
+                        "lease_id": lease,
+                        "calibration_id": calibration,
+                        "step_index": step,
+                        "confirmed_external_safety_checks": true,
+                    })),
+                )
+                .await?;
+                let execution_id = started["execution"]["id"]
+                    .as_str()
+                    .context("placement response did not contain an execution ID")?;
+                let operation_result =
+                    run_operation(&client, base, started["operation"].clone()).await;
+                let execution = get(
+                    &client,
+                    &format!("{base}/placement-executions/{execution_id}"),
+                )
+                .await?;
+                let outcome = get(
+                    &client,
+                    &format!("{base}/placement-executions/{execution_id}/outcome"),
+                )
+                .await?;
+                let passed = execution["report"]["passed"] == true
+                    && outcome["automatic_disposition"] == "good";
+                executions.push(execution);
+                outcomes.push(outcome);
+                if operation_result.is_err() || !passed {
+                    break;
+                }
+            }
+            json!({
+                "job_id": job,
+                "requested_steps": steps,
+                "completed_count": executions.len(),
+                "passed": executions.len() == steps.len()
+                    && outcomes.iter().all(|outcome| {
+                        outcome["automatic_disposition"] == "good"
+                    }),
+                "executions": executions,
+                "outcomes": outcomes,
+            })
+        }
         Command::PlacementExecution { execution } => {
             get(&client, &format!("{base}/placement-executions/{execution}")).await?
+        }
+        Command::PlacementOutcome { execution } => {
+            get(
+                &client,
+                &format!("{base}/placement-executions/{execution}/outcome"),
+            )
+            .await?
+        }
+        Command::ReviewPlacementOutcome {
+            execution,
+            disposition,
+            note,
+        } => {
+            post(
+                &client,
+                &format!("{base}/placement-executions/{execution}/outcome"),
+                Some(json!({
+                    "disposition": disposition,
+                    "note": note,
+                })),
+            )
+            .await?
+        }
+        Command::PlacementProcess {
+            part,
+            nozzle,
+            surface_offset,
+        } => {
+            get(
+                &client,
+                &format!(
+                    "{base}/parts/{part}/placement-process/{nozzle}/surfaces/{surface_offset}"
+                ),
+            )
+            .await?
         }
         Command::SetWorkspaceBaseline { scan } => {
             post(

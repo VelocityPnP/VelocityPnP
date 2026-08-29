@@ -829,6 +829,34 @@ and supports controlled tuning runs. The per-reference property has the highest
 priority. Preflight records every term in the plan, and each physical run copies
 them into its retained report.
 
+Each physical execution also creates a persistent placement outcome. The
+automatic disposition is one of `good`, `offset`, `rotated`, `tombstoned`,
+`missing`, or `uncertain`. An operator review overrides the automatic class but
+does not remove the original result:
+
+```bash
+cargo run --release -p velocitypnp -- review-placement-outcome EXECUTION_UUID \
+  good --note "operator confirmed"
+```
+
+Use `placement-process PART_UUID --nozzle N1 --surface-offset 0.0` to group
+outcomes by part, nozzle, board-surface offset, and seating offset. A
+recommendation requires at least three conclusive results at one offset and an
+80 percent pass rate. One update is limited to 0.05 mm and remains a
+recommendation; it does not silently change part data.
+
+Run a bounded series through the same guarded executor:
+
+```bash
+cargo run --release -p velocitypnp -- qualify-placement-sequence JOB_UUID \
+  --lease LEASE_UUID --calibration CALIBRATION_UUID \
+  --step 0 1 2 --confirm-safety-checks
+```
+
+The series accepts one to five distinct steps for one part, nozzle, seating
+offset, and board-surface offset. It records each execution and outcome and
+stops after the first failed operation or non-good automatic disposition.
+
 ### Automatic board registration
 
 Register a visually matched board after the machine is coarse-homed and the

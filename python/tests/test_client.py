@@ -1191,6 +1191,87 @@ class ClientTests(unittest.TestCase):
             "/placement-executions/execution/reanalyze-placement",
         )
 
+        outcome = {"execution_id": "execution", "automatic_disposition": "good"}
+        with patch.object(
+            client,
+            "_request",
+            return_value={"outcomes": [outcome]},
+        ) as send:
+            self.assertEqual(client.placement_outcomes(), [outcome])
+        send.assert_called_once_with("GET", "/placement-outcomes")
+
+        with patch.object(client, "_request", return_value=outcome) as send:
+            self.assertEqual(client.placement_outcome("execution"), outcome)
+        send.assert_called_once_with(
+            "GET", "/placement-executions/execution/outcome",
+        )
+
+        with patch.object(client, "_request", return_value=outcome) as send:
+            client.review_placement_outcome(
+                "execution", "good", note="operator confirmed",
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/placement-executions/execution/outcome",
+            {"disposition": "good", "note": "operator confirmed"},
+        )
+        with self.assertRaises(ValueError):
+            client.review_placement_outcome("execution", "bad")
+
+        estimate = {"ready": True, "recommended_seating_offset_mm": 0.1}
+        with patch.object(client, "_request", return_value=estimate) as send:
+            self.assertEqual(client.placement_process("part", "N1"), estimate)
+        send.assert_called_once_with(
+            "GET", "/parts/part/placement-process/N1/surfaces/0.0",
+        )
+
+    def test_placement_qualification_stops_after_a_bad_outcome(self):
+        client = Client(timeout=1)
+        plan = {
+            "steps": [
+                {
+                    "part_key": "R0603:10k",
+                    "nozzle_id": "N1",
+                    "placement_seating_offset_mm": 0.1,
+                    "placement_surface_offset_mm": 0.0,
+                },
+                {
+                    "part_key": "R0603:10k",
+                    "nozzle_id": "N1",
+                    "placement_seating_offset_mm": 0.1,
+                    "placement_surface_offset_mm": 0.0,
+                },
+            ],
+        }
+        starts = [
+            {"execution": {"id": "one"}, "operation": {"id": "op-one"}},
+            {"execution": {"id": "two"}, "operation": {"id": "op-two"}},
+        ]
+        outcomes = [
+            {"automatic_disposition": "good"},
+            {"automatic_disposition": "rotated"},
+        ]
+        with patch.object(client, "plan_job", return_value=plan), patch.object(
+            client, "start_guarded_single_placement", side_effect=starts,
+        ) as start, patch.object(client, "wait"), patch.object(
+            client, "placement_execution", side_effect=[{"id": "one"}, {"id": "two"}],
+        ), patch.object(client, "placement_outcome", side_effect=outcomes):
+            result = client.qualify_placement_sequence(
+                "job",
+                "lease",
+                "calibration",
+                [0, 1],
+                safety_checks_confirmed=True,
+            )
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["completed_count"], 2)
+        self.assertEqual(start.call_count, 2)
+        with self.assertRaises(ValueError):
+            client.qualify_placement_sequence(
+                "job", "lease", "calibration", [],
+                safety_checks_confirmed=True,
+            )
+
     def test_part_library_endpoints(self):
         client = Client(timeout=1)
         with patch.object(

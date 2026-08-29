@@ -22,24 +22,26 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    calculate_vacuum_classification_thresholds, lumen_calibration_artifacts,
-    lumen_calibration_workflow, summarize_visual_homing_validation, ApproachSide,
-    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BoardInstance,
-    BoardRegistrationFiducialObservation, BoardRegistrationHypothesis, BoardRegistrationRun,
-    BoardSide, BoardSurfaceFiducialView, BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun,
-    BoardSurfaceParallaxObservation, BottomCameraMappingReport, CalibrationArtifactId,
-    CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus,
-    CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId,
-    CameraProfile, CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
-    HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
-    HeldPartAlignmentReport, HeldPartInspectionReport, InspectionReport, InspectionStatus,
-    InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
-    InstalledPlateRegistrationReport, Job, JogTarget, LinearAxis, LocalXyAxisDirectionReport,
-    LocalXyAxisEstimate, LocalXyCompensationHoldout, LocalXyDirectionResponseReport,
-    LocalXyDirectionResponseSample, MachineProfile, MachineState, NozzleHeightModel,
-    NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample,
-    Operation, OperationStatus, Part, PlacementExecutionReport, PlacementExecutionRun,
-    PlacementExecutionStage, PlacementExecutionStageReport, PlanarCameraCalibrationReport,
+    calculate_vacuum_classification_thresholds, classify_placement_outcome,
+    estimate_placement_process, lumen_calibration_artifacts, lumen_calibration_workflow,
+    summarize_visual_homing_validation, ApproachSide, AutomatedCalibrationConfig,
+    AutomatedCalibrationRun, BoardDesign, BoardInstance, BoardRegistrationFiducialObservation,
+    BoardRegistrationHypothesis, BoardRegistrationRun, BoardSide, BoardSurfaceFiducialView,
+    BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun, BoardSurfaceParallaxObservation,
+    BottomCameraMappingReport, CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck,
+    CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
+    CalibrationSnapshot, CalibrationStepId, CameraProfile, CameraProfileControlValue,
+    CameraRayTransferReport, CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport,
+    HeldPartAlignmentObservation, HeldPartAlignmentReport, HeldPartInspectionReport,
+    InspectionReport, InspectionStatus, InstalledGeometryCalibrationReport,
+    InstalledPlateGeometryReport, InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job,
+    JogTarget, LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate,
+    LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
+    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
+    NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample, Operation,
+    OperationStatus, Part, PlacementExecutionReport, PlacementExecutionRun,
+    PlacementExecutionStage, PlacementExecutionStageReport, PlacementOutcomeDisposition,
+    PlacementOutcomeRecord, PlacementProcessEstimate, PlanarCameraCalibrationReport,
     PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
     StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
     StripFeederPickupDisposition, StripFeederPickupQualificationReport,
@@ -839,8 +841,17 @@ pub fn router(state: AppState) -> Router {
             post(reanalyze_placement_execution),
         )
         .route(
+            "/api/v1/placement-executions/{id}/outcome",
+            get(get_placement_outcome).post(review_placement_outcome),
+        )
+        .route(
             "/api/v1/placement-executions/{id}/artifacts/{name}",
             get(get_placement_execution_artifact),
+        )
+        .route("/api/v1/placement-outcomes", get(list_placement_outcomes))
+        .route(
+            "/api/v1/parts/{id}/placement-process/{nozzle_id}/surfaces/{surface_offset_mm}",
+            get(get_part_placement_process),
         )
         .route(
             "/api/v1/inspections",
@@ -20730,6 +20741,7 @@ async fn execute_guarded_placement_task(
                 .store
                 .put_placement_execution(&run)
                 .map_err(|error| error.to_string())?;
+            persist_automatic_placement_outcome(&state, &run).map_err(|error| error.to_string())?;
             Ok(run.message)
         }
         Err(error) => {
@@ -20767,6 +20779,8 @@ async fn execute_guarded_placement_task(
                     }
                 }
             }
+            persist_automatic_placement_outcome(&state, &run)
+                .map_err(|store_error| store_error.to_string())?;
             Err(error)
         }
     }
@@ -21936,6 +21950,171 @@ async fn get_placement_execution(
         .ok_or_else(|| ApiError::not_found("placement execution not found"))
 }
 
+fn persist_automatic_placement_outcome(
+    state: &AppState,
+    run: &PlacementExecutionRun,
+) -> anyhow::Result<Option<PlacementOutcomeRecord>> {
+    let Some(report) = run.report.as_ref().filter(|report| !report.simulated) else {
+        return Ok(None);
+    };
+    let part = state
+        .store
+        .list_parts()?
+        .into_iter()
+        .find(|part| part.key == report.part_key)
+        .context("placement outcome part is not in the part library")?;
+    let previous = state.store.get_placement_outcome(run.id)?;
+    let (automatic_disposition, automatic_confidence) = classify_placement_outcome(report);
+    let inspection = report.top_inspection.as_ref();
+    let now = Utc::now();
+    let outcome = PlacementOutcomeRecord {
+        id: run.id,
+        execution_id: run.id,
+        job_id: run.job_id,
+        placement_reference: report.placement_reference.clone(),
+        part_key: report.part_key.clone(),
+        package: part.package,
+        nozzle_id: report.nozzle_id.clone(),
+        placement_surface_offset_mm: report.placement_surface_offset_mm,
+        placement_seating_offset_mm: report.placement_seating_offset_mm,
+        automatic_disposition,
+        automatic_confidence: automatic_confidence.clamp(0.0, 1.0),
+        operator_disposition: previous
+            .as_ref()
+            .and_then(|outcome| outcome.operator_disposition),
+        operator_note: previous
+            .as_ref()
+            .and_then(|outcome| outcome.operator_note.clone()),
+        measured_offset_x_mm: inspection.and_then(|inspection| inspection.offset_x_mm),
+        measured_offset_y_mm: inspection.and_then(|inspection| inspection.offset_y_mm),
+        measured_rotation_error_deg: inspection
+            .and_then(|inspection| inspection.rotation_error_deg),
+        created_at: previous.map_or(run.created_at, |outcome| outcome.created_at),
+        updated_at: now,
+    };
+    state.store.put_placement_outcome(&outcome)?;
+    Ok(Some(outcome))
+}
+
+#[derive(Debug, Serialize)]
+struct PlacementOutcomeList {
+    outcomes: Vec<PlacementOutcomeRecord>,
+}
+
+async fn list_placement_outcomes(
+    State(state): State<AppState>,
+) -> ApiResult<Json<PlacementOutcomeList>> {
+    Ok(Json(PlacementOutcomeList {
+        outcomes: state
+            .store
+            .list_placement_outcomes()
+            .map_err(ApiError::internal)?,
+    }))
+}
+
+async fn get_placement_outcome(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<PlacementOutcomeRecord>> {
+    if let Some(outcome) = state
+        .store
+        .get_placement_outcome(id)
+        .map_err(ApiError::internal)?
+    {
+        return Ok(Json(outcome));
+    }
+    let run = state
+        .store
+        .get_placement_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement execution not found"))?;
+    persist_automatic_placement_outcome(&state, &run)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::bad_request("simulated placement has no physical outcome"))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewPlacementOutcomeRequest {
+    disposition: PlacementOutcomeDisposition,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn review_placement_outcome(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ReviewPlacementOutcomeRequest>,
+) -> ApiResult<Json<PlacementOutcomeRecord>> {
+    if body.note.as_ref().is_some_and(|note| note.len() > 500) {
+        return Err(ApiError::bad_request(
+            "placement outcome note must not exceed 500 bytes",
+        ));
+    }
+    let run = state
+        .store
+        .get_placement_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement execution not found"))?;
+    if matches!(
+        run.status,
+        OperationStatus::Pending | OperationStatus::Running
+    ) {
+        return Err(ApiError::bad_request("placement outcome is not complete"));
+    }
+    let mut outcome = if let Some(outcome) = state
+        .store
+        .get_placement_outcome(id)
+        .map_err(ApiError::internal)?
+    {
+        outcome
+    } else {
+        persist_automatic_placement_outcome(&state, &run)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::bad_request("simulated placement has no physical outcome"))?
+    };
+    outcome.operator_disposition = Some(body.disposition);
+    outcome.operator_note = body
+        .note
+        .map(|note| note.trim().to_string())
+        .filter(|note| !note.is_empty());
+    outcome.updated_at = Utc::now();
+    state
+        .store
+        .put_placement_outcome(&outcome)
+        .map_err(ApiError::internal)?;
+    Ok(Json(outcome))
+}
+
+async fn get_part_placement_process(
+    State(state): State<AppState>,
+    Path((id, nozzle_id, surface_offset_mm)): Path<(Uuid, String, f64)>,
+) -> ApiResult<Json<PlacementProcessEstimate>> {
+    if nozzle_id.trim().is_empty() {
+        return Err(ApiError::bad_request("placement process needs a nozzle ID"));
+    }
+    if !surface_offset_mm.is_finite() || !(0.0..=10.0).contains(&surface_offset_mm) {
+        return Err(ApiError::bad_request(
+            "placement surface offset must be finite and between 0.0 and 10.0 mm",
+        ));
+    }
+    let part = state
+        .store
+        .get_part(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("part not found"))?;
+    let outcomes = state
+        .store
+        .list_placement_outcomes()
+        .map_err(ApiError::internal)?;
+    Ok(Json(estimate_placement_process(
+        &part,
+        &nozzle_id,
+        surface_offset_mm,
+        &outcomes,
+    )))
+}
+
 async fn reanalyze_placement_execution(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -22079,6 +22258,7 @@ async fn reanalyze_placement_execution(
         .store
         .put_placement_execution(&run)
         .map_err(ApiError::internal)?;
+    persist_automatic_placement_outcome(&state, &run).map_err(ApiError::internal)?;
     Ok(Json(run))
 }
 

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, BoardSurfaceMeasurementRun,
     CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job, MachineEvent,
-    Operation, Part, PlacementExecutionRun, StripFeederLiveHoldoutRun,
+    Operation, Part, PlacementExecutionRun, PlacementOutcomeRecord, StripFeederLiveHoldoutRun,
     StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketStatus,
     StripFeederRegistration, StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
@@ -911,6 +911,18 @@ impl Store {
         self.get("placement_execution", id)
     }
 
+    pub fn put_placement_outcome(&self, outcome: &PlacementOutcomeRecord) -> Result<()> {
+        self.put("placement_outcome", outcome.id, outcome)
+    }
+
+    pub fn list_placement_outcomes(&self) -> Result<Vec<PlacementOutcomeRecord>> {
+        self.list("placement_outcome")
+    }
+
+    pub fn get_placement_outcome(&self, id: Uuid) -> Result<Option<PlacementOutcomeRecord>> {
+        self.get("placement_outcome", id)
+    }
+
     pub fn put_inspection(&self, inspection: &InspectionReport) -> Result<()> {
         self.put("inspection", inspection.id, inspection)
     }
@@ -1340,6 +1352,35 @@ mod tests {
         store.put_placement_execution(&run).unwrap();
 
         assert_eq!(store.get_placement_execution(run.id).unwrap(), Some(run));
+    }
+
+    #[test]
+    fn placement_outcome_round_trip_retains_operator_review() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+        let outcome = PlacementOutcomeRecord {
+            id,
+            execution_id: id,
+            job_id: Uuid::new_v4(),
+            placement_reference: "R10".into(),
+            part_key: "R0603:10k".into(),
+            package: "R_0603_1608Metric".into(),
+            nozzle_id: "N1".into(),
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: 0.10,
+            automatic_disposition: velocitypnp_domain::PlacementOutcomeDisposition::Good,
+            automatic_confidence: 0.95,
+            operator_disposition: Some(velocitypnp_domain::PlacementOutcomeDisposition::Offset),
+            operator_note: Some("slightly left".into()),
+            measured_offset_x_mm: Some(-0.04),
+            measured_offset_y_mm: Some(0.02),
+            measured_rotation_error_deg: Some(0.2),
+            created_at: now,
+            updated_at: now,
+        };
+        store.put_placement_outcome(&outcome).unwrap();
+        assert_eq!(store.get_placement_outcome(id).unwrap(), Some(outcome));
     }
 
     #[test]

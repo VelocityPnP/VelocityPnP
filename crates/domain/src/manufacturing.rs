@@ -832,6 +832,237 @@ pub struct PlacementExecutionRun {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementOutcomeDisposition {
+    Good,
+    Offset,
+    Rotated,
+    Tombstoned,
+    Missing,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementOutcomeRecord {
+    pub id: Uuid,
+    pub execution_id: Uuid,
+    pub job_id: Uuid,
+    pub placement_reference: String,
+    pub part_key: String,
+    pub package: String,
+    pub nozzle_id: String,
+    pub placement_surface_offset_mm: f64,
+    pub placement_seating_offset_mm: f64,
+    pub automatic_disposition: PlacementOutcomeDisposition,
+    pub automatic_confidence: f64,
+    #[serde(default)]
+    pub operator_disposition: Option<PlacementOutcomeDisposition>,
+    #[serde(default)]
+    pub operator_note: Option<String>,
+    #[serde(default)]
+    pub measured_offset_x_mm: Option<f64>,
+    #[serde(default)]
+    pub measured_offset_y_mm: Option<f64>,
+    #[serde(default)]
+    pub measured_rotation_error_deg: Option<f64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl PlacementOutcomeRecord {
+    pub fn effective_disposition(&self) -> PlacementOutcomeDisposition {
+        self.operator_disposition
+            .unwrap_or(self.automatic_disposition)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementOffsetSummary {
+    pub seating_offset_mm: f64,
+    pub observation_count: u32,
+    pub conclusive_count: u32,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub success_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementProcessEstimate {
+    pub part_id: Uuid,
+    pub part_key: String,
+    pub package: String,
+    pub nozzle_id: String,
+    pub placement_surface_offset_mm: f64,
+    pub current_seating_offset_mm: Option<f64>,
+    pub observation_count: u32,
+    pub operator_review_count: u32,
+    pub offset_summaries: Vec<PlacementOffsetSummary>,
+    pub recommended_seating_offset_mm: Option<f64>,
+    pub recommendation_confidence: f64,
+    pub ready: bool,
+    pub findings: Vec<String>,
+}
+
+pub fn classify_placement_outcome(
+    report: &PlacementExecutionReport,
+) -> (PlacementOutcomeDisposition, f64) {
+    let Some(inspection) = report.top_inspection.as_ref() else {
+        return (PlacementOutcomeDisposition::Uncertain, 0.0);
+    };
+    if inspection.passed {
+        return (PlacementOutcomeDisposition::Good, inspection.confidence);
+    }
+    if inspection.detected {
+        if inspection
+            .rotation_error_deg
+            .is_some_and(|error| error.abs() > 4.0)
+        {
+            return (PlacementOutcomeDisposition::Rotated, inspection.confidence);
+        }
+        return (PlacementOutcomeDisposition::Offset, inspection.confidence);
+    }
+    if inspection.target_registered
+        && inspection.body_change_fraction >= 0.20
+        && inspection.change_containment < 0.70
+    {
+        return (
+            PlacementOutcomeDisposition::Tombstoned,
+            inspection.confidence,
+        );
+    }
+    if inspection.target_registered && inspection.confidence >= 0.50 {
+        return (PlacementOutcomeDisposition::Missing, inspection.confidence);
+    }
+    (
+        PlacementOutcomeDisposition::Uncertain,
+        inspection.confidence,
+    )
+}
+
+pub fn estimate_placement_process(
+    part: &Part,
+    nozzle_id: &str,
+    placement_surface_offset_mm: f64,
+    outcomes: &[PlacementOutcomeRecord],
+) -> PlacementProcessEstimate {
+    use std::collections::BTreeMap;
+
+    const MINIMUM_CONCLUSIVE_OBSERVATIONS: u32 = 3;
+    const MINIMUM_SUCCESS_RATE: f64 = 0.80;
+    const MAXIMUM_UPDATE_MM: f64 = 0.05;
+
+    let selected = outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.part_key == part.key
+                && outcome.nozzle_id == nozzle_id
+                && (outcome.placement_surface_offset_mm - placement_surface_offset_mm).abs()
+                    <= 0.005
+        })
+        .collect::<Vec<_>>();
+    let operator_review_count = selected
+        .iter()
+        .filter(|outcome| outcome.operator_disposition.is_some())
+        .count() as u32;
+    let mut buckets = BTreeMap::<i32, Vec<&PlacementOutcomeRecord>>::new();
+    for outcome in &selected {
+        let key = (100.0 * outcome.placement_seating_offset_mm).round() as i32;
+        buckets.entry(key).or_default().push(outcome);
+    }
+    let offset_summaries = buckets
+        .into_iter()
+        .map(|(key, records)| {
+            let accepted_count = records
+                .iter()
+                .filter(|record| {
+                    record.effective_disposition() == PlacementOutcomeDisposition::Good
+                })
+                .count() as u32;
+            let rejected_count = records
+                .iter()
+                .filter(|record| {
+                    !matches!(
+                        record.effective_disposition(),
+                        PlacementOutcomeDisposition::Good | PlacementOutcomeDisposition::Uncertain
+                    )
+                })
+                .count() as u32;
+            let conclusive_count = accepted_count + rejected_count;
+            PlacementOffsetSummary {
+                seating_offset_mm: f64::from(key) / 100.0,
+                observation_count: records.len() as u32,
+                conclusive_count,
+                accepted_count,
+                rejected_count,
+                success_rate: (conclusive_count > 0)
+                    .then_some(f64::from(accepted_count) / f64::from(conclusive_count)),
+            }
+        })
+        .collect::<Vec<_>>();
+    let best = offset_summaries
+        .iter()
+        .filter(|summary| summary.conclusive_count >= MINIMUM_CONCLUSIVE_OBSERVATIONS)
+        .filter(|summary| summary.success_rate.unwrap_or(0.0) >= MINIMUM_SUCCESS_RATE)
+        .max_by(|left, right| {
+            left.success_rate
+                .partial_cmp(&right.success_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(left.conclusive_count.cmp(&right.conclusive_count))
+                .then_with(|| {
+                    let current = part.placement_seating_offset_mm.unwrap_or(0.0);
+                    let left_distance = (left.seating_offset_mm - current).abs();
+                    let right_distance = (right.seating_offset_mm - current).abs();
+                    right_distance
+                        .partial_cmp(&left_distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    right
+                        .seating_offset_mm
+                        .partial_cmp(&left.seating_offset_mm)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+    let recommended_seating_offset_mm = best.map(|summary| {
+        let target = summary.seating_offset_mm.clamp(-0.25, 0.50);
+        part.placement_seating_offset_mm.map_or(target, |current| {
+            target.clamp(current - MAXIMUM_UPDATE_MM, current + MAXIMUM_UPDATE_MM)
+        })
+    });
+    let recommendation_confidence = best.map_or(0.0, |summary| {
+        summary.success_rate.unwrap_or(0.0)
+            * (f64::from(summary.conclusive_count) / 10.0).clamp(0.0, 1.0)
+    });
+    let ready = recommended_seating_offset_mm.is_some();
+    let findings = if let Some(best) = best {
+        vec![format!(
+            "offset {:+.2} mm passed {}/{} conclusive placements",
+            best.seating_offset_mm, best.accepted_count, best.conclusive_count
+        )]
+    } else {
+        vec![format!(
+            "need at least {MINIMUM_CONCLUSIVE_OBSERVATIONS} conclusive placements at one offset with an {:.0}% pass rate",
+            100.0 * MINIMUM_SUCCESS_RATE,
+        )]
+    };
+    PlacementProcessEstimate {
+        part_id: part.id,
+        part_key: part.key.clone(),
+        package: part.package.clone(),
+        nozzle_id: nozzle_id.into(),
+        placement_surface_offset_mm,
+        current_seating_offset_mm: part.placement_seating_offset_mm,
+        observation_count: selected.len() as u32,
+        operator_review_count,
+        offset_summaries,
+        recommended_seating_offset_mm,
+        recommendation_confidence,
+        ready,
+        findings,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InspectionFinding {
     pub id: Uuid,
@@ -861,4 +1092,113 @@ pub struct InspectionReport {
     pub created_at: DateTime<Utc>,
     pub status: InspectionStatus,
     pub findings: Vec<InspectionFinding>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome(
+        part: &Part,
+        nozzle_id: &str,
+        offset_mm: f64,
+        disposition: PlacementOutcomeDisposition,
+    ) -> PlacementOutcomeRecord {
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+        PlacementOutcomeRecord {
+            id,
+            execution_id: id,
+            job_id: Uuid::new_v4(),
+            placement_reference: "R1".into(),
+            part_key: part.key.clone(),
+            package: part.package.clone(),
+            nozzle_id: nozzle_id.into(),
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: offset_mm,
+            automatic_disposition: disposition,
+            automatic_confidence: 0.9,
+            operator_disposition: None,
+            operator_note: None,
+            measured_offset_x_mm: None,
+            measured_offset_y_mm: None,
+            measured_rotation_error_deg: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn part() -> Part {
+        Part {
+            id: Uuid::new_v4(),
+            key: "R0603:10k".into(),
+            manufacturer_part_number: None,
+            package: "R_0603_1608Metric".into(),
+            height_mm: Some(0.55),
+            body_width_mm: Some(0.8),
+            body_length_mm: Some(1.6),
+            placement_seating_offset_mm: Some(0.10),
+            compatible_tips: vec!["N045".into()],
+            vision_profile: Some("rectangular_passive".into()),
+        }
+    }
+
+    #[test]
+    fn process_estimate_requires_three_conclusive_results() {
+        let part = part();
+        let mut outcomes = vec![
+            outcome(&part, "N1", 0.10, PlacementOutcomeDisposition::Good),
+            outcome(&part, "N1", 0.10, PlacementOutcomeDisposition::Good),
+        ];
+        let estimate = estimate_placement_process(&part, "N1", 0.0, &outcomes);
+        assert!(!estimate.ready);
+        assert_eq!(estimate.recommended_seating_offset_mm, None);
+        assert!(estimate.findings[0].contains("80% pass rate"));
+
+        outcomes.push(outcome(
+            &part,
+            "N1",
+            0.10,
+            PlacementOutcomeDisposition::Good,
+        ));
+        let estimate = estimate_placement_process(&part, "N1", 0.0, &outcomes);
+        assert!(estimate.ready);
+        assert_eq!(estimate.recommended_seating_offset_mm, Some(0.10));
+    }
+
+    #[test]
+    fn process_estimate_bounds_a_change_from_the_part_default() {
+        let part = part();
+        let outcomes = (0..3)
+            .map(|_| outcome(&part, "N1", 0.20, PlacementOutcomeDisposition::Good))
+            .collect::<Vec<_>>();
+        let estimate = estimate_placement_process(&part, "N1", 0.0, &outcomes);
+        assert!((estimate.recommended_seating_offset_mm.unwrap() - 0.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn process_estimate_keeps_board_surfaces_separate() {
+        let part = part();
+        let outcomes = (0..3)
+            .map(|_| {
+                let mut outcome = outcome(&part, "N1", 0.10, PlacementOutcomeDisposition::Good);
+                outcome.placement_surface_offset_mm = 0.20;
+                outcome
+            })
+            .collect::<Vec<_>>();
+        let estimate = estimate_placement_process(&part, "N1", 0.0, &outcomes);
+        assert_eq!(estimate.observation_count, 0);
+        assert!(!estimate.ready);
+    }
+
+    #[test]
+    fn operator_review_overrides_the_automatic_disposition() {
+        let part = part();
+        let mut reviewed = outcome(&part, "N1", 0.10, PlacementOutcomeDisposition::Good);
+        reviewed.operator_disposition = Some(PlacementOutcomeDisposition::Rotated);
+        assert_eq!(
+            reviewed.effective_disposition(),
+            PlacementOutcomeDisposition::Rotated
+        );
+    }
 }

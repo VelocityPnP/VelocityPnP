@@ -96,6 +96,10 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add three-to-five-cycle qualification across distinct occupied pockets
 - [x] Add a persistent guarded single-placement executor with simulator and
   gated live pickup, alignment, release, and inspection paths
+- [x] Persist automatic and operator-reviewed placement outcomes and add a
+  bounded, stop-on-failure placement qualification sequence
+- [x] Estimate seating offsets by part, nozzle, and board surface from qualified
+  outcome groups without changing part data automatically
 - [x] Validate deterministic next-pocket advancement during physical job use
 - [ ] Validate drag motion/actuator sequences with collision review
 - [ ] Validate Photon discovery/feed/status/retry on arriving hardware
@@ -144,7 +148,7 @@ The project is organized by measurable gates rather than calendar estimates.
   board and feeder changes on attached hardware
 - [ ] Add learned semantic segmentation with versioned datasets, calibrated
   confidence, and machine/configuration holdout tests
-- [ ] Add package-template pose comparison after live fiducial verification
+- [x] Add package-template pose comparison after live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles
