@@ -2446,6 +2446,50 @@ Board inspection therefore needs a board-specific package-template pose fit
 before it can enforce placement accuracy. SQLite integrity validation returned
 `ok`. The machine ended ready and homed at safe Z with vacuum off.
 
+### Placement-outcome qualification and R12 stop test
+
+On 2026-08-28, the operator reviewed the first three seating-offset trials.
+R9 was recorded as `tombstoned`, R10 as `good`, and R11 as `rotated`. The
+stored records retain both the automatic result and the operator override.
+The trials used three different seating offsets, so no offset has the minimum
+three observations needed for a process recommendation.
+
+Coarse home `93f634a8-1024-493a-b69e-72a7219abb46` and fine home
+`34b86685-2f40-44dc-bc4e-03d9e3b768c7` passed. Fine home detected the N24
+tip on N2 and reset the datum contact from controller Z59.4 to Z59.1.
+
+Job `00000000-0000-4000-8000-000000000012` defined a bounded R12, R13,
+and R14 qualification at a +0.10 mm seating offset. Execution
+`254cdaf7-ff27-4e9e-a971-af6fdc9d8687` picked R12 from feeder-8 pocket 8.
+Bottom vision ended with a 0.083 mm center residual and a 0.491 degree package
+axis residual. The tool reached nozzle Z4.107 and turned vacuum off. All
+release samples were zero, which confirmed pneumatic release.
+
+The old visual release gate then treated the empty N1 nozzle bore as a retained
+part. The held resistor was 1.318 by 2.268 mm, used 1877 foreground pixels,
+and was brighter than its reference. The two post-release bore detections were
+at most 1.210 by 1.655 mm, used at most 1012 pixels, and were darker than their
+reference. The bounded sequence stopped after R12. It did not run R13 or R14.
+The automatic R12 outcome remains `uncertain` pending operator review.
+
+Release matching now requires at least 75% of each held-part dimension and the
+same foreground polarity. The executor also records pneumatic release apart
+from vision proof. If vacuum confirms release but vision is uncertain, it no
+longer claims that recovery returned the part to the source pocket.
+
+A separate safe-Z top-camera capture shows R12 on its pads. An approximate
+offline registration measured a +0.24 mm X and +0.14 mm Y error and a +5.0
+degree angle error. This result is provisional because it used one manual
+frame and an approximate retained camera mapping. It did not change the stored
+operator outcome.
+
+R10 also showed a known orientation limitation. Its top marking proves that it
+was not physically face-down, but it was rotated 180 degrees in the board
+plane. The `rectangular_passive` profile treats 0 and 180 degrees as equal.
+This is valid for a resistor. Polarized parts require a separate full-angle
+profile that combines KiCad pad direction, feeder direction, and package-mark
+detection. Polarized placement must stop when that direction is uncertain.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
