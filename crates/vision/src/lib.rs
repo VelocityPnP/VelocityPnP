@@ -36,7 +36,8 @@ pub use held_part::{
 };
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use placed_part::{
-    inspect_placed_part, PlacedPartInspectionArtifacts, PLACED_PART_INSPECTION_ALGORITHM,
+    inspect_placed_part, inspect_placed_part_with_orientation, PlacedPartInspectionArtifacts,
+    PLACED_PART_INSPECTION_ALGORITHM,
 };
 pub use strip_feeder::{
     analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate,

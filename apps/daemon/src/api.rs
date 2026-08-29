@@ -78,11 +78,11 @@ use velocitypnp_vision::{
     encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
     fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
     inspect_held_part_difference, inspect_held_part_difference_with_orientation,
-    inspect_placed_part, inspect_strip_feeder_pocket_return, interpolate_planar_camera_model,
-    mean_nozzle_detection, measure_known_feature_surface_fraction, measure_workspace_parallax,
-    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
-    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
-    reanalyze_workspace_seam_health, render_board_fiducial_evidence,
+    inspect_placed_part_with_orientation, inspect_strip_feeder_pocket_return,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
+    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
+    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
+    query_camera_controls, reanalyze_workspace_seam_health, render_board_fiducial_evidence,
     render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
@@ -21414,7 +21414,7 @@ async fn execute_physical_guarded_placement(
         let placement_center_tolerance_mm = (0.5 * step.body_width_mm)
             .max(0.25)
             .min(pickup.maximum_part_offset_mm);
-        let top_inspection = inspect_placed_part(
+        let top_inspection = inspect_placed_part_with_orientation(
             &board_before,
             &board_after,
             [
@@ -21427,6 +21427,7 @@ async fn execute_physical_guarded_placement(
             step.board_place.rotation_deg,
             placement_center_tolerance_mm,
             MAX_PLACED_PART_ROTATION_ERROR_DEG,
+            step.part_orientation,
             BOARD_PLACEMENT_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
@@ -22622,7 +22623,7 @@ async fn reanalyze_placement_execution(
         .unwrap_or(1.0);
     let maximum_center_offset_mm = (0.5 * body_width_mm).max(0.25).min(pickup_center_offset_mm);
     let inspection = tokio::task::spawn_blocking(move || {
-        inspect_placed_part(
+        inspect_placed_part_with_orientation(
             &before,
             &after,
             expected_center_px,
@@ -22632,6 +22633,7 @@ async fn reanalyze_placement_execution(
             report.board_place.rotation_deg,
             maximum_center_offset_mm,
             MAX_PLACED_PART_ROTATION_ERROR_DEG,
+            report.part_orientation,
             BOARD_PLACEMENT_INSPECTION_ARTIFACT,
         )
         .map(|inspection| (report, inspection))

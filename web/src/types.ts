@@ -915,6 +915,45 @@ export interface HeldPartInspectionReport {
   findings: string[];
 }
 
+export interface PlacedPartInspectionReport {
+  algorithm_version: string;
+  detected: boolean;
+  nominal_center_x_px: number;
+  nominal_center_y_px: number;
+  target_registered: boolean;
+  target_correction_x_mm: number | null;
+  target_correction_y_mm: number | null;
+  target_correction_mm: number | null;
+  target_registration_confidence: number;
+  expected_center_x_px: number;
+  expected_center_y_px: number;
+  expected_width_mm: number;
+  expected_length_mm: number;
+  expected_rotation_deg: number;
+  center_x_px: number | null;
+  center_y_px: number | null;
+  offset_x_mm: number | null;
+  offset_y_mm: number | null;
+  offset_mm: number | null;
+  width_mm: number | null;
+  length_mm: number | null;
+  rotation_deg: number | null;
+  rotation_error_deg: number | null;
+  orientation: PartOrientation;
+  orientation_rotation_deg: number | null;
+  orientation_contrast_luma: number | null;
+  orientation_confidence: number;
+  orientation_matched: boolean | null;
+  changed_pixel_count: number;
+  mean_difference_luma: number;
+  body_change_fraction: number;
+  change_containment: number;
+  confidence: number;
+  passed: boolean;
+  artifact_name: string;
+  findings: string[];
+}
+
 export interface HeldPartAlignmentReport {
   algorithm_version: string;
   orientation: PartOrientation;
@@ -1024,6 +1063,13 @@ export interface PlacementExecutionReport {
   feeder_part_rotation_deg: number;
   feeder_pick: Pose;
   board_place: Pose;
+  part_height_mm: number;
+  placement_surface_offset_mm: number;
+  placement_seating_offset_mm: number;
+  pocket_index: number | null;
+  pickup_report: StripFeederPickupQualificationReport | null;
+  top_inspection: PlacedPartInspectionReport | null;
+  artifact_names: string[];
   corrected_move_count: number;
   passed: boolean;
   stages: Array<{

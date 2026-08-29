@@ -2587,6 +2587,35 @@ new bottom-camera correction, rejects excessive rotation, seats by the
 profile's 0.10 mm recovery depth, pulses the matching nozzle valve for the
 profile's 500 ms duration, and requires a clear-nozzle verification.
 
+### First directed LED pickup stop
+
+On 2026-08-29, coarse home `d227e622-24c9-40ae-9db9-cfaf4a2a12d2` and fine
+home `e95fd72f-efaf-42bd-836b-b09c0ba89c59` passed. Live holdout
+`3014548e-0803-4fbf-aa31-534f1c4146a9` measured feeder 7 with a 0.042 mm
+pitch residual. The requested pocket 14 was empty, so the holdout selected
+the strongest occupied pocket in its bounded span, pocket 15.
+
+Pickup qualification `3d5ef3c7-36f3-45d3-9bd5-ec69e62ba6bf` acquired an
+LED at nozzle Z4.0. Bottom vision measured 1.786 by 0.533 mm at -10.136
+degrees. It measured 5.61 luma of brighter-end separation. The provisional
+6.0 luma floor stopped alignment. Retained-image analysis with a 4.0 luma
+floor passed without changing the measured pose. The stored LED part now uses
+the 4.0 luma floor. This value is provisional until several physical LED
+captures show repeatable end direction.
+
+Vacuum pressure returned to its off state, but bottom vision found the LED on
+N1 after both release attempts. Manual recovery returned to the recorded
+pocket and then used the configured recovery area. Single 500 and 700 ms
+valve pulses, three 250 ms valve pulses, and a repeat at nozzle Z4.0 did not
+clear the nozzle. The LED moved onto its edge. Generic jog commands rejected
+the proposed rotation cycle because production rotation motion is not yet
+hardware-validated. No rotation occurred.
+
+The machine stopped ready and homed at safe Z over the bottom camera. The
+pump and valve are off. The edge-standing LED remains mechanically attached
+to N1 and needs operator removal. This failed experiment does not permit an
+automatic source-pocket valve retry.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

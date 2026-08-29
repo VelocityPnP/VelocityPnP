@@ -844,6 +844,10 @@ placement motion, bounded release verification, and top inspection. Top
 inspection registers the retained before and after board views. It then matches
 the part-library body dimensions near the planned pose and angle. Package text
 can provide change evidence, but it cannot define the detected body. Use
+an end-marked orientation policy to compare the two visible package ends after
+the geometry match. A directed placement fails when the marker is ambiguous or
+is 180 degrees from the planned board direction. A feeder-referenced policy
+preserves motion phase but cannot prove that phase in the final image. Use
 `POST /placement-executions/EXECUTION_UUID/reanalyze-placement` or the Python
 client's `reanalyze_placement()` method to apply the current detector to saved
 evidence without machine motion.

@@ -3244,6 +3244,11 @@ components:
         - length_mm
         - rotation_deg
         - rotation_error_deg
+        - orientation
+        - orientation_rotation_deg
+        - orientation_contrast_luma
+        - orientation_confidence
+        - orientation_matched
         - changed_pixel_count
         - mean_difference_luma
         - body_change_fraction
@@ -3276,6 +3281,11 @@ components:
         length_mm: { type: [number, "null"], format: double }
         rotation_deg: { type: [number, "null"], format: double }
         rotation_error_deg: { type: [number, "null"], format: double }
+        orientation: { $ref: "#/components/schemas/PartOrientation" }
+        orientation_rotation_deg: { type: [number, "null"], format: double }
+        orientation_contrast_luma: { type: [number, "null"], format: double }
+        orientation_confidence: { type: number, minimum: 0, maximum: 1 }
+        orientation_matched: { type: [boolean, "null"] }
         changed_pixel_count: { type: integer, minimum: 0 }
         mean_difference_luma: { type: number, format: double }
         body_change_fraction: { type: number, format: double }

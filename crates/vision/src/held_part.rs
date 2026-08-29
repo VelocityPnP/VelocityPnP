@@ -878,7 +878,7 @@ pub(crate) fn draw_polygon(frame: &mut RgbFrame, points: &[[f64; 2]], color: [u8
     }
 }
 
-fn draw_line(frame: &mut RgbFrame, start: [f64; 2], end: [f64; 2], color: [u8; 3]) {
+pub(crate) fn draw_line(frame: &mut RgbFrame, start: [f64; 2], end: [f64; 2], color: [u8; 3]) {
     let distance = (end[0] - start[0]).hypot(end[1] - start[1]);
     let steps = distance.ceil().max(1.0) as u32;
     for step in 0..=steps {

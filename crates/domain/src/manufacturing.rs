@@ -535,7 +535,8 @@ pub struct HeldPartInspectionReport {
 /// Top-camera evidence for one placed package at its planned board pose.
 ///
 /// This report is separate from held-part inspection. The detector matches a
-/// known package body and does not infer the pose from package markings.
+/// known package body before it uses a configured end marker to resolve the
+/// full package direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacedPartInspectionReport {
     pub algorithm_version: String,
@@ -579,6 +580,20 @@ pub struct PlacedPartInspectionReport {
     pub rotation_deg: Option<f64>,
     #[serde(default)]
     pub rotation_error_deg: Option<f64>,
+    /// Orientation policy used for the final package-direction check.
+    #[serde(default)]
+    pub orientation: PartOrientation,
+    /// Full-angle package direction when a configured end marker was found.
+    #[serde(default)]
+    pub orientation_rotation_deg: Option<f64>,
+    /// Absolute mean-luma separation between the two visible package ends.
+    #[serde(default)]
+    pub orientation_contrast_luma: Option<f64>,
+    #[serde(default)]
+    pub orientation_confidence: f64,
+    /// Marker result for an end-marked part. Other policies leave this empty.
+    #[serde(default)]
+    pub orientation_matched: Option<bool>,
     pub changed_pixel_count: u32,
     pub mean_difference_luma: f64,
     #[serde(default)]

@@ -1,12 +1,12 @@
-use crate::held_part::{bilinear_luma, draw_cross, draw_polygon, grayscale_preview};
+use crate::held_part::{bilinear_luma, draw_cross, draw_line, draw_polygon, grayscale_preview};
 use crate::opencv_backend::gray_frame_to_mat;
 use crate::{GrayFrame, RgbFrame};
 use anyhow::{ensure, Result};
 use opencv::core::{self, Mat, MatTraitConst, Rect, Size, Vec4i, Vector, CV_32S};
 use opencv::imgproc;
-use velocitypnp_domain::PlacedPartInspectionReport;
+use velocitypnp_domain::{PartOrientation, PlacedPartInspectionReport};
 
-pub const PLACED_PART_INSPECTION_ALGORITHM: &str = "placed_package_geometry.v2";
+pub const PLACED_PART_INSPECTION_ALGORITHM: &str = "placed_package_geometry.v3";
 
 const DIFFERENCE_FLOOR: u8 = 18;
 const MINIMUM_BODY_CHANGE_FRACTION: f64 = 0.55;
@@ -83,6 +83,36 @@ pub fn inspect_placed_part(
     maximum_rotation_error_deg: f64,
     artifact_name: impl Into<String>,
 ) -> Result<PlacedPartInspectionArtifacts> {
+    inspect_placed_part_with_orientation(
+        before,
+        after,
+        expected_center_px,
+        pixel_error_to_machine_mm,
+        expected_width_mm,
+        expected_length_mm,
+        expected_rotation_deg,
+        maximum_center_offset_mm,
+        maximum_rotation_error_deg,
+        PartOrientation::AxisSymmetric,
+        artifact_name,
+    )
+}
+
+/// Recognizes package geometry and verifies a configured visible end marker.
+#[allow(clippy::too_many_arguments)]
+pub fn inspect_placed_part_with_orientation(
+    before: &GrayFrame,
+    after: &GrayFrame,
+    expected_center_px: [f64; 2],
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    expected_width_mm: f64,
+    expected_length_mm: f64,
+    expected_rotation_deg: f64,
+    maximum_center_offset_mm: f64,
+    maximum_rotation_error_deg: f64,
+    orientation: PartOrientation,
+    artifact_name: impl Into<String>,
+) -> Result<PlacedPartInspectionArtifacts> {
     ensure!(
         before.width == after.width
             && before.height == after.height
@@ -107,7 +137,8 @@ pub fn inspect_placed_part(
             && maximum_center_offset_mm > 0.0
             && maximum_rotation_error_deg.is_finite()
             && maximum_rotation_error_deg > 0.0
-            && maximum_rotation_error_deg <= 45.0,
+            && maximum_rotation_error_deg <= 45.0
+            && orientation.validate().is_ok(),
         "placed-part inspection policy is invalid"
     );
     let determinant = matrix_determinant(pixel_error_to_machine_mm);
@@ -250,7 +281,75 @@ pub fn inspect_placed_part(
         rotation_search_radius_deg,
     )?
     .unwrap_or((best.rotation_deg, 0.0));
-    let rotation_error_deg = angle_error_deg(measured_rotation_deg, expected_rotation_deg);
+    let axis_rotation_error_deg = angle_error_deg(measured_rotation_deg, expected_rotation_deg);
+    let mut orientation_rotation_deg = None;
+    let mut orientation_contrast_luma = None;
+    let mut orientation_confidence = 0.0;
+    let mut orientation_matched = None;
+    let mut marker_direction_deg = None;
+    let rotation_error_deg = match orientation {
+        PartOrientation::AxisSymmetric => axis_rotation_error_deg,
+        PartOrientation::FeederReferenced => {
+            report.findings.push(
+                "top vision cannot verify the registered feeder phase from package geometry".into(),
+            );
+            axis_rotation_error_deg
+        }
+        PartOrientation::BrighterEnd {
+            minimum_contrast_luma,
+            rotation_offset_deg,
+        }
+        | PartOrientation::DarkerEnd {
+            minimum_contrast_luma,
+            rotation_offset_deg,
+        } => {
+            let [negative_luma, positive_luma] = package_end_mean_luma(
+                after,
+                center_px,
+                pixel_error_to_machine_mm,
+                expected_width_mm,
+                expected_length_mm,
+                measured_rotation_deg,
+            );
+            let signed_contrast = positive_luma - negative_luma;
+            let contrast = signed_contrast.abs();
+            let positive_is_marker = match orientation {
+                PartOrientation::BrighterEnd { .. } => signed_contrast >= 0.0,
+                PartOrientation::DarkerEnd { .. } => signed_contrast <= 0.0,
+                PartOrientation::AxisSymmetric | PartOrientation::FeederReferenced => {
+                    unreachable!()
+                }
+            };
+            let marker_rotation_deg = normalize_rotation_deg(
+                measured_rotation_deg + if positive_is_marker { 0.0 } else { 180.0 },
+            );
+            let directed_rotation_deg =
+                normalize_rotation_deg(marker_rotation_deg + rotation_offset_deg);
+            let directed_error_deg =
+                directed_angle_error_deg(directed_rotation_deg, expected_rotation_deg);
+            let contrast_passed = contrast >= minimum_contrast_luma;
+            let matched = contrast_passed && directed_error_deg.abs() <= maximum_rotation_error_deg;
+            orientation_rotation_deg = Some(directed_rotation_deg);
+            orientation_contrast_luma = Some(contrast);
+            orientation_confidence = (contrast / minimum_contrast_luma).clamp(0.0, 1.0);
+            orientation_matched = Some(matched);
+            marker_direction_deg = Some(marker_rotation_deg);
+            if !contrast_passed {
+                report.findings.push(format!(
+                    "placed package end contrast {contrast:.1} is below the required {minimum_contrast_luma:.1} luma"
+                ));
+            } else if matched {
+                report.findings.push(format!(
+                    "placed package end direction matched with {contrast:.1} luma contrast"
+                ));
+            } else {
+                report.findings.push(format!(
+                    "placed package end direction is {directed_error_deg:+.2} degrees from the planned direction"
+                ));
+            }
+            directed_error_deg
+        }
+    };
     let mean_difference_luma = if best.inside_count == 0 {
         0.0
     } else {
@@ -266,10 +365,12 @@ pub fn inspect_placed_part(
         && mean_difference_luma >= 18.0;
     let centered = offset_mm <= maximum_center_offset_mm;
     let rotated = rotation_error_deg.abs() <= maximum_rotation_error_deg;
+    let orientation_passed = orientation_matched.unwrap_or(true);
     let passed = target_registration.is_some()
         && geometry_detected
         && centered
         && rotated
+        && orientation_passed
         && confidence >= MINIMUM_INSPECTION_CONFIDENCE;
 
     report.detected = geometry_detected;
@@ -281,6 +382,19 @@ pub fn inspect_placed_part(
     report.rotation_deg =
         geometry_detected.then_some(normalize_package_angle(measured_rotation_deg));
     report.rotation_error_deg = geometry_detected.then_some(rotation_error_deg);
+    report.orientation = orientation;
+    report.orientation_rotation_deg = geometry_detected
+        .then_some(orientation_rotation_deg)
+        .flatten();
+    report.orientation_contrast_luma = geometry_detected
+        .then_some(orientation_contrast_luma)
+        .flatten();
+    report.orientation_confidence = if geometry_detected {
+        orientation_confidence
+    } else {
+        0.0
+    };
+    report.orientation_matched = geometry_detected.then_some(orientation_matched).flatten();
     report.changed_pixel_count = best.inside_count;
     report.mean_difference_luma = mean_difference_luma;
     report.body_change_fraction = best.body_change_fraction;
@@ -342,6 +456,18 @@ pub fn inspect_placed_part(
             [0, 255, 100],
             8,
         );
+        if let Some(marker_direction_deg) = marker_direction_deg {
+            let marker_radians = marker_direction_deg.to_radians();
+            let marker_end = pixel_at_machine_offset(
+                center_px,
+                pixel_error_to_machine_mm,
+                [
+                    0.58 * expected_length_mm * marker_radians.cos(),
+                    0.58 * expected_length_mm * marker_radians.sin(),
+                ],
+            )?;
+            draw_line(&mut preview, center_px, marker_end, [255, 0, 255]);
+        }
     }
     Ok(PlacedPartInspectionArtifacts { report, preview })
 }
@@ -382,6 +508,11 @@ fn empty_report(
         length_mm: None,
         rotation_deg: None,
         rotation_error_deg: None,
+        orientation: PartOrientation::AxisSymmetric,
+        orientation_rotation_deg: None,
+        orientation_contrast_luma: None,
+        orientation_confidence: 0.0,
+        orientation_matched: None,
         changed_pixel_count: 0,
         mean_difference_luma: 0.0,
         body_change_fraction: 0.0,
@@ -1056,8 +1187,65 @@ fn map_vector(matrix: [[f64; 2]; 2], vector: [f64; 2]) -> [f64; 2] {
     ]
 }
 
+fn package_end_mean_luma(
+    frame: &GrayFrame,
+    center_px: [f64; 2],
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    width_mm: f64,
+    length_mm: f64,
+    rotation_deg: f64,
+) -> [f64; 2] {
+    let radians = rotation_deg.to_radians();
+    let mut total = [0_u64; 2];
+    let mut count = [0_u64; 2];
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let pixel_error = [
+                f64::from(x) + 0.5 - center_px[0],
+                f64::from(y) + 0.5 - center_px[1],
+            ];
+            let machine = map_vector(pixel_error_to_machine_mm, pixel_error);
+            let along = machine[0] * radians.cos() + machine[1] * radians.sin();
+            let across = -machine[0] * radians.sin() + machine[1] * radians.cos();
+            if across.abs() > 0.35 * width_mm
+                || along.abs() < 0.15 * length_mm
+                || along.abs() > 0.45 * length_mm
+            {
+                continue;
+            }
+            let end = usize::from(along >= 0.0);
+            total[end] += u64::from(frame.pixels[(y * frame.width + x) as usize]);
+            count[end] += 1;
+        }
+    }
+    [
+        if count[0] == 0 {
+            0.0
+        } else {
+            total[0] as f64 / count[0] as f64
+        },
+        if count[1] == 0 {
+            0.0
+        } else {
+            total[1] as f64 / count[1] as f64
+        },
+    ]
+}
+
 fn angle_error_deg(observed_deg: f64, expected_deg: f64) -> f64 {
     normalize_package_angle(observed_deg - expected_deg)
+}
+
+fn directed_angle_error_deg(observed_deg: f64, expected_deg: f64) -> f64 {
+    normalize_rotation_deg(observed_deg - expected_deg)
+}
+
+fn normalize_rotation_deg(rotation_deg: f64) -> f64 {
+    let mut normalized = rotation_deg.rem_euclid(360.0);
+    if normalized >= 180.0 {
+        normalized -= 360.0;
+    }
+    normalized
 }
 
 fn normalize_package_angle(mut angle_deg: f64) -> f64 {
@@ -1108,6 +1296,36 @@ mod tests {
                     frame.pixels[(y * frame.width + x) as usize] = value;
                 }
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_directed_package(
+        frame: &mut GrayFrame,
+        center_px: [f64; 2],
+        matrix: [[f64; 2]; 2],
+        center_offset_mm: [f64; 2],
+        width_mm: f64,
+        length_mm: f64,
+        rotation_deg: f64,
+        negative_value: u8,
+        positive_value: u8,
+    ) {
+        let radians = rotation_deg.to_radians();
+        for (sign, value) in [(-1.0, negative_value), (1.0, positive_value)] {
+            draw_package(
+                frame,
+                center_px,
+                matrix,
+                [
+                    center_offset_mm[0] + sign * 0.25 * length_mm * radians.cos(),
+                    center_offset_mm[1] + sign * 0.25 * length_mm * radians.sin(),
+                ],
+                width_mm,
+                0.5 * length_mm,
+                rotation_deg,
+                value,
+            );
         }
     }
 
@@ -1189,6 +1407,139 @@ mod tests {
             "{:?}",
             result.report
         );
+    }
+
+    #[test]
+    fn verifies_a_placed_package_toward_its_brighter_end() {
+        let center = [160.0, 120.0];
+        let matrix = [[0.02, 0.0], [0.0, -0.02]];
+        let target_offset = [0.0, -0.20];
+        let mut before = frame(80);
+        draw_pad_pair(&mut before, center, matrix, target_offset, 0.8, 1.6, 30.0);
+        let mut after = before.clone();
+        draw_directed_package(
+            &mut after,
+            center,
+            matrix,
+            target_offset,
+            0.8,
+            1.6,
+            30.0,
+            140,
+            210,
+        );
+
+        let result = inspect_placed_part_with_orientation(
+            &before,
+            &after,
+            center,
+            matrix,
+            0.8,
+            1.6,
+            30.0,
+            0.5,
+            4.0,
+            PartOrientation::BrighterEnd {
+                minimum_contrast_luma: 20.0,
+                rotation_offset_deg: 0.0,
+            },
+            "placed.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert_eq!(result.report.orientation_matched, Some(true));
+        assert!(result.report.orientation_contrast_luma.unwrap() > 50.0);
+        assert!(
+            directed_angle_error_deg(result.report.orientation_rotation_deg.unwrap(), 30.0,).abs()
+                < 2.0
+        );
+    }
+
+    #[test]
+    fn rejects_a_placed_package_with_reversed_end_phase() {
+        let center = [160.0, 120.0];
+        let matrix = [[0.02, 0.0], [0.0, -0.02]];
+        let target_offset = [0.0, -0.20];
+        let mut before = frame(80);
+        draw_pad_pair(&mut before, center, matrix, target_offset, 0.8, 1.6, 30.0);
+        let mut after = before.clone();
+        draw_directed_package(
+            &mut after,
+            center,
+            matrix,
+            target_offset,
+            0.8,
+            1.6,
+            30.0,
+            210,
+            140,
+        );
+
+        let result = inspect_placed_part_with_orientation(
+            &before,
+            &after,
+            center,
+            matrix,
+            0.8,
+            1.6,
+            30.0,
+            0.5,
+            4.0,
+            PartOrientation::BrighterEnd {
+                minimum_contrast_luma: 20.0,
+                rotation_offset_deg: 0.0,
+            },
+            "placed.png",
+        )
+        .unwrap();
+
+        assert!(result.report.detected, "{:?}", result.report.findings);
+        assert!(!result.report.passed);
+        assert_eq!(result.report.orientation_matched, Some(false));
+        assert!(result.report.rotation_error_deg.unwrap().abs() > 175.0);
+    }
+
+    #[test]
+    fn rejects_an_ambiguous_placed_package_end() {
+        let center = [160.0, 120.0];
+        let matrix = [[0.02, 0.0], [0.0, -0.02]];
+        let target_offset = [0.0, -0.20];
+        let mut before = frame(80);
+        draw_pad_pair(&mut before, center, matrix, target_offset, 0.8, 1.6, 0.0);
+        let mut after = before.clone();
+        draw_package(
+            &mut after,
+            center,
+            matrix,
+            target_offset,
+            0.8,
+            1.6,
+            0.0,
+            170,
+        );
+
+        let result = inspect_placed_part_with_orientation(
+            &before,
+            &after,
+            center,
+            matrix,
+            0.8,
+            1.6,
+            0.0,
+            0.5,
+            4.0,
+            PartOrientation::DarkerEnd {
+                minimum_contrast_luma: 6.0,
+                rotation_offset_deg: 0.0,
+            },
+            "placed.png",
+        )
+        .unwrap();
+
+        assert!(result.report.detected, "{:?}", result.report.findings);
+        assert!(!result.report.passed);
+        assert_eq!(result.report.orientation_matched, Some(false));
     }
 
     #[test]
