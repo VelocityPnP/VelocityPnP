@@ -678,9 +678,9 @@ The runner lifts the part to level Z, transfers it to the exact bare-nozzle
 bottom-camera pose, and checks both retained vacuum and a frame-difference
 part outline. It applies at most two bounded X/Y and nozzle-angle corrections.
 Each correction gets a new camera measurement. The final gate requires a
-0.10 mm center residual and a 1 degree package-rotation residual. The runner then
-restores the pickup nozzle angle, returns to the exact source head pose, and
-releases at the detected pickup Z. A supplied fallback point is used only
+0.10 mm center residual and a 2 degree package-rotation residual. The runner
+then restores the pickup nozzle angle, returns to the exact source head pose,
+and releases at the detected pickup Z. A supplied fallback point is used only
 when the source return target is invalid.
 
 Every production part needs an orientation policy. `axis_symmetric` treats

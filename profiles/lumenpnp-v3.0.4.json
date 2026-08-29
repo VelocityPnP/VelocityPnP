@@ -188,7 +188,7 @@
     "release_settle_ms": 300,
     "alignment_max_iterations": 2,
     "alignment_translation_tolerance_mm": 0.10,
-    "alignment_rotation_tolerance_deg": 1.0,
+    "alignment_rotation_tolerance_deg": 2.0,
     "alignment_max_rotation_correction_deg": 180.0
   },
   "local_xy_direction_response": {
