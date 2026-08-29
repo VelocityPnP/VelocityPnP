@@ -833,6 +833,12 @@ nozzle through the shorter path. The V3 profile permits the complete
 30-degree intervals from -165 through +165 degrees and remains defined at the
 shared -180/+180 endpoint.
 
+A physical placement binds its reservation to the available strip pocket at
+the planned pick position. It then captures that pocket with the top camera
+and uses the measured component center for the pickup move. A missing part or
+a center correction larger than the configured part-offset bound stops the
+operation before the nozzle descends.
+
 The persistent run records preflight, live pickup, bottom alignment, calibrated
 placement motion, bounded release verification, and top inspection. Top
 inspection registers the retained before and after board views. It then matches

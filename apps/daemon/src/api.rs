@@ -119,7 +119,7 @@ const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
 const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
 const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v2";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v3";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
 const BOARD_SURFACE_MAX_FRACTION_P95_DEVIATION: f64 = 0.10;
@@ -132,6 +132,7 @@ const HELD_PART_INSPECTION_ARTIFACT: &str = "held-part-inspection.png";
 const POST_RELEASE_NOZZLE_ARTIFACT: &str = "post-release-nozzle.png";
 const POST_RELEASE_NOZZLE_INSPECTION_ARTIFACT: &str = "post-release-nozzle-inspection.png";
 const SOURCE_POCKET_BEFORE_ARTIFACT: &str = "source-pocket-before.png";
+const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspection.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
@@ -8405,6 +8406,29 @@ fn nearest_strip_feeder_pocket_index(
             first_distance.total_cmp(&second_distance)
         })
         .and_then(|(index, _)| u32::try_from(index).ok())
+}
+
+fn planned_available_strip_feeder_pocket(
+    registration: &StripFeederRegistration,
+    planned_pick: Pose,
+) -> Option<&StripFeederPocketState> {
+    let maximum_distance_mm = 0.5 * registration.tape_pitch_mm;
+    registration
+        .pockets
+        .iter()
+        .filter(|pocket| {
+            pocket.status == StripFeederPocketStatus::Available
+                && pocket.occupancy == StripPocketOccupancy::Occupied
+        })
+        .filter_map(|pocket| {
+            let center = pocket
+                .measured_center_machine_mm
+                .unwrap_or(pocket.nominal_center_machine_mm);
+            let distance_mm = (center[0] - planned_pick.x_mm).hypot(center[1] - planned_pick.y_mm);
+            (distance_mm <= maximum_distance_mm).then_some((distance_mm, pocket))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, pocket)| pocket)
 }
 
 fn vacuum_value_is_acquired(
@@ -20549,9 +20573,12 @@ fn prepare_physical_placement_pickup(
         ApiError::bad_request("active profile does not define strip-feeder pickup")
     })?;
     pickup_profile.validate().map_err(ApiError::bad_request)?;
-    let selected_pocket = registration
-        .next_available_pocket(None)
-        .ok_or_else(|| ApiError::bad_request("strip feeder has no available occupied pocket"))?;
+    let selected_pocket = planned_available_strip_feeder_pocket(&registration, step.feeder_pick)
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "strip feeder has no available occupied pocket at the planned pick position",
+            )
+        })?;
     let selected_pocket_index = selected_pocket.pocket_index;
     let nominal_center = selected_pocket.nominal_center_machine_mm;
     let latest_holdout = registration
@@ -21152,6 +21179,7 @@ struct AcquiredPlacementPart {
     current_tip_offset: CurrentTipOffset,
     bottom_pose: Pose,
     bare: GrayFrame,
+    pickup_center_machine_mm: [f64; 2],
     pickup_head_machine_mm: [f64; 2],
     contact: VacuumProbeSample,
     open_nozzle_raw_values: Vec<i64>,
@@ -21175,10 +21203,6 @@ async fn execute_physical_guarded_placement(
 ) -> Result<(), String> {
     let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
     let sensor_id = prepared.vacuum_characterization.sensor_id.as_str();
-    let pocket_machine_mm = prepared
-        .registration
-        .selected_pocket_machine_mm
-        .ok_or_else(|| "physical placement has no reserved pocket center".to_string())?;
     let (board_before, _) = capture_top_pocket_mean(
         state,
         prepared,
@@ -21200,8 +21224,8 @@ async fn execute_physical_guarded_placement(
     let acquired =
         acquire_physical_placement_part(state, prepared, step.board_place.rotation_deg).await?;
     report.feeder_pick = Pose {
-        x_mm: pocket_machine_mm[0],
-        y_mm: pocket_machine_mm[1],
+        x_mm: acquired.pickup_center_machine_mm[0],
+        y_mm: acquired.pickup_center_machine_mm[1],
         z_mm: acquired.contact.nozzle_z_mm,
         rotation_deg: prepared.registration.part_rotation_deg.unwrap_or(0.0),
     };
@@ -21682,7 +21706,10 @@ async fn acquire_physical_placement_part(
         stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
     let camera_path =
         camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
-    let pocket_machine_mm = prepared.registration.selected_pocket_machine_mm.unwrap();
+    let nominal_pocket_machine_mm = prepared
+        .registration
+        .selected_pocket_machine_mm
+        .ok_or_else(|| "physical placement has no reserved pocket center".to_string())?;
     let contact_z_mm = prepared
         .reference_contact
         .contact_nozzle_z_mm
@@ -21727,6 +21754,57 @@ async fn acquire_physical_placement_part(
     )
     .await?;
     persist_transfer_gray_artifact(state, prepared, BARE_NOZZLE_ARTIFACT, &bare)?;
+    let (source_before, source_before_pose) = capture_top_pocket_mean(
+        state,
+        prepared,
+        nominal_pocket_machine_mm,
+        pickup.inspection_sample_count,
+    )
+    .await?;
+    persist_transfer_gray_artifact(
+        state,
+        prepared,
+        SOURCE_POCKET_BEFORE_ARTIFACT,
+        &source_before,
+    )?;
+    let source_after = source_before.clone();
+    let registration = prepared.registration.clone();
+    let camera_model = prepared.top_camera_model.clone();
+    let source_inspection = tokio::task::spawn_blocking(move || {
+        inspect_strip_feeder_pocket_return(
+            &source_before,
+            source_before_pose,
+            &source_after,
+            source_before_pose,
+            &camera_model,
+            &registration,
+            nominal_pocket_machine_mm,
+            SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    persist_transfer_rgb_artifact(
+        state,
+        prepared,
+        SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
+        &source_inspection.preview,
+    )?;
+    if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
+        return Err("top vision did not confirm a part in the reserved pocket".into());
+    }
+    let pocket_machine_mm = source_inspection
+        .report
+        .before_measured_center_machine_mm
+        .ok_or_else(|| "top vision did not locate the reserved-pocket part".to_string())?;
+    let pocket_center_correction_mm = (pocket_machine_mm[0] - nominal_pocket_machine_mm[0])
+        .hypot(pocket_machine_mm[1] - nominal_pocket_machine_mm[1]);
+    if pocket_center_correction_mm > pickup.maximum_part_offset_mm {
+        return Err(format!(
+            "reserved-pocket part center correction {pocket_center_correction_mm:.3} mm exceeds the configured bound"
+        ));
+    }
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
     let height_correction = prepared
         .height_model
@@ -21900,6 +21978,8 @@ async fn acquire_physical_placement_part(
             .ok_or_else(|| "held-part alignment has no inspection".to_string())?;
         let mut artifact_names = vec![
             BARE_NOZZLE_ARTIFACT.into(),
+            SOURCE_POCKET_BEFORE_ARTIFACT.into(),
+            SOURCE_POCKET_PICK_INSPECTION_ARTIFACT.into(),
             HELD_PART_ARTIFACT.into(),
             HELD_PART_INITIAL_INSPECTION_ARTIFACT.into(),
         ];
@@ -21912,6 +21992,7 @@ async fn acquire_physical_placement_part(
             current_tip_offset,
             bottom_pose,
             bare,
+            pickup_center_machine_mm: pocket_machine_mm,
             pickup_head_machine_mm: pickup_head,
             contact,
             open_nozzle_raw_values,
@@ -22029,7 +22110,7 @@ fn build_placement_pickup_report(
         nozzle_id: prepared.run.nozzle_id.clone(),
         tip_id: prepared.geometry.tip_id.clone(),
         sensor_id: prepared.vacuum_characterization.sensor_id.clone(),
-        pocket_machine_mm: prepared.registration.selected_pocket_machine_mm.unwrap(),
+        pocket_machine_mm: acquired.pickup_center_machine_mm,
         pickup_nozzle_z_mm: Some(acquired.contact.nozzle_z_mm),
         pickup_controller_z_mm: Some(acquired.contact.controller_z_mm),
         open_nozzle_raw_values: acquired.open_nozzle_raw_values.clone(),
@@ -22052,7 +22133,9 @@ fn build_placement_pickup_report(
         return_verification: None,
         passed: released,
         artifact_names,
-        findings: vec!["physical placement used live pickup and bottom-vision evidence".into()],
+        findings: vec![
+            "physical placement used live top-pocket centering and bottom-vision evidence".into(),
+        ],
     }
 }
 
@@ -22857,6 +22940,39 @@ mod tests {
         assert!(current_pickup_sequence_ids(&state, &registration)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn placement_reserves_the_available_pocket_at_the_planned_position() {
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        registration.pockets[2].measured_center_machine_mm = Some([10.2, 8.1]);
+
+        let selected = planned_available_strip_feeder_pocket(
+            &registration,
+            Pose {
+                x_mm: 10.3,
+                y_mm: 8.2,
+                ..Pose::ORIGIN
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.pocket_index, 2);
+
+        let outside = planned_available_strip_feeder_pocket(
+            &registration,
+            Pose {
+                x_mm: 10.0,
+                y_mm: 20.0,
+                ..Pose::ORIGIN
+            },
+        );
+        assert!(outside.is_none());
     }
 
     fn test_pickup_registration(now: chrono::DateTime<Utc>) -> StripFeederRegistration {
