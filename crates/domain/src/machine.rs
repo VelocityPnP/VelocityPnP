@@ -390,10 +390,22 @@ pub struct StripFeederPickupProfile {
     pub held_sample_count: u32,
     pub release_sample_count: u32,
     pub release_settle_ms: u64,
+    #[serde(default = "default_board_release_retry_depth_mm")]
+    pub board_release_retry_depth_mm: f64,
+    #[serde(default = "default_board_release_valve_pulse_ms")]
+    pub board_release_valve_pulse_ms: u64,
     pub alignment_max_iterations: u32,
     pub alignment_translation_tolerance_mm: f64,
     pub alignment_rotation_tolerance_deg: f64,
     pub alignment_max_rotation_correction_deg: f64,
+}
+
+fn default_board_release_retry_depth_mm() -> f64 {
+    0.10
+}
+
+fn default_board_release_valve_pulse_ms() -> u64 {
+    500
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -653,6 +665,7 @@ impl StripFeederPickupProfile {
             self.maximum_part_offset_mm,
             self.minimum_part_size_mm,
             self.maximum_part_size_mm,
+            self.board_release_retry_depth_mm,
             self.alignment_translation_tolerance_mm,
             self.alignment_rotation_tolerance_deg,
             self.alignment_max_rotation_correction_deg,
@@ -669,6 +682,8 @@ impl StripFeederPickupProfile {
             || !(3..=30).contains(&self.held_sample_count)
             || !(3..=30).contains(&self.release_sample_count)
             || !(100..=2_000).contains(&self.release_settle_ms)
+            || !(0.02..=0.25).contains(&self.board_release_retry_depth_mm)
+            || !(100..=1_000).contains(&self.board_release_valve_pulse_ms)
             || !(1..=3).contains(&self.alignment_max_iterations)
             || !(0.02..=0.25).contains(&self.alignment_translation_tolerance_mm)
             || !(0.2..=3.0).contains(&self.alignment_rotation_tolerance_deg)

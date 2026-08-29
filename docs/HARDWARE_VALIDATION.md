@@ -2559,6 +2559,34 @@ unchanged from the pre-pulse frame and still showed the resistor moving with
 N1. Valve-only cycling did not release the part and must not become an
 automatic retry sequence.
 
+### R13 nominal-depth board recovery
+
+The retained R13 part was recovered on 2026-08-29. The prior bottom-camera
+observation supplied a +0.507 mm X and -0.153 mm Y replacement correction. A
+live frame at head X242.914 and Y215.479 showed the resistor centered on N1.
+A fresh top-camera frame showed R13 empty before motion to the board.
+
+The failed placement had used controller X386.787, Y336.150, and Z4.107 with a
++0.10 mm seating offset. Replacing the old alignment correction produced head
+X386.745 and Y336.143. The recovery used controller Z4.007, which is the
+nominal 0.00 mm seating target and 0.10 mm deeper than the failed attempt. At
+contact, the pump remained off and `blowoff_1` stayed open for 500 ms.
+
+The tool retracted straight to Z31.5. Bottom vision then showed a clear N1
+nozzle, and the top-camera after frame showed the resistor across the R13 pads.
+The machine ended ready, homed, and fault-free at the datum pose with all
+pneumatic outputs off and a vacuum sensor value of zero. The retained images
+are `/tmp/velocitypnp-r13-recovery-aligned-bottom.png`,
+`/tmp/velocitypnp-r13-recovery-post-release-bottom.png`,
+`/tmp/velocitypnp-r13-recovery-board-before.png`, and
+`/tmp/velocitypnp-r13-recovery-board-after.png`.
+
+Guarded placement version 4 now uses this bounded recovery after pneumatic
+release with a visually retained part. It replaces the old alignment with the
+new bottom-camera correction, rejects excessive rotation, seats by the
+profile's 0.10 mm recovery depth, pulses the matching nozzle valve for the
+profile's 500 ms duration, and requires a clear-nozzle verification.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

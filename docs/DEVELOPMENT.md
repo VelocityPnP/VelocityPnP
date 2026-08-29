@@ -854,6 +854,15 @@ its source pocket and quarantines the reservation. The simulator does not
 consume a pocket and does not claim live camera evidence. Job preflight requires
 part height, body width, and body length.
 
+Guarded placement version 4 has one bounded mechanical-release retry. It runs
+only when the vacuum sensor confirms pressure release but bottom vision still
+matches the held component. The retry replaces the original bottom-alignment
+translation with the retained-part correction, rejects a rotation error above
+the placement limit, and seats the part 0.10 mm deeper. It then holds the
+nozzle valve open for 500 ms with the pump off. A second bottom-camera capture
+must prove a clear nozzle before the pocket is consumed or placement continues.
+The depth and pulse duration are machine-profile values.
+
 The planned nozzle-contact Z keeps four terms separate:
 
 ```text

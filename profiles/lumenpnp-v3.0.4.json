@@ -188,6 +188,8 @@
     "held_sample_count": 10,
     "release_sample_count": 10,
     "release_settle_ms": 300,
+    "board_release_retry_depth_mm": 0.1,
+    "board_release_valve_pulse_ms": 500,
     "alignment_max_iterations": 2,
     "alignment_translation_tolerance_mm": 0.10,
     "alignment_rotation_tolerance_deg": 2.0,

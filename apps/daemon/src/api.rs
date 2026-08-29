@@ -114,12 +114,12 @@ const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
 const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v5";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v2";
-const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v2";
+const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v3";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
 const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
 const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v3";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v4";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
 const BOARD_SURFACE_MAX_FRACTION_P95_DEVIATION: f64 = 0.10;
@@ -21507,6 +21507,93 @@ struct VerifiedBoardRelease {
     sensor_released: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BoardReleaseRecoveryTargets {
+    level: Pose,
+    contact: Pose,
+    replacement_correction_x_mm: f64,
+    replacement_correction_y_mm: f64,
+    rotation_error_deg: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BoardReleaseRecoveryPolicy {
+    orientation: PartOrientation,
+    source_rotation_deg: f64,
+    target_rotation_deg: f64,
+    retry_controller_z_mm: f64,
+    maximum_part_offset_mm: f64,
+}
+
+fn board_release_recovery_targets(
+    place_level: Pose,
+    initial_alignment: &HeldPartAlignmentReport,
+    retained_part: &HeldPartInspectionReport,
+    policy: BoardReleaseRecoveryPolicy,
+) -> Result<BoardReleaseRecoveryTargets, String> {
+    let initial_final = initial_alignment
+        .observations
+        .last()
+        .ok_or_else(|| "initial held-part alignment has no final observation".to_string())?;
+    let initial_residual_x_mm = initial_final
+        .inspection
+        .centering_correction_x_mm
+        .ok_or_else(|| "initial held-part alignment has no final X residual".to_string())?;
+    let initial_residual_y_mm = initial_final
+        .inspection
+        .centering_correction_y_mm
+        .ok_or_else(|| "initial held-part alignment has no final Y residual".to_string())?;
+    let replacement_x_mm = retained_part
+        .centering_correction_x_mm
+        .ok_or_else(|| "retained-part inspection has no X correction".to_string())?;
+    let replacement_y_mm = retained_part
+        .centering_correction_y_mm
+        .ok_or_else(|| "retained-part inspection has no Y correction".to_string())?;
+    if replacement_x_mm.hypot(replacement_y_mm) > policy.maximum_part_offset_mm {
+        return Err("retained-part correction exceeds the configured bound".into());
+    }
+    let expected_rotation_deg =
+        policy.source_rotation_deg + initial_alignment.commanded_rotation_deg;
+    let resolved_rotation_deg =
+        resolved_held_part_rotation_deg(retained_part, policy.orientation, expected_rotation_deg)
+            .ok_or_else(|| "retained-part inspection has no resolved rotation".to_string())?;
+    let rotation_error_deg = held_part_rotation_error_deg(
+        resolved_rotation_deg,
+        policy.target_rotation_deg,
+        policy.orientation,
+    );
+    if rotation_error_deg.abs() > MAX_PLACED_PART_ROTATION_ERROR_DEG {
+        return Err(format!(
+            "retained-part rotation error {rotation_error_deg:.3} degrees exceeds the recovery bound"
+        ));
+    }
+    let initial_x_mm = initial_alignment.commanded_x_mm + initial_residual_x_mm;
+    let initial_y_mm = initial_alignment.commanded_y_mm + initial_residual_y_mm;
+    let level = Pose {
+        x_mm: place_level.x_mm - initial_x_mm + replacement_x_mm,
+        y_mm: place_level.y_mm - initial_y_mm + replacement_y_mm,
+        ..place_level
+    };
+    Ok(BoardReleaseRecoveryTargets {
+        level,
+        contact: Pose {
+            z_mm: policy.retry_controller_z_mm,
+            ..level
+        },
+        replacement_correction_x_mm: replacement_x_mm,
+        replacement_correction_y_mm: replacement_y_mm,
+        rotation_error_deg,
+    })
+}
+
+fn blowoff_actuator_id_for_nozzle(nozzle_id: &str) -> Option<&'static str> {
+    match nozzle_id {
+        "N1" => Some("blowoff_1"),
+        "N2" => Some("blowoff_2"),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn release_part_at_board_and_verify(
     state: &AppState,
@@ -21534,9 +21621,51 @@ async fn release_part_at_board_and_verify(
     let mut nozzle_clear = false;
     let mut release_sensor_confirmed = false;
     let mut corrected_move_count = 0;
+    let mut previous_sensor_released = false;
+    let mut previous_retained_part = false;
 
     for attempt in 1..=MAXIMUM_RELEASE_ATTEMPTS {
+        let mut attempt_level = place_level;
+        let mut attempt_contact = place_contact;
+        let mechanical_recovery = attempt > 1 && previous_sensor_released && previous_retained_part;
         if attempt > 1 {
+            if mechanical_recovery {
+                let retained_part = observations.last().ok_or_else(|| {
+                    "placement release recovery has no retained-part observation".to_string()
+                })?;
+                let retry_nozzle_z_mm = step.board_place.z_mm - pickup.board_release_retry_depth_mm;
+                let retry_controller_z_mm = state
+                    .profile
+                    .z_kinematics
+                    .as_ref()
+                    .and_then(|kinematics| {
+                        kinematics.controller_z(&step.nozzle_id, retry_nozzle_z_mm)
+                    })
+                    .ok_or_else(|| {
+                        "placement release recovery Z is outside controller bounds".to_string()
+                    })?;
+                let recovery = board_release_recovery_targets(
+                    place_level,
+                    &acquired.alignment,
+                    retained_part,
+                    BoardReleaseRecoveryPolicy {
+                        orientation: prepared.part_orientation,
+                        source_rotation_deg: prepared.source_rotation_deg,
+                        target_rotation_deg: step.board_place.rotation_deg,
+                        retry_controller_z_mm,
+                        maximum_part_offset_mm: pickup.maximum_part_offset_mm,
+                    },
+                )?;
+                attempt_level = recovery.level;
+                attempt_contact = recovery.contact;
+                findings.push(format!(
+                    "release retry re-centered the retained part by X{:+.3} Y{:+.3} mm, kept rotation error {:+.3} degrees, and seated {:.3} mm deeper",
+                    recovery.replacement_correction_x_mm,
+                    recovery.replacement_correction_y_mm,
+                    recovery.rotation_error_deg,
+                    pickup.board_release_retry_depth_mm,
+                ));
+            }
             let current_pose =
                 state.machine.status().pose.ok_or_else(|| {
                     "placement release retry lost the controller pose".to_string()
@@ -21545,8 +21674,8 @@ async fn release_part_at_board_and_verify(
                 .initial_state(current_pose)
                 .map_err(|error| error.to_string())?;
             for (target, feed) in [
-                (place_level, vacuum.xy_feed_mm_per_min),
-                (place_contact, vacuum.z_approach_feed_mm_per_min),
+                (attempt_level, vacuum.xy_feed_mm_per_min),
+                (attempt_contact, vacuum.z_approach_feed_mm_per_min),
             ] {
                 let planned = execute_job_motion(
                     &state.machine,
@@ -21566,6 +21695,21 @@ async fn release_part_at_board_and_verify(
             .disable_actuator(sensor_id.into())
             .await
             .map_err(|error| error.to_string())?;
+        if mechanical_recovery {
+            let blowoff_id = blowoff_actuator_id_for_nozzle(&step.nozzle_id)
+                .ok_or_else(|| "placement nozzle has no blowoff actuator".to_string())?;
+            state
+                .machine
+                .actuate(lease_id, blowoff_id.into(), true)
+                .await
+                .map_err(|error| error.to_string())?;
+            tokio::time::sleep(Duration::from_millis(pickup.board_release_valve_pulse_ms)).await;
+            state
+                .machine
+                .disable_actuator(blowoff_id.into())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         tokio::time::sleep(Duration::from_millis(pickup.release_settle_ms)).await;
         let raw_values =
             collect_sensor_values(state, lease_id, sensor_id, pickup.release_sample_count).await?;
@@ -21588,7 +21732,7 @@ async fn release_part_at_board_and_verify(
             lease_id,
             planner,
             &mut motion_state,
-            place_level,
+            attempt_level,
             vacuum.z_approach_feed_mm_per_min,
             MotionMode::Calibrated,
         )
@@ -21622,7 +21766,7 @@ async fn release_part_at_board_and_verify(
             format!("post-release-nozzle-inspection-attempt-{attempt}.png")
         };
         persist_placement_gray_artifact(state, execution_id, &raw_artifact, &post_release)?;
-        let inspection = inspect_held_part_difference(
+        let inspection = inspect_held_part_difference_with_orientation(
             &acquired.bare,
             &post_release,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -21630,6 +21774,7 @@ async fn release_part_at_board_and_verify(
             pickup.maximum_part_offset_mm,
             pickup.minimum_part_size_mm,
             pickup.maximum_part_size_mm,
+            prepared.part_orientation,
             &inspection_artifact,
         )
         .map_err(|error| error.to_string())?;
@@ -21642,6 +21787,8 @@ async fn release_part_at_board_and_verify(
         let retained_part =
             post_release_matches_held_part(&acquired.inspection, &inspection.report);
         nozzle_clear = nozzle_release_attempt_passed(sensor_released, retained_part);
+        previous_sensor_released = sensor_released;
+        previous_retained_part = retained_part;
         observations.push(inspection.report);
         artifact_names.extend([raw_artifact, inspection_artifact]);
         if nozzle_clear {
@@ -26164,6 +26311,114 @@ mod tests {
         assert_eq!(target.x_mm, 242.5);
         assert_eq!(target.y_mm, 215.6);
         assert_eq!(target.z_mm, 31.5);
+    }
+
+    #[test]
+    fn board_release_recovery_replaces_the_old_alignment_and_seats_deeper() {
+        let initial = HeldPartInspectionReport {
+            algorithm_version: "fixture".into(),
+            detected: true,
+            center_x_px: Some(641.8),
+            center_y_px: Some(358.3),
+            centering_correction_x_mm: Some(-0.063_994_067_550_063_3),
+            centering_correction_y_mm: Some(0.059_405_399_107_063_48),
+            centering_correction_mm: Some(0.087),
+            width_mm: Some(1.56),
+            length_mm: Some(2.27),
+            rotation_deg: Some(-1.56),
+            orientation_rotation_deg: None,
+            orientation_contrast_luma: None,
+            orientation_confidence: 0.0,
+            changed_pixel_count: 2_190,
+            mean_difference_luma: 105.0,
+            confidence: 0.97,
+            passed: true,
+            artifact_name: "initial.png".into(),
+            findings: Vec::new(),
+        };
+        let retained = HeldPartInspectionReport {
+            centering_correction_x_mm: Some(0.506_917_686_906_071_5),
+            centering_correction_y_mm: Some(-0.153_380_902_604_429_7),
+            centering_correction_mm: Some(0.530),
+            rotation_deg: Some(2.158_148_191_063_503_4),
+            artifact_name: "retained.png".into(),
+            ..initial.clone()
+        };
+        let alignment = HeldPartAlignmentReport {
+            algorithm_version: "fixture".into(),
+            orientation: PartOrientation::AxisSymmetric,
+            source_rotation_deg: 0.0,
+            target_rotation_deg: 0.075_573_469_582_209_44,
+            commanded_x_mm: 0.613_447_951_116_282_7,
+            commanded_y_mm: -0.205_979_852_341_138_16,
+            commanded_rotation_deg: 4.200_944_914_564_417,
+            final_centering_residual_mm: Some(0.087),
+            final_rotation_residual_deg: Some(-1.637),
+            final_resolved_rotation_deg: Some(-1.561),
+            passed: true,
+            observations: vec![HeldPartAlignmentObservation {
+                iteration: 1,
+                head_machine_mm: [243.0208, 215.4265],
+                nozzle_rotation_offset_deg: 4.200_944_914_564_417,
+                inspection: initial,
+            }],
+            artifact_names: Vec::new(),
+            findings: Vec::new(),
+        };
+        let targets = board_release_recovery_targets(
+            Pose {
+                x_mm: 386.743_919_495_237_5,
+                y_mm: 336.106_464_756_538_97,
+                z_mm: 31.5,
+                rotation_deg: 724.2,
+            },
+            &alignment,
+            &retained,
+            BoardReleaseRecoveryPolicy {
+                orientation: PartOrientation::AxisSymmetric,
+                source_rotation_deg: 0.0,
+                target_rotation_deg: 0.075_573_469_582_209_44,
+                retry_controller_z_mm: 4.006_850_360_816_993,
+                maximum_part_offset_mm: 1.0,
+            },
+        )
+        .unwrap();
+
+        assert!((targets.level.x_mm - 386.701_383_298_577_36).abs() < 1e-9);
+        assert!((targets.level.y_mm - 336.099_658_307_168_57).abs() < 1e-9);
+        assert!((targets.contact.z_mm - 4.006_850_360_816_993).abs() < 1e-12);
+        assert!((targets.rotation_error_deg - 2.082_574_721_481_294).abs() < 1e-9);
+
+        let excessive_rotation = HeldPartInspectionReport {
+            rotation_deg: Some(10.0),
+            ..retained
+        };
+        let error = board_release_recovery_targets(
+            Pose {
+                x_mm: 386.743_919_495_237_5,
+                y_mm: 336.106_464_756_538_97,
+                z_mm: 31.5,
+                rotation_deg: 724.2,
+            },
+            &alignment,
+            &excessive_rotation,
+            BoardReleaseRecoveryPolicy {
+                orientation: PartOrientation::AxisSymmetric,
+                source_rotation_deg: 0.0,
+                target_rotation_deg: 0.075_573_469_582_209_44,
+                retry_controller_z_mm: 4.006_850_360_816_993,
+                maximum_part_offset_mm: 1.0,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("rotation error"));
+    }
+
+    #[test]
+    fn board_release_recovery_maps_each_nozzle_valve() {
+        assert_eq!(blowoff_actuator_id_for_nozzle("N1"), Some("blowoff_1"));
+        assert_eq!(blowoff_actuator_id_for_nozzle("N2"), Some("blowoff_2"));
+        assert_eq!(blowoff_actuator_id_for_nozzle("unknown"), None);
     }
 
     #[test]
