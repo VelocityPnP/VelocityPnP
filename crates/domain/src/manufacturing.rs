@@ -423,6 +423,22 @@ pub struct HeldPartInspectionReport {
 pub struct PlacedPartInspectionReport {
     pub algorithm_version: String,
     pub detected: bool,
+    /// Nominal image point before local footprint registration.
+    #[serde(default)]
+    pub nominal_center_x_px: f64,
+    #[serde(default)]
+    pub nominal_center_y_px: f64,
+    /// True when the bare footprint supplied a local placement target.
+    #[serde(default)]
+    pub target_registered: bool,
+    #[serde(default)]
+    pub target_correction_x_mm: Option<f64>,
+    #[serde(default)]
+    pub target_correction_y_mm: Option<f64>,
+    #[serde(default)]
+    pub target_correction_mm: Option<f64>,
+    #[serde(default)]
+    pub target_registration_confidence: f64,
     #[serde(default)]
     pub expected_center_x_px: f64,
     #[serde(default)]

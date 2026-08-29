@@ -2986,6 +2986,72 @@ components:
             - complete
         passed: { type: boolean }
         message: { type: string }
+    PlacedPartInspectionReport:
+      type: object
+      required:
+        - algorithm_version
+        - detected
+        - nominal_center_x_px
+        - nominal_center_y_px
+        - target_registered
+        - target_correction_x_mm
+        - target_correction_y_mm
+        - target_correction_mm
+        - target_registration_confidence
+        - expected_center_x_px
+        - expected_center_y_px
+        - expected_width_mm
+        - expected_length_mm
+        - expected_rotation_deg
+        - center_x_px
+        - center_y_px
+        - offset_x_mm
+        - offset_y_mm
+        - offset_mm
+        - width_mm
+        - length_mm
+        - rotation_deg
+        - rotation_error_deg
+        - changed_pixel_count
+        - mean_difference_luma
+        - body_change_fraction
+        - change_containment
+        - confidence
+        - passed
+        - artifact_name
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        detected: { type: boolean }
+        nominal_center_x_px: { type: number, format: double }
+        nominal_center_y_px: { type: number, format: double }
+        target_registered: { type: boolean }
+        target_correction_x_mm: { type: [number, "null"], format: double }
+        target_correction_y_mm: { type: [number, "null"], format: double }
+        target_correction_mm: { type: [number, "null"], format: double }
+        target_registration_confidence: { type: number, format: double }
+        expected_center_x_px: { type: number, format: double }
+        expected_center_y_px: { type: number, format: double }
+        expected_width_mm: { type: number, format: double }
+        expected_length_mm: { type: number, format: double }
+        expected_rotation_deg: { type: number, format: double }
+        center_x_px: { type: [number, "null"], format: double }
+        center_y_px: { type: [number, "null"], format: double }
+        offset_x_mm: { type: [number, "null"], format: double }
+        offset_y_mm: { type: [number, "null"], format: double }
+        offset_mm: { type: [number, "null"], format: double }
+        width_mm: { type: [number, "null"], format: double }
+        length_mm: { type: [number, "null"], format: double }
+        rotation_deg: { type: [number, "null"], format: double }
+        rotation_error_deg: { type: [number, "null"], format: double }
+        changed_pixel_count: { type: integer, minimum: 0 }
+        mean_difference_luma: { type: number, format: double }
+        body_change_fraction: { type: number, format: double }
+        change_containment: { type: number, format: double }
+        confidence: { type: number, format: double }
+        passed: { type: boolean }
+        artifact_name: { type: string }
+        findings: { type: array, items: { type: string } }
     PlacementExecutionReport:
       type: object
       required:
@@ -2997,6 +3063,13 @@ components:
         - nozzle_id
         - feeder_pick
         - board_place
+        - part_height_mm
+        - placement_surface_offset_mm
+        - placement_seating_offset_mm
+        - pocket_index
+        - pickup_report
+        - top_inspection
+        - artifact_names
         - corrected_move_count
         - passed
         - stages
@@ -3010,6 +3083,19 @@ components:
         nozzle_id: { type: string }
         feeder_pick: { $ref: "#/components/schemas/Pose" }
         board_place: { $ref: "#/components/schemas/Pose" }
+        part_height_mm: { type: number, format: double }
+        placement_surface_offset_mm: { type: number, format: double }
+        placement_seating_offset_mm: { type: number, format: double }
+        pocket_index: { type: [integer, "null"], minimum: 0 }
+        pickup_report:
+          oneOf:
+            - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }
+            - type: "null"
+        top_inspection:
+          oneOf:
+            - { $ref: "#/components/schemas/PlacedPartInspectionReport" }
+            - type: "null"
+        artifact_names: { type: array, items: { type: string } }
         corrected_move_count: { type: integer, minimum: 0 }
         passed: { type: boolean }
         stages:
