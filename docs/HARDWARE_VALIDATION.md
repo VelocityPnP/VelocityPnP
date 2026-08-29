@@ -2485,10 +2485,13 @@ operator outcome.
 
 R10 also showed a known orientation limitation. Its top marking proves that it
 was not physically face-down, but it was rotated 180 degrees in the board
-plane. The `rectangular_passive` profile treats 0 and 180 degrees as equal.
-This is valid for a resistor. Polarized parts require a separate full-angle
-profile that combines KiCad pad direction, feeder direction, and package-mark
-detection. Polarized placement must stop when that direction is uncertain.
+plane. Its part record identifies a resistor and stores the
+`rectangular_passive` profile. However, the placement executor does not yet use
+that profile. Its current bottom-alignment angle function treats 0 and 180
+degrees as equal for every part. This is valid for R10, but it is not valid for
+a polarized part. Polarized parts require a separate full-angle profile that
+combines KiCad pad direction, feeder direction, and package-mark detection.
+Preflight must reject polarized placement until that direction is known.
 
 ## Procedure sources
 
