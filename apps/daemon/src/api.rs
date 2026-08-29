@@ -115,7 +115,7 @@ const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v4";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v1";
 const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v2";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
-const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.60;
+const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
 const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v1";
@@ -7558,9 +7558,35 @@ fn post_release_matches_held_part(
     } else {
         observed.mean_difference_luma / held.mean_difference_luma
     };
+    let polarity_matches = match (
+        held_part_foreground_is_brighter(held),
+        held_part_foreground_is_brighter(observed),
+    ) {
+        (Some(held), Some(observed)) => held == observed,
+        _ => true,
+    };
     size_matches
+        && polarity_matches
         && (pixel_ratio >= MINIMUM_RETAINED_PART_PIXEL_RATIO
             || luma_ratio >= MINIMUM_RETAINED_PART_LUMA_RATIO)
+}
+
+fn held_part_foreground_is_brighter(report: &HeldPartInspectionReport) -> Option<bool> {
+    if report
+        .findings
+        .iter()
+        .any(|finding| finding.contains("foreground is brighter"))
+    {
+        Some(true)
+    } else if report
+        .findings
+        .iter()
+        .any(|finding| finding.contains("foreground is darker"))
+    {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 async fn release_pickup_part(
@@ -21147,6 +21173,7 @@ async fn execute_physical_guarded_placement(
         .await?;
         report.corrected_move_count += board_release.corrected_move_count;
         let nozzle_clear = board_release.verification.nozzle_clear;
+        let sensor_released = board_release.sensor_released;
         let release_raw_values = board_release.release_raw_values;
         let release_verification = board_release.verification;
         report
@@ -21167,7 +21194,12 @@ async fn execute_physical_guarded_placement(
                 false,
             ));
             persist_placement_progress(state, run, report)?;
-            return Err("placement release did not confirm a clear nozzle".into());
+            release_confirmed = sensor_released;
+            return Err(if sensor_released {
+                "vacuum confirmed release, but bottom vision did not confirm a clear nozzle".into()
+            } else {
+                "placement release did not confirm a clear nozzle".into()
+            });
         }
         release_confirmed = true;
 
@@ -21283,6 +21315,7 @@ struct VerifiedBoardRelease {
     release_raw_values: Vec<i64>,
     verification: NozzleReleaseVerificationReport,
     corrected_move_count: u32,
+    sensor_released: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -21310,6 +21343,7 @@ async fn release_part_at_board_and_verify(
     let mut artifact_names = Vec::new();
     let mut findings = Vec::new();
     let mut nozzle_clear = false;
+    let mut release_sensor_confirmed = false;
     let mut corrected_move_count = 0;
 
     for attempt in 1..=MAXIMUM_RELEASE_ATTEMPTS {
@@ -21349,6 +21383,7 @@ async fn release_part_at_board_and_verify(
         let sensor_released = median_raw(&raw_values).is_some_and(|value| {
             vacuum_value_is_released(&prepared.vacuum_characterization, value)
         });
+        release_sensor_confirmed |= sensor_released;
         release_raw_values.extend(raw_values);
 
         let current_pose = state
@@ -21454,6 +21489,7 @@ async fn release_part_at_board_and_verify(
             findings,
         },
         corrected_move_count,
+        sensor_released: release_sensor_confirmed,
     })
 }
 
@@ -25837,6 +25873,48 @@ mod tests {
 
         assert!(!post_release_matches_held_part(&held, &reflection));
         assert!(post_release_matches_held_part(&held, &retained_part));
+    }
+
+    #[test]
+    fn release_shape_matching_rejects_the_r12_nozzle_bore_change() {
+        let held = HeldPartInspectionReport {
+            algorithm_version: "held_part_difference.v3".into(),
+            detected: true,
+            center_x_px: Some(640.91),
+            center_y_px: Some(357.85),
+            centering_correction_x_mm: Some(-0.031),
+            centering_correction_y_mm: Some(0.077),
+            centering_correction_mm: Some(0.083),
+            width_mm: Some(1.318),
+            length_mm: Some(2.268),
+            rotation_deg: Some(0.57),
+            changed_pixel_count: 1_877,
+            mean_difference_luma: 106.84,
+            confidence: 0.97,
+            passed: true,
+            artifact_name: "held-part-inspection.png".into(),
+            findings: vec![
+                "held-part foreground is brighter than the bare nozzle reference".into(),
+            ],
+        };
+        let bore_change = HeldPartInspectionReport {
+            width_mm: Some(1.210),
+            length_mm: Some(1.655),
+            rotation_deg: Some(21.41),
+            changed_pixel_count: 1_012,
+            mean_difference_luma: 30.09,
+            confidence: 0.65,
+            artifact_name: "post-release-nozzle-inspection-attempt-2.png".into(),
+            findings: vec!["held-part foreground is darker than the bare nozzle reference".into()],
+            ..held.clone()
+        };
+        let opposite_polarity = HeldPartInspectionReport {
+            findings: bore_change.findings.clone(),
+            ..held.clone()
+        };
+
+        assert!(!post_release_matches_held_part(&held, &bore_change));
+        assert!(!post_release_matches_held_part(&held, &opposite_polarity));
     }
 
     #[tokio::test]
