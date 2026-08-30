@@ -2672,6 +2672,38 @@ preferred validation path for this irregular 0603 package. Future LED checks
 should place a good, aligned part on the prepared board and use top-camera
 inspection instead of repeatedly disturbing the carrier tape.
 
+### First guarded LED placement attempts
+
+On 2026-08-30, standard home `9bbcc13f-c77f-48ec-8886-c07fee178a3b` and
+fine home `18b7fd70-f826-45ee-9e32-44953b1e0850` passed. Retained
+qualification `dd007d04-fb22-4ee6-9688-077c4a0b9bd2` created a provisional
+LED feeder. This feeder path needs one passed guarded placement instead of
+two more carrier-tape returns.
+
+Live holdout `4e976f74-aa40-483f-852a-21f3e654733d` found an occupied part
+near pocket 12. Placement `0d214776-e440-4bc5-8282-20cf0bc4e042` found no
+vacuum transition through its bounded Z3.6 search. Top vision confirmed that
+the LED remained in the pocket. The pocket was quarantined and D1 was not
+touched.
+
+Live holdout `ebaf6b86-fdd9-4ca2-b564-96172119f4c0` corrected the inventory:
+pocket 6 was empty and pocket 7 was the first occupied position. Placement
+`af7df812-6a73-48ab-9889-8ad14edeeb12` acquired that LED and measured it as
+1.024 by 1.619 mm with 17.7 luma of end contrast. Its initial direction was
+174.0 degrees, so alignment commanded a large directed turn.
+
+The zero-angle bare-nozzle reference did not match the nozzle appearance
+after that turn. It enlarged the final difference outline to 1.711 by
+2.235 mm even though the LED remained visible. Recovery returned the LED to
+its source pocket. The strict 70% to 150% size gate remains in use for the
+initial identity check. Post-rotation retention now permits up to 200% outline
+growth, while it keeps the 70% lower bound, appearance, vacuum, centering, and
+iteration gates. This change still needs a physical rerun.
+
+A passed live holdout now updates the active feeder's planned pick pose to the
+measured occupied pocket. The two attempts required a manual feeder API update
+because that behavior was not yet deployed.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

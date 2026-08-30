@@ -757,6 +757,9 @@ The client chooses distinct available occupied pockets and stops on the first
 failure. The API also accepts `pocket_index` on an individual pickup request,
 so another headless client can implement the same bounded policy. The daemon
 applies the current live-holdout correction to the fitted pocket lattice.
+For an active feeder, a passed holdout also moves the planned pick pose to the
+measured occupied pocket. This keeps the planner away from a quarantined or
+empty prior source.
 Three passed returns at distinct pockets make the feeder ready. One passed
 return creates a provisional feeder. One successful guarded placement with
 top inspection also makes that feeder ready. This second path avoids repeated

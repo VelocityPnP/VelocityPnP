@@ -121,6 +121,7 @@ const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
 const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const MINIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 0.70;
 const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
+const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v4";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
@@ -6057,6 +6058,9 @@ async fn execute_strip_feeder_live_holdout_task(
                     }
                     .into(),
                 );
+                if let Some(center) = report.measured_pocket_machine_mm {
+                    refresh_active_strip_feeder_pick(&state, &registration, center)?;
+                }
                 if registration.part_key.is_some()
                     && registration.part_rotation_deg.is_some()
                     && matches!(
@@ -6089,6 +6093,58 @@ async fn execute_strip_feeder_live_holdout_task(
             Err(message)
         }
     }
+}
+
+fn refresh_active_strip_feeder_pick(
+    state: &AppState,
+    registration: &StripFeederRegistration,
+    measured_center_machine_mm: [f64; 2],
+) -> Result<(), String> {
+    let (Some(feeder_id), Some(pickup_z_mm), Some(part_rotation_deg)) = (
+        registration.active_feeder_id,
+        registration.pickup_z_mm,
+        registration.part_rotation_deg,
+    ) else {
+        return Ok(());
+    };
+    let feeder = state
+        .store
+        .list_feeders()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|feeder| feeder.id() == feeder_id)
+        .ok_or_else(|| "active strip feeder disappeared during live holdout".to_string())?;
+    let Feeder::Strip {
+        id,
+        name,
+        part_key,
+        tape_pitch_mm,
+        tape_width_mm,
+        tape_rotation_deg,
+        remaining,
+        ..
+    } = feeder
+    else {
+        return Err("active feeder is not a strip feeder".into());
+    };
+    state
+        .store
+        .put_feeder(&Feeder::Strip {
+            id,
+            name,
+            part_key,
+            first_pick: Pose {
+                x_mm: measured_center_machine_mm[0],
+                y_mm: measured_center_machine_mm[1],
+                z_mm: pickup_z_mm,
+                rotation_deg: part_rotation_deg,
+            },
+            tape_pitch_mm,
+            tape_width_mm,
+            tape_rotation_deg,
+            remaining,
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7732,6 +7788,18 @@ fn held_part_dimensions_match_expected(
     report: &HeldPartInspectionReport,
     expected_size_mm: [f64; 2],
 ) -> bool {
+    held_part_dimensions_match_expected_with_maximum(
+        report,
+        expected_size_mm,
+        MAXIMUM_EXPECTED_PART_DIMENSION_RATIO,
+    )
+}
+
+fn held_part_dimensions_match_expected_with_maximum(
+    report: &HeldPartInspectionReport,
+    expected_size_mm: [f64; 2],
+    maximum_ratio: f64,
+) -> bool {
     let expected_width_mm = expected_size_mm[0].min(expected_size_mm[1]);
     let expected_length_mm = expected_size_mm[0].max(expected_size_mm[1]);
     report
@@ -7747,10 +7815,33 @@ fn held_part_dimensions_match_expected(
                 ]
                 .into_iter()
                 .all(|ratio| {
-                    (MINIMUM_EXPECTED_PART_DIMENSION_RATIO..=MAXIMUM_EXPECTED_PART_DIMENSION_RATIO)
-                        .contains(&ratio)
+                    (MINIMUM_EXPECTED_PART_DIMENSION_RATIO..=maximum_ratio).contains(&ratio)
                 })
         })
+}
+
+fn apply_rotated_retained_part_size_gate(
+    report: &mut HeldPartInspectionReport,
+    expected_size_mm: Option<[f64; 2]>,
+) {
+    let Some(expected_size_mm) = expected_size_mm else {
+        return;
+    };
+    if held_part_dimensions_match_expected_with_maximum(
+        report,
+        expected_size_mm,
+        MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO,
+    ) {
+        report.findings.push(
+            "post-rotation dimensions passed the retained-part bounds; nozzle-reference reflections can enlarge this outline"
+                .into(),
+        );
+    } else {
+        report.passed = false;
+        report
+            .findings
+            .push("post-rotation dimensions do not match the initial held-part measurement".into());
+    }
 }
 
 fn rotate_machine_vector(vector: [f64; 2], rotation_deg: f64) -> [f64; 2] {
@@ -8031,7 +8122,11 @@ async fn align_held_part(
         let corrected_observation = iteration > 0;
         let visual_evidence_passed = if corrected_observation {
             initial_size_mm.is_some_and(|expected| {
-                held_part_dimensions_match_expected(&current.report, expected)
+                held_part_dimensions_match_expected_with_maximum(
+                    &current.report,
+                    expected,
+                    MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO,
+                )
             }) && post_release_matches_held_part(&initial_report, &current.report)
         } else {
             current.report.passed
@@ -8194,11 +8289,7 @@ async fn align_held_part(
             HELD_PART_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
-        apply_expected_held_part_size_gate(
-            &mut current.report,
-            initial_size_mm,
-            "initial bottom-camera measurement",
-        );
+        apply_rotated_retained_part_size_gate(&mut current.report, initial_size_mm);
         persist_transfer_rgb_artifact(
             state,
             prepared,
@@ -23367,6 +23458,19 @@ mod tests {
     }
 
     #[test]
+    fn rotated_retention_allows_nozzle_reference_outline_growth() {
+        let report = held_part_report(1.7108, 2.2349);
+        let initial_size = [1.0243, 1.6193];
+
+        assert!(!held_part_dimensions_match_expected(&report, initial_size));
+        assert!(held_part_dimensions_match_expected_with_maximum(
+            &report,
+            initial_size,
+            MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO,
+        ));
+    }
+
+    #[test]
     fn registered_phase_resolves_an_ambiguous_flat_led() {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
@@ -23695,6 +23799,51 @@ mod tests {
             safe_z_mm: 31.5,
         };
         assert!(placement_validation_is_current(&state, &saved, &step, execution_id,).unwrap());
+    }
+
+    #[tokio::test]
+    async fn live_holdout_updates_the_active_feeder_pick_pose() {
+        let state = test_state();
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        let feeder_id = Uuid::new_v4();
+        registration.active_feeder_id = Some(feeder_id);
+        registration.pickup_z_mm = Some(4.2);
+        state
+            .store
+            .put_feeder(&Feeder::Strip {
+                id: feeder_id,
+                name: registration.name.clone(),
+                part_key: registration.part_key.clone().unwrap(),
+                first_pick: Pose::ORIGIN,
+                tape_pitch_mm: registration.tape_pitch_mm,
+                tape_width_mm: registration.tape_width_mm,
+                tape_rotation_deg: registration.tape_rotation_deg,
+                remaining: Some(4),
+            })
+            .unwrap();
+
+        refresh_active_strip_feeder_pick(&state, &registration, [152.65, 171.39]).unwrap();
+
+        let feeder = state
+            .store
+            .list_feeders()
+            .unwrap()
+            .into_iter()
+            .find(|feeder| feeder.id() == feeder_id)
+            .unwrap();
+        let Feeder::Strip {
+            first_pick,
+            remaining,
+            ..
+        } = feeder
+        else {
+            panic!("expected strip feeder");
+        };
+        assert_eq!(first_pick.x_mm, 152.65);
+        assert_eq!(first_pick.y_mm, 171.39);
+        assert_eq!(first_pick.z_mm, 4.2);
+        assert_eq!(remaining, Some(4));
     }
 
     #[test]
