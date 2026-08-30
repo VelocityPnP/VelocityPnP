@@ -390,6 +390,7 @@ pub enum Feeder {
 pub enum StripFeederRegistrationStatus {
     VisionDraft,
     LiveValidationRequired,
+    PlacementValidationRequired,
     Ready,
 }
 
@@ -746,9 +747,10 @@ pub struct StripFeederPickupQualificationRun {
 
 /// Persistent feeder setup state derived from retained workspace evidence.
 ///
-/// `Ready` requires a current live holdout and three successful pickup-return
-/// cycles at distinct pockets with one nozzle. Creating a draft cannot create
-/// or enable a production `Feeder`.
+/// `Ready` requires a current live holdout and either three successful
+/// pickup-return cycles at distinct pockets with one nozzle or one successful
+/// pickup-return cycle followed by a passed guarded placement. Creating a
+/// draft cannot create or enable a `Feeder`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederRegistration {
     pub id: Uuid,
@@ -796,6 +798,8 @@ pub struct StripFeederRegistration {
     pub pickup_sequence_passed: bool,
     #[serde(default)]
     pub latest_pickup_sequence_qualification_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub latest_placement_validation_id: Option<Uuid>,
     pub vision_confidence: f64,
     pub vision_review_required: bool,
     #[serde(default)]

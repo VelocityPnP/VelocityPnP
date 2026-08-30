@@ -756,9 +756,11 @@ normal persistent pickup qualification with its own operation and artifacts.
 The client chooses distinct available occupied pockets and stops on the first
 failure. The API also accepts `pocket_index` on an individual pickup request,
 so another headless client can implement the same bounded policy. The daemon
-applies the current live-holdout correction to the fitted pocket lattice. A
-feeder becomes ready only after the latest three attempts pass at distinct
-pockets with one nozzle.
+applies the current live-holdout correction to the fitted pocket lattice.
+Three passed returns at distinct pockets make the feeder ready. One passed
+return creates a provisional feeder. One successful guarded placement with
+top inspection also makes that feeder ready. This second path avoids repeated
+returns for small parts that do not settle reliably in carrier tape.
 
 Held-part inspection aligns the bare-nozzle reference within an 8 pixel bound
 before subtraction. It selects the brighter or darker foreground polarity
@@ -802,9 +804,10 @@ failure or an uncertain release requires review. A daemon restart quarantines
 its reserved pocket.
 
 A passed qualification stores pickup Z and measured part width, length,
-rotation, and confidence. It creates an active strip `Feeder` only when the
-draft also has a part key and orientation. Passive strip advancement is a
-logical next-pocket operation; it does not move the tape.
+rotation, and confidence. It creates a provisional strip `Feeder` only when
+the draft also has a part key and orientation. The provisional feeder can run
+one guarded, inspected placement. Passive strip advancement is a logical
+next-pocket operation; it does not move the tape.
 
 ### Guarded single-placement execution
 
@@ -819,11 +822,11 @@ cargo run --release -p velocitypnp -- execute-single-placement JOB_UUID \
 The API route is `POST /jobs/JOB_UUID/placement-executions`. The Python client
 uses `start_guarded_single_placement()`. The executor requires a homed machine,
 a current local direction-response calibration, a registered board transform
-and measured surface Z, a part-library height, and an active strip feeder. The
-latest feeder qualification sequence must include three distinct passed cycles
-with the planned nozzle. Each cycle must include passed nozzle-clear and
-pocket-return evidence. Set a job's `placement_references` list to run a
-deliberate subset of board parts.
+and measured surface Z, a part-library height, and an active strip feeder. A
+provisional feeder needs one passed pickup-return cycle with the planned
+nozzle. Its first passed top-inspected placement promotes it. A feeder can
+also become ready through three distinct passed pickup-return cycles. Set a
+job's `placement_references` list to run a deliberate subset of board parts.
 
 The plan carries the feeder's directed part angle separately from the KiCad
 board-placement angle. Bottom vision preserves or measures the 180-degree

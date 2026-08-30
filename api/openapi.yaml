@@ -2747,6 +2747,7 @@ components:
         - latest_pickup_qualification_id
         - pickup_sequence_passed
         - latest_pickup_sequence_qualification_ids
+        - latest_placement_validation_id
         - vision_confidence
         - vision_review_required
         - findings
@@ -2761,7 +2762,11 @@ components:
         updated_at: { type: string, format: date-time }
         status:
           type: string
-          enum: [vision_draft, live_validation_required, ready]
+          enum:
+            - vision_draft
+            - live_validation_required
+            - placement_validation_required
+            - ready
         name: { type: string }
         part_key: { type: [string, "null"] }
         part_rotation_deg: { type: [number, "null"] }
@@ -2803,6 +2808,9 @@ components:
         latest_pickup_sequence_qualification_ids:
           type: array
           items: { type: string, format: uuid }
+        latest_placement_validation_id:
+          type: [string, "null"]
+          format: uuid
         vision_confidence: { type: number, minimum: 0, maximum: 1 }
         vision_review_required: { type: boolean }
         findings:

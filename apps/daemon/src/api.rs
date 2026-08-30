@@ -5716,6 +5716,7 @@ async fn create_strip_feeder_registration(
         latest_pickup_qualification_id: None,
         pickup_sequence_passed: false,
         latest_pickup_sequence_qualification_ids: Vec::new(),
+        latest_placement_validation_id: None,
         vision_confidence: proposal.confidence,
         vision_review_required: proposal.review_required,
         findings,
@@ -6049,9 +6050,21 @@ async fn execute_strip_feeder_live_holdout_task(
                     !finding.contains("live pocket occupancy") && !finding.contains("live holdout")
                 });
                 registration.findings.push(
-                    "live pocket position and occupancy passed; pickup Z remains unmeasured".into(),
+                    if registration.pickup_z_mm.is_some() {
+                        "live pocket position and occupancy passed"
+                    } else {
+                        "live pocket position and occupancy passed; pickup Z remains unmeasured"
+                    }
+                    .into(),
                 );
-                if registration.part_key.is_some() && registration.part_rotation_deg.is_some() {
+                if registration.part_key.is_some()
+                    && registration.part_rotation_deg.is_some()
+                    && matches!(
+                        registration.status,
+                        StripFeederRegistrationStatus::VisionDraft
+                            | StripFeederRegistrationStatus::LiveValidationRequired
+                    )
+                {
                     registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
                 }
             }
@@ -8357,8 +8370,10 @@ fn update_registration_after_pickup(
     registration.updated_at = Utc::now();
     registration.findings.retain(|finding| {
         !finding.contains("pickup qualification")
-            && !finding.contains("pickup-return qualifications")
+            && !finding.contains("pickup-return qualification")
             && !finding.contains("pickup Z, vacuum hold")
+            && !finding.contains("guarded inspected placement")
+            && !finding.contains("guarded board placement")
     });
     if let Some(inspection) = report
         .inspection
@@ -8384,72 +8399,48 @@ fn update_registration_after_pickup(
             report.pocket_machine_mm,
         )
         .or(registration.selected_pocket_index);
-        if registration.pickup_sequence_passed {
-            registration.findings.push(
-                "three successful pickup-return qualifications at distinct pockets passed".into(),
-            );
-            match (
-                registration.part_key.clone(),
-                registration.part_rotation_deg,
-            ) {
-                (Some(part_key), Some(part_rotation_deg)) => {
-                    let feeder_id = registration.active_feeder_id.unwrap_or_else(Uuid::new_v4);
-                    let remaining = registration
-                        .pockets
-                        .iter()
-                        .filter(|pocket| {
-                            pocket.status == StripFeederPocketStatus::Available
-                                && pocket.occupancy == StripPocketOccupancy::Occupied
-                        })
-                        .count()
-                        .try_into()
-                        .ok();
-                    let first_pick = Pose {
-                        x_mm: report.pocket_machine_mm[0],
-                        y_mm: report.pocket_machine_mm[1],
-                        z_mm: report.pickup_nozzle_z_mm.unwrap(),
-                        rotation_deg: part_rotation_deg,
-                    };
-                    let feeder = Feeder::Strip {
-                        id: feeder_id,
-                        name: registration.name.clone(),
-                        part_key,
-                        first_pick,
-                        tape_pitch_mm: registration.tape_pitch_mm,
-                        tape_width_mm: registration.tape_width_mm,
-                        tape_rotation_deg: registration.tape_rotation_deg,
-                        remaining,
-                    };
-                    state
-                        .store
-                        .put_feeder(&feeder)
-                        .map_err(|error| error.to_string())?;
-                    registration.active_feeder_id = Some(feeder_id);
-                    registration.status = StripFeederRegistrationStatus::Ready;
-                    registration.findings.push(
-                        "pickup Z, vacuum hold, bottom inspection, nozzle release, and pocket return passed"
-                            .into(),
-                    );
-                }
-                _ => {
-                    deactivate_strip_feeder(state, &mut registration)?;
-                    registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
-                    registration.findings.push(
-                        "pickup qualification passed; part identity and orientation are still required"
-                            .into(),
-                    );
-                }
+        if registration.pickup_sequence_passed
+            || registration.latest_placement_validation_id.is_some()
+        {
+            if activate_strip_feeder(state, &mut registration, report)? {
+                registration.status = StripFeederRegistrationStatus::Ready;
+                registration.findings.push(
+                    if registration.pickup_sequence_passed {
+                        "three successful pickup-return qualifications at distinct pockets passed"
+                    } else {
+                        "guarded board placement and top inspection remain current"
+                    }
+                    .into(),
+                );
+                registration.findings.push(
+                    "pickup Z, vacuum hold, bottom inspection, nozzle release, and pocket return passed"
+                        .into(),
+                );
+            } else {
+                deactivate_strip_feeder(state, &mut registration)?;
+                registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
+                registration.findings.push(
+                    "pickup qualification passed; part identity and orientation are still required"
+                        .into(),
+                );
             }
+        } else if activate_strip_feeder(state, &mut registration, report)? {
+            registration.status = StripFeederRegistrationStatus::PlacementValidationRequired;
+            registration.findings.push(
+                "one pickup-return qualification passed; one guarded inspected placement is required"
+                    .into(),
+            );
         } else {
             deactivate_strip_feeder(state, &mut registration)?;
             registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
             registration.findings.push(
-                "three successful pickup-return qualifications at distinct pockets are required"
+                "pickup qualification passed; part identity and orientation are still required"
                     .into(),
             );
         }
     } else {
         deactivate_strip_feeder(state, &mut registration)?;
+        registration.latest_placement_validation_id = None;
         registration.pickup_z_mm = None;
         registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
         registration
@@ -8460,6 +8451,51 @@ fn update_registration_after_pickup(
         .store
         .put_strip_feeder_registration(&registration)
         .map_err(|error| error.to_string())
+}
+
+fn activate_strip_feeder(
+    state: &AppState,
+    registration: &mut StripFeederRegistration,
+    report: &StripFeederPickupQualificationReport,
+) -> Result<bool, String> {
+    let (Some(part_key), Some(part_rotation_deg), Some(pickup_z_mm)) = (
+        registration.part_key.clone(),
+        registration.part_rotation_deg,
+        report.pickup_nozzle_z_mm,
+    ) else {
+        return Ok(false);
+    };
+    let feeder_id = registration.active_feeder_id.unwrap_or_else(Uuid::new_v4);
+    let remaining = registration
+        .pockets
+        .iter()
+        .filter(|pocket| {
+            pocket.status == StripFeederPocketStatus::Available
+                && pocket.occupancy == StripPocketOccupancy::Occupied
+        })
+        .count()
+        .try_into()
+        .ok();
+    state
+        .store
+        .put_feeder(&Feeder::Strip {
+            id: feeder_id,
+            name: registration.name.clone(),
+            part_key,
+            first_pick: Pose {
+                x_mm: report.pocket_machine_mm[0],
+                y_mm: report.pocket_machine_mm[1],
+                z_mm: pickup_z_mm,
+                rotation_deg: part_rotation_deg,
+            },
+            tape_pitch_mm: registration.tape_pitch_mm,
+            tape_width_mm: registration.tape_width_mm,
+            tape_rotation_deg: registration.tape_rotation_deg,
+            remaining,
+        })
+        .map_err(|error| error.to_string())?;
+    registration.active_feeder_id = Some(feeder_id);
+    Ok(true)
 }
 
 fn current_pickup_sequence_ids(
@@ -8556,6 +8592,7 @@ fn invalidate_registration_after_pickup_error(
     registration
         .latest_pickup_sequence_qualification_ids
         .clear();
+    registration.latest_placement_validation_id = None;
     registration.pickup_z_mm = None;
     registration.status = StripFeederRegistrationStatus::LiveValidationRequired;
     registration.updated_at = Utc::now();
@@ -20947,8 +20984,11 @@ fn validate_guarded_strip_feeder(
         .ok_or_else(|| {
             ApiError::bad_request("placement feeder has no active vision registration")
         })?;
-    if registration.status != StripFeederRegistrationStatus::Ready
-        || registration.pickup_z_mm.is_none()
+    if !matches!(
+        registration.status,
+        StripFeederRegistrationStatus::PlacementValidationRequired
+            | StripFeederRegistrationStatus::Ready
+    ) || registration.pickup_z_mm.is_none()
     {
         return Err(ApiError::bad_request(
             "placement feeder has not passed pickup qualification",
@@ -20956,18 +20996,36 @@ fn validate_guarded_strip_feeder(
     }
     let current_sequence_ids =
         current_pickup_sequence_ids(state, &registration).map_err(ApiError::internal)?;
-    if !registration.pickup_sequence_passed
-        || current_sequence_ids.len() < 3
-        || registration.latest_pickup_sequence_qualification_ids != current_sequence_ids
-    {
-        return Err(ApiError::bad_request(
-            "placement feeder needs three current, distinct pickup-return qualifications",
-        ));
+    let sequence_is_current = registration.pickup_sequence_passed
+        && current_sequence_ids.len() >= 3
+        && registration.latest_pickup_sequence_qualification_ids == current_sequence_ids;
+    let placement_is_current =
+        if let Some(execution_id) = registration.latest_placement_validation_id {
+            placement_validation_is_current(state, &registration, step, execution_id)
+                .map_err(ApiError::internal)?
+        } else {
+            false
+        };
+    match registration.status {
+        StripFeederRegistrationStatus::PlacementValidationRequired => {
+            if registration.latest_placement_validation_id.is_some() {
+                return Err(ApiError::bad_request(
+                    "provisional feeder placement evidence is inconsistent",
+                ));
+            }
+        }
+        StripFeederRegistrationStatus::Ready if !sequence_is_current && !placement_is_current => {
+            return Err(ApiError::bad_request(
+                "placement feeder has no current return sequence or inspected placement",
+            ));
+        }
+        StripFeederRegistrationStatus::Ready => {}
+        _ => unreachable!(),
     }
     let qualification_id = registration
         .latest_pickup_qualification_id
         .ok_or_else(|| ApiError::bad_request("placement feeder has no pickup evidence"))?;
-    if current_sequence_ids.last() != Some(&qualification_id) {
+    if sequence_is_current && current_sequence_ids.last() != Some(&qualification_id) {
         return Err(ApiError::bad_request(
             "placement feeder pickup sequence is not the latest evidence",
         ));
@@ -20984,7 +21042,7 @@ fn validate_guarded_strip_feeder(
         .ok_or_else(|| ApiError::bad_request("placement feeder pickup evidence did not pass"))?;
     if qualification.nozzle_id != step.nozzle_id {
         return Err(ApiError::bad_request(format!(
-            "placement nozzle {} has no current three-pocket qualification",
+            "placement nozzle {} has no current pickup qualification",
             step.nozzle_id
         )));
     }
@@ -21047,6 +21105,108 @@ fn validate_guarded_strip_feeder(
         ));
     }
     Ok(registration)
+}
+
+fn placement_validation_is_current(
+    state: &AppState,
+    registration: &StripFeederRegistration,
+    step: &PlanStep,
+    execution_id: Uuid,
+) -> Result<bool, String> {
+    let Some(execution) = state
+        .store
+        .get_placement_execution(execution_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    let Some(report) = execution.report else {
+        return Ok(false);
+    };
+    Ok(execution.status == OperationStatus::Succeeded
+        && execution.calibration_id == registration.calibration_id
+        && report.passed
+        && !report.simulated
+        && registration.active_feeder_id == Some(step.feeder_id)
+        && registration.part_key.as_deref() == Some(step.part_key.as_str())
+        && report.feeder_id == step.feeder_id
+        && report.part_key == step.part_key
+        && report.nozzle_id == step.nozzle_id
+        && report.part_orientation == step.part_orientation
+        && held_part_rotation_error_deg(
+            report.feeder_part_rotation_deg,
+            step.feeder_part_rotation_deg,
+            PartOrientation::FeederReferenced,
+        )
+        .abs()
+            <= 0.01
+        && report.pickup_report.as_ref().is_some_and(|pickup| {
+            pickup.passed
+                && pickup.released
+                && pickup.disposition == StripFeederPickupDisposition::PlacedOnBoard
+                && pickup
+                    .nozzle_release_verification
+                    .as_ref()
+                    .is_some_and(|verification| verification.passed)
+        })
+        && report
+            .top_inspection
+            .as_ref()
+            .is_some_and(|inspection| inspection.passed))
+}
+
+fn promote_strip_feeder_after_placement(
+    state: &AppState,
+    registration_id: Uuid,
+    execution_id: Uuid,
+    report: &PlacementExecutionReport,
+) -> Result<(), String> {
+    if !report.passed
+        || report.simulated
+        || !report.pickup_report.as_ref().is_some_and(|pickup| {
+            pickup.passed
+                && pickup.released
+                && pickup.disposition == StripFeederPickupDisposition::PlacedOnBoard
+                && pickup
+                    .nozzle_release_verification
+                    .as_ref()
+                    .is_some_and(|verification| verification.passed)
+        })
+        || !report
+            .top_inspection
+            .as_ref()
+            .is_some_and(|inspection| inspection.passed)
+    {
+        return Err("feeder promotion requires a passed physical placement".into());
+    }
+    let mut registration = state
+        .store
+        .get_strip_feeder_registration(registration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "placement feeder registration disappeared".to_string())?;
+    if registration.active_feeder_id != Some(report.feeder_id) {
+        return Err("placement evidence does not match the provisional feeder".into());
+    }
+    if registration.part_key.as_deref() != Some(report.part_key.as_str()) {
+        return Err("placement part does not match the provisional feeder".into());
+    }
+    if registration.status != StripFeederRegistrationStatus::PlacementValidationRequired {
+        return Ok(());
+    }
+    registration.status = StripFeederRegistrationStatus::Ready;
+    registration.latest_placement_validation_id = Some(execution_id);
+    registration.updated_at = Utc::now();
+    registration.findings.retain(|finding| {
+        !finding.contains("guarded inspected placement")
+            && !finding.contains("guarded board placement")
+    });
+    registration
+        .findings
+        .push("guarded board placement and top inspection passed".into());
+    state
+        .store
+        .put_strip_feeder_registration(&registration)
+        .map_err(|error| error.to_string())
 }
 
 async fn execute_guarded_placement_task(
@@ -21140,6 +21300,27 @@ async fn execute_guarded_placement_task(
                 },
                 step.placement_reference
             ));
+            if let Some(prepared) = physical.as_ref() {
+                if let Err(error) = promote_strip_feeder_after_placement(
+                    &state,
+                    prepared.registration.id,
+                    run.id,
+                    &report,
+                ) {
+                    report.findings.push(error.clone());
+                    run.status = OperationStatus::Failed;
+                    run.message = Some(format!(
+                        "Placement completed, but feeder promotion failed: {error}"
+                    ));
+                    run.report = Some(report);
+                    run.updated_at = Utc::now();
+                    state
+                        .store
+                        .put_placement_execution(&run)
+                        .map_err(|store_error| store_error.to_string())?;
+                    return Err(error);
+                }
+            }
             run.report = Some(report);
             run.updated_at = Utc::now();
             state
@@ -23407,6 +23588,115 @@ mod tests {
             .is_empty());
     }
 
+    #[tokio::test]
+    async fn one_pickup_return_creates_a_provisional_feeder() {
+        let state = test_state();
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        state
+            .store
+            .put_strip_feeder_registration(&registration)
+            .unwrap();
+        let qualification =
+            test_pickup_qualification(&registration, 1, OperationStatus::Succeeded, now);
+        state
+            .store
+            .put_strip_feeder_pickup_qualification(&qualification)
+            .unwrap();
+
+        update_registration_after_pickup(
+            &state,
+            registration.clone(),
+            qualification.id,
+            qualification.report.as_ref().unwrap(),
+        )
+        .unwrap();
+
+        let saved = state
+            .store
+            .get_strip_feeder_registration(registration.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            StripFeederRegistrationStatus::PlacementValidationRequired
+        );
+        assert!(!saved.pickup_sequence_passed);
+        let feeder_id = saved.active_feeder_id.unwrap();
+        assert!(state
+            .store
+            .list_feeders()
+            .unwrap()
+            .iter()
+            .any(|feeder| feeder.id() == feeder_id));
+    }
+
+    #[tokio::test]
+    async fn passed_physical_placement_promotes_a_provisional_feeder() {
+        let state = test_state();
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.status = StripFeederRegistrationStatus::PlacementValidationRequired;
+        registration.part_key = Some("LED_SMD:LED_0603_1608Metric:LED_Small".into());
+        let feeder_id = Uuid::new_v4();
+        registration.active_feeder_id = Some(feeder_id);
+        state
+            .store
+            .put_strip_feeder_registration(&registration)
+            .unwrap();
+        let execution_id = Uuid::new_v4();
+        let report = test_passed_placement_report(feeder_id);
+        state
+            .store
+            .put_placement_execution(&PlacementExecutionRun {
+                id: execution_id,
+                operation_id: Uuid::new_v4(),
+                job_id: Uuid::new_v4(),
+                step_index: 0,
+                calibration_id: registration.calibration_id,
+                status: OperationStatus::Succeeded,
+                created_at: now,
+                updated_at: now,
+                report: Some(report.clone()),
+                message: None,
+            })
+            .unwrap();
+
+        promote_strip_feeder_after_placement(&state, registration.id, execution_id, &report)
+            .unwrap();
+
+        let saved = state
+            .store
+            .get_strip_feeder_registration(registration.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, StripFeederRegistrationStatus::Ready);
+        assert_eq!(saved.latest_placement_validation_id, Some(execution_id));
+        let step = PlanStep {
+            board_instance_id: Uuid::new_v4(),
+            placement_reference: "D1".into(),
+            part_key: report.part_key.clone(),
+            feeder_id,
+            nozzle_id: "N1".into(),
+            part_height_mm: 0.55,
+            body_width_mm: 0.8,
+            body_length_mm: 1.6,
+            part_orientation: report.part_orientation,
+            feeder_part_rotation_deg: 0.0,
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: 0.1,
+            feeder_pick: Pose::ORIGIN,
+            board_place: Pose::ORIGIN,
+            safe_z_mm: 31.5,
+        };
+        assert!(placement_validation_is_current(&state, &saved, &step, execution_id,).unwrap());
+    }
+
     #[test]
     fn placement_reserves_the_available_pocket_at_the_planned_position() {
         let now = Utc::now();
@@ -23472,6 +23762,7 @@ mod tests {
             latest_pickup_qualification_id: None,
             pickup_sequence_passed: false,
             latest_pickup_sequence_qualification_ids: Vec::new(),
+            latest_placement_validation_id: None,
             vision_confidence: 0.9,
             vision_review_required: false,
             findings: Vec::new(),
@@ -23551,6 +23842,61 @@ mod tests {
                 findings: Vec::new(),
             }),
             message: None,
+        }
+    }
+
+    fn test_passed_placement_report(feeder_id: Uuid) -> PlacementExecutionReport {
+        let mut pickup = test_pickup_qualification(
+            &test_pickup_registration(Utc::now()),
+            1,
+            OperationStatus::Succeeded,
+            Utc::now(),
+        )
+        .report
+        .unwrap();
+        pickup.disposition = StripFeederPickupDisposition::PlacedOnBoard;
+        pickup.return_verification = None;
+        let top_inspection: velocitypnp_domain::PlacedPartInspectionReport =
+            serde_json::from_value(json!({
+                "algorithm_version": "fixture",
+                "detected": true,
+                "center_x_px": 640.0,
+                "center_y_px": 360.0,
+                "width_mm": 0.8,
+                "length_mm": 1.6,
+                "rotation_deg": 0.0,
+                "changed_pixel_count": 400,
+                "mean_difference_luma": 60.0,
+                "confidence": 0.9,
+                "passed": true,
+                "artifact_name": "fixture.png"
+            }))
+            .unwrap();
+        PlacementExecutionReport {
+            algorithm_version: PLACEMENT_EXECUTION_ALGORITHM.into(),
+            simulated: false,
+            placement_reference: "D1".into(),
+            part_key: "LED_SMD:LED_0603_1608Metric:LED_Small".into(),
+            feeder_id,
+            nozzle_id: "N1".into(),
+            part_orientation: PartOrientation::BrighterEnd {
+                minimum_contrast_luma: 4.0,
+                rotation_offset_deg: 0.0,
+            },
+            feeder_part_rotation_deg: 0.0,
+            feeder_pick: Pose::ORIGIN,
+            board_place: Pose::ORIGIN,
+            part_height_mm: 0.55,
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: 0.1,
+            pocket_index: Some(1),
+            pickup_report: Some(pickup),
+            top_inspection: Some(top_inspection),
+            artifact_names: Vec::new(),
+            corrected_move_count: 1,
+            passed: true,
+            stages: Vec::new(),
+            findings: Vec::new(),
         }
     }
 

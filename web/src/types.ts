@@ -810,7 +810,11 @@ export interface StripFeederRegistration {
   source_proposal_index: number;
   created_at: string;
   updated_at: string;
-  status: "vision_draft" | "live_validation_required" | "ready";
+  status:
+    | "vision_draft"
+    | "live_validation_required"
+    | "placement_validation_required"
+    | "ready";
   name: string;
   part_key: string | null;
   part_rotation_deg: number | null;
@@ -845,6 +849,7 @@ export interface StripFeederRegistration {
   latest_pickup_qualification_id: string | null;
   pickup_sequence_passed: boolean;
   latest_pickup_sequence_qualification_ids: string[];
+  latest_placement_validation_id: string | null;
   vision_confidence: number;
   vision_review_required: boolean;
   findings: string[];

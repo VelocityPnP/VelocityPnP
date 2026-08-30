@@ -63,10 +63,12 @@ runner restores the nozzle angle before it returns to the exact pickup pose.
 It fails closed if the requested angle exceeds the configured bound.
 
 The guarded single-placement endpoint requires one explicit plan index,
-calibrated motion, a measured board surface, complete part geometry, and
-three current pickup-return cycles at distinct pockets with the planned nozzle.
-Each cycle needs nozzle-clear and pocket-return evidence. Physical execution
-reserves one
+calibrated motion, a measured board surface, and complete part geometry. A
+provisional feeder needs one current pickup-return cycle with the planned
+nozzle. That evidence allows one guarded placement with top inspection. A
+passed placement promotes the feeder. A feeder can also become ready after
+three current pickup-return cycles at distinct pockets. Each return cycle needs
+nozzle-clear and pocket-return evidence. Physical execution reserves one
 known occupied pocket, uses live vacuum and bottom vision, verifies release in
 at most two attempts, and then uses top vision. A failure before confirmed
 release tries to return the part to the source pocket. Simulation records the
