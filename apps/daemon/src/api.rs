@@ -206,7 +206,6 @@ const BOARD_REGISTRATION_MAX_CORRECTION_MM: f64 = 2.5;
 const BOARD_REGISTRATION_MAX_ROTATION_ERROR_DEG: f64 = 5.0;
 const BOARD_REGISTRATION_MAX_RESIDUAL_MM: f64 = 0.15;
 const BOARD_REGISTRATION_APPROACH_MM: f64 = 1.0;
-const FINE_HOME_Z_SEARCH_CLEARANCE_MM: f64 = 0.3;
 const FINE_HOME_MAX_Z_CORRECTION_MM: f64 = 0.5;
 
 struct WorkspaceHeightArtifacts {
@@ -11893,6 +11892,19 @@ struct VacuumProbeSearch {
 }
 
 impl VacuumProbeSearch {
+    fn around_fine_home_contact(
+        contact_nozzle_z_mm: f64,
+        profile_start_nozzle_z_mm: f64,
+        profile_end_nozzle_z_mm: f64,
+    ) -> Self {
+        Self {
+            start_nozzle_z_mm: (contact_nozzle_z_mm + FINE_HOME_MAX_Z_CORRECTION_MM)
+                .min(profile_start_nozzle_z_mm),
+            end_nozzle_z_mm: (contact_nozzle_z_mm - FINE_HOME_MAX_Z_CORRECTION_MM)
+                .max(profile_end_nozzle_z_mm),
+        }
+    }
+
     fn descent_targets(self, profile_start_nozzle_z_mm: f64, step_mm: f64) -> Vec<f64> {
         let narrowed = self.start_nozzle_z_mm < profile_start_nozzle_z_mm - 1e-9;
         let mut nozzle_z_mm = if narrowed {
@@ -12187,27 +12199,27 @@ async fn start_vacuum_operation(
                 .filter(|value| value.is_finite())
         })
         .unwrap_or((probe.search_start_nozzle_z_mm + probe.search_end_nozzle_z_mm) / 2.0);
-    let (search_start_nozzle_z_mm, search_end_nozzle_z_mm) = match prior_contact
+    let search = match prior_contact
         .as_ref()
         .and_then(|report| report.contact_nozzle_z_mm)
     {
-        Some(contact_z_mm) if mode.fine_homes() => (
-            (contact_z_mm + FINE_HOME_Z_SEARCH_CLEARANCE_MM).min(probe.search_start_nozzle_z_mm),
-            (contact_z_mm - FINE_HOME_Z_SEARCH_CLEARANCE_MM).max(probe.search_end_nozzle_z_mm),
+        Some(contact_z_mm) if mode.fine_homes() => VacuumProbeSearch::around_fine_home_contact(
+            contact_z_mm,
+            probe.search_start_nozzle_z_mm,
+            probe.search_end_nozzle_z_mm,
         ),
-        Some(contact_z_mm) => (
-            (contact_z_mm
+        Some(contact_z_mm) => VacuumProbeSearch {
+            start_nozzle_z_mm: (contact_z_mm
                 + characterization_profile
                     .unwrap()
                     .characterization_clearance_mm)
                 .min(probe.search_start_nozzle_z_mm),
-            contact_z_mm,
-        ),
-        None => (probe.search_start_nozzle_z_mm, probe.search_end_nozzle_z_mm),
-    };
-    let search = VacuumProbeSearch {
-        start_nozzle_z_mm: search_start_nozzle_z_mm,
-        end_nozzle_z_mm: search_end_nozzle_z_mm,
+            end_nozzle_z_mm: contact_z_mm,
+        },
+        None => VacuumProbeSearch {
+            start_nozzle_z_mm: probe.search_start_nozzle_z_mm,
+            end_nozzle_z_mm: probe.search_end_nozzle_z_mm,
+        },
     };
     let surface_x_mm = visual.fiducial_x_mm + probe.target_offset_x_mm;
     let surface_y_mm = visual.fiducial_y_mm + probe.target_offset_y_mm;
@@ -12668,7 +12680,7 @@ async fn execute_vacuum_probe(
     };
     let fine_home_contact = if mode.fine_homes() {
         let contact = contact.as_ref().ok_or_else(|| {
-            "fine home did not reproduce contact in the bounded datum interval".to_string()
+            fine_home_missing_contact_message(search, &open_nozzle_raw_values, &samples)
         });
         match contact {
             Ok(contact) => {
@@ -12811,6 +12823,32 @@ async fn execute_vacuum_probe(
             report.nozzle_id, report.tip_id,
         ),
     }))
+}
+
+fn fine_home_missing_contact_message(
+    search: VacuumProbeSearch,
+    open_nozzle_raw_values: &[i64],
+    samples: &[VacuumProbeSample],
+) -> String {
+    let open_median = median_raw(open_nozzle_raw_values)
+        .map(|value| format!("{value:.1}"))
+        .unwrap_or_else(|| "unavailable".to_string());
+    let sample_deltas = samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "Z{:.3}:{:.1}",
+                sample.nozzle_z_mm, sample.signal_delta_counts
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "fine home did not reproduce contact in the bounded datum interval \
+         (nozzle Z{:.3} to Z{:.3}; open median {open_median}; \
+         signal deltas [{sample_deltas}])",
+        search.start_nozzle_z_mm, search.end_nozzle_z_mm,
+    )
 }
 
 async fn measure_current_tip_offset(
@@ -27914,6 +27952,32 @@ mod tests {
         assert!((targets[0] - 3.5).abs() < 1e-9);
         assert!((targets[3] - 3.2).abs() < 1e-9);
         assert!(targets.iter().all(|value| *value >= 3.2));
+    }
+
+    #[test]
+    fn fine_home_search_uses_the_full_allowed_correction_range() {
+        let search = VacuumProbeSearch::around_fine_home_contact(3.4, 5.0, 3.0);
+        assert!((search.start_nozzle_z_mm - 3.9).abs() < 1e-9);
+        assert!((search.end_nozzle_z_mm - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn failed_fine_home_message_keeps_sensor_evidence() {
+        let search = VacuumProbeSearch {
+            start_nozzle_z_mm: 3.9,
+            end_nozzle_z_mm: 3.0,
+        };
+        let samples = [VacuumProbeSample {
+            nozzle_z_mm: 3.0,
+            controller_z_mm: 3.0,
+            raw_values: vec![231, 230, 230],
+            median_raw_value: 230.0,
+            signal_delta_counts: 7.0,
+        }];
+        let message = fine_home_missing_contact_message(search, &[237, 237, 238], &samples);
+        assert!(message.contains("nozzle Z3.900 to Z3.000"));
+        assert!(message.contains("open median 237.0"));
+        assert!(message.contains("signal deltas [Z3.000:7.0]"));
     }
 
     #[test]
