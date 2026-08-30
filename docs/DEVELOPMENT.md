@@ -843,7 +843,10 @@ A physical placement binds its reservation to the available strip pocket at
 the planned pick position. It then captures that pocket with the top camera
 and uses the measured component center for the pickup move. A missing part or
 a center correction larger than the configured part-offset bound stops the
-operation before the nozzle descends.
+operation before the nozzle descends. The ordinary executor also rejects a
+board reference after an earlier physical run reached its placement pose.
+This prevents a failed release or inspection from causing a second component
+to be stacked on the same target. Rework needs a separate explicit workflow.
 
 The persistent run records preflight, live pickup, bottom alignment, calibrated
 placement motion, bounded release verification, and top inspection. Top
@@ -894,8 +897,8 @@ them into its retained report.
 
 Each physical execution also creates a persistent placement outcome. The
 automatic disposition is one of `good`, `offset`, `rotated`, `tombstoned`,
-`missing`, or `uncertain`. An operator review overrides the automatic class but
-does not remove the original result:
+`stacked`, `missing`, or `uncertain`. An operator review overrides the automatic
+class but does not remove the original result:
 
 ```bash
 cargo run --release -p velocitypnp -- review-placement-outcome EXECUTION_UUID \

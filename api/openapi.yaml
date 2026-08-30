@@ -3307,6 +3307,7 @@ components:
       required:
         - algorithm_version
         - simulated
+        - board_instance_id
         - placement_reference
         - part_key
         - feeder_id
@@ -3329,6 +3330,7 @@ components:
       properties:
         algorithm_version: { type: string }
         simulated: { type: boolean }
+        board_instance_id: { type: [string, "null"], format: uuid }
         placement_reference: { type: string }
         part_key: { type: string }
         feeder_id: { type: string, format: uuid }
@@ -3385,7 +3387,7 @@ components:
         message: { type: [string, "null"] }
     PlacementOutcomeDisposition:
       type: string
-      enum: [good, offset, rotated, tombstoned, missing, uncertain]
+      enum: [good, offset, rotated, tombstoned, stacked, missing, uncertain]
     PlacementOutcomeRecord:
       type: object
       required:

@@ -929,6 +929,10 @@ pub struct PlacementExecutionStageReport {
 pub struct PlacementExecutionReport {
     pub algorithm_version: String,
     pub simulated: bool,
+    /// Exact physical board target used by this execution. Older reports can
+    /// omit this field and are resolved from their single-board job.
+    #[serde(default)]
+    pub board_instance_id: Option<Uuid>,
     pub placement_reference: String,
     pub part_key: String,
     pub feeder_id: Uuid,
@@ -985,6 +989,7 @@ pub enum PlacementOutcomeDisposition {
     Offset,
     Rotated,
     Tombstoned,
+    Stacked,
     Missing,
     Uncertain,
 }
@@ -1362,10 +1367,14 @@ mod tests {
     fn operator_review_overrides_the_automatic_disposition() {
         let part = part();
         let mut reviewed = outcome(&part, "N1", 0.10, PlacementOutcomeDisposition::Good);
-        reviewed.operator_disposition = Some(PlacementOutcomeDisposition::Rotated);
+        reviewed.operator_disposition = Some(PlacementOutcomeDisposition::Stacked);
         assert_eq!(
             reviewed.effective_disposition(),
-            PlacementOutcomeDisposition::Rotated
+            PlacementOutcomeDisposition::Stacked
         );
+
+        let estimate = estimate_placement_process(&part, "N1", 0.0, &[reviewed]);
+        assert_eq!(estimate.offset_summaries[0].conclusive_count, 1);
+        assert_eq!(estimate.offset_summaries[0].rejected_count, 1);
     }
 }

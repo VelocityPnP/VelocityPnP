@@ -2704,6 +2704,47 @@ A passed live holdout now updates the active feeder's planned pick pose to the
 measured occupied pocket. The two attempts required a manual feeder API update
 because that behavior was not yet deployed.
 
+### Repeated resistor placement and occupied-target failure
+
+On 2026-08-30, live holdouts
+`eedee114-bd0b-4c08-9f1f-d2489f4f9208` and
+`a7a29dd4-11a7-4f5b-b996-b0fa6dadbcc8` passed with 0.447 mm and
+0.270 mm pickup corrections. Both measured 96% strip occupancy.
+
+Placement `bac0f763-00e1-4b64-b3c1-57dccde3a487` reported R12 as good.
+Its bottom-camera center residual was 0.088 mm. Top inspection measured
+-0.020 mm X, -0.240 mm Y, and -0.033 degrees. Placement
+`914ae61c-7a80-4976-aff2-b0f13be4e6cc` also reported R13 as good. Its
+bottom-camera center residual was 0.091 mm. Top inspection measured 0.000 mm
+X, -0.400 mm Y, and -2.870 degrees.
+
+The operator found two resistors stacked at both R12 and R13. Retained
+pre-placement images show that each target already had one resistor before
+these executions. Earlier failed release or inspection runs had reached both
+board targets. The executor captured the pre-placement images but used them
+only as change references. It did not reject an already contacted target.
+
+The ordinary physical executor now stores the exact board instance in each
+report. It rejects a reference when any earlier physical execution reached the
+placement pose on that board instance. Old reports use their stored
+single-board job for this check. This conservative one-contact rule also
+protects targets where release evidence is uncertain. A future explicit
+rework workflow must own any intentional reuse.
+
+Placement `b6b9a8d8-a035-43f2-8c15-b1585af075c3` put one resistor on the
+previously empty R14 target. Top inspection measured -0.020 mm X, -0.100 mm Y,
+and -4.474 degrees. The automatic four-degree limit rejected it. The operator
+reported that it was a little angled but would reflow correctly. Operator
+reviews can now use `stacked` to distinguish duplicate placement from other
+bad results.
+
+The saved operator reviews mark R12 and R13 as `stacked` and R14 as `good`.
+The revised +0.10 mm summary has two accepted and two rejected conclusive
+results, for a 50% pass rate. It does not qualify the process.
+
+No more physical placements ran after the operator found the stacks. The
+machine remained homed with the nozzle at safe Z31.5.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

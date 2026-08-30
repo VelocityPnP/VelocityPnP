@@ -122,7 +122,7 @@ const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const MINIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 0.70;
 const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v4";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v5";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
 const BOARD_SURFACE_MAX_FRACTION_P95_DEVIATION: f64 = 0.10;
@@ -20794,6 +20794,7 @@ async fn start_guarded_placement_execution(
             ));
         }
         validate_guarded_board_surface(&state, &step, body.calibration_id)?;
+        validate_guarded_board_target_unused(&state, &step)?;
     }
     let motion_calibration = load_job_motion_calibration(&state, body.calibration_id)?;
     let motion_planner = MotionPlanner::new(state.profile.bounds, Some(motion_calibration));
@@ -20911,6 +20912,50 @@ fn validate_guarded_board_surface(
         return Err(ApiError::bad_request(
             "placement board surface is not current for the planned calibration and nozzle",
         ));
+    }
+    Ok(())
+}
+
+fn validate_guarded_board_target_unused(state: &AppState, step: &PlanStep) -> ApiResult<()> {
+    let jobs = state
+        .store
+        .list_jobs()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|job| (job.id, job))
+        .collect::<HashMap<_, _>>();
+    let prior = state
+        .store
+        .list_placement_executions()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|run| {
+            let Some(report) = run.report.as_ref().filter(|report| !report.simulated) else {
+                return false;
+            };
+            if report.placement_reference != step.placement_reference
+                || !report
+                    .stages
+                    .iter()
+                    .any(|stage| stage.stage == PlacementExecutionStage::Placement && stage.passed)
+            {
+                return false;
+            }
+            if report.board_instance_id == Some(step.board_instance_id) {
+                return true;
+            }
+            report.board_instance_id.is_none()
+                && jobs.get(&run.job_id).is_some_and(|job| {
+                    job.boards
+                        .iter()
+                        .any(|board| board.id == step.board_instance_id)
+                })
+        });
+    if let Some(prior) = prior {
+        return Err(ApiError::bad_request(format!(
+            "placement target {} has prior physical board contact in execution {}; ordinary placement will not reuse this target",
+            step.placement_reference, prior.id,
+        )));
     }
     Ok(())
 }
@@ -21352,6 +21397,7 @@ async fn execute_guarded_placement_task(
     let mut report = PlacementExecutionReport {
         algorithm_version: PLACEMENT_EXECUTION_ALGORITHM.into(),
         simulated: physical.is_none(),
+        board_instance_id: Some(step.board_instance_id),
         placement_reference: step.placement_reference.clone(),
         part_key: step.part_key.clone(),
         feeder_id: step.feeder_id,
@@ -24062,6 +24108,7 @@ mod tests {
         PlacementExecutionReport {
             algorithm_version: PLACEMENT_EXECUTION_ALGORITHM.into(),
             simulated: false,
+            board_instance_id: None,
             placement_reference: "D1".into(),
             part_key: "LED_SMD:LED_0603_1608Metric:LED_Small".into(),
             feeder_id,
@@ -24773,6 +24820,7 @@ mod tests {
         let mut report = PlacementExecutionReport {
             algorithm_version: PLACEMENT_EXECUTION_ALGORITHM.into(),
             simulated: true,
+            board_instance_id: Some(step.board_instance_id),
             placement_reference: step.placement_reference.clone(),
             part_key: step.part_key.clone(),
             feeder_id: step.feeder_id,
@@ -24812,6 +24860,82 @@ mod tests {
                 .raw_value,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn prior_physical_board_contact_blocks_an_ordinary_repeat() {
+        let state = test_state();
+        let board_instance_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        state
+            .store
+            .put_job(&Job {
+                id: job_id,
+                name: "contact gate fixture".into(),
+                boards: vec![BoardInstance {
+                    id: board_instance_id,
+                    board_id: Uuid::new_v4(),
+                    label: "fixture".into(),
+                    side: BoardSide::Top,
+                    design_to_machine: None,
+                    surface_z_mm: Some(3.4),
+                    placement_surface_offset_mm: 0.0,
+                }],
+                placement_references: vec!["D1".into()],
+                placement_seating_offset_mm: Some(0.1),
+                status: "ready".into(),
+            })
+            .unwrap();
+        let now = Utc::now();
+        let mut report = test_passed_placement_report(Uuid::new_v4());
+        report.stages = vec![PlacementExecutionStageReport {
+            stage: PlacementExecutionStage::Placement,
+            passed: true,
+            message: "reached the board".into(),
+        }];
+        let mut run = PlacementExecutionRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            job_id,
+            step_index: 0,
+            calibration_id: Uuid::new_v4(),
+            status: OperationStatus::Failed,
+            created_at: now,
+            updated_at: now,
+            report: Some(report),
+            message: Some("release was uncertain".into()),
+        };
+        state.store.put_placement_execution(&run).unwrap();
+        let step = PlanStep {
+            board_instance_id,
+            placement_reference: "D1".into(),
+            part_key: "LED".into(),
+            feeder_id: Uuid::new_v4(),
+            nozzle_id: "N1".into(),
+            part_height_mm: 0.55,
+            body_width_mm: 0.8,
+            body_length_mm: 1.6,
+            part_orientation: PartOrientation::AxisSymmetric,
+            feeder_part_rotation_deg: 0.0,
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: 0.1,
+            feeder_pick: Pose::ORIGIN,
+            board_place: Pose::ORIGIN,
+            safe_z_mm: 31.5,
+        };
+
+        let error = validate_guarded_board_target_unused(&state, &step).unwrap_err();
+        assert!(error.message.contains("prior physical board contact"));
+        assert!(error.message.contains(&run.id.to_string()));
+
+        run.report.as_mut().unwrap().board_instance_id = Some(Uuid::new_v4());
+        state.store.put_placement_execution(&run).unwrap();
+        validate_guarded_board_target_unused(&state, &step).unwrap();
+
+        run.report.as_mut().unwrap().board_instance_id = Some(board_instance_id);
+        state.store.put_placement_execution(&run).unwrap();
+        let error = validate_guarded_board_target_unused(&state, &step).unwrap_err();
+        assert!(error.message.contains("prior physical board contact"));
     }
 
     #[tokio::test]

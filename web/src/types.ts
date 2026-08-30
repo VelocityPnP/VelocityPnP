@@ -1060,6 +1060,7 @@ export interface StripFeederPickupQualificationRun {
 export interface PlacementExecutionReport {
   algorithm_version: string;
   simulated: boolean;
+  board_instance_id: string | null;
   placement_reference: string;
   part_key: string;
   feeder_id: string;
