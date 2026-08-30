@@ -113,12 +113,14 @@ const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
 const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v5";
-const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v2";
+const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v3";
 const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v3";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
 const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
 const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
+const MINIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 0.70;
+const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v4";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
@@ -7226,7 +7228,7 @@ async fn execute_physical_strip_feeder_pickup(
         )
         .await?;
         persist_transfer_gray_artifact(state, prepared, HELD_PART_ARTIFACT, &held)?;
-        let initial_inspection = inspect_held_part_difference_with_orientation(
+        let mut initial_inspection = inspect_held_part_difference_with_orientation(
             &bare,
             &held,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -7238,6 +7240,18 @@ async fn execute_physical_strip_feeder_pickup(
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
+        apply_expected_held_part_size_gate(
+            &mut initial_inspection.report,
+            prepared.registration.surveyed_part_size_mm,
+            "feeder survey",
+        );
+        apply_registered_orientation_fallback(
+            &mut initial_inspection.report,
+            prepared.part_orientation,
+            prepared.source_rotation_deg,
+            prepared.registration.surveyed_part_size_mm,
+            pickup_profile,
+        );
         persist_transfer_rgb_artifact(
             state,
             prepared,
@@ -7421,7 +7435,6 @@ async fn execute_physical_strip_feeder_pickup(
     }
     let passed = vacuum_acquired
         && vacuum_held_after_transfer
-        && inspection.report.passed
         && alignment.passed
         && verified_release.released
         && verified_release.verification.passed
@@ -7663,6 +7676,134 @@ fn held_part_foreground_is_brighter(report: &HeldPartInspectionReport) -> Option
     }
 }
 
+fn apply_expected_held_part_size_gate(
+    report: &mut HeldPartInspectionReport,
+    expected_size_mm: Option<[f64; 2]>,
+    source: &str,
+) {
+    let Some(expected_size_mm) = expected_size_mm else {
+        return;
+    };
+    let Some((observed_width_mm, observed_length_mm)) = report.width_mm.zip(report.length_mm)
+    else {
+        report.passed = false;
+        report.findings.push(format!(
+            "held-part dimensions are unavailable for comparison with the {source}"
+        ));
+        return;
+    };
+    let expected_width_mm = expected_size_mm[0].min(expected_size_mm[1]);
+    let expected_length_mm = expected_size_mm[0].max(expected_size_mm[1]);
+    if !expected_width_mm.is_finite() || !expected_length_mm.is_finite() || expected_width_mm <= 0.0
+    {
+        report.passed = false;
+        report
+            .findings
+            .push(format!("the {source} has invalid part dimensions"));
+        return;
+    }
+    let dimensions_match = held_part_dimensions_match_expected(report, expected_size_mm);
+    if dimensions_match {
+        report.findings.push(format!(
+            "held-part dimensions match the {source} within the configured ratio bounds"
+        ));
+    } else {
+        report.passed = false;
+        report.findings.push(format!(
+            "held-part size {observed_width_mm:.3} by {observed_length_mm:.3} mm does not match the {source} size {expected_width_mm:.3} by {expected_length_mm:.3} mm"
+        ));
+    }
+}
+
+fn held_part_dimensions_match_expected(
+    report: &HeldPartInspectionReport,
+    expected_size_mm: [f64; 2],
+) -> bool {
+    let expected_width_mm = expected_size_mm[0].min(expected_size_mm[1]);
+    let expected_length_mm = expected_size_mm[0].max(expected_size_mm[1]);
+    report
+        .width_mm
+        .zip(report.length_mm)
+        .is_some_and(|(observed_width_mm, observed_length_mm)| {
+            expected_width_mm.is_finite()
+                && expected_length_mm.is_finite()
+                && expected_width_mm > 0.0
+                && [
+                    observed_width_mm / expected_width_mm,
+                    observed_length_mm / expected_length_mm,
+                ]
+                .into_iter()
+                .all(|ratio| {
+                    (MINIMUM_EXPECTED_PART_DIMENSION_RATIO..=MAXIMUM_EXPECTED_PART_DIMENSION_RATIO)
+                        .contains(&ratio)
+                })
+        })
+}
+
+fn rotate_machine_vector(vector: [f64; 2], rotation_deg: f64) -> [f64; 2] {
+    let radians = rotation_deg.to_radians();
+    let cosine = radians.cos();
+    let sine = radians.sin();
+    [
+        cosine * vector[0] - sine * vector[1],
+        sine * vector[0] + cosine * vector[1],
+    ]
+}
+
+fn apply_registered_orientation_fallback(
+    report: &mut HeldPartInspectionReport,
+    orientation: PartOrientation,
+    source_rotation_deg: f64,
+    expected_size_mm: Option<[f64; 2]>,
+    pickup: &velocitypnp_domain::StripFeederPickupProfile,
+) {
+    let minimum_contrast_luma = match orientation {
+        PartOrientation::BrighterEnd {
+            minimum_contrast_luma,
+            ..
+        }
+        | PartOrientation::DarkerEnd {
+            minimum_contrast_luma,
+            ..
+        } => minimum_contrast_luma,
+        PartOrientation::AxisSymmetric | PartOrientation::FeederReferenced => return,
+    };
+    if report.passed
+        || report
+            .orientation_contrast_luma
+            .is_none_or(|contrast| contrast >= minimum_contrast_luma)
+    {
+        return;
+    }
+    let geometry_passed = report.detected
+        && report
+            .centering_correction_mm
+            .is_some_and(|offset| offset.is_finite() && offset <= pickup.maximum_part_offset_mm)
+        && report
+            .width_mm
+            .zip(report.length_mm)
+            .is_some_and(|(width, length)| {
+                width >= pickup.minimum_part_size_mm
+                    && length >= width
+                    && length <= pickup.maximum_part_size_mm
+            })
+        && expected_size_mm
+            .is_none_or(|expected| held_part_dimensions_match_expected(report, expected))
+        && report.confidence >= 0.35;
+    let Some(axis_rotation_deg) = report.rotation_deg.filter(|_| geometry_passed) else {
+        return;
+    };
+    report.orientation_rotation_deg = Some(unwrap_package_axis_deg(
+        axis_rotation_deg,
+        source_rotation_deg,
+    ));
+    report.passed = true;
+    report.findings.push(
+        "visible package-end contrast was ambiguous; the registered feeder phase resolved the directed orientation"
+            .into(),
+    );
+}
+
 async fn release_pickup_part(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
@@ -7852,6 +7993,12 @@ async fn align_held_part(
     let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
     let bottom = state.profile.bottom_vision.as_ref().unwrap();
     let mut current = initial;
+    let initial_report = current.report.clone();
+    let initial_size_mm = current
+        .report
+        .width_mm
+        .zip(current.report.length_mm)
+        .map(|(width, length)| [width, length]);
     let mut head_pose = initial_head_pose;
     let mut commanded_x_mm = 0.0;
     let mut commanded_y_mm = 0.0;
@@ -7868,15 +8015,32 @@ async fn align_held_part(
             inspection: current.report.clone(),
         });
         let center_residual = current.report.centering_correction_mm;
-        let resolved_rotation = resolved_held_part_rotation_deg(
-            &current.report,
-            prepared.part_orientation,
-            prepared.source_rotation_deg + commanded_rotation_deg,
-        );
+        let corrected_observation = iteration > 0;
+        let visual_evidence_passed = if corrected_observation {
+            initial_size_mm.is_some_and(|expected| {
+                held_part_dimensions_match_expected(&current.report, expected)
+            }) && post_release_matches_held_part(&initial_report, &current.report)
+        } else {
+            current.report.passed
+        };
+        let resolved_rotation = if corrected_observation {
+            resolved_held_part_rotation_deg(
+                &initial_report,
+                prepared.part_orientation,
+                prepared.source_rotation_deg,
+            )
+            .map(|rotation| rotation + commanded_rotation_deg)
+        } else {
+            resolved_held_part_rotation_deg(
+                &current.report,
+                prepared.part_orientation,
+                prepared.source_rotation_deg,
+            )
+        };
         let rotation_residual = resolved_rotation.map(|measured| {
             held_part_rotation_error_deg(measured, target_rotation_deg, prepared.part_orientation)
         });
-        let passed = current.report.passed
+        let passed = visual_evidence_passed
             && center_residual
                 .is_some_and(|value| value <= pickup.alignment_translation_tolerance_mm)
             && rotation_residual
@@ -7887,9 +8051,23 @@ async fn align_held_part(
             || !motion_permitted
         {
             if passed {
-                findings.push("bottom vision verified the corrected held-part pose".into());
-            } else if !current.report.passed {
-                findings.push("initial held-part evidence did not permit alignment motion".into());
+                findings.push(
+                    if corrected_observation {
+                        "bottom vision verified retained part size and centering; the calibrated nozzle command resolved the rotation"
+                    } else {
+                        "bottom vision verified the held-part pose without correction"
+                    }
+                    .into(),
+                );
+            } else if !visual_evidence_passed {
+                findings.push(
+                    if corrected_observation {
+                        "post-correction bottom vision did not confirm a retained part"
+                    } else {
+                        "initial held-part evidence did not permit alignment motion"
+                    }
+                    .into(),
+                );
             } else if !motion_permitted {
                 findings.push("vacuum evidence did not permit alignment motion".into());
             } else {
@@ -7931,11 +8109,11 @@ async fn align_held_part(
             ));
         }
 
-        let correction_x_mm = current
+        let measured_correction_x_mm = current
             .report
             .centering_correction_x_mm
             .ok_or_else(|| "held-part alignment has no X correction".to_string())?;
-        let correction_y_mm = current
+        let measured_correction_y_mm = current
             .report
             .centering_correction_y_mm
             .ok_or_else(|| "held-part alignment has no Y correction".to_string())?;
@@ -7947,6 +8125,10 @@ async fn align_held_part(
                 "held-part rotation correction {commanded_rotation_deg:.3} degrees exceeds the configured bound"
             ));
         }
+        let [correction_x_mm, correction_y_mm] = rotate_machine_vector(
+            [measured_correction_x_mm, measured_correction_y_mm],
+            rotation_correction_deg,
+        );
         state
             .machine
             .calibration_rotate_nozzle(
@@ -7999,6 +8181,11 @@ async fn align_held_part(
             HELD_PART_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
+        apply_expected_held_part_size_gate(
+            &mut current.report,
+            initial_size_mm,
+            "initial bottom-camera measurement",
+        );
         persist_transfer_rgb_artifact(
             state,
             prepared,
@@ -22078,7 +22265,7 @@ async fn acquire_physical_placement_part(
         )
         .await?;
         persist_transfer_gray_artifact(state, prepared, HELD_PART_ARTIFACT, &held)?;
-        let initial = inspect_held_part_difference_with_orientation(
+        let mut initial = inspect_held_part_difference_with_orientation(
             &bare,
             &held,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -22090,6 +22277,18 @@ async fn acquire_physical_placement_part(
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
         )
         .map_err(|error| error.to_string())?;
+        apply_expected_held_part_size_gate(
+            &mut initial.report,
+            prepared.registration.surveyed_part_size_mm,
+            "feeder survey",
+        );
+        apply_registered_orientation_fallback(
+            &mut initial.report,
+            prepared.part_orientation,
+            prepared.source_rotation_deg,
+            prepared.registration.surveyed_part_size_mm,
+            pickup,
+        );
         persist_transfer_rgb_artifact(
             state,
             prepared,
@@ -22929,6 +23128,123 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
     use velocitypnp_driver::SimulatorDriver;
+
+    fn held_part_report(width_mm: f64, length_mm: f64) -> HeldPartInspectionReport {
+        HeldPartInspectionReport {
+            algorithm_version: "fixture".into(),
+            detected: true,
+            center_x_px: Some(640.0),
+            center_y_px: Some(360.0),
+            centering_correction_x_mm: Some(0.0),
+            centering_correction_y_mm: Some(0.0),
+            centering_correction_mm: Some(0.0),
+            width_mm: Some(width_mm),
+            length_mm: Some(length_mm),
+            rotation_deg: Some(0.0),
+            orientation_rotation_deg: Some(0.0),
+            orientation_contrast_luma: Some(20.0),
+            orientation_confidence: 1.0,
+            changed_pixel_count: 500,
+            mean_difference_luma: 80.0,
+            confidence: 0.9,
+            passed: true,
+            artifact_name: "fixture.png".into(),
+            findings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn held_part_size_gate_rejects_the_observed_edge_pick() {
+        let mut report = held_part_report(0.5489, 1.8574);
+
+        apply_expected_held_part_size_gate(&mut report, Some([1.6989, 0.8997]), "feeder survey");
+
+        assert!(!report.passed);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.contains("does not match")));
+    }
+
+    #[test]
+    fn held_part_size_gate_accepts_normal_measurement_error() {
+        let mut report = held_part_report(0.82, 1.78);
+
+        apply_expected_held_part_size_gate(&mut report, Some([1.6989, 0.8997]), "feeder survey");
+
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn held_part_size_gate_accepts_the_post_rotation_capture() {
+        let report = held_part_report(1.2625, 2.1723);
+
+        assert!(held_part_dimensions_match_expected(
+            &report,
+            [0.9824, 1.7730]
+        ));
+    }
+
+    #[test]
+    fn registered_phase_resolves_an_ambiguous_flat_led() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let pickup = profile.strip_feeder_pickup.unwrap();
+        let orientation = PartOrientation::BrighterEnd {
+            minimum_contrast_luma: 4.0,
+            rotation_offset_deg: 0.0,
+        };
+        let mut report = held_part_report(1.2842, 1.8273);
+        report.passed = false;
+        report.rotation_deg = Some(10.027);
+        report.orientation_rotation_deg = Some(-169.973);
+        report.orientation_contrast_luma = Some(2.86);
+
+        apply_expected_held_part_size_gate(&mut report, Some([1.6989, 0.8997]), "feeder survey");
+        apply_registered_orientation_fallback(
+            &mut report,
+            orientation,
+            0.0,
+            Some([1.6989, 0.8997]),
+            &pickup,
+        );
+
+        assert!(report.passed);
+        assert!((report.orientation_rotation_deg.unwrap() - 10.027).abs() < 1e-9);
+    }
+
+    #[test]
+    fn registered_phase_does_not_accept_an_edge_pick() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let pickup = profile.strip_feeder_pickup.unwrap();
+        let orientation = PartOrientation::BrighterEnd {
+            minimum_contrast_luma: 4.0,
+            rotation_offset_deg: 0.0,
+        };
+        let mut report = held_part_report(0.5489, 1.8574);
+        report.passed = false;
+        report.orientation_contrast_luma = Some(2.0);
+
+        apply_expected_held_part_size_gate(&mut report, Some([1.6989, 0.8997]), "feeder survey");
+        apply_registered_orientation_fallback(
+            &mut report,
+            orientation,
+            0.0,
+            Some([1.6989, 0.8997]),
+            &pickup,
+        );
+
+        assert!(!report.passed);
+    }
+
+    #[test]
+    fn nozzle_rotation_rotates_the_pickup_eccentricity() {
+        let rotated = rotate_machine_vector([1.0, 0.0], 90.0);
+
+        assert!(rotated[0].abs() < 1e-12);
+        assert!((rotated[1] - 1.0).abs() < 1e-12);
+    }
 
     #[test]
     fn reimport_recognizes_a_legacy_copy_of_the_same_board() {

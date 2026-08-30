@@ -2616,6 +2616,62 @@ pump and valve are off. The edge-standing LED remains mechanically attached
 to N1 and needs operator removal. This failed experiment does not permit an
 automatic source-pocket valve retry.
 
+### Directed LED geometry and alignment correction
+
+On 2026-08-30, pickup qualification
+`96acfe40-07c2-4109-b9da-f2f9902b9238` acquired another LED at nozzle Z4.2.
+The initial 0.549 by 1.857 mm observation was much narrower than the feeder
+survey's 0.900 by 1.699 mm body. The raw image showed an edge-held LED. The
+alignment loop also compared the rotated nozzle with its zero-angle reference.
+This inflated later measurements and caused an invalid second correction. The
+part was released, but top vision did not confirm an accurate pocket return.
+
+Pickup now compares the initial bottom-camera dimensions with the feeder
+survey. Each dimension must be between 70% and 150% of the survey value. This
+rejects the 0.549 mm edge pickup but permits bounded lighting and segmentation
+growth around a flat package. Each later alignment image must also match the
+initial dimensions.
+
+The alignment translation now rotates with the commanded nozzle angle. If the
+initial part-to-nozzle correction is `C` and the nozzle turns by `a`, the move
+uses `R(a)C`. This accounts for the part center rotating around the nozzle
+axis. The initial directed phase plus the calibrated nozzle command supplies
+the corrected phase. Later bottom-camera images still verify part retention,
+dimensions, and center position. They do not replace that phase with nozzle
+reflection artifacts.
+
+Coarse home `ace08d9f-7077-4dcd-af81-a9534ef1a099` and fine home
+`9f51747e-5f8d-48e7-bbd4-2692dcae8a43` passed. Holdout
+`e5632eb8-a082-4c0d-b65f-8bacd6f01512` passed. Qualification
+`3b1bdde1-fd0e-4fda-8fc3-82a897817d8b` then acquired a flat 0.982 by
+1.773 mm LED. Its initial center error was 0.444 mm. One combined -0.721
+degree rotation and XY correction reduced the center residual to 0.049 mm.
+The final image had only 3.5 luma of end contrast, so this run stopped and
+returned the LED. Release and top-camera pocket return passed.
+
+The directed policy now uses the registered feeder phase when the visible end
+contrast is ambiguous but package geometry passes. This fallback uses the
+measured package axis. It cannot override an edge-size failure. Qualification
+`45435485-0434-403f-939a-45e7b1306907` stopped without pickup when another
+pocket produced no vacuum transition. Qualification
+`bb52615b-a45c-4a69-a665-b561e84fbc5d` acquired and returned a flat LED, but
+ran before the registered-phase fallback was deployed.
+
+The final build passed coarse home `14e42b16-0eaa-41ab-a23e-adc48dc0725e`
+and fine home `8352a49a-6283-40ca-9948-4b40907dd35d`. Qualification
+`dd007d04-fb22-4ee6-9688-077c4a0b9bd2` acquired a 0.958 by 1.828 mm LED at
+nozzle Z4.2. Its initial angle was +12.482 degrees and its center error was
+0.144 mm. One combined correction produced a 0.008 mm center residual. The
+rotation model resolved 0.000 degrees, while the final image independently
+measured +0.908 degrees. Vacuum release, clear-nozzle inspection, and top
+pocket inspection passed.
+
+The final return moved the LED by 0.325 mm in its pocket. Earlier returns also
+changed small LED angles. Repeated return qualification is therefore not the
+preferred validation path for this irregular 0603 package. Future LED checks
+should place a good, aligned part on the prepared board and use top-camera
+inspection instead of repeatedly disturbing the carrier tape.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
