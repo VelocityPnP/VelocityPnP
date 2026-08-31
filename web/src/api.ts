@@ -2,7 +2,8 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Operation, PlacementExecutionRun, SensorReading, StripFeederLiveHoldoutRun,
+  Job, JobExecutionRun, Operation, PlacementExecutionRun, SensorReading,
+  StripFeederLiveHoldoutRun,
   StripFeederPickupQualificationRun, StripFeederRegistration,
   StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
   WorkspaceBoardDiscoveryReport,
@@ -276,6 +277,36 @@ export const api = {
   ),
   placementExecution: (executionId: string) =>
     request<PlacementExecutionRun>(`/placement-executions/${executionId}`),
+  jobs: async () => (await request<{ jobs: Job[] }>("/jobs")).jobs,
+  jobExecutions: async () =>
+    (await request<{ executions: JobExecutionRun[] }>("/job-executions")).executions,
+  jobExecution: (executionId: string) =>
+    request<JobExecutionRun>(`/job-executions/${executionId}`),
+  startJobExecution: (
+    jobId: string, leaseId: string, calibrationId: string,
+  ) => jsonPost<{ execution: JobExecutionRun; operation: Operation }>(
+    `/jobs/${jobId}/executions`,
+    {
+      lease_id: leaseId,
+      calibration_id: calibrationId,
+      confirmed_external_safety_checks: true,
+    },
+  ),
+  pauseJobExecution: (executionId: string) =>
+    jsonPost<JobExecutionRun>(`/job-executions/${executionId}/pause`),
+  cancelJobExecution: (executionId: string) =>
+    jsonPost<JobExecutionRun>(`/job-executions/${executionId}/cancel`),
+  resumeJobExecution: (executionId: string, leaseId: string) =>
+    jsonPost<{ execution: JobExecutionRun; operation: Operation }>(
+      `/job-executions/${executionId}/resume`,
+      { lease_id: leaseId, confirmed_external_safety_checks: true },
+    ),
+  resolveJobExecutionStep: (
+    executionId: string, stepIndex: number, action: "retry" | "skip", note?: string,
+  ) => jsonPost<JobExecutionRun>(
+    `/job-executions/${executionId}/steps/${stepIndex}/resolve`,
+    { action, note: note ?? null },
+  ),
   reanalyzeStripFeederReturn: (qualificationId: string) =>
     jsonPost<StripFeederPickupQualificationRun>(
       `/strip-feeder-pickup-qualifications/${qualificationId}/reanalyze-return`,

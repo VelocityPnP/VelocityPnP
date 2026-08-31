@@ -35,29 +35,30 @@ use velocitypnp_domain::{
     HeldPartAlignmentObservation, HeldPartAlignmentReport, HeldPartInspectionReport,
     InspectionReport, InspectionStatus, InstalledGeometryCalibrationReport,
     InstalledPlateGeometryReport, InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job,
-    JogTarget, LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate,
-    LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
-    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
-    NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample, Operation,
-    OperationStatus, Part, PartOrientation, PlacementExecutionReport, PlacementExecutionRun,
-    PlacementExecutionStage, PlacementExecutionStageReport, PlacementOutcomeDisposition,
-    PlacementOutcomeRecord, PlacementProcessEstimate, PlanarCameraCalibrationReport,
-    PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
-    StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
-    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
-    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketState,
-    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
-    VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
-    VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
-    WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
-    WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary, WorkspaceChangeSetReport,
-    WorkspaceChangeSetSummary, WorkspaceHeightMapSummary, WorkspaceInventoryBaseline,
-    WorkspaceMosaicLayerReport, WorkspaceObjectClass, WorkspaceParallaxSummary,
-    WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
-    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
-    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
-    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
+    JobExecutionRun, JobExecutionStatus, JobExecutionStep, JobExecutionStepStatus, JogTarget,
+    LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate, LocalXyCompensationHoldout,
+    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, MachineProfile, MachineState,
+    NozzleHeightModel, NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport,
+    NozzleRunoutSample, Operation, OperationStatus, Part, PartOrientation,
+    PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
+    PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
+    PlacementProcessEstimate, PlanarCameraCalibrationReport, PlanarCameraCalibrationSample,
+    PlanarCameraModel, Pose, Residuals, SensorReading, StripFeederInventoryReport,
+    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupDisposition,
+    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
+    StripFeederPocketOutcome, StripFeederPocketState, StripFeederPocketStatus,
+    StripFeederRegistration, StripFeederRegistrationStatus, StripFeederVisionReport,
+    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
+    VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
+    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
+    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
+    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
+    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
+    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
+    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
+    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
+    WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -123,6 +124,7 @@ const MINIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 0.70;
 const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v5";
+const PLACEMENT_OUTCOME_ALGORITHM: &str = "placement_outcome.v2";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
 const BOARD_SURFACE_MAX_FRACTION_P95_DEVIATION: f64 = 0.10;
@@ -241,7 +243,106 @@ impl AppState {
         state.recover_interrupted_strip_feeder_holdouts();
         state.recover_interrupted_strip_feeder_pickups();
         state.recover_interrupted_placement_executions();
+        state.recover_interrupted_job_executions();
+        state.refresh_automatic_placement_outcomes();
         state
+    }
+
+    fn refresh_automatic_placement_outcomes(&self) {
+        let Ok(runs) = self.store.list_placement_executions() else {
+            tracing::error!("failed to inspect placement outcomes during startup");
+            return;
+        };
+        for run in runs.into_iter().filter(|run| {
+            !matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            ) && run.report.as_ref().is_some_and(|report| !report.simulated)
+        }) {
+            let current = self.store.get_placement_outcome(run.id).ok().flatten();
+            if current.as_ref().is_some_and(|outcome| {
+                outcome.automatic_algorithm_version == PLACEMENT_OUTCOME_ALGORITHM
+            }) {
+                continue;
+            }
+            if let Err(error) = persist_automatic_placement_outcome(self, &run) {
+                tracing::error!(%error, execution_id = %run.id, "failed to refresh placement outcome");
+            }
+        }
+    }
+
+    fn recover_interrupted_job_executions(&self) {
+        let Ok(runs) = self.store.list_job_executions() else {
+            tracing::error!("failed to inspect job executions during startup");
+            return;
+        };
+        for mut run in runs.into_iter().filter(|run| {
+            matches!(
+                run.status,
+                JobExecutionStatus::Pending | JobExecutionStatus::Running
+            )
+        }) {
+            let mut needs_attention = false;
+            for step in &mut run.steps {
+                if step.status != JobExecutionStepStatus::Running {
+                    continue;
+                }
+                let placement = step
+                    .execution_id
+                    .and_then(|id| self.store.get_placement_execution(id).ok().flatten());
+                if placement
+                    .as_ref()
+                    .is_some_and(|placement| placement.status == OperationStatus::Succeeded)
+                {
+                    step.status = JobExecutionStepStatus::Succeeded;
+                    step.message = placement.and_then(|placement| placement.message);
+                } else {
+                    step.status = JobExecutionStepStatus::NeedsAttention;
+                    step.board_contacted = placement.as_ref().is_some_and(|placement| {
+                        placement.report.as_ref().is_some_and(|report| {
+                            report.stages.iter().any(|stage| {
+                                stage.stage == PlacementExecutionStage::Placement && stage.passed
+                            })
+                        })
+                    });
+                    step.message = Some(
+                        placement
+                            .and_then(|placement| placement.message)
+                            .unwrap_or_else(|| "daemon restarted during this placement".into()),
+                    );
+                    needs_attention = true;
+                }
+            }
+            run.status = if needs_attention {
+                JobExecutionStatus::NeedsAttention
+            } else {
+                JobExecutionStatus::Paused
+            };
+            run.current_step_index = None;
+            run.pause_requested = false;
+            run.message = Some(if needs_attention {
+                "daemon restarted during a placement; resolve it before resume".into()
+            } else {
+                "daemon restarted; reconnect, fine-home, and resume this job".into()
+            });
+            run.updated_at = Utc::now();
+            if let Err(error) = self.store.put_job_execution(&run) {
+                tracing::error!(%error, job_execution_id = %run.id, "failed to recover job execution");
+            }
+            if let Ok(Some(mut operation)) = self.store.get_operation(run.operation_id) {
+                if matches!(
+                    operation.status,
+                    OperationStatus::Pending | OperationStatus::Running
+                ) {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some("daemon restarted; job execution is resumable".into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(%error, operation_id = %operation.id, "failed to recover job operation");
+                    }
+                }
+            }
+        }
     }
 
     fn recover_interrupted_placement_executions(&self) {
@@ -832,6 +933,25 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/jobs", get(list_jobs).post(put_job))
         .route("/api/v1/jobs/{id}/plan", get(get_job_plan))
         .route("/api/v1/jobs/{id}/simulate", post(simulate_job))
+        .route("/api/v1/jobs/{id}/executions", post(start_job_execution))
+        .route("/api/v1/job-executions", get(list_job_executions))
+        .route("/api/v1/job-executions/{id}", get(get_job_execution))
+        .route(
+            "/api/v1/job-executions/{id}/pause",
+            post(pause_job_execution),
+        )
+        .route(
+            "/api/v1/job-executions/{id}/resume",
+            post(resume_job_execution),
+        )
+        .route(
+            "/api/v1/job-executions/{id}/cancel",
+            post(cancel_job_execution),
+        )
+        .route(
+            "/api/v1/job-executions/{id}/steps/{step_index}/resolve",
+            post(resolve_job_execution_step),
+        )
         .route(
             "/api/v1/jobs/{id}/placement-executions",
             post(start_guarded_placement_execution),
@@ -5862,10 +5982,7 @@ async fn start_strip_feeder_live_holdout(
             "strip feeder registration has no pocket hypotheses",
         ));
     }
-    let pocket_index = body
-        .pocket_index
-        .map(|index| index as usize)
-        .unwrap_or(registration.pocket_centers_machine_mm.len() / 2);
+    let pocket_index = live_holdout_pocket_index(&registration, body.pocket_index)?;
     let predicted_pocket_machine_mm = registration
         .pocket_centers_machine_mm
         .get(pocket_index)
@@ -5944,6 +6061,25 @@ async fn start_strip_feeder_live_holdout(
         ),
     );
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+fn live_holdout_pocket_index(
+    registration: &StripFeederRegistration,
+    requested: Option<u32>,
+) -> ApiResult<usize> {
+    requested.map_or_else(
+        || {
+            registration
+                .next_available_pocket(None)
+                .map(|pocket| pocket.pocket_index as usize)
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "strip feeder has no available occupied pocket for live holdout",
+                    )
+                })
+        },
+        |index| Ok(index as usize),
+    )
 }
 
 fn ensure_no_active_strip_feeder_holdouts(state: &AppState) -> ApiResult<()> {
@@ -20708,6 +20844,615 @@ async fn simulate_job(
 }
 
 #[derive(Debug, Deserialize)]
+struct StartJobExecutionRequest {
+    lease_id: Uuid,
+    calibration_id: Uuid,
+    confirmed_external_safety_checks: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResumeJobExecutionRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StartJobExecutionResponse {
+    execution: JobExecutionRun,
+    operation: Operation,
+}
+
+#[derive(Debug, Serialize)]
+struct JobExecutionList {
+    executions: Vec<JobExecutionRun>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum JobExecutionResolution {
+    Retry,
+    Skip,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveJobExecutionStepRequest {
+    action: JobExecutionResolution,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+fn validate_job_execution_machine(
+    state: &AppState,
+    lease_id: Uuid,
+    calibration_id: Uuid,
+    safety_confirmed: bool,
+) -> ApiResult<bool> {
+    if !safety_confirmed {
+        return Err(ApiError::bad_request(
+            "job execution requires confirmation that the PCB and feeders are fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+        return Err(ApiError::bad_request(
+            "job execution requires a homed ready machine",
+        ));
+    }
+    if !status.simulated && status.calibration_revision != Some(calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "physical job execution requires fine XYZ homing with calibration {calibration_id}"
+        )));
+    }
+    Ok(status.simulated)
+}
+
+async fn start_job_execution(
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+    Json(body): Json<StartJobExecutionRequest>,
+) -> ApiResult<(StatusCode, Json<StartJobExecutionResponse>)> {
+    let simulated = validate_job_execution_machine(
+        &state,
+        body.lease_id,
+        body.calibration_id,
+        body.confirmed_external_safety_checks,
+    )?;
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    ensure_no_active_placement_executions(&state)?;
+    ensure_no_active_job_executions(&state)?;
+    let job = state
+        .store
+        .get_job(job_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("job not found"))?;
+    let boards = state
+        .store
+        .list_boards()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|board| (board.id, board))
+        .collect::<HashMap<_, _>>();
+    let feeders = state.store.list_feeders().map_err(ApiError::internal)?;
+    let parts = state
+        .store
+        .list_parts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|part| (part.key.clone(), part))
+        .collect::<HashMap<_, _>>();
+    let plan = plan_job(&job, &boards, &feeders, &parts, &state.profile);
+    if !plan.report.ready {
+        return Err(ApiError::bad_request(format!(
+            "job-execution preflight failed: {}",
+            plan.report.errors.join("; ")
+        )));
+    }
+    if plan.steps.is_empty() {
+        return Err(ApiError::bad_request("job plan has no placement steps"));
+    }
+    let operation = Operation::pending(if simulated {
+        "job.execution.simulate"
+    } else {
+        "job.execution.physical"
+    });
+    let now = Utc::now();
+    let run = JobExecutionRun {
+        id: Uuid::new_v4(),
+        operation_id: operation.id,
+        job_id,
+        calibration_id: body.calibration_id,
+        simulated,
+        status: JobExecutionStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        steps: plan
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(step_index, step)| JobExecutionStep {
+                step_index: step_index as u32,
+                placement_reference: step.placement_reference.clone(),
+                status: JobExecutionStepStatus::Pending,
+                execution_id: None,
+                attempt_execution_ids: Vec::new(),
+                outcome_disposition: None,
+                board_contacted: false,
+                message: None,
+            })
+            .collect(),
+        current_step_index: None,
+        pause_requested: false,
+        cancel_requested: false,
+        message: Some(format!("{} placement steps are ready", plan.steps.len())),
+    };
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&operation)
+        .and_then(|_| state.store.put_job_execution(&run))
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartJobExecutionResponse {
+        execution: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_job_execution_task(task_state, run.id, body.lease_id),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn execute_job_execution_task(
+    state: AppState,
+    job_execution_id: Uuid,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    loop {
+        let mut run = state
+            .store
+            .get_job_execution(job_execution_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "job execution disappeared".to_string())?;
+        if run.cancel_requested {
+            run.status = JobExecutionStatus::Cancelled;
+            run.current_step_index = None;
+            run.message = Some("job execution cancelled between placements".into());
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_job_execution(&run)
+                .map_err(|error| error.to_string())?;
+            return Ok(run.message);
+        }
+        if run.pause_requested {
+            run.status = JobExecutionStatus::Paused;
+            run.current_step_index = None;
+            run.pause_requested = false;
+            run.message = Some("job execution paused between placements".into());
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_job_execution(&run)
+                .map_err(|error| error.to_string())?;
+            return Ok(run.message);
+        }
+        let Some(step_position) = run
+            .steps
+            .iter()
+            .position(|step| step.status == JobExecutionStepStatus::Pending)
+        else {
+            let skipped_count = run
+                .steps
+                .iter()
+                .filter(|step| step.status == JobExecutionStepStatus::Skipped)
+                .count();
+            run.status = if skipped_count == 0 {
+                JobExecutionStatus::Succeeded
+            } else {
+                JobExecutionStatus::CompletedWithSkips
+            };
+            run.current_step_index = None;
+            run.message = Some(format!(
+                "job execution completed {} placements with {} skipped",
+                run.steps
+                    .iter()
+                    .filter(|step| step.status == JobExecutionStepStatus::Succeeded)
+                    .count(),
+                skipped_count,
+            ));
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_job_execution(&run)
+                .map_err(|error| error.to_string())?;
+            return Ok(run.message);
+        };
+        let step_index = run.steps[step_position].step_index;
+        run.status = JobExecutionStatus::Running;
+        run.current_step_index = Some(step_index);
+        run.steps[step_position].status = JobExecutionStepStatus::Running;
+        run.steps[step_position].message = Some("preparing guarded placement".into());
+        run.updated_at = Utc::now();
+        state
+            .store
+            .put_job_execution(&run)
+            .map_err(|error| error.to_string())?;
+
+        let prepared = prepare_guarded_placement_execution(
+            &state,
+            run.job_id,
+            StartGuardedPlacementExecutionRequest {
+                lease_id,
+                calibration_id: run.calibration_id,
+                step_index,
+                confirmed_external_safety_checks: true,
+            },
+            Some(run.steps[step_position].placement_reference.as_str()),
+        )
+        .await;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                stop_job_execution_for_attention(
+                    &state,
+                    &mut run,
+                    step_position,
+                    error.message,
+                    false,
+                    None,
+                )?;
+                return Ok(run.message);
+            }
+        };
+        let child_execution_id = prepared.run.id;
+        run.steps[step_position].execution_id = Some(child_execution_id);
+        run.steps[step_position]
+            .attempt_execution_ids
+            .push(child_execution_id);
+        run.steps[step_position].message = Some("guarded placement is running".into());
+        run.updated_at = Utc::now();
+        state
+            .store
+            .put_job_execution(&run)
+            .map_err(|error| error.to_string())?;
+
+        let mut child_operation = prepared.operation;
+        child_operation.status = OperationStatus::Running;
+        child_operation.updated_at = Utc::now();
+        state
+            .store
+            .put_operation(&child_operation)
+            .map_err(|error| error.to_string())?;
+        let child_result = execute_guarded_placement_task(
+            state.clone(),
+            prepared.run,
+            prepared.step,
+            prepared.lease_id,
+            prepared.motion_planner,
+            prepared.physical,
+        )
+        .await;
+        match &child_result {
+            Ok(message) => {
+                child_operation.status = OperationStatus::Succeeded;
+                child_operation.message = message.clone();
+            }
+            Err(message) => {
+                child_operation.status = OperationStatus::Failed;
+                child_operation.message = Some(message.clone());
+            }
+        }
+        child_operation.updated_at = Utc::now();
+        state
+            .store
+            .put_operation(&child_operation)
+            .map_err(|error| error.to_string())?;
+        let child = state
+            .store
+            .get_placement_execution(child_execution_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "guarded placement result disappeared".to_string())?;
+        run = state
+            .store
+            .get_job_execution(job_execution_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "job execution disappeared".to_string())?;
+        let step_position = run
+            .steps
+            .iter()
+            .position(|step| step.step_index == step_index)
+            .ok_or_else(|| "running job step disappeared".to_string())?;
+        let board_contacted = child.report.as_ref().is_some_and(|report| {
+            report
+                .stages
+                .iter()
+                .any(|stage| stage.stage == PlacementExecutionStage::Placement && stage.passed)
+        });
+        let outcome = state
+            .store
+            .get_placement_outcome(child_execution_id)
+            .map_err(|error| error.to_string())?;
+        run.steps[step_position].board_contacted = board_contacted;
+        run.steps[step_position].outcome_disposition = outcome
+            .as_ref()
+            .map(PlacementOutcomeRecord::effective_disposition);
+        if child.status == OperationStatus::Succeeded {
+            run.steps[step_position].status = JobExecutionStepStatus::Succeeded;
+            run.steps[step_position].message = child.message;
+            run.current_step_index = None;
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_job_execution(&run)
+                .map_err(|error| error.to_string())?;
+            continue;
+        }
+        stop_job_execution_for_attention(
+            &state,
+            &mut run,
+            step_position,
+            child
+                .message
+                .unwrap_or_else(|| "guarded placement failed".into()),
+            board_contacted,
+            outcome.map(|outcome| outcome.effective_disposition()),
+        )?;
+        return Ok(run.message);
+    }
+}
+
+fn stop_job_execution_for_attention(
+    state: &AppState,
+    run: &mut JobExecutionRun,
+    step_position: usize,
+    message: String,
+    board_contacted: bool,
+    outcome: Option<PlacementOutcomeDisposition>,
+) -> Result<(), String> {
+    run.status = JobExecutionStatus::NeedsAttention;
+    run.current_step_index = Some(run.steps[step_position].step_index);
+    run.steps[step_position].status = JobExecutionStepStatus::NeedsAttention;
+    run.steps[step_position].board_contacted = board_contacted;
+    run.steps[step_position].outcome_disposition = outcome;
+    run.steps[step_position].message = Some(message.clone());
+    run.message = Some(format!(
+        "placement {} needs attention: {message}",
+        run.steps[step_position].placement_reference
+    ));
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_job_execution(run)
+        .map_err(|error| error.to_string())
+}
+
+async fn list_job_executions(State(state): State<AppState>) -> ApiResult<Json<JobExecutionList>> {
+    Ok(Json(JobExecutionList {
+        executions: state
+            .store
+            .list_job_executions()
+            .map_err(ApiError::internal)?,
+    }))
+}
+
+async fn get_job_execution(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<JobExecutionRun>> {
+    state
+        .store
+        .get_job_execution(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("job execution not found"))
+}
+
+async fn pause_job_execution(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<JobExecutionRun>> {
+    let mut run = state
+        .store
+        .get_job_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("job execution not found"))?;
+    match run.status {
+        JobExecutionStatus::Pending | JobExecutionStatus::Running => {
+            run.pause_requested = true;
+            run.message = Some("pause requested; the current placement will finish".into());
+        }
+        JobExecutionStatus::Paused => {}
+        _ => return Err(ApiError::bad_request("job execution cannot be paused")),
+    }
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_job_execution(&run)
+        .map_err(ApiError::internal)?;
+    Ok(Json(run))
+}
+
+async fn cancel_job_execution(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<JobExecutionRun>> {
+    let mut run = state
+        .store
+        .get_job_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("job execution not found"))?;
+    match run.status {
+        JobExecutionStatus::Pending | JobExecutionStatus::Running => {
+            run.cancel_requested = true;
+            run.message = Some("cancel requested; the current placement will finish".into());
+        }
+        JobExecutionStatus::Paused | JobExecutionStatus::NeedsAttention => {
+            run.status = JobExecutionStatus::Cancelled;
+            run.cancel_requested = true;
+            run.current_step_index = None;
+            run.message = Some("job execution cancelled".into());
+        }
+        JobExecutionStatus::Cancelled => {}
+        JobExecutionStatus::Succeeded | JobExecutionStatus::CompletedWithSkips => {
+            return Err(ApiError::bad_request(
+                "completed job execution cannot be cancelled",
+            ));
+        }
+    }
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_job_execution(&run)
+        .map_err(ApiError::internal)?;
+    Ok(Json(run))
+}
+
+async fn resolve_job_execution_step(
+    State(state): State<AppState>,
+    Path((id, step_index)): Path<(Uuid, u32)>,
+    Json(body): Json<ResolveJobExecutionStepRequest>,
+) -> ApiResult<Json<JobExecutionRun>> {
+    let mut run = state
+        .store
+        .get_job_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("job execution not found"))?;
+    if run.status != JobExecutionStatus::NeedsAttention {
+        return Err(ApiError::bad_request(
+            "job execution does not have an unresolved placement",
+        ));
+    }
+    let step = run
+        .steps
+        .iter_mut()
+        .find(|step| step.step_index == step_index)
+        .filter(|step| step.status == JobExecutionStepStatus::NeedsAttention)
+        .ok_or_else(|| ApiError::bad_request("job step does not need attention"))?;
+    let note = body
+        .note
+        .map(|note| note.trim().to_string())
+        .filter(|note| !note.is_empty());
+    match body.action {
+        JobExecutionResolution::Retry => {
+            if step.board_contacted {
+                return Err(ApiError::bad_request(
+                    "a placement that reached board contact cannot use ordinary retry",
+                ));
+            }
+            step.status = JobExecutionStepStatus::Pending;
+            step.execution_id = None;
+            step.outcome_disposition = None;
+            step.message = Some(note.unwrap_or_else(|| "operator approved retry".into()));
+        }
+        JobExecutionResolution::Skip => {
+            let Some(note) = note else {
+                return Err(ApiError::bad_request(
+                    "skipping a placement requires an operator note",
+                ));
+            };
+            step.status = JobExecutionStepStatus::Skipped;
+            step.message = Some(note);
+        }
+    }
+    run.status = JobExecutionStatus::Paused;
+    run.current_step_index = None;
+    run.message = Some("placement recovery recorded; resume when the machine is ready".into());
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_job_execution(&run)
+        .map_err(ApiError::internal)?;
+    Ok(Json(run))
+}
+
+async fn resume_job_execution(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ResumeJobExecutionRequest>,
+) -> ApiResult<(StatusCode, Json<StartJobExecutionResponse>)> {
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    ensure_no_active_placement_executions(&state)?;
+    let mut run = state
+        .store
+        .get_job_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("job execution not found"))?;
+    if run.status != JobExecutionStatus::Paused {
+        return Err(ApiError::bad_request(
+            "only a paused job execution can resume",
+        ));
+    }
+    if run
+        .steps
+        .iter()
+        .any(|step| step.status == JobExecutionStepStatus::NeedsAttention)
+    {
+        return Err(ApiError::bad_request(
+            "resolve the placement that needs attention before resume",
+        ));
+    }
+    validate_job_execution_machine(
+        &state,
+        body.lease_id,
+        run.calibration_id,
+        body.confirmed_external_safety_checks,
+    )?;
+    let operation = Operation::pending(if run.simulated {
+        "job.execution.resume_simulation"
+    } else {
+        "job.execution.resume_physical"
+    });
+    run.operation_id = operation.id;
+    run.status = JobExecutionStatus::Pending;
+    run.pause_requested = false;
+    run.cancel_requested = false;
+    run.message = Some("job execution resume queued".into());
+    run.updated_at = Utc::now();
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&operation)
+        .and_then(|_| state.store.put_job_execution(&run))
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartJobExecutionResponse {
+        execution: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_job_execution_task(task_state, run.id, body.lease_id),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+#[derive(Debug, Deserialize)]
 struct StartGuardedPlacementExecutionRequest {
     lease_id: Uuid,
     calibration_id: Uuid,
@@ -20722,11 +21467,48 @@ struct StartGuardedPlacementExecutionResponse {
     operation: Operation,
 }
 
+struct PreparedGuardedPlacementExecution {
+    lease_id: Uuid,
+    operation: Operation,
+    run: PlacementExecutionRun,
+    step: PlanStep,
+    motion_planner: MotionPlanner,
+    physical: Option<PreparedStripFeederPickup>,
+}
+
 async fn start_guarded_placement_execution(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
     Json(body): Json<StartGuardedPlacementExecutionRequest>,
 ) -> ApiResult<(StatusCode, Json<StartGuardedPlacementExecutionResponse>)> {
+    ensure_no_active_job_executions(&state)?;
+    let prepared = prepare_guarded_placement_execution(&state, job_id, body, None).await?;
+    let response = StartGuardedPlacementExecutionResponse {
+        execution: prepared.run.clone(),
+        operation: prepared.operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        prepared.operation,
+        execute_guarded_placement_task(
+            task_state,
+            prepared.run,
+            prepared.step,
+            prepared.lease_id,
+            prepared.motion_planner,
+            prepared.physical,
+        ),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn prepare_guarded_placement_execution(
+    state: &AppState,
+    job_id: Uuid,
+    body: StartGuardedPlacementExecutionRequest,
+    expected_placement_reference: Option<&str>,
+) -> ApiResult<PreparedGuardedPlacementExecution> {
     if !body.confirmed_external_safety_checks {
         return Err(ApiError::bad_request(
             "single placement requires confirmation that the PCB and feeders are fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
@@ -20748,12 +21530,12 @@ async fn start_guarded_placement_execution(
         )));
     }
     let admission_guard = state.workspace_scan_admission_lock.lock().await;
-    ensure_no_active_workspace_scans(&state)?;
-    ensure_no_active_board_registrations(&state)?;
-    ensure_no_active_board_surface_measurements(&state)?;
-    ensure_no_active_strip_feeder_holdouts(&state)?;
-    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
-    ensure_no_active_placement_executions(&state)?;
+    ensure_no_active_workspace_scans(state)?;
+    ensure_no_active_board_registrations(state)?;
+    ensure_no_active_board_surface_measurements(state)?;
+    ensure_no_active_strip_feeder_holdouts(state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(state)?;
+    ensure_no_active_placement_executions(state)?;
     let job = state
         .store
         .get_job(job_id)
@@ -20786,17 +21568,24 @@ async fn start_guarded_placement_execution(
         .get(body.step_index as usize)
         .cloned()
         .ok_or_else(|| ApiError::bad_request("placement step index is outside the job plan"))?;
-    let feeder_registration = validate_guarded_strip_feeder(&state, &step)?;
+    if expected_placement_reference
+        .is_some_and(|expected| expected != step.placement_reference.as_str())
+    {
+        return Err(ApiError::bad_request(
+            "job plan order changed after execution started; operator review is required",
+        ));
+    }
+    let feeder_registration = validate_guarded_strip_feeder(state, &step)?;
     if !status.simulated {
         if feeder_registration.calibration_id != body.calibration_id {
             return Err(ApiError::bad_request(
                 "physical placement feeder calibration does not match the fine-home revision",
             ));
         }
-        validate_guarded_board_surface(&state, &step, body.calibration_id)?;
-        validate_guarded_board_target_unused(&state, &step)?;
+        validate_guarded_board_surface(state, &step, body.calibration_id)?;
+        validate_guarded_board_target_unused(state, &step)?;
     }
-    let motion_calibration = load_job_motion_calibration(&state, body.calibration_id)?;
+    let motion_calibration = load_job_motion_calibration(state, body.calibration_id)?;
     let motion_planner = MotionPlanner::new(state.profile.bounds, Some(motion_calibration));
     let operation = Operation::pending(if status.simulated {
         "job.single_placement.simulate"
@@ -20825,7 +21614,7 @@ async fn start_guarded_placement_execution(
         None
     } else {
         Some(prepare_physical_placement_pickup(
-            &state,
+            state,
             &run,
             feeder_registration,
             &step,
@@ -20848,24 +21637,14 @@ async fn start_guarded_placement_execution(
         return Err(ApiError::internal(error));
     }
     drop(admission_guard);
-    let response = StartGuardedPlacementExecutionResponse {
-        execution: run.clone(),
-        operation: operation.clone(),
-    };
-    let task_state = state.clone();
-    spawn_prepared_operation(
-        state,
+    Ok(PreparedGuardedPlacementExecution {
+        lease_id: body.lease_id,
         operation,
-        execute_guarded_placement_task(
-            task_state,
-            run,
-            step,
-            body.lease_id,
-            motion_planner,
-            physical,
-        ),
-    );
-    Ok((StatusCode::ACCEPTED, Json(response)))
+        run,
+        step,
+        motion_planner,
+        physical,
+    })
 }
 
 fn validate_guarded_board_surface(
@@ -21410,6 +22189,8 @@ async fn execute_guarded_placement_task(
         placement_surface_offset_mm: step.placement_surface_offset_mm,
         placement_seating_offset_mm: step.placement_seating_offset_mm,
         pocket_index: physical.as_ref().map(|prepared| prepared.run.pocket_index),
+        pickup_open_nozzle_raw_values: Vec::new(),
+        pickup_search_samples: Vec::new(),
         pickup_report: None,
         top_inspection: None,
         artifact_names: Vec::new(),
@@ -21765,7 +22546,20 @@ async fn execute_physical_guarded_placement(
     persist_placement_progress(state, run, report)?;
 
     let acquired =
-        acquire_physical_placement_part(state, prepared, step.board_place.rotation_deg).await?;
+        acquire_physical_placement_part(state, prepared, step.board_place.rotation_deg, report)
+            .await;
+    let acquired = match acquired {
+        Ok(acquired) => acquired,
+        Err(error) => {
+            report.stages.push(PlacementExecutionStageReport {
+                stage: PlacementExecutionStage::Pickup,
+                passed: false,
+                message: error.clone(),
+            });
+            persist_placement_progress(state, run, report)?;
+            return Err(error);
+        }
+    };
     report.feeder_pick = Pose {
         x_mm: acquired.pickup_center_machine_mm[0],
         y_mm: acquired.pickup_center_machine_mm[1],
@@ -22386,6 +23180,7 @@ async fn acquire_physical_placement_part(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
     target_rotation_deg: f64,
+    report: &mut PlacementExecutionReport,
 ) -> Result<AcquiredPlacementPart, String> {
     let nozzle_id = &prepared.run.nozzle_id;
     let sensor_id = &prepared.vacuum_characterization.sensor_id;
@@ -22556,6 +23351,8 @@ async fn acquire_physical_placement_part(
             return Err(cleanup_unconfirmed_pickup(state, prepared, sensor_id, error).await)
         }
     };
+    report.pickup_open_nozzle_raw_values = open_nozzle_raw_values.clone();
+    report.pickup_search_samples = pickup_samples.clone();
     let Some(contact) = contact else {
         return Err(cleanup_unconfirmed_pickup(
             state,
@@ -22926,6 +23723,28 @@ fn ensure_no_active_placement_executions(state: &AppState) -> ApiResult<()> {
     Ok(())
 }
 
+fn ensure_no_active_job_executions(state: &AppState) -> ApiResult<()> {
+    let active = state
+        .store
+        .list_job_executions()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .any(|run| {
+            !matches!(
+                run.status,
+                JobExecutionStatus::Succeeded
+                    | JobExecutionStatus::CompletedWithSkips
+                    | JobExecutionStatus::Cancelled
+            )
+        });
+    if active {
+        return Err(ApiError::bad_request(
+            "an unfinished job execution already exists; resume or cancel it first",
+        ));
+    }
+    Ok(())
+}
+
 async fn get_placement_execution(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -22965,6 +23784,7 @@ fn persist_automatic_placement_outcome(
         nozzle_id: report.nozzle_id.clone(),
         placement_surface_offset_mm: report.placement_surface_offset_mm,
         placement_seating_offset_mm: report.placement_seating_offset_mm,
+        automatic_algorithm_version: PLACEMENT_OUTCOME_ALGORITHM.into(),
         automatic_disposition,
         automatic_confidence: automatic_confidence.clamp(0.0, 1.0),
         operator_disposition: previous
@@ -24002,6 +24822,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn live_holdout_defaults_to_the_first_available_occupied_pocket() {
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        registration.pockets[0].status = StripFeederPocketStatus::Consumed;
+        registration.pockets[1].status = StripFeederPocketStatus::NeedsReview;
+
+        assert_eq!(live_holdout_pocket_index(&registration, None).unwrap(), 2);
+        assert_eq!(
+            live_holdout_pocket_index(&registration, Some(3)).unwrap(),
+            3
+        );
+    }
+
     fn test_pickup_qualification(
         registration: &StripFeederRegistration,
         pocket_index: u32,
@@ -24124,6 +24963,8 @@ mod tests {
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: 0.1,
             pocket_index: Some(1),
+            pickup_open_nozzle_raw_values: Vec::new(),
+            pickup_search_samples: Vec::new(),
             pickup_report: Some(pickup),
             top_inspection: Some(top_inspection),
             artifact_names: Vec::new(),
@@ -24132,6 +24973,154 @@ mod tests {
             stages: Vec::new(),
             findings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn release_vision_failure_is_stuck_on_nozzle() {
+        let mut report = test_passed_placement_report(Uuid::new_v4());
+        let pickup = report.pickup_report.as_mut().unwrap();
+        pickup.disposition = StripFeederPickupDisposition::NotReleased;
+        pickup.released = false;
+        pickup.passed = false;
+        let verification = pickup.nozzle_release_verification.as_mut().unwrap();
+        verification.nozzle_clear = false;
+        verification.passed = false;
+        report.top_inspection = None;
+
+        assert_eq!(
+            classify_placement_outcome(&report).0,
+            PlacementOutcomeDisposition::StuckOnNozzle
+        );
+    }
+
+    #[test]
+    fn placement_report_round_trip_retains_failed_pickup_search() {
+        let mut report = test_passed_placement_report(Uuid::new_v4());
+        report.pickup_open_nozzle_raw_values = vec![1, 2, 3];
+        report.pickup_search_samples = vec![VacuumProbeSample {
+            nozzle_z_mm: 3.7,
+            controller_z_mm: 3.7,
+            raw_values: vec![8, 9, 9],
+            median_raw_value: 9.0,
+            signal_delta_counts: 8.0,
+        }];
+
+        let restored: PlacementExecutionReport =
+            serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+        assert_eq!(restored.pickup_open_nozzle_raw_values, vec![1, 2, 3]);
+        assert_eq!(restored.pickup_search_samples, report.pickup_search_samples);
+    }
+
+    #[tokio::test]
+    async fn daemon_restart_retains_job_and_requires_placement_recovery() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            kind: "job.execution.physical".into(),
+            status: OperationStatus::Running,
+            created_at: now,
+            updated_at: now,
+            message: None,
+        };
+        let placement = PlacementExecutionRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            step_index: 0,
+            calibration_id: Uuid::new_v4(),
+            status: OperationStatus::Running,
+            created_at: now,
+            updated_at: now,
+            report: None,
+            message: None,
+        };
+        let run = JobExecutionRun {
+            id: Uuid::new_v4(),
+            operation_id: operation.id,
+            job_id: placement.job_id,
+            calibration_id: placement.calibration_id,
+            simulated: false,
+            status: JobExecutionStatus::Running,
+            created_at: now,
+            updated_at: now,
+            steps: vec![JobExecutionStep {
+                step_index: 0,
+                placement_reference: "R1".into(),
+                status: JobExecutionStepStatus::Running,
+                execution_id: Some(placement.id),
+                attempt_execution_ids: vec![placement.id],
+                outcome_disposition: None,
+                board_contacted: false,
+                message: None,
+            }],
+            current_step_index: Some(0),
+            pause_requested: false,
+            cancel_requested: false,
+            message: None,
+        };
+        store.put_operation(&operation).unwrap();
+        store.put_placement_execution(&placement).unwrap();
+        store.put_job_execution(&run).unwrap();
+        let machine = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile.clone(),
+        );
+
+        let _state = AppState::new(machine, profile, store.clone());
+
+        let recovered = store.get_job_execution(run.id).unwrap().unwrap();
+        assert_eq!(recovered.status, JobExecutionStatus::NeedsAttention);
+        assert_eq!(
+            recovered.steps[0].status,
+            JobExecutionStepStatus::NeedsAttention
+        );
+        assert!(recovered.message.unwrap().contains("resolve"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_job_retry_rejects_prior_board_contact() {
+        let state = test_state();
+        let now = Utc::now();
+        let run = JobExecutionRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            calibration_id: Uuid::new_v4(),
+            simulated: false,
+            status: JobExecutionStatus::NeedsAttention,
+            created_at: now,
+            updated_at: now,
+            steps: vec![JobExecutionStep {
+                step_index: 0,
+                placement_reference: "R15".into(),
+                status: JobExecutionStepStatus::NeedsAttention,
+                execution_id: Some(Uuid::new_v4()),
+                attempt_execution_ids: Vec::new(),
+                outcome_disposition: Some(PlacementOutcomeDisposition::StuckOnNozzle),
+                board_contacted: true,
+                message: Some("part stayed on N1".into()),
+            }],
+            current_step_index: Some(0),
+            pause_requested: false,
+            cancel_requested: false,
+            message: None,
+        };
+        state.store.put_job_execution(&run).unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::post(format!("/api/v1/job-executions/{}/steps/0/resolve", run.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"action":"retry"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     fn test_state() -> AppState {
@@ -24833,6 +25822,8 @@ mod tests {
             placement_surface_offset_mm: step.placement_surface_offset_mm,
             placement_seating_offset_mm: step.placement_seating_offset_mm,
             pocket_index: None,
+            pickup_open_nozzle_raw_values: Vec::new(),
+            pickup_search_samples: Vec::new(),
             pickup_report: None,
             top_inspection: None,
             artifact_names: Vec::new(),

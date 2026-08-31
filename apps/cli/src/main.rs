@@ -216,6 +216,41 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    ExecuteJob {
+        job: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long)]
+        calibration: Uuid,
+        /// Confirm fixed feeders and PCB, level nozzles, a clear envelope,
+        /// and reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    JobExecutions,
+    JobExecution {
+        execution: Uuid,
+    },
+    PauseJobExecution {
+        execution: Uuid,
+    },
+    ResumeJobExecution {
+        execution: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    CancelJobExecution {
+        execution: Uuid,
+    },
+    ResolveJobStep {
+        execution: Uuid,
+        step: u32,
+        action: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
     PlacementExecution {
         execution: Uuid,
     },
@@ -961,6 +996,84 @@ async fn main() -> Result<()> {
                 "executions": executions,
                 "outcomes": outcomes,
             })
+        }
+        Command::ExecuteJob {
+            job,
+            lease,
+            calibration,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "job execution requires --confirm-safety-checks after inspecting the fixed feeders and PCB, level nozzles, travel envelope, and power isolation"
+                );
+            }
+            post(
+                &client,
+                &format!("{base}/jobs/{job}/executions"),
+                Some(json!({
+                    "lease_id": lease,
+                    "calibration_id": calibration,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?
+        }
+        Command::JobExecutions => get(&client, &format!("{base}/job-executions")).await?,
+        Command::JobExecution { execution } => {
+            get(&client, &format!("{base}/job-executions/{execution}")).await?
+        }
+        Command::PauseJobExecution { execution } => {
+            post(
+                &client,
+                &format!("{base}/job-executions/{execution}/pause"),
+                None,
+            )
+            .await?
+        }
+        Command::ResumeJobExecution {
+            execution,
+            lease,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "job resume requires --confirm-safety-checks after inspecting the fixed feeders and PCB, level nozzles, travel envelope, and power isolation"
+                );
+            }
+            post(
+                &client,
+                &format!("{base}/job-executions/{execution}/resume"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                })),
+            )
+            .await?
+        }
+        Command::CancelJobExecution { execution } => {
+            post(
+                &client,
+                &format!("{base}/job-executions/{execution}/cancel"),
+                None,
+            )
+            .await?
+        }
+        Command::ResolveJobStep {
+            execution,
+            step,
+            action,
+            note,
+        } => {
+            if !matches!(action.as_str(), "retry" | "skip") {
+                bail!("job step action must be retry or skip");
+            }
+            post(
+                &client,
+                &format!("{base}/job-executions/{execution}/steps/{step}/resolve"),
+                Some(json!({ "action": action, "note": note })),
+            )
+            .await?
         }
         Command::PlacementExecution { execution } => {
             get(&client, &format!("{base}/placement-executions/{execution}")).await?

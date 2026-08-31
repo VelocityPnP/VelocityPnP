@@ -96,6 +96,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add three-to-five-cycle qualification across distinct occupied pockets
 - [x] Add a persistent guarded single-placement executor with simulator and
   gated live pickup, alignment, release, and inspection paths
+- [x] Add a persistent multi-placement job runner with cooperative pause,
+  cancel, reboot-safe resume, and per-placement recovery state
 - [x] Persist automatic and operator-reviewed placement outcomes and add a
   bounded, stop-on-failure placement qualification sequence
 - [x] Estimate seating offsets by part, nozzle, and board surface from qualified
@@ -153,5 +155,6 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles
 
-The physical job endpoint is limited to one explicit, guarded plan step. Full
-job execution remains unavailable until Gate 4 hardware validation passes.
+The physical job runner uses the guarded single-placement executor for each
+step. Each run keeps persistent progress and stops for operator recovery after
+a failed placement.

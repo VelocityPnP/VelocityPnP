@@ -584,6 +584,47 @@ export interface BoardInstance {
   side: "top" | "bottom";
   design_to_machine: { matrix: number[] } | null;
   surface_z_mm: number | null;
+  placement_surface_offset_mm: number;
+}
+
+export interface Job {
+  id: string;
+  name: string;
+  boards: BoardInstance[];
+  placement_references: string[];
+  placement_seating_offset_mm: number | null;
+  status: string;
+}
+
+export type PlacementOutcomeDisposition = "good" | "offset" | "rotated"
+  | "tombstoned" | "stacked" | "missing" | "stuck_on_nozzle" | "uncertain";
+
+export interface JobExecutionStep {
+  step_index: number;
+  placement_reference: string;
+  status: "pending" | "running" | "succeeded" | "needs_attention" | "skipped";
+  execution_id: string | null;
+  attempt_execution_ids: string[];
+  outcome_disposition: PlacementOutcomeDisposition | null;
+  board_contacted: boolean;
+  message: string | null;
+}
+
+export interface JobExecutionRun {
+  id: string;
+  operation_id: string;
+  job_id: string;
+  calibration_id: string;
+  simulated: boolean;
+  status: "pending" | "running" | "paused" | "needs_attention"
+    | "succeeded" | "completed_with_skips" | "cancelled";
+  created_at: string;
+  updated_at: string;
+  steps: JobExecutionStep[];
+  current_step_index: number | null;
+  pause_requested: boolean;
+  cancel_requested: boolean;
+  message: string | null;
 }
 
 export interface BoardRegistrationFiducialObservation {
@@ -990,20 +1031,15 @@ export interface StripFeederPickupQualificationReport {
   pickup_nozzle_z_mm: number | null;
   pickup_controller_z_mm: number | null;
   open_nozzle_raw_values: number[];
-  pickup_samples: Array<{
-    nozzle_z_mm: number;
-    controller_z_mm: number;
-    raw_values: number[];
-    median_raw_value: number;
-    signal_delta_counts: number;
-  }>;
+  pickup_samples: VacuumProbeSample[];
   held_raw_values: number[];
   held_median_raw_value: number | null;
   vacuum_acquired: boolean;
   vacuum_held_after_transfer: boolean;
   inspection: HeldPartInspectionReport | null;
   alignment: HeldPartAlignmentReport | null;
-  disposition: "returned_to_pocket" | "dropped_at_fallback" | "not_released";
+  disposition: "returned_to_pocket" | "dropped_at_fallback"
+    | "placed_on_board" | "not_released";
   release_surface_machine_mm: [number, number] | null;
   release_raw_values: number[];
   released: boolean;
@@ -1041,6 +1077,14 @@ export interface StripFeederPickupQualificationReport {
   findings: string[];
 }
 
+export interface VacuumProbeSample {
+  nozzle_z_mm: number;
+  controller_z_mm: number;
+  raw_values: number[];
+  median_raw_value: number;
+  signal_delta_counts: number;
+}
+
 export interface StripFeederPickupQualificationRun {
   id: string;
   operation_id: string;
@@ -1073,6 +1117,8 @@ export interface PlacementExecutionReport {
   placement_surface_offset_mm: number;
   placement_seating_offset_mm: number;
   pocket_index: number | null;
+  pickup_open_nozzle_raw_values: number[];
+  pickup_search_samples: VacuumProbeSample[];
   pickup_report: StripFeederPickupQualificationReport | null;
   top_inspection: PlacedPartInspectionReport | null;
   artifact_names: string[];

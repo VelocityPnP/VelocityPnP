@@ -65,13 +65,17 @@ vector has resolved-effect and improved-holdout evidence. Calibration runners
 continue to send raw controller poses, so they cannot consume the result that
 they are measuring. Active motion state binds both the snapshot UUID and
 artifact fingerprint, because a recapture can update an existing snapshot.
-Physical job execution remains disabled.
+Physical placement uses this same planner. A daemon-owned job runner executes
+one guarded placement at a time and stores each step before and after motion.
+Pause and cancel are cooperative between placements. A failed placement moves
+the job to `needs_attention`.
 
 ## Persistence and reproducibility
 
 SQLite stores versioned JSON documents for boards, board registrations,
 strip-feeder setup drafts, active feeders, jobs, operations, inspection
-reports, calibration snapshots, and calibration runs. Board-registration
+reports, job executions, calibration snapshots, and calibration runs.
+Board-registration
 evidence images use a dedicated artifact table. Workspace scan artifacts hold
 the feeder-lane report and preview with their source image. An
 append-only event journal records machine state changes and operation results.

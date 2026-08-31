@@ -903,6 +903,70 @@ pub struct Job {
     pub status: String,
 }
 
+/// Persistent state of a complete job execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobExecutionStatus {
+    Pending,
+    Running,
+    Paused,
+    NeedsAttention,
+    Succeeded,
+    CompletedWithSkips,
+    Cancelled,
+}
+
+/// Persistent state of one placement in a complete job execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobExecutionStepStatus {
+    Pending,
+    Running,
+    Succeeded,
+    NeedsAttention,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobExecutionStep {
+    pub step_index: u32,
+    pub placement_reference: String,
+    pub status: JobExecutionStepStatus,
+    #[serde(default)]
+    pub execution_id: Option<Uuid>,
+    #[serde(default)]
+    pub attempt_execution_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub outcome_disposition: Option<PlacementOutcomeDisposition>,
+    #[serde(default)]
+    pub board_contacted: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobExecutionRun {
+    pub id: Uuid,
+    /// Operation for the most recent start or resume command.
+    pub operation_id: Uuid,
+    pub job_id: Uuid,
+    pub calibration_id: Uuid,
+    pub simulated: bool,
+    pub status: JobExecutionStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub steps: Vec<JobExecutionStep>,
+    #[serde(default)]
+    pub current_step_index: Option<u32>,
+    #[serde(default)]
+    pub pause_requested: bool,
+    #[serde(default)]
+    pub cancel_requested: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlacementExecutionStage {
@@ -951,6 +1015,12 @@ pub struct PlacementExecutionReport {
     pub placement_seating_offset_mm: f64,
     #[serde(default)]
     pub pocket_index: Option<u32>,
+    /// Open-nozzle samples retained even when pickup does not find contact.
+    #[serde(default)]
+    pub pickup_open_nozzle_raw_values: Vec<i64>,
+    /// Full Z-search evidence retained even when pickup does not find contact.
+    #[serde(default)]
+    pub pickup_search_samples: Vec<VacuumProbeSample>,
     #[serde(default)]
     pub pickup_report: Option<StripFeederPickupQualificationReport>,
     #[serde(default)]
@@ -991,6 +1061,7 @@ pub enum PlacementOutcomeDisposition {
     Tombstoned,
     Stacked,
     Missing,
+    StuckOnNozzle,
     Uncertain,
 }
 
@@ -1005,6 +1076,8 @@ pub struct PlacementOutcomeRecord {
     pub nozzle_id: String,
     pub placement_surface_offset_mm: f64,
     pub placement_seating_offset_mm: f64,
+    #[serde(default)]
+    pub automatic_algorithm_version: String,
     pub automatic_disposition: PlacementOutcomeDisposition,
     pub automatic_confidence: f64,
     #[serde(default)]
@@ -1058,6 +1131,29 @@ pub struct PlacementProcessEstimate {
 pub fn classify_placement_outcome(
     report: &PlacementExecutionReport,
 ) -> (PlacementOutcomeDisposition, f64) {
+    if let Some(pickup) = report.pickup_report.as_ref().filter(|pickup| {
+        pickup.disposition == StripFeederPickupDisposition::NotReleased
+            || pickup
+                .nozzle_release_verification
+                .as_ref()
+                .is_some_and(|verification| !verification.nozzle_clear)
+    }) {
+        let confidence = pickup
+            .nozzle_release_verification
+            .as_ref()
+            .and_then(|verification| {
+                verification
+                    .observations
+                    .iter()
+                    .map(|observation| observation.confidence)
+                    .max_by(f64::total_cmp)
+            })
+            .unwrap_or(1.0);
+        return (
+            PlacementOutcomeDisposition::StuckOnNozzle,
+            confidence.clamp(0.0, 1.0),
+        );
+    }
     let Some(inspection) = report.top_inspection.as_ref() else {
         return (PlacementOutcomeDisposition::Uncertain, 0.0);
     };
@@ -1267,6 +1363,7 @@ mod tests {
             nozzle_id: nozzle_id.into(),
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: offset_mm,
+            automatic_algorithm_version: "fixture".into(),
             automatic_disposition: disposition,
             automatic_confidence: 0.9,
             operator_disposition: None,

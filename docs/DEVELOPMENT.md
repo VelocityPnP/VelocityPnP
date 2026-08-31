@@ -897,8 +897,9 @@ them into its retained report.
 
 Each physical execution also creates a persistent placement outcome. The
 automatic disposition is one of `good`, `offset`, `rotated`, `tombstoned`,
-`stacked`, `missing`, or `uncertain`. An operator review overrides the automatic
-class but does not remove the original result:
+`stacked`, `missing`, `stuck_on_nozzle`, or `uncertain`. A failed release with
+bottom-camera retained-part evidence is `stuck_on_nozzle`. An operator review
+overrides the automatic class but does not remove the original result:
 
 ```bash
 cargo run --release -p velocitypnp -- review-placement-outcome EXECUTION_UUID \
@@ -922,6 +923,23 @@ cargo run --release -p velocitypnp -- qualify-placement-sequence JOB_UUID \
 The series accepts one to five distinct steps for one part, nozzle, seating
 offset, and board-surface offset. It records each execution and outcome and
 stops after the first failed operation or non-good automatic disposition.
+
+Run a complete job with daemon-owned, persistent state:
+
+```bash
+cargo run --release -p velocitypnp -- execute-job JOB_UUID \
+  --lease LEASE_UUID --calibration CALIBRATION_UUID \
+  --confirm-safety-checks
+cargo run --release -p velocitypnp -- job-execution EXECUTION_UUID
+```
+
+Use `pause-job-execution` or `cancel-job-execution` for cooperative control.
+These commands do not use emergency stop and take effect between placements.
+After a failure, use `resolve-job-step EXECUTION_UUID STEP retry` only if the
+step did not reach board contact. Use `skip --note "..."` to record an explicit
+operator recovery. Then use `resume-job-execution` with a new lease and current
+fine XYZ home. The daemon pauses active jobs after restart and retains all
+placement attempt IDs and evidence.
 
 ### Automatic board registration
 

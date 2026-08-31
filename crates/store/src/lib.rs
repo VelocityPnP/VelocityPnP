@@ -8,10 +8,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
     AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, BoardSurfaceMeasurementRun,
-    CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job, MachineEvent,
-    Operation, Part, PlacementExecutionRun, PlacementOutcomeRecord, StripFeederLiveHoldoutRun,
-    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketStatus,
-    StripFeederRegistration, StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
+    CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job, JobExecutionRun,
+    MachineEvent, Operation, Part, PlacementExecutionRun, PlacementOutcomeRecord,
+    StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun, StripFeederPocketOutcome,
+    StripFeederPocketStatus, StripFeederRegistration, StripPocketOccupancy,
+    WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -899,6 +900,18 @@ impl Store {
         self.get("job", id)
     }
 
+    pub fn put_job_execution(&self, run: &JobExecutionRun) -> Result<()> {
+        self.put("job_execution", run.id, run)
+    }
+
+    pub fn list_job_executions(&self) -> Result<Vec<JobExecutionRun>> {
+        self.list("job_execution")
+    }
+
+    pub fn get_job_execution(&self, id: Uuid) -> Result<Option<JobExecutionRun>> {
+        self.get("job_execution", id)
+    }
+
     pub fn put_placement_execution(&self, run: &PlacementExecutionRun) -> Result<()> {
         self.put("placement_execution", run.id, run)
     }
@@ -1356,6 +1369,46 @@ mod tests {
     }
 
     #[test]
+    fn job_execution_round_trip_retains_recovery_state() {
+        use velocitypnp_domain::{
+            JobExecutionRun, JobExecutionStatus, JobExecutionStep, JobExecutionStepStatus,
+        };
+
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let child_id = Uuid::new_v4();
+        let run = JobExecutionRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            calibration_id: Uuid::new_v4(),
+            simulated: false,
+            status: JobExecutionStatus::NeedsAttention,
+            created_at: now,
+            updated_at: now,
+            steps: vec![JobExecutionStep {
+                step_index: 2,
+                placement_reference: "R15".into(),
+                status: JobExecutionStepStatus::NeedsAttention,
+                execution_id: Some(child_id),
+                attempt_execution_ids: vec![child_id],
+                outcome_disposition: Some(
+                    velocitypnp_domain::PlacementOutcomeDisposition::StuckOnNozzle,
+                ),
+                board_contacted: true,
+                message: Some("part remained on N1".into()),
+            }],
+            current_step_index: Some(2),
+            pause_requested: false,
+            cancel_requested: false,
+            message: Some("operator action is required".into()),
+        };
+        store.put_job_execution(&run).unwrap();
+
+        assert_eq!(store.get_job_execution(run.id).unwrap(), Some(run));
+    }
+
+    #[test]
     fn placement_outcome_round_trip_retains_operator_review() {
         let store = Store::memory().unwrap();
         let now = Utc::now();
@@ -1370,6 +1423,7 @@ mod tests {
             nozzle_id: "N1".into(),
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: 0.10,
+            automatic_algorithm_version: "fixture".into(),
             automatic_disposition: velocitypnp_domain::PlacementOutcomeDisposition::Good,
             automatic_confidence: 0.95,
             operator_disposition: Some(velocitypnp_domain::PlacementOutcomeDisposition::Offset),

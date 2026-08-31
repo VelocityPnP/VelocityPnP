@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, waitForOperation } from "./api";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
-  CalibrationSnapshot, CalibrationStep, Device, MachineEvent, MachineStatus, Pose,
+  CalibrationSnapshot, CalibrationStep, Device, Job, JobExecutionRun, MachineEvent,
+  MachineStatus, Pose,
   SensorReading, StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun,
   StripFeederRegistration,
   StripFeederVisionReport, VisualHomingResult,
@@ -11,7 +12,7 @@ import type {
 } from "./types";
 import "./styles.css";
 
-type Tab = "machine" | "calibration" | "boards";
+type Tab = "machine" | "calibration" | "boards" | "jobs";
 
 const EMPTY_POSE: Pose = { x_mm: 0, y_mm: 0, z_mm: 31.5, rotation_deg: 0 };
 
@@ -64,6 +65,7 @@ export default function App() {
           <NavButton active={tab === "machine"} onClick={() => setTab("machine")} icon="⌁">Machine</NavButton>
           <NavButton active={tab === "calibration"} onClick={() => setTab("calibration")} icon="◎">Calibration</NavButton>
           <NavButton active={tab === "boards"} onClick={() => setTab("boards")} icon="▦">Boards</NavButton>
+          <NavButton active={tab === "jobs"} onClick={() => setTab("jobs")} icon="▶">Jobs</NavButton>
         </nav>
         <div className="sidebar-foot">
           <div className={`state-dot state-${status?.state ?? "disconnected"}`} />
@@ -72,7 +74,7 @@ export default function App() {
       </aside>
       <main>
         <header className="topbar">
-          <div><p className="eyebrow">LumenPnP V3.0.4</p><h1>{tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : "Board library"}</h1></div>
+          <div><p className="eyebrow">LumenPnP V3.0.4</p><h1>{tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : tab === "boards" ? "Board library" : "Job execution"}</h1></div>
           <button className="estop" onClick={() => {
             if (window.confirm("Emergency stop immediately? The controller may require a reset.")) void run(async () => waitForOperation(await api.emergencyStop()));
           }}>EMERGENCY STOP</button>
@@ -81,6 +83,7 @@ export default function App() {
         {tab === "machine" && status && <MachinePanel status={status} devices={devices} events={events} busy={busy} run={run} />}
         {tab === "calibration" && status && <CalibrationPanel status={status} devices={devices} setError={setError} />}
         {tab === "boards" && <BoardsPanel setError={setError} />}
+        {tab === "jobs" && status && <JobsPanel status={status} setError={setError} />}
       </main>
     </div>
   );
@@ -88,6 +91,106 @@ export default function App() {
 
 function NavButton({ active, icon, children, onClick }: { active: boolean; icon: string; children: React.ReactNode; onClick: () => void }) {
   return <button className={active ? "nav-active" : ""} onClick={onClick}><span>{icon}</span>{children}</button>;
+}
+
+function JobsPanel({ status, setError }: {
+  status: MachineStatus;
+  setError: (value: string | null) => void;
+}) {
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [executions, setExecutions] = useState<JobExecutionRun[]>([]);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      const [jobValues, executionValues] = await Promise.all([
+        api.jobs(), api.jobExecutions(),
+      ]);
+      setJobs(jobValues);
+      setExecutions(executionValues.sort((left, right) =>
+        right.updated_at.localeCompare(left.updated_at)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [setError]);
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(), 1000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+  const lease = async (clientName: string) => {
+    const machine = await api.status();
+    return machine.control_lease
+      ? api.renewLease(machine.control_lease.id, 900)
+      : api.lease(clientName, 900);
+  };
+  const act = async (action: () => Promise<unknown>) => {
+    setBusy(true); setError(null);
+    try { await action(); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  };
+  const start = (job: Job) => void act(async () => {
+    if (!status.calibration_revision) throw new Error("Fine XYZ home is required.");
+    if (!window.confirm(
+      "Start this job? Confirm the PCB and feeders are fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable.",
+    )) return;
+    const control = await lease("VelocityPnP job execution");
+    await api.startJobExecution(job.id, control.id, status.calibration_revision);
+  });
+  const resume = (run: JobExecutionRun) => void act(async () => {
+    if (!window.confirm(
+      "Resume this job? Confirm fine XYZ home is current, the PCB and feeders are fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable.",
+    )) return;
+    const control = await lease("VelocityPnP job resume");
+    await api.resumeJobExecution(run.id, control.id);
+  });
+  const resolve = (
+    run: JobExecutionRun, stepIndex: number, action: "retry" | "skip",
+  ) => void act(async () => {
+    const note = action === "skip"
+      ? window.prompt("Why is this placement safe to skip?")?.trim()
+      : window.prompt("Optional retry note")?.trim();
+    if (action === "skip" && !note) return;
+    await api.resolveJobExecutionStep(run.id, stepIndex, action, note);
+  });
+  const unfinished = executions.some((run) =>
+    !["succeeded", "completed_with_skips", "cancelled"].includes(run.status));
+
+  return <div className="page-stack">
+    <section className="panel">
+      <div className="section-heading"><div><p className="eyebrow">Queue</p><h2>Jobs</h2></div></div>
+      {jobs.length === 0 && <p>No jobs are stored.</p>}
+      <div className="card-grid">{jobs.map((job) => <article className="card" key={job.id}>
+        <h3>{job.name}</h3>
+        <p>{job.placement_references.length || "All"} selected placements</p>
+        <button disabled={busy || unfinished} onClick={() => start(job)}>Start job</button>
+      </article>)}</div>
+    </section>
+    <section className="panel">
+      <div className="section-heading"><div><p className="eyebrow">Persistent state</p><h2>Executions</h2></div></div>
+      {executions.length === 0 && <p>No job executions are stored.</p>}
+      {executions.map((run) => <article className="workflow-step" key={run.id}>
+        <div className="workflow-index">{run.steps.filter((step) => step.status === "succeeded").length}/{run.steps.length}</div>
+        <div>
+          <h3>{jobs.find((job) => job.id === run.job_id)?.name ?? run.job_id}</h3>
+          <p><strong>{pretty(run.status)}</strong>{run.message ? ` — ${run.message}` : ""}</p>
+          {run.steps.map((step) => <small key={step.step_index} className="job-step">
+            {step.placement_reference}: {pretty(step.status)}
+            {step.outcome_disposition ? ` (${pretty(step.outcome_disposition)})` : ""}
+            {step.board_contacted ? "; board contacted" : ""}
+            {step.message ? ` — ${step.message}` : ""}
+            {step.status === "needs_attention" && !step.board_contacted && <button disabled={busy} onClick={() => resolve(run, step.step_index, "retry")}>Retry</button>}
+            {step.status === "needs_attention" && <button disabled={busy} onClick={() => resolve(run, step.step_index, "skip")}>Skip</button>}
+          </small>)}
+        </div>
+        <div>
+          {(run.status === "pending" || run.status === "running") && <button disabled={busy || run.pause_requested} onClick={() => void act(() => api.pauseJobExecution(run.id))}>Pause</button>}
+          {run.status === "paused" && <button disabled={busy} onClick={() => resume(run)}>Resume</button>}
+          {!["succeeded", "completed_with_skips", "cancelled"].includes(run.status) && <button disabled={busy} onClick={() => void act(() => api.cancelJobExecution(run.id))}>Cancel</button>}
+        </div>
+      </article>)}
+    </section>
+  </div>;
 }
 
 function MachinePanel({ status, devices, events, busy, run }: {

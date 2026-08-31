@@ -133,6 +133,8 @@ h3 { font-size: 15px; margin: 3px 0 7px; }
 .step-labels { display: flex; gap: 5px; }
 .step-labels span { color: var(--amber); background: #352916; border-radius: 3px; padding: 2px 5px; font: 8px "DM Mono", monospace; text-transform: uppercase; }
 .snapshot-count { grid-column: 2; color: var(--muted); font-size: 10px; }
+.job-step { display: block; margin: 6px 0; }
+.job-step button { margin-left: 6px; padding: 3px 7px; }
 
 .boards-layout { display: grid; grid-template-columns: 330px 1fr; gap: 18px; align-items: start; }
 .import-card p:not(.eyebrow) { color: var(--muted); font-size: 12px; line-height: 1.6; }

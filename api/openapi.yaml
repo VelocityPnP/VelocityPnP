@@ -1312,6 +1312,143 @@ paths:
                   description: Current snapshot whose validated motion corrections are applied.
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /jobs/{id}/executions:
+    post:
+      operationId: startJobExecution
+      description: >-
+        Starts a persistent multi-placement job. Physical execution requires
+        current fine XYZ homing. The runner stops between placements for pause
+        or cancel and stops after each failed placement for operator recovery.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - lease_id
+                - calibration_id
+                - confirmed_external_safety_checks
+              properties:
+                lease_id: { type: string, format: uuid }
+                calibration_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202":
+          description: Persistent job execution accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [execution, operation]
+                properties:
+                  execution: { $ref: "#/components/schemas/JobExecutionRun" }
+                  operation: { $ref: "#/components/schemas/Operation" }
+  /job-executions:
+    get:
+      operationId: listJobExecutions
+      responses:
+        "200":
+          description: Persistent job executions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [executions]
+                properties:
+                  executions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobExecutionRun" }
+  /job-executions/{id}:
+    get:
+      operationId: getJobExecution
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Persistent job execution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobExecutionRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /job-executions/{id}/pause:
+    post:
+      operationId: pauseJobExecution
+      description: Requests a cooperative pause after the current placement.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Updated job execution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobExecutionRun" }
+  /job-executions/{id}/cancel:
+    post:
+      operationId: cancelJobExecution
+      description: Requests cooperative cancellation without an emergency stop.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Updated job execution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobExecutionRun" }
+  /job-executions/{id}/resume:
+    post:
+      operationId: resumeJobExecution
+      description: Resumes a paused job after a new lease and fine-home check.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, confirmed_external_safety_checks]
+              properties:
+                lease_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+      responses:
+        "202":
+          description: Job execution resume accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [execution, operation]
+                properties:
+                  execution: { $ref: "#/components/schemas/JobExecutionRun" }
+                  operation: { $ref: "#/components/schemas/Operation" }
+  /job-executions/{id}/steps/{step_index}/resolve:
+    post:
+      operationId: resolveJobExecutionStep
+      description: >-
+        Records retry or skip recovery. Ordinary retry is rejected after board
+        contact. Skip requires an operator note.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: step_index, in: path, required: true, schema: { type: integer, minimum: 0 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [retry, skip] }
+                note: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Recovery decision recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobExecutionRun" }
   /jobs/{id}/placement-executions:
     post:
       operationId: startGuardedSinglePlacement
@@ -3208,6 +3345,67 @@ components:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }
             - type: "null"
         message: { type: [string, "null"] }
+    JobExecutionStep:
+      type: object
+      required:
+        - step_index
+        - placement_reference
+        - status
+        - execution_id
+        - attempt_execution_ids
+        - outcome_disposition
+        - board_contacted
+        - message
+      properties:
+        step_index: { type: integer, minimum: 0 }
+        placement_reference: { type: string }
+        status:
+          type: string
+          enum: [pending, running, succeeded, needs_attention, skipped]
+        execution_id: { type: [string, "null"], format: uuid }
+        attempt_execution_ids:
+          type: array
+          items: { type: string, format: uuid }
+        outcome_disposition:
+          oneOf:
+            - { $ref: "#/components/schemas/PlacementOutcomeDisposition" }
+            - type: "null"
+        board_contacted: { type: boolean }
+        message: { type: [string, "null"] }
+    JobExecutionRun:
+      type: object
+      required:
+        - id
+        - operation_id
+        - job_id
+        - calibration_id
+        - simulated
+        - status
+        - created_at
+        - updated_at
+        - steps
+        - current_step_index
+        - pause_requested
+        - cancel_requested
+        - message
+      properties:
+        id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        calibration_id: { type: string, format: uuid }
+        simulated: { type: boolean }
+        status:
+          type: string
+          enum: [pending, running, paused, needs_attention, succeeded, completed_with_skips, cancelled]
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/JobExecutionStep" }
+        current_step_index: { type: [integer, "null"], minimum: 0 }
+        pause_requested: { type: boolean }
+        cancel_requested: { type: boolean }
+        message: { type: [string, "null"] }
     PlacementExecutionStageReport:
       type: object
       required: [stage, passed, message]
@@ -3320,6 +3518,8 @@ components:
         - placement_surface_offset_mm
         - placement_seating_offset_mm
         - pocket_index
+        - pickup_open_nozzle_raw_values
+        - pickup_search_samples
         - pickup_report
         - top_inspection
         - artifact_names
@@ -3343,6 +3543,12 @@ components:
         placement_surface_offset_mm: { type: number, format: double }
         placement_seating_offset_mm: { type: number, format: double }
         pocket_index: { type: [integer, "null"], minimum: 0 }
+        pickup_open_nozzle_raw_values:
+          type: array
+          items: { type: integer, format: int64 }
+        pickup_search_samples:
+          type: array
+          items: { $ref: "#/components/schemas/VacuumProbeSample" }
         pickup_report:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }
@@ -3387,7 +3593,7 @@ components:
         message: { type: [string, "null"] }
     PlacementOutcomeDisposition:
       type: string
-      enum: [good, offset, rotated, tombstoned, stacked, missing, uncertain]
+      enum: [good, offset, rotated, tombstoned, stacked, missing, stuck_on_nozzle, uncertain]
     PlacementOutcomeRecord:
       type: object
       required:
@@ -3400,6 +3606,7 @@ components:
         - nozzle_id
         - placement_surface_offset_mm
         - placement_seating_offset_mm
+        - automatic_algorithm_version
         - automatic_disposition
         - automatic_confidence
         - operator_disposition
@@ -3419,6 +3626,7 @@ components:
         nozzle_id: { type: string }
         placement_surface_offset_mm: { type: number, format: double }
         placement_seating_offset_mm: { type: number, format: double }
+        automatic_algorithm_version: { type: string }
         automatic_disposition: { $ref: "#/components/schemas/PlacementOutcomeDisposition" }
         automatic_confidence: { type: number, minimum: 0, maximum: 1 }
         operator_disposition:
