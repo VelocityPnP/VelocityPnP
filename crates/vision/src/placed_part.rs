@@ -4,9 +4,12 @@ use crate::{GrayFrame, RgbFrame};
 use anyhow::{ensure, Result};
 use opencv::core::{self, Mat, MatTraitConst, Rect, Size, Vec4i, Vector, CV_32S};
 use opencv::imgproc;
-use velocitypnp_domain::{PartOrientation, PlacedPartInspectionReport};
+use velocitypnp_domain::{
+    PartOrientation, PlacedPartInspectionReport, PlacementTargetRegistrationReport,
+};
 
 pub const PLACED_PART_INSPECTION_ALGORITHM: &str = "placed_package_geometry.v3";
+pub const PLACEMENT_TARGET_REGISTRATION_ALGORITHM: &str = "local_two_terminal_target.v1";
 
 const DIFFERENCE_FLOOR: u8 = 18;
 const MINIMUM_BODY_CHANGE_FRACTION: f64 = 0.55;
@@ -21,6 +24,12 @@ const FINE_ROTATION_STEP_DEG: f64 = 0.25;
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedPartInspectionArtifacts {
     pub report: PlacedPartInspectionReport,
+    pub preview: RgbFrame,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementTargetRegistrationArtifacts {
+    pub report: PlacementTargetRegistrationReport,
     pub preview: RgbFrame,
 }
 
@@ -65,6 +74,126 @@ struct LongEdgeCandidate {
     length_mm: f64,
     position_score: f64,
     change_support: f64,
+}
+
+/// Locates the local pad-pair center before a two-terminal part is picked.
+///
+/// The returned machine correction moves the top camera from the nominal
+/// board target to the observed pad-pair center.
+#[allow(clippy::too_many_arguments)]
+pub fn register_two_terminal_placement_target(
+    frame: &GrayFrame,
+    nominal_center_px: [f64; 2],
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    expected_width_mm: f64,
+    expected_length_mm: f64,
+    expected_rotation_deg: f64,
+    artifact_name: impl Into<String>,
+) -> Result<PlacementTargetRegistrationArtifacts> {
+    ensure!(
+        frame.width >= 32
+            && frame.height >= 32
+            && frame.pixels.len() == frame.width as usize * frame.height as usize,
+        "placement-target frame is invalid"
+    );
+    ensure!(
+        nominal_center_px.into_iter().all(f64::is_finite)
+            && pixel_error_to_machine_mm
+                .into_iter()
+                .flatten()
+                .all(f64::is_finite)
+            && expected_width_mm.is_finite()
+            && expected_width_mm > 0.0
+            && expected_length_mm.is_finite()
+            && expected_length_mm >= expected_width_mm
+            && expected_rotation_deg.is_finite(),
+        "placement-target registration policy is invalid"
+    );
+    let determinant = matrix_determinant(pixel_error_to_machine_mm);
+    ensure!(
+        determinant.is_finite() && determinant.abs() > 1e-9,
+        "top-camera map is singular"
+    );
+    let mean_scale = 0.5
+        * (pixel_error_to_machine_mm[0][0].hypot(pixel_error_to_machine_mm[1][0])
+            + pixel_error_to_machine_mm[0][1].hypot(pixel_error_to_machine_mm[1][1]));
+    let registration = locate_two_terminal_target(
+        frame,
+        nominal_center_px,
+        pixel_error_to_machine_mm,
+        expected_width_mm,
+        expected_length_mm,
+        expected_rotation_deg,
+        mean_scale,
+    )?;
+    let artifact_name = artifact_name.into();
+    let mut preview = grayscale_preview(frame);
+    draw_cross(
+        &mut preview,
+        nominal_center_px[0].round() as i32,
+        nominal_center_px[1].round() as i32,
+        [255, 0, 220],
+        10,
+    );
+    let (center_px, correction_mm, confidence) = registration.map_or((None, None, 0.0), |target| {
+        let correction = map_vector(
+            pixel_error_to_machine_mm,
+            [
+                target.center_px[0] - nominal_center_px[0],
+                target.center_px[1] - nominal_center_px[1],
+            ],
+        );
+        (Some(target.center_px), Some(correction), target.confidence)
+    });
+    if let Some(center) = center_px {
+        draw_cross(
+            &mut preview,
+            center[0].round() as i32,
+            center[1].round() as i32,
+            [0, 255, 100],
+            8,
+        );
+        let corners = rectangle_corners_px(
+            center,
+            pixel_error_to_machine_mm,
+            expected_width_mm,
+            expected_length_mm,
+            expected_rotation_deg,
+        )?;
+        draw_polygon(&mut preview, &corners, [0, 255, 100]);
+    }
+    let correction_norm = correction_mm.map(|correction| correction[0].hypot(correction[1]));
+    let passed = correction_norm.is_some_and(|value| value <= MAXIMUM_TARGET_CORRECTION_MM);
+    let findings = match (correction_mm, passed) {
+        (Some(correction), true) => vec![format!(
+            "registered the local pad pair by X{:+.3} Y{:+.3} mm with {:.3} confidence",
+            correction[0], correction[1], confidence,
+        )],
+        (Some(correction), false) => vec![format!(
+            "local pad-pair correction {:.3} mm exceeds the {:.3} mm bound",
+            correction[0].hypot(correction[1]),
+            MAXIMUM_TARGET_CORRECTION_MM,
+        )],
+        (None, _) => vec!["top vision did not find the local two-terminal pad pair".into()],
+    };
+    Ok(PlacementTargetRegistrationArtifacts {
+        report: PlacementTargetRegistrationReport {
+            algorithm_version: PLACEMENT_TARGET_REGISTRATION_ALGORITHM.into(),
+            registered: registration.is_some(),
+            nominal_center_x_px: nominal_center_px[0],
+            nominal_center_y_px: nominal_center_px[1],
+            center_x_px: center_px.map(|center| center[0]),
+            center_y_px: center_px.map(|center| center[1]),
+            correction_x_mm: correction_mm.map(|correction| correction[0]),
+            correction_y_mm: correction_mm.map(|correction| correction[1]),
+            correction_mm: correction_norm,
+            confidence,
+            passed,
+            artifact_name,
+            findings,
+        },
+        preview,
+    })
 }
 
 /// Recognizes a placed component by matching the known package body near the
@@ -1407,6 +1536,50 @@ mod tests {
             "{:?}",
             result.report
         );
+    }
+
+    #[test]
+    fn registers_a_bare_two_terminal_target_before_placement() {
+        let mut before = frame(80);
+        let center = [160.0, 120.0];
+        let matrix = [[0.02, 0.0], [0.0, -0.02]];
+        let target_offset = [0.12, -0.18];
+        draw_pad_pair(&mut before, center, matrix, target_offset, 0.8, 1.6, 30.0);
+
+        let result = register_two_terminal_placement_target(
+            &before,
+            center,
+            matrix,
+            0.8,
+            1.6,
+            30.0,
+            "target.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!((result.report.correction_x_mm.unwrap() - target_offset[0]).abs() <= 0.05);
+        assert!((result.report.correction_y_mm.unwrap() - target_offset[1]).abs() <= 0.05);
+        assert_eq!(result.report.artifact_name, "target.png");
+    }
+
+    #[test]
+    fn rejects_a_missing_two_terminal_target_before_placement() {
+        let before = frame(80);
+        let result = register_two_terminal_placement_target(
+            &before,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, -0.02]],
+            0.8,
+            1.6,
+            0.0,
+            "target.png",
+        )
+        .unwrap();
+
+        assert!(!result.report.registered);
+        assert!(!result.report.passed);
+        assert!(result.report.correction_mm.is_none());
     }
 
     #[test]

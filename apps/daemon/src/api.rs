@@ -83,8 +83,8 @@ use velocitypnp_vision::{
     interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, reanalyze_workspace_seam_health, render_board_fiducial_evidence,
-    render_workspace_height_mosaic_with_consistency,
+    query_camera_controls, reanalyze_workspace_seam_health, register_two_terminal_placement_target,
+    render_board_fiducial_evidence, render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
@@ -123,7 +123,7 @@ const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const MINIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 0.70;
 const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v5";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v6";
 const PLACEMENT_OUTCOME_ALGORITHM: &str = "placement_outcome.v2";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
@@ -141,6 +141,7 @@ const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspect
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
+const BOARD_TARGET_REGISTRATION_ARTIFACT: &str = "board-target-registration.png";
 const BOARD_PLACEMENT_AFTER_ARTIFACT: &str = "board-placement-after.png";
 const BOARD_PLACEMENT_INSPECTION_ARTIFACT: &str = "board-placement-inspection.png";
 const REUSED_TOP_PLANAR_REPORT: &str = "reused_top_camera_planar_report";
@@ -22192,6 +22193,7 @@ async fn execute_guarded_placement_task(
         pickup_open_nozzle_raw_values: Vec::new(),
         pickup_search_samples: Vec::new(),
         pickup_report: None,
+        board_target_registration: None,
         top_inspection: None,
         artifact_names: Vec::new(),
         corrected_move_count: 0,
@@ -22515,6 +22517,47 @@ struct AcquiredPlacementPart {
     artifact_names: Vec<String>,
 }
 
+fn resolved_physical_place_head_xy(
+    nominal_target_mm: [f64; 2],
+    local_target_correction_mm: [f64; 2],
+    current_tip_offset: CurrentTipOffset,
+    height_correction_mm: [f64; 2],
+    alignment: &HeldPartAlignmentReport,
+) -> Result<[f64; 2], String> {
+    if !alignment.passed || alignment.observations.is_empty() {
+        return Err("placement requires a verified final bottom-camera pose".into());
+    }
+    let values = [
+        nominal_target_mm[0],
+        nominal_target_mm[1],
+        local_target_correction_mm[0],
+        local_target_correction_mm[1],
+        current_tip_offset.x_mm,
+        current_tip_offset.y_mm,
+        height_correction_mm[0],
+        height_correction_mm[1],
+        alignment.commanded_x_mm,
+        alignment.commanded_y_mm,
+    ];
+    if !values.into_iter().all(f64::is_finite) {
+        return Err("placement XY transform contains a non-finite value".into());
+    }
+    // The live tip offset is measured at the bottom-camera reference pose.
+    // The verified alignment translation includes part offset and any runout
+    // caused by the commanded nozzle rotation. The height model then transfers
+    // that observed pose to the placement Z, including nozzle-axis tilt.
+    Ok([
+        nominal_target_mm[0] + local_target_correction_mm[0]
+            - current_tip_offset.x_mm
+            - height_correction_mm[0]
+            + alignment.commanded_x_mm,
+        nominal_target_mm[1] + local_target_correction_mm[1]
+            - current_tip_offset.y_mm
+            - height_correction_mm[1]
+            + alignment.commanded_y_mm,
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_physical_guarded_placement(
     state: &AppState,
@@ -22527,6 +22570,16 @@ async fn execute_physical_guarded_placement(
 ) -> Result<(), String> {
     let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
     let sensor_id = prepared.vacuum_characterization.sensor_id.as_str();
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id: prepared.lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
     let (board_before, _) = capture_top_pocket_mean(
         state,
         prepared,
@@ -22543,7 +22596,53 @@ async fn execute_physical_guarded_placement(
     report
         .artifact_names
         .push(BOARD_PLACEMENT_BEFORE_ARTIFACT.into());
+    let top_mapping = local_planar_camera_mapping(
+        &prepared.top_camera_model,
+        prepared.top_camera_model.center_x_px,
+        prepared.top_camera_model.center_y_px,
+    )
+    .ok_or_else(|| "top-camera placement mapping is invalid".to_string())?;
+    let target_registration = register_two_terminal_placement_target(
+        &board_before,
+        [
+            prepared.top_camera_model.center_x_px,
+            prepared.top_camera_model.center_y_px,
+        ],
+        top_mapping,
+        step.body_width_mm,
+        step.body_length_mm,
+        step.board_place.rotation_deg,
+        BOARD_TARGET_REGISTRATION_ARTIFACT,
+    )
+    .map_err(|error| error.to_string())?;
+    persist_placement_rgb_artifact(
+        state,
+        run.id,
+        BOARD_TARGET_REGISTRATION_ARTIFACT,
+        &target_registration.preview,
+    )?;
+    let target_report = target_registration.report;
+    report
+        .artifact_names
+        .push(BOARD_TARGET_REGISTRATION_ARTIFACT.into());
+    report.board_target_registration = Some(target_report.clone());
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::BoardTargetRegistration,
+        passed: target_report.passed,
+        message: target_report.findings[0].clone(),
+    });
     persist_placement_progress(state, run, report)?;
+    if !target_report.passed {
+        return Err("top vision did not register the local placement pad pair".into());
+    }
+    let local_target_correction_mm = [
+        target_report
+            .correction_x_mm
+            .ok_or_else(|| "local placement target has no X correction".to_string())?,
+        target_report
+            .correction_y_mm
+            .ok_or_else(|| "local placement target has no Y correction".to_string())?,
+    ];
 
     let acquired =
         acquire_physical_placement_part(state, prepared, step.board_place.rotation_deg, report)
@@ -22608,22 +22707,13 @@ async fn execute_physical_guarded_placement(
             .as_ref()
             .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
             .ok_or_else(|| "placement Z is outside the calibrated height model".to_string())?;
-        let final_inspection = acquired
-            .alignment
-            .observations
-            .last()
-            .map(|observation| &observation.inspection)
-            .ok_or_else(|| "held-part alignment has no final observation".to_string())?;
-        let remaining_x_mm = final_inspection.centering_correction_x_mm.unwrap_or(0.0);
-        let remaining_y_mm = final_inspection.centering_correction_y_mm.unwrap_or(0.0);
-        let place_head_x_mm =
-            step.board_place.x_mm - acquired.current_tip_offset.x_mm - height_correction[0]
-                + acquired.alignment.commanded_x_mm
-                + remaining_x_mm;
-        let place_head_y_mm =
-            step.board_place.y_mm - acquired.current_tip_offset.y_mm - height_correction[1]
-                + acquired.alignment.commanded_y_mm
-                + remaining_y_mm;
+        let [place_head_x_mm, place_head_y_mm] = resolved_physical_place_head_xy(
+            [step.board_place.x_mm, step.board_place.y_mm],
+            local_target_correction_mm,
+            acquired.current_tip_offset,
+            height_correction,
+            &acquired.alignment,
+        )?;
         let place_controller_z_mm = z_kinematics
             .controller_z(&step.nozzle_id, step.board_place.z_mm)
             .ok_or_else(|| "placement Z is outside controller bounds".to_string())?;
@@ -22659,7 +22749,10 @@ async fn execute_physical_guarded_placement(
         report.stages.push(PlacementExecutionStageReport {
             stage: PlacementExecutionStage::PlaceApproach,
             passed: true,
-            message: "moved the aligned part above the registered board target".into(),
+            message: format!(
+                "moved the aligned part above the local pad target at X{:+.3} Y{:+.3} mm from nominal",
+                local_target_correction_mm[0], local_target_correction_mm[1],
+            ),
         });
         let planned = execute_job_motion(
             &state.machine,
@@ -22714,7 +22807,10 @@ async fn execute_physical_guarded_placement(
             report.pickup_report = Some(build_placement_pickup_report(
                 prepared,
                 &acquired,
-                [step.board_place.x_mm, step.board_place.y_mm],
+                [
+                    step.board_place.x_mm + local_target_correction_mm[0],
+                    step.board_place.y_mm + local_target_correction_mm[1],
+                ],
                 release_raw_values,
                 release_verification,
                 false,
@@ -22742,12 +22838,6 @@ async fn execute_physical_guarded_placement(
             BOARD_PLACEMENT_AFTER_ARTIFACT,
             &board_after,
         )?;
-        let top_mapping = local_planar_camera_mapping(
-            &prepared.top_camera_model,
-            prepared.top_camera_model.center_x_px,
-            prepared.top_camera_model.center_y_px,
-        )
-        .ok_or_else(|| "top-camera placement mapping is invalid".to_string())?;
         let placement_center_tolerance_mm = (0.5 * step.body_width_mm)
             .max(0.25)
             .min(pickup.maximum_part_offset_mm);
@@ -22782,7 +22872,10 @@ async fn execute_physical_guarded_placement(
         report.pickup_report = Some(build_placement_pickup_report(
             prepared,
             &acquired,
-            [step.board_place.x_mm, step.board_place.y_mm],
+            [
+                step.board_place.x_mm + local_target_correction_mm[0],
+                step.board_place.y_mm + local_target_correction_mm[1],
+            ],
             release_raw_values,
             release_verification,
             true,
@@ -22813,6 +22906,10 @@ async fn execute_physical_guarded_placement(
         report.findings.push(format!(
             "consumed feeder pocket {} only after pickup and release evidence passed",
             prepared.run.pocket_index,
+        ));
+        report.findings.push(format!(
+            "placed from the verified bottom-camera pose with X{:+.3} Y{:+.3} mm height correction; no unverified residual move was added",
+            height_correction[0], height_correction[1],
         ));
         Ok(())
     }
@@ -22869,18 +22966,9 @@ fn board_release_recovery_targets(
     retained_part: &HeldPartInspectionReport,
     policy: BoardReleaseRecoveryPolicy,
 ) -> Result<BoardReleaseRecoveryTargets, String> {
-    let initial_final = initial_alignment
-        .observations
-        .last()
-        .ok_or_else(|| "initial held-part alignment has no final observation".to_string())?;
-    let initial_residual_x_mm = initial_final
-        .inspection
-        .centering_correction_x_mm
-        .ok_or_else(|| "initial held-part alignment has no final X residual".to_string())?;
-    let initial_residual_y_mm = initial_final
-        .inspection
-        .centering_correction_y_mm
-        .ok_or_else(|| "initial held-part alignment has no final Y residual".to_string())?;
+    if !initial_alignment.passed || initial_alignment.observations.is_empty() {
+        return Err("initial held-part alignment has no verified final pose".into());
+    }
     let replacement_x_mm = retained_part
         .centering_correction_x_mm
         .ok_or_else(|| "retained-part inspection has no X correction".to_string())?;
@@ -22905,11 +22993,9 @@ fn board_release_recovery_targets(
             "retained-part rotation error {rotation_error_deg:.3} degrees exceeds the recovery bound"
         ));
     }
-    let initial_x_mm = initial_alignment.commanded_x_mm + initial_residual_x_mm;
-    let initial_y_mm = initial_alignment.commanded_y_mm + initial_residual_y_mm;
     let level = Pose {
-        x_mm: place_level.x_mm - initial_x_mm + replacement_x_mm,
-        y_mm: place_level.y_mm - initial_y_mm + replacement_y_mm,
+        x_mm: place_level.x_mm - initial_alignment.commanded_x_mm + replacement_x_mm,
+        y_mm: place_level.y_mm - initial_alignment.commanded_y_mm + replacement_y_mm,
         ..place_level
     };
     Ok(BoardReleaseRecoveryTargets {
@@ -23209,16 +23295,6 @@ async fn acquire_physical_placement_part(
         .disable_actuator(sensor_id.clone())
         .await
         .map_err(|error| error.to_string())?;
-    execute_visual_home(
-        state,
-        VisualHomingRequest {
-            lease_id: prepared.lease_id,
-            apply_offset: true,
-            move_to_seed: true,
-        },
-    )
-    .await
-    .map_err(|error| error.message)?;
     let current_tip_offset = measure_current_tip_offset(
         state,
         prepared.lease_id,
@@ -24966,6 +25042,7 @@ mod tests {
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
             pickup_report: Some(pickup),
+            board_target_registration: None,
             top_inspection: Some(top_inspection),
             artifact_names: Vec::new(),
             corrected_move_count: 1,
@@ -25825,6 +25902,7 @@ mod tests {
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
             pickup_report: None,
+            board_target_registration: None,
             top_inspection: None,
             artifact_names: Vec::new(),
             corrected_move_count: 0,
@@ -28331,6 +28409,21 @@ mod tests {
             artifact_names: Vec::new(),
             findings: Vec::new(),
         };
+        let place_xy = resolved_physical_place_head_xy(
+            [400.0, 300.0],
+            [0.09, 0.02],
+            CurrentTipOffset {
+                x_mm: 156.0,
+                y_mm: 84.0,
+            },
+            [0.50, -0.30],
+            &alignment,
+        )
+        .unwrap();
+        // The final 0.087 mm visual residual is observed and accepted. It is
+        // not added as a move without a following bottom-camera capture.
+        assert!((place_xy[0] - 244.203_447_951_116_3).abs() < 1e-9);
+        assert!((place_xy[1] - 216.114_020_147_658_87).abs() < 1e-9);
         let targets = board_release_recovery_targets(
             Pose {
                 x_mm: 386.743_919_495_237_5,
@@ -28350,8 +28443,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!((targets.level.x_mm - 386.701_383_298_577_36).abs() < 1e-9);
-        assert!((targets.level.y_mm - 336.099_658_307_168_57).abs() < 1e-9);
+        assert!((targets.level.x_mm - 386.637_389_231_027_3).abs() < 1e-9);
+        assert!((targets.level.y_mm - 336.159_063_706_275_7).abs() < 1e-9);
         assert!((targets.contact.z_mm - 4.006_850_360_816_993).abs() < 1e-12);
         assert!((targets.rotation_error_deg - 2.082_574_721_481_294).abs() < 1e-9);
 

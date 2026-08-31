@@ -108,6 +108,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add live vacuum and bottom-vision feedback to the physical job executor
 - [x] Route the physical job executor through the validated motion planner
   without enabling compensation for calibration or manual jog
+- [x] Apply local two-terminal pad registration before pickup and place only
+  from a bottom-camera pose that follows the final alignment command
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
 
 ## Gate 5 — Inspection and newer machines

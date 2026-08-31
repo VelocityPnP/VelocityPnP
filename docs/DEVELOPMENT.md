@@ -848,6 +848,20 @@ board reference after an earlier physical run reached its placement pose.
 This prevents a failed release or inspection from causing a second component
 to be stacked on the same target. Rework needs a separate explicit workflow.
 
+Before pickup, guarded placement version 6 also registers the bare local
+two-terminal pad pair. It stores `board-target-registration.png` and applies
+the bounded local XY correction to the placement pose. A missing or ambiguous
+pad pair stops the operation before pickup. The retained report keeps the
+nominal board pose and records the local correction separately.
+
+Bottom alignment places from its last observed pose. Each commanded
+translation is followed by another bottom-camera capture. The final measured
+residual is accepted only inside the configured tolerance; it is not added as
+an unverified move. The live tip offset includes the installed tip and its
+current runout state. Rotation-induced runout is present in the verified
+bottom alignment translation. The height transform separately applies the
+calibrated nozzle-axis tilt and working-plane transfer at placement Z.
+
 The persistent run records preflight, live pickup, bottom alignment, calibrated
 placement motion, bounded release verification, and top inspection. Top
 inspection registers the retained before and after board views. It then matches
@@ -867,7 +881,7 @@ its source pocket and quarantines the reservation. The simulator does not
 consume a pocket and does not claim live camera evidence. Job preflight requires
 part height, body width, and body length.
 
-Guarded placement version 4 has one bounded mechanical-release retry. It runs
+Guarded placement has one bounded mechanical-release retry. It runs
 only when the vacuum sensor confirms pressure release but bottom vision still
 matches the held component. The retry replaces the original bottom-alignment
 translation with the retained-part correction, rejects a rotation error above

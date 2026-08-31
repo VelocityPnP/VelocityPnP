@@ -608,6 +608,25 @@ pub struct PlacedPartInspectionReport {
     pub findings: Vec<String>,
 }
 
+/// Top-camera registration of one bare, two-terminal placement target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementTargetRegistrationReport {
+    pub algorithm_version: String,
+    pub registered: bool,
+    pub nominal_center_x_px: f64,
+    pub nominal_center_y_px: f64,
+    pub center_x_px: Option<f64>,
+    pub center_y_px: Option<f64>,
+    pub correction_x_mm: Option<f64>,
+    pub correction_y_mm: Option<f64>,
+    pub correction_mm: Option<f64>,
+    pub confidence: f64,
+    pub passed: bool,
+    pub artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// One retained bottom-camera observation during held-part alignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeldPartAlignmentObservation {
@@ -971,6 +990,7 @@ pub struct JobExecutionRun {
 #[serde(rename_all = "snake_case")]
 pub enum PlacementExecutionStage {
     Preflight,
+    BoardTargetRegistration,
     PickApproach,
     Pickup,
     BottomInspection,
@@ -1023,6 +1043,8 @@ pub struct PlacementExecutionReport {
     pub pickup_search_samples: Vec<VacuumProbeSample>,
     #[serde(default)]
     pub pickup_report: Option<StripFeederPickupQualificationReport>,
+    #[serde(default)]
+    pub board_target_registration: Option<PlacementTargetRegistrationReport>,
     #[serde(default)]
     pub top_inspection: Option<PlacedPartInspectionReport>,
     #[serde(default)]

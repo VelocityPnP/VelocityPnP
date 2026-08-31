@@ -1120,12 +1120,27 @@ export interface PlacementExecutionReport {
   pickup_open_nozzle_raw_values: number[];
   pickup_search_samples: VacuumProbeSample[];
   pickup_report: StripFeederPickupQualificationReport | null;
+  board_target_registration: {
+    algorithm_version: string;
+    registered: boolean;
+    nominal_center_x_px: number;
+    nominal_center_y_px: number;
+    center_x_px: number | null;
+    center_y_px: number | null;
+    correction_x_mm: number | null;
+    correction_y_mm: number | null;
+    correction_mm: number | null;
+    confidence: number;
+    passed: boolean;
+    artifact_name: string;
+    findings: string[];
+  } | null;
   top_inspection: PlacedPartInspectionReport | null;
   artifact_names: string[];
   corrected_move_count: number;
   passed: boolean;
   stages: Array<{
-    stage: "preflight" | "pick_approach" | "pickup" | "bottom_inspection"
+    stage: "preflight" | "board_target_registration" | "pick_approach" | "pickup" | "bottom_inspection"
       | "place_approach" | "placement" | "release" | "top_inspection"
       | "complete";
     passed: boolean;

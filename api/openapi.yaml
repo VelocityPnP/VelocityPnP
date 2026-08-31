@@ -3414,6 +3414,7 @@ components:
           type: string
           enum:
             - preflight
+            - board_target_registration
             - pick_approach
             - pickup
             - bottom_inspection
@@ -3500,6 +3501,36 @@ components:
         passed: { type: boolean }
         artifact_name: { type: string }
         findings: { type: array, items: { type: string } }
+    PlacementTargetRegistrationReport:
+      type: object
+      required:
+        - algorithm_version
+        - registered
+        - nominal_center_x_px
+        - nominal_center_y_px
+        - center_x_px
+        - center_y_px
+        - correction_x_mm
+        - correction_y_mm
+        - correction_mm
+        - confidence
+        - passed
+        - artifact_name
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        registered: { type: boolean }
+        nominal_center_x_px: { type: number, format: double }
+        nominal_center_y_px: { type: number, format: double }
+        center_x_px: { type: [number, "null"], format: double }
+        center_y_px: { type: [number, "null"], format: double }
+        correction_x_mm: { type: [number, "null"], format: double }
+        correction_y_mm: { type: [number, "null"], format: double }
+        correction_mm: { type: [number, "null"], format: double }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        passed: { type: boolean }
+        artifact_name: { type: string }
+        findings: { type: array, items: { type: string } }
     PlacementExecutionReport:
       type: object
       required:
@@ -3521,6 +3552,7 @@ components:
         - pickup_open_nozzle_raw_values
         - pickup_search_samples
         - pickup_report
+        - board_target_registration
         - top_inspection
         - artifact_names
         - corrected_move_count
@@ -3552,6 +3584,10 @@ components:
         pickup_report:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }
+            - type: "null"
+        board_target_registration:
+          oneOf:
+            - { $ref: "#/components/schemas/PlacementTargetRegistrationReport" }
             - type: "null"
         top_inspection:
           oneOf:
