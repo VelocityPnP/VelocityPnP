@@ -8882,6 +8882,14 @@ fn planned_available_strip_feeder_pocket(
         .map(|(_, pocket)| pocket)
 }
 
+fn placement_available_strip_feeder_pocket(
+    registration: &StripFeederRegistration,
+    planned_pick: Pose,
+) -> Option<&StripFeederPocketState> {
+    planned_available_strip_feeder_pocket(registration, planned_pick)
+        .or_else(|| registration.next_available_pocket(None))
+}
+
 fn vacuum_value_is_acquired(
     characterization: &VacuumSensorCharacterizationReport,
     value: f64,
@@ -21751,12 +21759,8 @@ fn prepare_physical_placement_pickup(
         ApiError::bad_request("active profile does not define strip-feeder pickup")
     })?;
     pickup_profile.validate().map_err(ApiError::bad_request)?;
-    let selected_pocket = planned_available_strip_feeder_pocket(&registration, step.feeder_pick)
-        .ok_or_else(|| {
-            ApiError::bad_request(
-                "strip feeder has no available occupied pocket at the planned pick position",
-            )
-        })?;
+    let selected_pocket = placement_available_strip_feeder_pocket(&registration, step.feeder_pick)
+        .ok_or_else(|| ApiError::bad_request("strip feeder has no available occupied pocket"))?;
     let selected_pocket_index = selected_pocket.pocket_index;
     let nominal_center = selected_pocket.nominal_center_machine_mm;
     let latest_holdout = registration
@@ -24857,6 +24861,31 @@ mod tests {
             },
         );
         assert!(outside.is_none());
+    }
+
+    #[test]
+    fn placement_skips_unavailable_pockets_in_a_registered_strip() {
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Empty;
+            pocket.status = StripFeederPocketStatus::Consumed;
+        }
+        registration.pockets[3].occupancy = StripPocketOccupancy::Occupied;
+        registration.pockets[3].status = StripFeederPocketStatus::Available;
+
+        let selected = placement_available_strip_feeder_pocket(
+            &registration,
+            Pose {
+                x_mm: 100.0,
+                y_mm: 100.0,
+                ..Pose::ORIGIN
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selected.pocket_index, 3);
     }
 
     fn test_pickup_registration(now: chrono::DateTime<Utc>) -> StripFeederRegistration {
