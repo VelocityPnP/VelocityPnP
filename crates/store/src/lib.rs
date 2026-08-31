@@ -584,6 +584,52 @@ impl Store {
         Ok(registration)
     }
 
+    /// Releases a reservation when execution stopped before pocket approach.
+    /// This preserves the observed occupancy and does not record an attempt.
+    pub fn release_strip_feeder_pocket_reservation(
+        &self,
+        registration_id: Uuid,
+        reservation_id: Uuid,
+    ) -> Result<StripFeederRegistration> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let document: String = transaction
+            .query_row(
+                "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
+                params!["strip_feeder_registration", registration_id.to_string()],
+                |row| row.get(0),
+            )
+            .context("strip feeder registration not found")?;
+        let mut registration: StripFeederRegistration =
+            serde_json::from_str(&document).context("decoding strip feeder registration")?;
+        registration.ensure_pocket_state();
+        let pocket = registration
+            .pockets
+            .iter_mut()
+            .find(|pocket| pocket.reservation_id == Some(reservation_id))
+            .context("strip feeder pocket reservation is not current")?;
+        anyhow::ensure!(
+            pocket.status == StripFeederPocketStatus::Reserved,
+            "strip feeder pocket reservation is not active"
+        );
+        pocket.status = StripFeederPocketStatus::Available;
+        pocket.reservation_id = None;
+        pocket.updated_at = Utc::now();
+        registration.updated_at = Utc::now();
+        transaction.execute(
+            r#"UPDATE entities
+               SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), document = ?3
+               WHERE kind = ?1 AND id = ?2"#,
+            params![
+                "strip_feeder_registration",
+                registration_id.to_string(),
+                serde_json::to_string(&registration)?,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(registration)
+    }
+
     /// Atomically settles a reservation. Consumption requires pickup and
     /// bottom-camera evidence from the caller.
     pub fn settle_strip_feeder_pocket(
@@ -1221,6 +1267,23 @@ mod tests {
             reserved.pockets[1].status,
             StripFeederPocketStatus::Reserved
         );
+        let released = store
+            .release_strip_feeder_pocket_reservation(registration_id, first_reservation)
+            .unwrap();
+        assert_eq!(
+            released.pockets[1].status,
+            StripFeederPocketStatus::Available
+        );
+        assert_eq!(
+            released.pockets[1].occupancy,
+            StripPocketOccupancy::Occupied
+        );
+        assert_eq!(released.pockets[1].attempt_count, 0);
+
+        let first_reservation = Uuid::new_v4();
+        store
+            .reserve_strip_feeder_pocket(registration_id, first_reservation, Some(1))
+            .unwrap();
         assert!(store
             .settle_strip_feeder_pocket(
                 registration_id,

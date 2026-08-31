@@ -7558,6 +7558,7 @@ async fn execute_physical_strip_feeder_pickup(
     let verified_release = {
         // Return to the exact pickup head pose. The measured part-to-nozzle
         // offset must not be applied here because it existed at pickup time.
+        let release_reference = release_reference_inspection(&alignment, &inspection.report);
         release_and_verify_nozzle_clear(
             state,
             prepared,
@@ -7566,7 +7567,7 @@ async fn execute_physical_strip_feeder_pickup(
             current_tip_offset,
             contact.controller_z_mm,
             &bare,
-            &inspection.report,
+            release_reference,
             bottom_pose,
             &camera_profile,
             &camera_path,
@@ -7861,6 +7862,17 @@ fn post_release_matches_held_part(
         && polarity_matches
         && (pixel_ratio >= MINIMUM_RETAINED_PART_PIXEL_RATIO
             || luma_ratio >= MINIMUM_RETAINED_PART_LUMA_RATIO)
+}
+
+fn release_reference_inspection<'a>(
+    alignment: &'a HeldPartAlignmentReport,
+    final_inspection: &'a HeldPartInspectionReport,
+) -> &'a HeldPartInspectionReport {
+    alignment
+        .observations
+        .first()
+        .map(|observation| &observation.inspection)
+        .unwrap_or(final_inspection)
 }
 
 fn held_part_foreground_is_brighter(report: &HeldPartInspectionReport) -> Option<bool> {
@@ -22297,6 +22309,10 @@ async fn execute_guarded_placement_task(
                 let _ = state.machine.disable_actuator(sensor_id.into()).await;
             }
             report.findings.push(error.clone());
+            let pocket_approach_started = report
+                .stages
+                .iter()
+                .any(|stage| stage.stage == PlacementExecutionStage::PickApproach && stage.passed);
             run.status = OperationStatus::Failed;
             run.message = Some(error.clone());
             run.report = Some(report);
@@ -22317,13 +22333,21 @@ async fn execute_guarded_placement_task(
                         })
                     });
                 if reservation_is_active {
-                    if let Err(store_error) = state.store.settle_strip_feeder_pocket(
-                        prepared.registration.id,
-                        run.id,
-                        StripFeederPocketOutcome::Interrupted,
-                        false,
-                    ) {
-                        tracing::error!(%store_error, execution_id = %run.id, "failed to quarantine interrupted placement pocket");
+                    let recovery = if pocket_approach_started {
+                        state.store.settle_strip_feeder_pocket(
+                            prepared.registration.id,
+                            run.id,
+                            StripFeederPocketOutcome::Interrupted,
+                            false,
+                        )
+                    } else {
+                        state.store.release_strip_feeder_pocket_reservation(
+                            prepared.registration.id,
+                            run.id,
+                        )
+                    };
+                    if let Err(store_error) = recovery {
+                        tracing::error!(%store_error, execution_id = %run.id, "failed to recover interrupted placement pocket");
                     }
                 }
             }
@@ -22669,14 +22693,6 @@ async fn execute_physical_guarded_placement(
         z_mm: acquired.contact.nozzle_z_mm,
         rotation_deg: prepared.registration.part_rotation_deg.unwrap_or(0.0),
     };
-    report.stages.push(PlacementExecutionStageReport {
-        stage: PlacementExecutionStage::PickApproach,
-        passed: true,
-        message: format!(
-            "reserved pocket {} and used the live holdout correction",
-            prepared.run.pocket_index,
-        ),
-    });
     report.stages.push(PlacementExecutionStageReport {
         stage: PlacementExecutionStage::Pickup,
         passed: true,
@@ -23212,8 +23228,10 @@ async fn release_part_at_board_and_verify(
             &inspection_artifact,
             &inspection.preview,
         )?;
-        let retained_part =
-            post_release_matches_held_part(&acquired.inspection, &inspection.report);
+        let retained_part = post_release_matches_held_part(
+            release_reference_inspection(&acquired.alignment, &acquired.inspection),
+            &inspection.report,
+        );
         nozzle_clear = nozzle_release_attempt_passed(sensor_released, retained_part);
         previous_sensor_released = sensor_released;
         previous_retained_part = retained_part;
@@ -23408,6 +23426,14 @@ async fn acquire_physical_placement_part(
         )
         .await
         .map_err(|error| error.to_string())?;
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::PickApproach,
+        passed: true,
+        message: format!(
+            "reserved pocket {} and used the live holdout correction",
+            prepared.run.pocket_index,
+        ),
+    });
     state
         .machine
         .actuate(prepared.lease_id, sensor_id.clone(), true)
@@ -28564,6 +28590,79 @@ mod tests {
 
         assert!(!post_release_matches_held_part(&held, &reflection));
         assert!(post_release_matches_held_part(&held, &retained_part));
+    }
+
+    #[test]
+    fn release_uses_the_stable_pre_rotation_part_outline() {
+        let initial = HeldPartInspectionReport {
+            algorithm_version: "held_part_difference.v3".into(),
+            detected: true,
+            center_x_px: Some(640.0),
+            center_y_px: Some(360.0),
+            centering_correction_x_mm: Some(0.0),
+            centering_correction_y_mm: Some(0.0),
+            centering_correction_mm: Some(0.0),
+            width_mm: Some(1.094_75),
+            length_mm: Some(1.773_09),
+            rotation_deg: Some(0.0),
+            orientation_rotation_deg: None,
+            orientation_contrast_luma: None,
+            orientation_confidence: 0.0,
+            changed_pixel_count: 1_383,
+            mean_difference_luma: 128.109,
+            confidence: 0.97,
+            passed: true,
+            artifact_name: "held-part-inspection-initial.png".into(),
+            findings: vec![
+                "held-part foreground is brighter than the bare nozzle reference".into(),
+            ],
+        };
+        let final_inspection = HeldPartInspectionReport {
+            width_mm: Some(1.513_50),
+            length_mm: Some(2.099_97),
+            changed_pixel_count: 1_849,
+            mean_difference_luma: 102.27,
+            artifact_name: "held-part-inspection.png".into(),
+            ..initial.clone()
+        };
+        let retained = HeldPartInspectionReport {
+            width_mm: Some(1.034_39),
+            length_mm: Some(1.757_04),
+            changed_pixel_count: 1_354,
+            mean_difference_luma: 133.213,
+            artifact_name: "post-release-nozzle-inspection.png".into(),
+            ..initial.clone()
+        };
+        let alignment = HeldPartAlignmentReport {
+            algorithm_version: "held_part_alignment.v1".into(),
+            orientation: PartOrientation::AxisSymmetric,
+            source_rotation_deg: 0.0,
+            target_rotation_deg: 0.0,
+            commanded_x_mm: 0.0,
+            commanded_y_mm: 0.0,
+            commanded_rotation_deg: 0.0,
+            final_centering_residual_mm: Some(0.0),
+            final_rotation_residual_deg: Some(0.0),
+            final_resolved_rotation_deg: Some(0.0),
+            passed: true,
+            observations: vec![HeldPartAlignmentObservation {
+                iteration: 1,
+                head_machine_mm: [0.0, 0.0],
+                nozzle_rotation_offset_deg: 0.0,
+                inspection: initial,
+            }],
+            artifact_names: Vec::new(),
+            findings: Vec::new(),
+        };
+
+        assert!(!post_release_matches_held_part(
+            &final_inspection,
+            &retained
+        ));
+        assert!(post_release_matches_held_part(
+            release_reference_inspection(&alignment, &final_inspection),
+            &retained,
+        ));
     }
 
     #[test]
