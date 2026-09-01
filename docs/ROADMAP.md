@@ -89,8 +89,8 @@ The project is organized by measurable gates rather than calendar estimates.
   present/absent feed-position counts across compatible focused scans
 - [x] Add persistent vision-assisted strip setup through live pocket,
   bounded pickup Z, vacuum hold, bottom inspection, and release
-- [x] Verify release with bottom-camera nozzle-clear evidence, one bounded
-  retry, and fail-closed top-camera pocket confirmation
+- [x] Verify release with bottom-camera nozzle-clear evidence, an adaptive
+  bounded depth schedule, and fail-closed top-camera confirmation
 - [x] Add persistent per-pocket reservation, evidence-gated consumption,
   empty-pocket skipping, retry limits, and restart recovery
 - [x] Add three-to-five-cycle qualification across distinct occupied pockets

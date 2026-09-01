@@ -9,8 +9,10 @@ use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 use velocitypnp_domain::{
     top_side_placement_rotation_deg, BoardDesign, BoardSide, Feeder, Job, MachineProfile, Part,
-    PartOrientation, Placement, Pose,
+    PartOrientation, Placement, PlacementReleaseSchedule, Pose,
 };
+
+const MAXIMUM_PLACEMENT_RELEASE_ATTEMPTS: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightReport {
@@ -41,6 +43,7 @@ pub struct PlanStep {
     pub feeder_part_rotation_deg: f64,
     pub placement_surface_offset_mm: f64,
     pub placement_seating_offset_mm: f64,
+    pub placement_release_seating_offsets_mm: Vec<f64>,
     pub feeder_pick: Pose,
     pub board_place: Pose,
     pub safe_z_mm: f64,
@@ -71,6 +74,12 @@ pub fn plan_job(
         .is_some_and(|offset| !offset.is_finite() || !(-0.25..=0.5).contains(&offset))
     {
         errors.push("job placement seating offset is invalid".into());
+    }
+    if job
+        .placement_release
+        .is_some_and(|schedule| schedule.validate().is_err())
+    {
+        errors.push("job placement release schedule is invalid".into());
     }
 
     for instance in &job.boards {
@@ -177,7 +186,7 @@ pub fn plan_job(
                 (body_length_mm, body_width_mm)
             };
             let seating_property = placement.properties.get("Placement Seating Offset");
-            let placement_seating_offset_mm = if let Some(value) = seating_property {
+            let reference_seating_offset_mm = if let Some(value) = seating_property {
                 let Ok(offset) = value.parse::<f64>() else {
                     errors.push(format!(
                         "{} has an invalid placement seating offset",
@@ -185,13 +194,22 @@ pub fn plan_job(
                     ));
                     continue;
                 };
-                offset
+                Some(offset)
             } else {
-                job.placement_seating_offset_mm
-                    .unwrap_or_else(|| part.placement_seating_offset_mm.unwrap_or(0.0))
+                None
             };
+            let release_schedule = part.placement_release.or(job.placement_release);
+            let placement_seating_offset_mm = reference_seating_offset_mm.unwrap_or_else(|| {
+                release_schedule.map_or_else(
+                    || {
+                        job.placement_seating_offset_mm
+                            .unwrap_or_else(|| part.placement_seating_offset_mm.unwrap_or(0.0))
+                    },
+                    |schedule| schedule.start_seating_offset_mm,
+                )
+            });
             if !placement_seating_offset_mm.is_finite()
-                || !(-0.25..=0.5).contains(&placement_seating_offset_mm)
+                || !(-0.5..=0.5).contains(&placement_seating_offset_mm)
             {
                 errors.push(format!(
                     "{} has an invalid placement seating offset",
@@ -199,6 +217,19 @@ pub fn plan_job(
                 ));
                 continue;
             }
+            let placement_release_seating_offsets_mm = match release_schedule {
+                Some(mut schedule) => {
+                    schedule.start_seating_offset_mm = placement_seating_offset_mm;
+                    match expand_placement_release_schedule(schedule) {
+                        Ok(offsets) => offsets,
+                        Err(error) => {
+                            errors.push(format!("{} {error}", placement.reference));
+                            continue;
+                        }
+                    }
+                }
+                None => vec![placement_seating_offset_mm],
+            };
             let nozzle_id = select_compatible_nozzle(part, profile).unwrap_or_else(|| "N1".into());
             let Some(transform) = instance.design_to_machine else {
                 continue;
@@ -248,6 +279,7 @@ pub fn plan_job(
                 feeder_part_rotation_deg: feeder_pick.rotation_deg,
                 placement_surface_offset_mm: instance.placement_surface_offset_mm,
                 placement_seating_offset_mm,
+                placement_release_seating_offsets_mm,
                 feeder_pick,
                 board_place,
                 safe_z_mm: profile.safe_z_mm,
@@ -274,6 +306,28 @@ pub fn plan_job(
         steps,
         report,
     }
+}
+
+fn expand_placement_release_schedule(
+    schedule: PlacementReleaseSchedule,
+) -> Result<Vec<f64>, &'static str> {
+    schedule.validate()?;
+    let mut offsets = vec![schedule.start_seating_offset_mm];
+    let mut current = schedule.start_seating_offset_mm;
+    while current - schedule.step_mm > schedule.minimum_seating_offset_mm + 1e-9 {
+        current -= schedule.step_mm;
+        offsets.push(current);
+        if offsets.len() >= MAXIMUM_PLACEMENT_RELEASE_ATTEMPTS {
+            return Err("placement release schedule has too many attempts");
+        }
+    }
+    if current > schedule.minimum_seating_offset_mm + 1e-9 {
+        offsets.push(schedule.minimum_seating_offset_mm);
+    }
+    if offsets.len() > MAXIMUM_PLACEMENT_RELEASE_ATTEMPTS {
+        return Err("placement release schedule has too many attempts");
+    }
+    Ok(offsets)
 }
 
 fn select_compatible_nozzle(part: &Part, profile: &MachineProfile) -> Option<String> {
@@ -388,6 +442,7 @@ mod tests {
             status: "draft".into(),
             placement_references: Vec::new(),
             placement_seating_offset_mm: None,
+            placement_release: None,
             boards: vec![BoardInstance {
                 id: Uuid::new_v4(),
                 board_id,
@@ -459,6 +514,11 @@ mod tests {
             }],
             placement_references: vec!["R2".into()],
             placement_seating_offset_mm: Some(0.06),
+            placement_release: Some(PlacementReleaseSchedule {
+                start_seating_offset_mm: 0.2,
+                minimum_seating_offset_mm: 0.0,
+                step_mm: 0.1,
+            }),
             status: "ready".into(),
         };
         let feeder = Feeder::Strip {
@@ -487,6 +547,11 @@ mod tests {
                 body_width_mm: Some(0.8),
                 body_length_mm: Some(1.6),
                 placement_seating_offset_mm: Some(0.05),
+                placement_release: Some(PlacementReleaseSchedule {
+                    start_seating_offset_mm: 0.1,
+                    minimum_seating_offset_mm: -0.1,
+                    step_mm: 0.1,
+                }),
                 compatible_tips: vec!["N045".into()],
                 vision_profile: None,
                 orientation: Some(velocitypnp_domain::PartOrientation::AxisSymmetric),
@@ -514,6 +579,49 @@ mod tests {
         assert_eq!(plan.steps[0].feeder_part_rotation_deg, 0.0);
         assert_eq!(plan.steps[0].placement_surface_offset_mm, 0.10);
         assert_eq!(plan.steps[0].placement_seating_offset_mm, 0.07);
+        let offsets = &plan.steps[0].placement_release_seating_offsets_mm;
+        assert_eq!(offsets.len(), 3);
+        for (actual, expected) in offsets.iter().zip([0.07, -0.03, -0.1]) {
+            assert!((*actual - expected).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn release_schedule_expands_shallow_to_deep_and_keeps_the_limit() {
+        let offsets = expand_placement_release_schedule(PlacementReleaseSchedule {
+            start_seating_offset_mm: -0.2,
+            minimum_seating_offset_mm: -0.4,
+            step_mm: 0.1,
+        })
+        .unwrap();
+
+        assert_eq!(offsets.len(), 3);
+        for (actual, expected) in offsets.iter().zip([-0.2, -0.3, -0.4]) {
+            assert!((*actual - expected).abs() < 1e-9);
+        }
+
+        let error = expand_placement_release_schedule(PlacementReleaseSchedule {
+            start_seating_offset_mm: 0.5,
+            minimum_seating_offset_mm: -0.5,
+            step_mm: 0.02,
+        })
+        .unwrap_err();
+        assert_eq!(error, "placement release schedule has too many attempts");
+    }
+
+    #[test]
+    fn release_schedule_includes_a_nonuniform_final_depth() {
+        let offsets = expand_placement_release_schedule(PlacementReleaseSchedule {
+            start_seating_offset_mm: -0.15,
+            minimum_seating_offset_mm: -0.4,
+            step_mm: 0.1,
+        })
+        .unwrap();
+
+        assert_eq!(offsets.len(), 4);
+        for (actual, expected) in offsets.iter().zip([-0.15, -0.25, -0.35, -0.4]) {
+            assert!((*actual - expected).abs() < 1e-9);
+        }
     }
 
     #[test]

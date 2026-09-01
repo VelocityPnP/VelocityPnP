@@ -70,14 +70,19 @@ passed placement promotes the feeder. A feeder can also become ready after
 three current pickup-return cycles at distinct pockets. Each return cycle needs
 nozzle-clear and pocket-return evidence. Physical execution reserves one
 known occupied pocket, uses live vacuum and bottom vision, verifies release in
-at most two attempts, and then uses top vision. A failure before confirmed
-release tries to return the part to the source pocket. Simulation records the
-intended stages but does not claim live evidence or consume feeder inventory.
+at most ten configured depth attempts, and then uses top vision. Each deeper
+attempt needs bottom-camera retained-part evidence, restored vacuum hold, and
+a fresh bottom-camera alignment. An ambiguous result stops without more board
+motion. A securely held part is returned to the source pocket after failure.
+Simulation records the intended stages but does not claim live evidence or
+consume feeder inventory.
 
 Placement Z keeps the measured board datum, a nonnegative board surface
 offset, nominal part height, and a bounded signed seating offset as separate
 terms. A positive seating offset stops higher. This prevents tape thickness or
 nozzle compression tuning from changing calibration evidence.
+The complete release schedule must fit the calibrated nozzle height range and
+controller Z model before pickup starts.
 
 The V3.0.4 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the

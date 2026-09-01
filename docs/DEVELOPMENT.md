@@ -848,7 +848,7 @@ board reference after an earlier physical run reached its placement pose.
 This prevents a failed release or inspection from causing a second component
 to be stacked on the same target. Rework needs a separate explicit workflow.
 
-Before pickup, guarded placement version 6 also registers the bare local
+Before pickup, guarded placement version 7 also registers the bare local
 two-terminal pad pair. It stores `board-target-registration.png` and applies
 the bounded local XY correction to the placement pose. A missing or ambiguous
 pad pair stops the operation before pickup. The retained report keeps the
@@ -881,18 +881,36 @@ its source pocket and quarantines the reservation. The simulator does not
 consume a pocket and does not claim live camera evidence. Job preflight requires
 part height, body width, and body length.
 
-Guarded placement has one bounded mechanical-release retry. It runs
-only when the vacuum sensor confirms pressure release but bottom vision still
-matches the held component. The retry replaces the original bottom-alignment
-translation with the retained-part correction, rejects a rotation error above
-the placement limit, and seats the part 0.10 mm deeper. It then holds the
-nozzle valve open for 500 ms with the pump off. A second bottom-camera capture
-must prove a clear nozzle before the pocket is consumed or placement continues.
-The depth and pulse duration are machine-profile values.
+Guarded placement can use a bounded shallow-to-deep release schedule. Each
+attempt turns off the pump, pulses blowoff, retracts, reads the vacuum sensor,
+and captures the nozzle with the bottom camera. Confirmed transfer requires
+both a released vacuum signal and a clear-nozzle image. Before a deeper
+attempt, the runner must see the retained part, restore vacuum hold, and pass a
+fresh bottom-camera alignment. Ambiguous evidence, failed hold, failed
+alignment, or the end of the range stops the sequence. Every attempt keeps its
+depth, sensor samples, alignment report, and image names.
+
+Set a job-wide range with `placement_release`:
+
+```json
+{
+  "placement_release": {
+    "start_seating_offset_mm": -0.2,
+    "minimum_seating_offset_mm": -0.4,
+    "step_mm": 0.1
+  }
+}
+```
+
+A part-level schedule overrides the job schedule. A KiCad placement property
+named `Placement Seating Offset` overrides the schedule start for that one
+reference. Preflight expands no more than ten depths and checks all of them
+against the calibrated height and controller Z models.
 
 Retained-part recovery can set an explicit `placement_seating_offset_mm` from
--0.50 to +0.50 mm for a bounded diagnostic release. This override does not
-change the normal job-planner range. Its deeper retry is clamped at -0.50 mm.
+-0.50 to +0.50 mm for a bounded diagnostic release. The override becomes the
+first attempt and removes shallower configured attempts. The -0.50 mm lower
+bound still applies.
 An optional `target_placement_reference` can redirect the held part to a
 confirmed empty job target only when the part, nozzle, feeder, and board are
 the same. The recovery report records both overrides.
@@ -912,9 +930,8 @@ adjustment. A positive seating offset stops the nozzle higher and reduces
 compression. The part default can be from -0.25 to +0.50 mm. A KiCad placement
 property named `Placement Seating Offset` overrides that default for one
 reference. A job-level `placement_seating_offset_mm` overrides the part default
-and supports controlled tuning runs. The per-reference property has the highest
-priority. Preflight records every term in the plan, and each physical run copies
-them into its retained report.
+when no release schedule is set. Preflight records every term and every release
+depth in the plan. The physical report records the shallowest successful depth.
 
 Each physical execution also creates a persistent placement outcome. The
 automatic disposition is one of `good`, `offset`, `rotated`, `tombstoned`,
@@ -941,8 +958,8 @@ cargo run --release -p velocitypnp -- qualify-placement-sequence JOB_UUID \
   --step 0 1 2 --confirm-safety-checks
 ```
 
-The series accepts one to five distinct steps for one part, nozzle, seating
-offset, and board-surface offset. It records each execution and outcome and
+The series accepts one to five distinct steps for one part, nozzle, release
+schedule, and board-surface offset. It records each execution and outcome and
 stops after the first failed operation or non-good automatic disposition.
 
 Run a complete job with daemon-owned, persistent state:

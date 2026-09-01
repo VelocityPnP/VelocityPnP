@@ -1633,6 +1633,16 @@ components:
             mode: { type: string, const: darker_end }
             minimum_contrast_luma: { type: number, minimum: 2, maximum: 64 }
             rotation_offset_deg: { type: number, minimum: -360, maximum: 360 }
+    PlacementReleaseSchedule:
+      type: object
+      required:
+        - start_seating_offset_mm
+        - minimum_seating_offset_mm
+        - step_mm
+      properties:
+        start_seating_offset_mm: { type: number, minimum: -0.5, maximum: 0.5 }
+        minimum_seating_offset_mm: { type: number, minimum: -0.5, maximum: 0.5 }
+        step_mm: { type: number, minimum: 0.02, maximum: 0.25 }
     Part:
       type: object
       required:
@@ -1644,6 +1654,7 @@ components:
         - body_width_mm
         - body_length_mm
         - placement_seating_offset_mm
+        - placement_release
         - compatible_tips
         - vision_profile
         - orientation
@@ -1656,6 +1667,10 @@ components:
         body_width_mm: { type: [number, "null"], exclusiveMinimum: 0 }
         body_length_mm: { type: [number, "null"], exclusiveMinimum: 0 }
         placement_seating_offset_mm: { type: [number, "null"], minimum: -0.25, maximum: 0.5 }
+        placement_release:
+          oneOf:
+            - { $ref: "#/components/schemas/PlacementReleaseSchedule" }
+            - type: "null"
         compatible_tips: { type: array, items: { type: string } }
         vision_profile: { type: [string, "null"] }
         orientation:
@@ -1677,6 +1692,7 @@ components:
         - feeder_part_rotation_deg
         - placement_surface_offset_mm
         - placement_seating_offset_mm
+        - placement_release_seating_offsets_mm
         - feeder_pick
         - board_place
         - safe_z_mm
@@ -1693,6 +1709,11 @@ components:
         feeder_part_rotation_deg: { type: number }
         placement_surface_offset_mm: { type: number }
         placement_seating_offset_mm: { type: number }
+        placement_release_seating_offsets_mm:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { type: number, minimum: -0.5, maximum: 0.5 }
         feeder_pick: { $ref: "#/components/schemas/Pose" }
         board_place: { $ref: "#/components/schemas/Pose" }
         safe_z_mm: { type: number }
@@ -3175,7 +3196,7 @@ components:
         - findings
       properties:
         algorithm_version: { type: string }
-        attempt_count: { type: integer, minimum: 1, maximum: 2 }
+        attempt_count: { type: integer, minimum: 1, maximum: 10 }
         retry_performed: { type: boolean }
         nozzle_clear: { type: boolean }
         passed: { type: boolean }
@@ -3531,6 +3552,41 @@ components:
         passed: { type: boolean }
         artifact_name: { type: string }
         findings: { type: array, items: { type: string } }
+    PlacementReleaseAttemptReport:
+      type: object
+      required:
+        - attempt_index
+        - seating_offset_mm
+        - nozzle_z_mm
+        - controller_z_mm
+        - release_raw_values
+        - sensor_released
+        - retained_part_detected
+        - nozzle_clear
+        - vacuum_reacquired
+        - hold_raw_values
+        - realignment
+        - artifact_names
+      properties:
+        attempt_index: { type: integer, minimum: 1, maximum: 10 }
+        seating_offset_mm: { type: number, format: double }
+        nozzle_z_mm: { type: number, format: double }
+        controller_z_mm: { type: number, format: double }
+        release_raw_values:
+          type: array
+          items: { type: integer, format: int64 }
+        sensor_released: { type: boolean }
+        retained_part_detected: { type: boolean }
+        nozzle_clear: { type: boolean }
+        vacuum_reacquired: { type: [boolean, "null"] }
+        hold_raw_values:
+          type: array
+          items: { type: integer, format: int64 }
+        realignment:
+          oneOf:
+            - { $ref: "#/components/schemas/HeldPartAlignmentReport" }
+            - type: "null"
+        artifact_names: { type: array, items: { type: string } }
     PlacementExecutionReport:
       type: object
       required:
@@ -3548,6 +3604,9 @@ components:
         - part_height_mm
         - placement_surface_offset_mm
         - placement_seating_offset_mm
+        - placement_release_seating_offsets_mm
+        - successful_placement_seating_offset_mm
+        - placement_release_attempts
         - pocket_index
         - pickup_open_nozzle_raw_values
         - pickup_search_samples
@@ -3574,6 +3633,15 @@ components:
         part_height_mm: { type: number, format: double }
         placement_surface_offset_mm: { type: number, format: double }
         placement_seating_offset_mm: { type: number, format: double }
+        placement_release_seating_offsets_mm:
+          type: array
+          items: { type: number, format: double }
+        successful_placement_seating_offset_mm:
+          type: [number, "null"]
+          format: double
+        placement_release_attempts:
+          type: array
+          items: { $ref: "#/components/schemas/PlacementReleaseAttemptReport" }
         pocket_index: { type: [integer, "null"], minimum: 0 }
         pickup_open_nozzle_raw_values:
           type: array

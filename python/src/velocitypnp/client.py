@@ -1596,14 +1596,19 @@ class Client:
             (
                 step["part_key"],
                 step["nozzle_id"],
-                step["placement_seating_offset_mm"],
+                tuple(
+                    step.get(
+                        "placement_release_seating_offsets_mm",
+                        [step["placement_seating_offset_mm"]],
+                    )
+                ),
                 step["placement_surface_offset_mm"],
             )
             for step in selected
         }
         if len(keys) != 1:
             raise ValueError(
-                "placement sequence steps must use one part, nozzle, seating offset, "
+                "placement sequence steps must use one part, nozzle, release schedule, "
                 "and surface offset"
             )
         executions = []

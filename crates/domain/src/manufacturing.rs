@@ -240,11 +240,43 @@ pub struct Part {
     /// Signed process adjustment. A positive value stops the nozzle higher.
     #[serde(default)]
     pub placement_seating_offset_mm: Option<f64>,
+    /// Optional part-specific adaptive board-release schedule.
+    #[serde(default)]
+    pub placement_release: Option<PlacementReleaseSchedule>,
     pub compatible_tips: Vec<String>,
     pub vision_profile: Option<String>,
     /// Rotation semantics used by bottom vision and placement planning.
     #[serde(default)]
     pub orientation: Option<PartOrientation>,
+}
+
+/// Bounded seating offsets used to release a part onto a board.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlacementReleaseSchedule {
+    /// First seating offset. A positive value stops the nozzle higher.
+    pub start_seating_offset_mm: f64,
+    /// Deepest permitted seating offset.
+    pub minimum_seating_offset_mm: f64,
+    /// Positive depth increment between attempts.
+    pub step_mm: f64,
+}
+
+impl PlacementReleaseSchedule {
+    pub fn validate(self) -> Result<(), &'static str> {
+        let values = [
+            self.start_seating_offset_mm,
+            self.minimum_seating_offset_mm,
+            self.step_mm,
+        ];
+        if values.iter().any(|value| !value.is_finite())
+            || !(-0.5..=0.5).contains(&self.start_seating_offset_mm)
+            || !(-0.5..=self.start_seating_offset_mm).contains(&self.minimum_seating_offset_mm)
+            || !(0.02..=0.25).contains(&self.step_mm)
+        {
+            return Err("placement release schedule is invalid");
+        }
+        Ok(())
+    }
 }
 
 /// How bottom vision resolves a package's directed rotation.
@@ -919,6 +951,10 @@ pub struct Job {
     /// Optional job-wide override for the part seating process adjustment.
     #[serde(default)]
     pub placement_seating_offset_mm: Option<f64>,
+    /// Optional job-wide adaptive release schedule. A part schedule overrides
+    /// this value.
+    #[serde(default)]
+    pub placement_release: Option<PlacementReleaseSchedule>,
     pub status: String,
 }
 
@@ -1008,6 +1044,28 @@ pub struct PlacementExecutionStageReport {
     pub message: String,
 }
 
+/// Sensor, motion, and vision evidence from one board-release depth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementReleaseAttemptReport {
+    pub attempt_index: u32,
+    pub seating_offset_mm: f64,
+    pub nozzle_z_mm: f64,
+    pub controller_z_mm: f64,
+    #[serde(default)]
+    pub release_raw_values: Vec<i64>,
+    pub sensor_released: bool,
+    pub retained_part_detected: bool,
+    pub nozzle_clear: bool,
+    #[serde(default)]
+    pub vacuum_reacquired: Option<bool>,
+    #[serde(default)]
+    pub hold_raw_values: Vec<i64>,
+    #[serde(default)]
+    pub realignment: Option<HeldPartAlignmentReport>,
+    #[serde(default)]
+    pub artifact_names: Vec<String>,
+}
+
 /// Evidence from one guarded placement-plan step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacementExecutionReport {
@@ -1033,6 +1091,15 @@ pub struct PlacementExecutionReport {
     pub placement_surface_offset_mm: f64,
     #[serde(default)]
     pub placement_seating_offset_mm: f64,
+    /// Planned shallow-to-deep release schedule.
+    #[serde(default)]
+    pub placement_release_seating_offsets_mm: Vec<f64>,
+    /// Seating offset that first produced confirmed transfer.
+    #[serde(default)]
+    pub successful_placement_seating_offset_mm: Option<f64>,
+    /// Per-depth sensor and bottom-camera evidence.
+    #[serde(default)]
+    pub placement_release_attempts: Vec<PlacementReleaseAttemptReport>,
     #[serde(default)]
     pub pocket_index: Option<u32>,
     /// Open-nozzle samples retained even when pickup does not find contact.
@@ -1220,6 +1287,10 @@ pub fn estimate_placement_process(
     const MINIMUM_CONCLUSIVE_OBSERVATIONS: u32 = 3;
     const MINIMUM_SUCCESS_RATE: f64 = 0.80;
     const MAXIMUM_UPDATE_MM: f64 = 0.05;
+    let current_seating_offset_mm = part
+        .placement_release
+        .map(|schedule| schedule.start_seating_offset_mm)
+        .or(part.placement_seating_offset_mm);
 
     let selected = outcomes
         .iter()
@@ -1279,7 +1350,7 @@ pub fn estimate_placement_process(
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(left.conclusive_count.cmp(&right.conclusive_count))
                 .then_with(|| {
-                    let current = part.placement_seating_offset_mm.unwrap_or(0.0);
+                    let current = current_seating_offset_mm.unwrap_or(0.0);
                     let left_distance = (left.seating_offset_mm - current).abs();
                     let right_distance = (right.seating_offset_mm - current).abs();
                     right_distance
@@ -1294,8 +1365,8 @@ pub fn estimate_placement_process(
                 })
         });
     let recommended_seating_offset_mm = best.map(|summary| {
-        let target = summary.seating_offset_mm.clamp(-0.25, 0.50);
-        part.placement_seating_offset_mm.map_or(target, |current| {
+        let target = summary.seating_offset_mm.clamp(-0.50, 0.50);
+        current_seating_offset_mm.map_or(target, |current| {
             target.clamp(current - MAXIMUM_UPDATE_MM, current + MAXIMUM_UPDATE_MM)
         })
     });
@@ -1321,7 +1392,7 @@ pub fn estimate_placement_process(
         package: part.package.clone(),
         nozzle_id: nozzle_id.into(),
         placement_surface_offset_mm,
-        current_seating_offset_mm: part.placement_seating_offset_mm,
+        current_seating_offset_mm,
         observation_count: selected.len() as u32,
         operator_review_count,
         offset_summaries,
@@ -1408,6 +1479,7 @@ mod tests {
             body_width_mm: Some(0.8),
             body_length_mm: Some(1.6),
             placement_seating_offset_mm: Some(0.10),
+            placement_release: None,
             compatible_tips: vec!["N045".into()],
             vision_profile: Some("rectangular_passive".into()),
             orientation: None,
@@ -1465,6 +1537,24 @@ mod tests {
             .collect::<Vec<_>>();
         let estimate = estimate_placement_process(&part, "N1", 0.0, &outcomes);
         assert!((estimate.recommended_seating_offset_mm.unwrap() - 0.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn process_estimate_uses_the_release_schedule_start_and_deeper_results() {
+        let mut part = part();
+        part.placement_release = Some(PlacementReleaseSchedule {
+            start_seating_offset_mm: -0.2,
+            minimum_seating_offset_mm: -0.4,
+            step_mm: 0.1,
+        });
+        let outcomes = (0..3)
+            .map(|_| outcome(&part, "N1", -0.3, PlacementOutcomeDisposition::Good))
+            .collect::<Vec<_>>();
+
+        let estimate = estimate_placement_process(&part, "N1", 0.0, &outcomes);
+
+        assert_eq!(estimate.current_seating_offset_mm, Some(-0.2));
+        assert_eq!(estimate.recommended_seating_offset_mm, Some(-0.25));
     }
 
     #[test]

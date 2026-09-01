@@ -587,12 +587,19 @@ export interface BoardInstance {
   placement_surface_offset_mm: number;
 }
 
+export interface PlacementReleaseSchedule {
+  start_seating_offset_mm: number;
+  minimum_seating_offset_mm: number;
+  step_mm: number;
+}
+
 export interface Job {
   id: string;
   name: string;
   boards: BoardInstance[];
   placement_references: string[];
   placement_seating_offset_mm: number | null;
+  placement_release: PlacementReleaseSchedule | null;
   status: string;
 }
 
@@ -1116,6 +1123,22 @@ export interface PlacementExecutionReport {
   part_height_mm: number;
   placement_surface_offset_mm: number;
   placement_seating_offset_mm: number;
+  placement_release_seating_offsets_mm: number[];
+  successful_placement_seating_offset_mm: number | null;
+  placement_release_attempts: Array<{
+    attempt_index: number;
+    seating_offset_mm: number;
+    nozzle_z_mm: number;
+    controller_z_mm: number;
+    release_raw_values: number[];
+    sensor_released: boolean;
+    retained_part_detected: boolean;
+    nozzle_clear: boolean;
+    vacuum_reacquired: boolean | null;
+    hold_raw_values: number[];
+    realignment: HeldPartAlignmentReport | null;
+    artifact_names: string[];
+  }>;
   pocket_index: number | null;
   pickup_open_nozzle_raw_values: number[];
   pickup_search_samples: VacuumProbeSample[];

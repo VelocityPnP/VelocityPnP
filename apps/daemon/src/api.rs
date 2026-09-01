@@ -42,23 +42,23 @@ use velocitypnp_domain::{
     NozzleRunoutSample, Operation, OperationStatus, Part, PartOrientation,
     PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
     PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
-    PlacementProcessEstimate, PlanarCameraCalibrationReport, PlanarCameraCalibrationSample,
-    PlanarCameraModel, Pose, Residuals, SensorReading, StripFeederInventoryReport,
-    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupDisposition,
-    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
-    StripFeederPocketOutcome, StripFeederPocketState, StripFeederPocketStatus,
-    StripFeederRegistration, StripFeederRegistrationStatus, StripFeederVisionReport,
-    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
-    VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
-    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
-    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
-    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
-    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
-    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
-    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
-    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
-    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
-    WorkspaceSurfaceModel,
+    PlacementProcessEstimate, PlacementReleaseAttemptReport, PlanarCameraCalibrationReport,
+    PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
+    StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
+    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
+    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketState,
+    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
+    VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
+    VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
+    WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
+    WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary, WorkspaceChangeSetReport,
+    WorkspaceChangeSetSummary, WorkspaceHeightMapSummary, WorkspaceInventoryBaseline,
+    WorkspaceMosaicLayerReport, WorkspaceObjectClass, WorkspaceParallaxSummary,
+    WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
+    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -115,7 +115,7 @@ const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
 const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v5";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v3";
-const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v4";
+const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v5";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
 const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
@@ -125,7 +125,7 @@ const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
 const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v6";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v7";
 const PLACEMENT_OUTCOME_ALGORITHM: &str = "placement_outcome.v2";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
@@ -7491,6 +7491,7 @@ async fn execute_physical_strip_feeder_pickup(
             &camera_path,
             target_rotation_deg,
             motion_permitted,
+            None,
         )
         .await;
         let rotation_restore = if rotation_reference_captured {
@@ -8247,6 +8248,7 @@ async fn align_held_part(
     camera_path: &str,
     target_rotation_deg: f64,
     motion_permitted: bool,
+    artifact_suffix: Option<&str>,
 ) -> Result<(HeldPartInspectionArtifacts, HeldPartAlignmentReport), String> {
     let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
     let bottom = state.profile.bottom_vision.as_ref().unwrap();
@@ -8261,7 +8263,9 @@ async fn align_held_part(
     let mut commanded_x_mm = 0.0;
     let mut commanded_y_mm = 0.0;
     let mut commanded_rotation_deg = 0.0;
-    let mut artifact_names = vec![HELD_PART_INITIAL_INSPECTION_ARTIFACT.into()];
+    let aligned_artifact = suffixed_png_artifact(HELD_PART_ALIGNED_ARTIFACT, artifact_suffix);
+    let inspection_artifact = suffixed_png_artifact(HELD_PART_INSPECTION_ARTIFACT, artifact_suffix);
+    let mut artifact_names = vec![current.report.artifact_name.clone()];
     let mut observations = Vec::new();
     let mut findings = Vec::new();
 
@@ -8335,20 +8339,20 @@ async fn align_held_part(
             } else {
                 findings.push("held-part alignment reached its bounded iteration limit".into());
             }
-            if current.report.artifact_name != HELD_PART_INSPECTION_ARTIFACT {
-                current.report.artifact_name = HELD_PART_INSPECTION_ARTIFACT.into();
+            if current.report.artifact_name != inspection_artifact {
+                current.report.artifact_name = inspection_artifact.clone();
                 persist_transfer_rgb_artifact(
                     state,
                     prepared,
-                    HELD_PART_INSPECTION_ARTIFACT,
+                    &inspection_artifact,
                     &current.preview,
                 )?;
             }
             if !artifact_names
                 .iter()
-                .any(|name| name == HELD_PART_INSPECTION_ARTIFACT)
+                .any(|name| name == &inspection_artifact)
             {
-                artifact_names.push(HELD_PART_INSPECTION_ARTIFACT.into());
+                artifact_names.push(inspection_artifact.clone());
             }
             return Ok((
                 current,
@@ -8424,12 +8428,9 @@ async fn align_held_part(
             pickup.inspection_sample_count,
         )
         .await?;
-        persist_transfer_gray_artifact(state, prepared, HELD_PART_ALIGNED_ARTIFACT, &held)?;
-        if !artifact_names
-            .iter()
-            .any(|name| name == HELD_PART_ALIGNED_ARTIFACT)
-        {
-            artifact_names.push(HELD_PART_ALIGNED_ARTIFACT.into());
+        persist_transfer_gray_artifact(state, prepared, &aligned_artifact, &held)?;
+        if !artifact_names.iter().any(|name| name == &aligned_artifact) {
+            artifact_names.push(aligned_artifact.clone());
         }
         current = inspect_held_part_difference_with_orientation(
             bare,
@@ -8440,18 +8441,25 @@ async fn align_held_part(
             pickup.minimum_part_size_mm,
             pickup.maximum_part_size_mm,
             prepared.part_orientation,
-            HELD_PART_INSPECTION_ARTIFACT,
+            &inspection_artifact,
         )
         .map_err(|error| error.to_string())?;
         apply_rotated_retained_part_size_gate(&mut current.report, initial_size_mm);
-        persist_transfer_rgb_artifact(
-            state,
-            prepared,
-            HELD_PART_INSPECTION_ARTIFACT,
-            &current.preview,
-        )?;
+        persist_transfer_rgb_artifact(state, prepared, &inspection_artifact, &current.preview)?;
     }
     Err("held-part alignment ended without a report".into())
+}
+
+fn suffixed_png_artifact(base: &str, suffix: Option<&str>) -> String {
+    suffix.map_or_else(
+        || base.to_string(),
+        |suffix| {
+            base.strip_suffix(".png").map_or_else(
+                || format!("{base}-{suffix}"),
+                |stem| format!("{stem}-{suffix}.png"),
+            )
+        },
+    )
 }
 
 fn resolved_held_part_rotation_deg(
@@ -20543,12 +20551,15 @@ async fn put_part(
             .placement_seating_offset_mm
             .is_some_and(|value| !value.is_finite() || !(-0.25..=0.5).contains(&value))
         || part
+            .placement_release
+            .is_some_and(|schedule| schedule.validate().is_err())
+        || part
             .resolved_orientation()
             .is_none_or(|orientation| orientation.validate().is_err())
         || (part.orientation.is_none() && existing.is_none())
     {
         return Err(ApiError::bad_request(
-            "part key, package, geometry, seating offset, and orientation must be valid",
+            "part key, package, geometry, release schedule, and orientation must be valid",
         ));
     }
     state.store.put_part(&part).map_err(ApiError::internal)?;
@@ -20638,6 +20649,14 @@ async fn put_job(
     {
         return Err(ApiError::bad_request(
             "job placement seating offset must be from -0.25 to +0.50 mm",
+        ));
+    }
+    if job
+        .placement_release
+        .is_some_and(|schedule| schedule.validate().is_err())
+    {
+        return Err(ApiError::bad_request(
+            "job placement release schedule is invalid",
         ));
     }
     for instance in &job.boards {
@@ -21749,6 +21768,15 @@ async fn prepare_retained_part_recovery(
         }
         step.board_place.z_mm += offset_mm - step.placement_seating_offset_mm;
         step.placement_seating_offset_mm = offset_mm;
+        let mut release_offsets = vec![offset_mm];
+        release_offsets.extend(
+            step.placement_release_seating_offsets_mm
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate < offset_mm - 1e-9),
+        );
+        release_offsets.dedup_by(|left, right| (*left - *right).abs() <= 1e-9);
+        step.placement_release_seating_offsets_mm = release_offsets;
         if !state.profile.bounds.contains(step.board_place) {
             return Err(ApiError::bad_request(
                 "retained-part recovery seating override is outside machine bounds",
@@ -21917,13 +21945,23 @@ fn prepare_retained_part_physical_context(
         .as_ref()
         .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
     if !height_model_has_working_plane_transfer
-        || height_model
-            .as_ref()
-            .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
-            .is_none()
+        || height_model.as_ref().is_none_or(|model| {
+            !placement_release_offsets(step).iter().all(|offset_mm| {
+                let nozzle_z_mm = placement_release_nozzle_z_mm(step, *offset_mm);
+                model.tip_offset_correction_at(nozzle_z_mm).is_some()
+                    && state
+                        .profile
+                        .z_kinematics
+                        .as_ref()
+                        .and_then(|kinematics| {
+                            kinematics.controller_z(&step.nozzle_id, nozzle_z_mm)
+                        })
+                        .is_some()
+            })
+        })
     {
         return Err(ApiError::bad_request(
-            "retained-part recovery needs a height model for the placement Z",
+            "retained-part recovery needs valid height and controller models for every release Z",
         ));
     }
     if artifacts_changed {
@@ -22304,13 +22342,23 @@ fn prepare_physical_placement_pickup(
         .as_ref()
         .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
     if !height_model_has_working_plane_transfer
-        || height_model
-            .as_ref()
-            .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
-            .is_none()
+        || height_model.as_ref().is_none_or(|model| {
+            !placement_release_offsets(step).iter().all(|offset_mm| {
+                let nozzle_z_mm = placement_release_nozzle_z_mm(step, *offset_mm);
+                model.tip_offset_correction_at(nozzle_z_mm).is_some()
+                    && state
+                        .profile
+                        .z_kinematics
+                        .as_ref()
+                        .and_then(|kinematics| {
+                            kinematics.controller_z(&step.nozzle_id, nozzle_z_mm)
+                        })
+                        .is_some()
+            })
+        })
     {
         return Err(ApiError::bad_request(
-            "physical placement needs a height model that supports the placement Z",
+            "physical placement needs valid height and controller models for every release Z",
         ));
     }
     if artifacts_changed {
@@ -22656,6 +22704,11 @@ async fn execute_retained_part_recovery_task(
         part_height_mm: step.part_height_mm,
         placement_surface_offset_mm: step.placement_surface_offset_mm,
         placement_seating_offset_mm: step.placement_seating_offset_mm,
+        placement_release_seating_offsets_mm: step
+            .placement_release_seating_offsets_mm
+            .clone(),
+        successful_placement_seating_offset_mm: None,
+        placement_release_attempts: Vec::new(),
         pocket_index: source_report.pocket_index,
         pickup_open_nozzle_raw_values: Vec::new(),
         pickup_search_samples: Vec::new(),
@@ -22722,10 +22775,17 @@ async fn execute_retained_part_recovery_task(
             ));
         }
         Err(error) => {
-            let _ = state
-                .machine
-                .disable_actuator(physical.vacuum_characterization.sensor_id.clone())
-                .await;
+            if failed_recovery_requires_vacuum_hold(&report) {
+                report.findings.push(
+                    "retained-part recovery stopped with possible held-part evidence; vacuum remains on for operator recovery"
+                        .into(),
+                );
+            } else {
+                let _ = state
+                    .machine
+                    .disable_actuator(physical.vacuum_characterization.sensor_id.clone())
+                    .await;
+            }
             report.findings.push(error.clone());
             run.status = OperationStatus::Failed;
             run.message = Some(error);
@@ -22747,6 +22807,17 @@ async fn execute_retained_part_recovery_task(
             .clone()
             .unwrap_or_else(|| "retained-part recovery failed".into()))
     }
+}
+
+fn failed_recovery_requires_vacuum_hold(report: &PlacementExecutionReport) -> bool {
+    report
+        .placement_release_attempts
+        .last()
+        .is_none_or(|attempt| {
+            !attempt.nozzle_clear
+                && (attempt.vacuum_reacquired == Some(true)
+                    || (attempt.vacuum_reacquired.is_none() && !attempt.sensor_released))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -22937,6 +23008,7 @@ async fn execute_physical_retained_part_recovery(
         &camera_path,
         step.board_place.rotation_deg,
         true,
+        None,
     )
     .await?;
     if !alignment.passed {
@@ -23095,14 +23167,24 @@ async fn execute_physical_retained_part_recovery(
         planner,
         place_level,
         place_contact,
+        local_target_correction_mm,
         prepared,
         &acquired,
     )
     .await?;
-    report.corrected_move_count += board_release.corrected_move_count;
-    let nozzle_clear = board_release.verification.nozzle_clear;
-    let release_raw_values = board_release.release_raw_values;
-    let release_verification = board_release.verification;
+    let VerifiedBoardRelease {
+        release_raw_values,
+        verification: release_verification,
+        corrected_move_count,
+        sensor_released: _,
+        successful_seating_offset_mm,
+        attempts,
+        retained_part_secured: _,
+    } = board_release;
+    report.corrected_move_count += corrected_move_count;
+    report.successful_placement_seating_offset_mm = successful_seating_offset_mm;
+    report.placement_release_attempts = attempts;
+    let nozzle_clear = release_verification.nozzle_clear;
     report
         .artifact_names
         .extend(release_verification.artifact_names.clone());
@@ -23282,6 +23364,9 @@ async fn execute_guarded_placement_task(
         part_height_mm: step.part_height_mm,
         placement_surface_offset_mm: step.placement_surface_offset_mm,
         placement_seating_offset_mm: step.placement_seating_offset_mm,
+        placement_release_seating_offsets_mm: step.placement_release_seating_offsets_mm.clone(),
+        successful_placement_seating_offset_mm: None,
+        placement_release_attempts: Vec::new(),
         pocket_index: physical.as_ref().map(|prepared| prepared.run.pocket_index),
         pickup_open_nozzle_raw_values: Vec::new(),
         pickup_search_samples: Vec::new(),
@@ -23795,7 +23880,7 @@ async fn execute_physical_guarded_placement(
         .extend(acquired.artifact_names.clone());
     persist_placement_progress(state, run, report)?;
 
-    let mut release_confirmed = false;
+    let mut part_no_longer_safe_for_source_return = false;
     let placement_result: Result<(), String> = async {
         let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
         let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
@@ -23883,15 +23968,24 @@ async fn execute_physical_guarded_placement(
             planner,
             place_level,
             place_contact,
+            local_target_correction_mm,
             prepared,
             &acquired,
         )
         .await?;
-        report.corrected_move_count += board_release.corrected_move_count;
-        let nozzle_clear = board_release.verification.nozzle_clear;
-        let sensor_released = board_release.sensor_released;
-        let release_raw_values = board_release.release_raw_values;
-        let release_verification = board_release.verification;
+        let VerifiedBoardRelease {
+            release_raw_values,
+            verification: release_verification,
+            corrected_move_count,
+            sensor_released,
+            successful_seating_offset_mm,
+            attempts,
+            retained_part_secured,
+        } = board_release;
+        report.corrected_move_count += corrected_move_count;
+        report.successful_placement_seating_offset_mm = successful_seating_offset_mm;
+        report.placement_release_attempts = attempts;
+        let nozzle_clear = release_verification.nozzle_clear;
         report
             .artifact_names
             .extend(release_verification.artifact_names.clone());
@@ -23913,14 +24007,14 @@ async fn execute_physical_guarded_placement(
                 false,
             ));
             persist_placement_progress(state, run, report)?;
-            release_confirmed = sensor_released;
+            part_no_longer_safe_for_source_return = !retained_part_secured;
             return Err(if sensor_released {
                 "vacuum confirmed release, but bottom vision did not confirm a clear nozzle".into()
             } else {
                 "placement release did not confirm a clear nozzle".into()
             });
         }
-        release_confirmed = true;
+        part_no_longer_safe_for_source_return = true;
 
         let (board_after, _) = capture_top_pocket_mean(
             state,
@@ -24013,7 +24107,7 @@ async fn execute_physical_guarded_placement(
     .await;
     match placement_result {
         Ok(()) => Ok(()),
-        Err(error) if release_confirmed => Err(error),
+        Err(error) if part_no_longer_safe_for_source_return => Err(error),
         Err(error) => {
             let cleanup = return_interrupted_pickup(
                 state,
@@ -24037,74 +24131,21 @@ struct VerifiedBoardRelease {
     verification: NozzleReleaseVerificationReport,
     corrected_move_count: u32,
     sensor_released: bool,
+    successful_seating_offset_mm: Option<f64>,
+    attempts: Vec<PlacementReleaseAttemptReport>,
+    retained_part_secured: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct BoardReleaseRecoveryTargets {
-    level: Pose,
-    contact: Pose,
-    replacement_correction_x_mm: f64,
-    replacement_correction_y_mm: f64,
-    rotation_error_deg: f64,
+fn placement_release_offsets(step: &PlanStep) -> Vec<f64> {
+    if step.placement_release_seating_offsets_mm.is_empty() {
+        vec![step.placement_seating_offset_mm]
+    } else {
+        step.placement_release_seating_offsets_mm.clone()
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct BoardReleaseRecoveryPolicy {
-    orientation: PartOrientation,
-    source_rotation_deg: f64,
-    target_rotation_deg: f64,
-    retry_controller_z_mm: f64,
-    maximum_part_offset_mm: f64,
-}
-
-fn board_release_recovery_targets(
-    place_level: Pose,
-    initial_alignment: &HeldPartAlignmentReport,
-    retained_part: &HeldPartInspectionReport,
-    policy: BoardReleaseRecoveryPolicy,
-) -> Result<BoardReleaseRecoveryTargets, String> {
-    if !initial_alignment.passed || initial_alignment.observations.is_empty() {
-        return Err("initial held-part alignment has no verified final pose".into());
-    }
-    let replacement_x_mm = retained_part
-        .centering_correction_x_mm
-        .ok_or_else(|| "retained-part inspection has no X correction".to_string())?;
-    let replacement_y_mm = retained_part
-        .centering_correction_y_mm
-        .ok_or_else(|| "retained-part inspection has no Y correction".to_string())?;
-    if replacement_x_mm.hypot(replacement_y_mm) > policy.maximum_part_offset_mm {
-        return Err("retained-part correction exceeds the configured bound".into());
-    }
-    let expected_rotation_deg =
-        policy.source_rotation_deg + initial_alignment.commanded_rotation_deg;
-    let resolved_rotation_deg =
-        resolved_held_part_rotation_deg(retained_part, policy.orientation, expected_rotation_deg)
-            .ok_or_else(|| "retained-part inspection has no resolved rotation".to_string())?;
-    let rotation_error_deg = held_part_rotation_error_deg(
-        resolved_rotation_deg,
-        policy.target_rotation_deg,
-        policy.orientation,
-    );
-    if rotation_error_deg.abs() > MAX_PLACED_PART_ROTATION_ERROR_DEG {
-        return Err(format!(
-            "retained-part rotation error {rotation_error_deg:.3} degrees exceeds the recovery bound"
-        ));
-    }
-    let level = Pose {
-        x_mm: place_level.x_mm - initial_alignment.commanded_x_mm + replacement_x_mm,
-        y_mm: place_level.y_mm - initial_alignment.commanded_y_mm + replacement_y_mm,
-        ..place_level
-    };
-    Ok(BoardReleaseRecoveryTargets {
-        level,
-        contact: Pose {
-            z_mm: policy.retry_controller_z_mm,
-            ..level
-        },
-        replacement_correction_x_mm: replacement_x_mm,
-        replacement_correction_y_mm: replacement_y_mm,
-        rotation_error_deg,
-    })
+fn placement_release_nozzle_z_mm(step: &PlanStep, seating_offset_mm: f64) -> f64 {
+    step.board_place.z_mm + seating_offset_mm - step.placement_seating_offset_mm
 }
 
 fn blowoff_actuator_id_for_nozzle(nozzle_id: &str) -> Option<&'static str> {
@@ -24113,15 +24154,6 @@ fn blowoff_actuator_id_for_nozzle(nozzle_id: &str) -> Option<&'static str> {
         "N2" => Some("blowoff_2"),
         _ => None,
     }
-}
-
-fn bounded_board_release_retry_depth_mm(
-    configured_depth_mm: f64,
-    placement_seating_offset_mm: f64,
-) -> f64 {
-    configured_depth_mm.min(
-        (placement_seating_offset_mm - MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM).max(0.0),
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -24133,6 +24165,7 @@ async fn release_part_at_board_and_verify(
     planner: &MotionPlanner,
     place_level: Pose,
     place_contact: Pose,
+    local_target_correction_mm: [f64; 2],
     prepared: &PreparedStripFeederPickup,
     acquired: &AcquiredPlacementPart,
 ) -> Result<VerifiedBoardRelease, String> {
@@ -24151,57 +24184,63 @@ async fn release_part_at_board_and_verify(
     let mut nozzle_clear = false;
     let mut release_sensor_confirmed = false;
     let mut corrected_move_count = 0;
-    let mut previous_sensor_released = false;
-    let mut previous_retained_part = false;
+    let mut attempts = Vec::new();
+    let mut successful_seating_offset_mm = None;
+    let mut retained_part_secured = false;
+    let mut active_alignment = acquired.alignment.clone();
+    let mut active_tip_offset = acquired.current_tip_offset;
     let blowoff_id = blowoff_actuator_id_for_nozzle(&step.nozzle_id)
         .ok_or_else(|| "placement nozzle has no blowoff actuator".to_string())?;
+    let release_offsets = placement_release_offsets(step);
 
-    for attempt in 1..=MAXIMUM_RELEASE_ATTEMPTS {
-        let mut attempt_level = place_level;
-        let mut attempt_contact = place_contact;
-        let mechanical_recovery = attempt > 1 && previous_sensor_released && previous_retained_part;
-        if attempt > 1 {
-            if mechanical_recovery {
-                let retained_part = observations.last().ok_or_else(|| {
-                    "placement release recovery has no retained-part observation".to_string()
+    for (attempt_index, seating_offset_mm) in release_offsets.iter().copied().enumerate() {
+        let attempt = attempt_index as u32 + 1;
+        let nozzle_z_mm = placement_release_nozzle_z_mm(step, seating_offset_mm);
+        let controller_z_mm = state
+            .profile
+            .z_kinematics
+            .as_ref()
+            .and_then(|kinematics| kinematics.controller_z(&step.nozzle_id, nozzle_z_mm))
+            .ok_or_else(|| "placement release Z is outside controller bounds".to_string())?;
+        let (attempt_level, attempt_contact) = if attempt == 1 {
+            (place_level, place_contact)
+        } else {
+            let height_correction = prepared
+                .height_model
+                .as_ref()
+                .and_then(|model| model.tip_offset_correction_at(nozzle_z_mm))
+                .ok_or_else(|| "placement release Z is outside the height model".to_string())?;
+            let [head_x_mm, head_y_mm] = resolved_physical_place_head_xy(
+                [step.board_place.x_mm, step.board_place.y_mm],
+                local_target_correction_mm,
+                active_tip_offset,
+                height_correction,
+                &active_alignment,
+            )?;
+            let current_pose =
+                state.machine.status().pose.ok_or_else(|| {
+                    "placement release retry lost the controller pose".to_string()
                 })?;
-                let retry_depth_mm = bounded_board_release_retry_depth_mm(
-                    pickup.board_release_retry_depth_mm,
-                    step.placement_seating_offset_mm,
-                );
-                let retry_nozzle_z_mm = step.board_place.z_mm - retry_depth_mm;
-                let retry_controller_z_mm = state
+            let level = Pose {
+                x_mm: head_x_mm,
+                y_mm: head_y_mm,
+                z_mm: state
                     .profile
                     .z_kinematics
                     .as_ref()
-                    .and_then(|kinematics| {
-                        kinematics.controller_z(&step.nozzle_id, retry_nozzle_z_mm)
-                    })
-                    .ok_or_else(|| {
-                        "placement release recovery Z is outside controller bounds".to_string()
-                    })?;
-                let recovery = board_release_recovery_targets(
-                    place_level,
-                    &acquired.alignment,
-                    retained_part,
-                    BoardReleaseRecoveryPolicy {
-                        orientation: prepared.part_orientation,
-                        source_rotation_deg: prepared.source_rotation_deg,
-                        target_rotation_deg: step.board_place.rotation_deg,
-                        retry_controller_z_mm,
-                        maximum_part_offset_mm: pickup.maximum_part_offset_mm,
-                    },
-                )?;
-                attempt_level = recovery.level;
-                attempt_contact = recovery.contact;
-                findings.push(format!(
-                    "release retry re-centered the retained part by X{:+.3} Y{:+.3} mm, kept rotation error {:+.3} degrees, and seated {:.3} mm deeper",
-                    recovery.replacement_correction_x_mm,
-                    recovery.replacement_correction_y_mm,
-                    recovery.rotation_error_deg,
-                    retry_depth_mm,
-                ));
-            }
+                    .unwrap()
+                    .level_controller_z_mm,
+                rotation_deg: current_pose.rotation_deg,
+            };
+            (
+                level,
+                Pose {
+                    z_mm: controller_z_mm,
+                    ..level
+                },
+            )
+        };
+        if attempt > 1 {
             let current_pose =
                 state.machine.status().pose.ok_or_else(|| {
                     "placement release retry lost the controller pose".to_string()
@@ -24225,6 +24264,9 @@ async fn release_part_at_board_and_verify(
                 .await?;
                 corrected_move_count += u32::from(planned.correction.applied());
             }
+            findings.push(format!(
+                "release attempt {attempt} used seating offset {seating_offset_mm:+.3} mm at nozzle Z{nozzle_z_mm:.3}"
+            ));
         }
         state
             .machine
@@ -24247,14 +24289,6 @@ async fn release_part_at_board_and_verify(
             step.nozzle_id,
         ));
         tokio::time::sleep(Duration::from_millis(pickup.release_settle_ms)).await;
-        let raw_values =
-            collect_sensor_values(state, lease_id, sensor_id, pickup.release_sample_count).await?;
-        let sensor_released = median_raw(&raw_values).is_some_and(|value| {
-            vacuum_value_is_released(&prepared.vacuum_characterization, value)
-        });
-        release_sensor_confirmed |= sensor_released;
-        release_raw_values.extend(raw_values);
-
         let current_pose = state
             .machine
             .status()
@@ -24274,7 +24308,14 @@ async fn release_part_at_board_and_verify(
         )
         .await?;
         corrected_move_count += u32::from(planned.correction.applied());
-        state
+        let raw_values =
+            collect_sensor_values(state, lease_id, sensor_id, pickup.release_sample_count).await?;
+        let sensor_released = median_raw(&raw_values).is_some_and(|value| {
+            vacuum_value_is_released(&prepared.vacuum_characterization, value)
+        });
+        release_sensor_confirmed |= sensor_released;
+        release_raw_values.extend(raw_values.iter().copied());
+        let retry_bottom_pose = state
             .machine
             .jog(
                 lease_id,
@@ -24302,7 +24343,7 @@ async fn release_part_at_board_and_verify(
             format!("post-release-nozzle-inspection-attempt-{attempt}.png")
         };
         persist_placement_gray_artifact(state, execution_id, &raw_artifact, &post_release)?;
-        let inspection = inspect_held_part_difference_with_orientation(
+        let mut inspection = inspect_held_part_difference_with_orientation(
             &acquired.bare,
             &post_release,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
@@ -24325,19 +24366,137 @@ async fn release_part_at_board_and_verify(
             &inspection.report,
         );
         nozzle_clear = nozzle_release_attempt_passed(sensor_released, retained_part);
-        previous_sensor_released = sensor_released;
-        previous_retained_part = retained_part;
-        observations.push(inspection.report);
-        artifact_names.extend([raw_artifact, inspection_artifact]);
+        retained_part_secured = false;
+        observations.push(inspection.report.clone());
+        artifact_names.extend([raw_artifact.clone(), inspection_artifact.clone()]);
+        let mut attempt_report = PlacementReleaseAttemptReport {
+            attempt_index: attempt,
+            seating_offset_mm,
+            nozzle_z_mm,
+            controller_z_mm,
+            release_raw_values: raw_values,
+            sensor_released,
+            retained_part_detected: retained_part,
+            nozzle_clear,
+            vacuum_reacquired: None,
+            hold_raw_values: Vec::new(),
+            realignment: None,
+            artifact_names: vec![raw_artifact, inspection_artifact],
+        };
         if nozzle_clear {
+            successful_seating_offset_mm = Some(seating_offset_mm);
             findings.push(format!(
-                "bottom vision confirmed a clear nozzle after board release attempt {attempt}"
+                "bottom vision confirmed a clear nozzle after board release attempt {attempt} at seating offset {seating_offset_mm:+.3} mm"
             ));
+            attempts.push(attempt_report);
             break;
         }
-        if attempt < MAXIMUM_RELEASE_ATTEMPTS {
+        if !retained_part {
             findings.push(format!(
-                "board release attempt {attempt} did not confirm a clear nozzle; retrying once"
+                "release attempt {attempt} was ambiguous because vacuum and bottom vision did not prove either transfer or retention"
+            ));
+            attempts.push(attempt_report);
+            break;
+        }
+
+        state
+            .machine
+            .actuate(lease_id, sensor_id.into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(vacuum.vacuum_settle_ms)).await;
+        let hold_raw_values =
+            collect_sensor_values(state, lease_id, sensor_id, pickup.held_sample_count).await?;
+        let vacuum_reacquired = median_raw(&hold_raw_values).is_some_and(|value| {
+            vacuum_value_is_acquired(&prepared.vacuum_characterization, value)
+        });
+        attempt_report.vacuum_reacquired = Some(vacuum_reacquired);
+        attempt_report.hold_raw_values = hold_raw_values;
+        retained_part_secured = vacuum_reacquired;
+        if !vacuum_reacquired {
+            findings.push(format!(
+                "release attempt {attempt} found a retained part but could not restore vacuum hold"
+            ));
+            attempts.push(attempt_report);
+            break;
+        }
+
+        if attempt_index + 1 < release_offsets.len() {
+            apply_expected_held_part_size_gate(
+                &mut inspection.report,
+                prepared.registration.surveyed_part_size_mm,
+                "feeder survey",
+            );
+            apply_registered_orientation_fallback(
+                &mut inspection.report,
+                prepared.part_orientation,
+                step.board_place.rotation_deg,
+                prepared.registration.surveyed_part_size_mm,
+                pickup,
+            );
+            let controller_angle_deg = state
+                .machine
+                .calibration_rotation_reference(lease_id, step.nozzle_id.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            let [runout_x_mm, runout_y_mm] = prepared
+                .geometry
+                .runout_correction_at(controller_angle_deg)
+                .ok_or_else(|| "retained-part runout correction is invalid".to_string())?;
+            active_tip_offset = CurrentTipOffset {
+                x_mm: prepared.geometry.head_offset_x_mm - runout_x_mm,
+                y_mm: prepared.geometry.head_offset_y_mm - runout_y_mm,
+            };
+            let suffix = format!("release-attempt-{attempt}");
+            let realignment = align_held_part(
+                state,
+                prepared,
+                &acquired.bare,
+                inspection,
+                retry_bottom_pose,
+                &bottom_profile,
+                &bottom_path,
+                step.board_place.rotation_deg,
+                true,
+                Some(&suffix),
+            )
+            .await;
+            let (_, realignment) = match realignment {
+                Ok(realignment) => realignment,
+                Err(error) => {
+                    findings.push(format!(
+                        "release attempt {attempt} retained the part, but bottom-camera realignment failed: {error}"
+                    ));
+                    attempts.push(attempt_report);
+                    break;
+                }
+            };
+            for name in &realignment.artifact_names {
+                if !artifact_names.contains(name) {
+                    artifact_names.push(name.clone());
+                }
+                if !attempt_report.artifact_names.contains(name) {
+                    attempt_report.artifact_names.push(name.clone());
+                }
+            }
+            if !realignment.passed {
+                attempt_report.realignment = Some(realignment);
+                findings.push(format!(
+                    "release attempt {attempt} retained the part, but bottom vision could not realign it"
+                ));
+                attempts.push(attempt_report);
+                break;
+            }
+            findings.push(format!(
+                "release attempt {attempt} retained the part; vacuum hold and bottom-camera realignment passed before the next depth"
+            ));
+            active_alignment = realignment.clone();
+            attempt_report.realignment = Some(realignment);
+        }
+        attempts.push(attempt_report);
+        if attempt_index + 1 < release_offsets.len() {
+            findings.push(format!(
+                "board release attempt {attempt} did not confirm transfer; continuing to the next configured seating offset"
             ));
         }
     }
@@ -24364,6 +24523,9 @@ async fn release_part_at_board_and_verify(
         },
         corrected_move_count,
         sensor_released: release_sensor_confirmed,
+        successful_seating_offset_mm,
+        attempts,
+        retained_part_secured,
     })
 }
 
@@ -24664,6 +24826,7 @@ async fn acquire_physical_placement_part(
             &camera_path,
             target_rotation_deg,
             true,
+            None,
         )
         .await?;
         if !alignment.passed {
@@ -24981,7 +25144,9 @@ fn persist_automatic_placement_outcome(
         package: part.package,
         nozzle_id: report.nozzle_id.clone(),
         placement_surface_offset_mm: report.placement_surface_offset_mm,
-        placement_seating_offset_mm: report.placement_seating_offset_mm,
+        placement_seating_offset_mm: report
+            .successful_placement_seating_offset_mm
+            .unwrap_or(report.placement_seating_offset_mm),
         automatic_algorithm_version: PLACEMENT_OUTCOME_ALGORITHM.into(),
         automatic_disposition,
         automatic_confidence: automatic_confidence.clamp(0.0, 1.0),
@@ -25896,6 +26061,7 @@ mod tests {
             feeder_part_rotation_deg: 0.0,
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: 0.1,
+            placement_release_seating_offsets_mm: vec![0.1],
             feeder_pick: Pose::ORIGIN,
             board_place: Pose::ORIGIN,
             safe_z_mm: 31.5,
@@ -26185,6 +26351,9 @@ mod tests {
             part_height_mm: 0.55,
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: 0.1,
+            placement_release_seating_offsets_mm: vec![0.1],
+            successful_placement_seating_offset_mm: Some(0.1),
+            placement_release_attempts: Vec::new(),
             pocket_index: Some(1),
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
@@ -27003,6 +27172,7 @@ mod tests {
             feeder_part_rotation_deg: 0.0,
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: 0.0,
+            placement_release_seating_offsets_mm: vec![0.0],
             feeder_pick: Pose {
                 x_mm: 100.0,
                 y_mm: 100.0,
@@ -27045,6 +27215,9 @@ mod tests {
             part_height_mm: step.part_height_mm,
             placement_surface_offset_mm: step.placement_surface_offset_mm,
             placement_seating_offset_mm: step.placement_seating_offset_mm,
+            placement_release_seating_offsets_mm: step.placement_release_seating_offsets_mm.clone(),
+            successful_placement_seating_offset_mm: None,
+            placement_release_attempts: Vec::new(),
             pocket_index: None,
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
@@ -27099,6 +27272,7 @@ mod tests {
                 }],
                 placement_references: vec!["D1".into()],
                 placement_seating_offset_mm: Some(0.1),
+                placement_release: None,
                 status: "ready".into(),
             })
             .unwrap();
@@ -27135,6 +27309,7 @@ mod tests {
             feeder_part_rotation_deg: 0.0,
             placement_surface_offset_mm: 0.0,
             placement_seating_offset_mm: 0.1,
+            placement_release_seating_offsets_mm: vec![0.1],
             feeder_pick: Pose::ORIGIN,
             board_place: Pose::ORIGIN,
             safe_z_mm: 31.5,
@@ -29538,7 +29713,7 @@ mod tests {
     }
 
     #[test]
-    fn board_release_recovery_replaces_the_old_alignment_and_seats_deeper() {
+    fn physical_place_head_uses_the_last_verified_alignment() {
         let initial = HeldPartInspectionReport {
             algorithm_version: "fixture".into(),
             detected: true,
@@ -29559,14 +29734,6 @@ mod tests {
             passed: true,
             artifact_name: "initial.png".into(),
             findings: Vec::new(),
-        };
-        let retained = HeldPartInspectionReport {
-            centering_correction_x_mm: Some(0.506_917_686_906_071_5),
-            centering_correction_y_mm: Some(-0.153_380_902_604_429_7),
-            centering_correction_mm: Some(0.530),
-            rotation_deg: Some(2.158_148_191_063_503_4),
-            artifact_name: "retained.png".into(),
-            ..initial.clone()
         };
         let alignment = HeldPartAlignmentReport {
             algorithm_version: "fixture".into(),
@@ -29604,53 +29771,6 @@ mod tests {
         // not added as a move without a following bottom-camera capture.
         assert!((place_xy[0] - 244.203_447_951_116_3).abs() < 1e-9);
         assert!((place_xy[1] - 216.114_020_147_658_87).abs() < 1e-9);
-        let targets = board_release_recovery_targets(
-            Pose {
-                x_mm: 386.743_919_495_237_5,
-                y_mm: 336.106_464_756_538_97,
-                z_mm: 31.5,
-                rotation_deg: 724.2,
-            },
-            &alignment,
-            &retained,
-            BoardReleaseRecoveryPolicy {
-                orientation: PartOrientation::AxisSymmetric,
-                source_rotation_deg: 0.0,
-                target_rotation_deg: 0.075_573_469_582_209_44,
-                retry_controller_z_mm: 4.006_850_360_816_993,
-                maximum_part_offset_mm: 1.0,
-            },
-        )
-        .unwrap();
-
-        assert!((targets.level.x_mm - 386.637_389_231_027_3).abs() < 1e-9);
-        assert!((targets.level.y_mm - 336.159_063_706_275_7).abs() < 1e-9);
-        assert!((targets.contact.z_mm - 4.006_850_360_816_993).abs() < 1e-12);
-        assert!((targets.rotation_error_deg - 2.082_574_721_481_294).abs() < 1e-9);
-
-        let excessive_rotation = HeldPartInspectionReport {
-            rotation_deg: Some(10.0),
-            ..retained
-        };
-        let error = board_release_recovery_targets(
-            Pose {
-                x_mm: 386.743_919_495_237_5,
-                y_mm: 336.106_464_756_538_97,
-                z_mm: 31.5,
-                rotation_deg: 724.2,
-            },
-            &alignment,
-            &excessive_rotation,
-            BoardReleaseRecoveryPolicy {
-                orientation: PartOrientation::AxisSymmetric,
-                source_rotation_deg: 0.0,
-                target_rotation_deg: 0.075_573_469_582_209_44,
-                retry_controller_z_mm: 4.006_850_360_816_993,
-                maximum_part_offset_mm: 1.0,
-            },
-        )
-        .unwrap_err();
-        assert!(error.contains("rotation error"));
     }
 
     #[test]
@@ -29661,10 +29781,45 @@ mod tests {
     }
 
     #[test]
-    fn board_release_retry_does_not_exceed_the_recovery_seating_limit() {
-        assert!((bounded_board_release_retry_depth_mm(0.1, -0.3) - 0.1).abs() < 1e-12);
-        assert!((bounded_board_release_retry_depth_mm(0.1, -0.45) - 0.05).abs() < 1e-12);
-        assert_eq!(bounded_board_release_retry_depth_mm(0.1, -0.5), 0.0);
+    fn placement_release_depth_preserves_the_logical_seating_reference() {
+        let step = PlanStep {
+            board_instance_id: Uuid::new_v4(),
+            placement_reference: "R1".into(),
+            part_key: "R0603:10k".into(),
+            feeder_id: Uuid::new_v4(),
+            nozzle_id: "N1".into(),
+            part_height_mm: 0.55,
+            body_width_mm: 0.8,
+            body_length_mm: 1.6,
+            part_orientation: PartOrientation::AxisSymmetric,
+            feeder_part_rotation_deg: 0.0,
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: -0.2,
+            placement_release_seating_offsets_mm: vec![-0.2, -0.3, -0.4],
+            feeder_pick: Pose::ORIGIN,
+            board_place: Pose {
+                z_mm: 4.35,
+                ..Pose::ORIGIN
+            },
+            safe_z_mm: 31.5,
+        };
+
+        assert_eq!(placement_release_offsets(&step), vec![-0.2, -0.3, -0.4]);
+        assert!((placement_release_nozzle_z_mm(&step, -0.2) - 4.35).abs() < 1e-12);
+        assert!((placement_release_nozzle_z_mm(&step, -0.3) - 4.25).abs() < 1e-12);
+        assert!((placement_release_nozzle_z_mm(&step, -0.4) - 4.15).abs() < 1e-12);
+    }
+
+    #[test]
+    fn repeated_release_artifacts_have_distinct_names() {
+        assert_eq!(
+            suffixed_png_artifact("held-part.png", Some("release-attempt-2")),
+            "held-part-release-attempt-2.png",
+        );
+        assert_eq!(
+            suffixed_png_artifact("held-part.png", None),
+            "held-part.png",
+        );
     }
 
     #[test]
@@ -30609,6 +30764,7 @@ mod tests {
             boards: vec![],
             placement_references: Vec::new(),
             placement_seating_offset_mm: None,
+            placement_release: None,
             status: "draft".into(),
         };
         let response = router(test_state())
