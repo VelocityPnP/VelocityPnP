@@ -11,7 +11,7 @@ use velocitypnp_domain::{
 };
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
-pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v2";
+pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v3";
 pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v4";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
@@ -643,6 +643,7 @@ pub fn analyze_live_strip_feeder_holdout(
     for index in first_index..=last_index {
         let tentative_along_mm =
             center_along_mm + along_delta_mm + f64::from(index) * registration.tape_pitch_mm;
+        let geometry_center_mm = [live_centerline_cross_mm, tentative_along_mm];
         let measured_center = measure_pocket_image_center(
             &crop,
             live_centerline_cross_mm,
@@ -665,7 +666,7 @@ pub fn analyze_live_strip_feeder_holdout(
         );
         visible_pockets.push((
             index,
-            measured_center_mm,
+            geometry_center_mm,
             evidence,
             measured_center.map_or(0.0, |measurement| measurement.confidence),
         ));
@@ -3888,11 +3889,12 @@ mod tests {
             paint_disc(&mut pixels, width, height, 163, 250 + y_mm * 25, 18, 235);
         }
         for y_mm in (-8_i32..=8).step_by(2) {
+            let center_x = if y_mm == 0 { 285 } else { 250 };
             paint_disc(
                 &mut pixels,
                 width,
                 height,
-                250,
+                center_x,
                 250 + y_mm * 25,
                 11,
                 if y_mm == 0 { 25 } else { 165 },
@@ -3975,14 +3977,19 @@ mod tests {
         assert!(result.report.passed, "{:?}", result.report.findings);
         assert_eq!(result.report.sprocket_center_count, 4);
         assert_eq!(result.report.occupancy, StripPocketOccupancy::Occupied);
+        // A loose component can move inside its pocket. The sprocket lattice,
+        // not the component centroid, defines the pocket correction.
         assert!(result.report.correction_magnitude_mm < 0.15);
         assert_eq!(result.preview.width, 350);
         assert_eq!(result.preview.height, 500);
 
+        let mut returned_frame = frame.clone();
+        paint_disc(&mut returned_frame.pixels, width, height, 285, 250, 11, 105);
+        paint_disc(&mut returned_frame.pixels, width, height, 250, 250, 11, 25);
         let returned = inspect_strip_feeder_pocket_return(
-            &frame,
+            &returned_frame,
             pose,
-            &frame,
+            &returned_frame,
             pose,
             &model,
             &registration,

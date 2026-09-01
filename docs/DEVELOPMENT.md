@@ -644,17 +644,19 @@ the calibrated planar camera model. It then checks the 4 mm sprocket lattice,
 local line angle, pocket phase, bounded XY correction, and occupied-component
 image support.
 
-Version 2 uses the periodic response only to find a tentative pocket. It then
-measures the package center from local foreground support. This prevents a
-strong package edge from becoming the pickup point. The selected machine
-coordinate and the stored local correction use the measured center.
+Version 3 derives the stored pocket center and correction only from the
+sprocket line, tape centerline, and periodic pocket phase. A loose component
+can move inside its pocket, and image clutter can move its foreground
+centroid. Neither effect is tape geometry. Foreground support still selects an
+occupied pocket. The pickup operation measures the component center again in
+a fresh top-camera image immediately before nozzle motion.
 
 The persistent report gives predicted and measured machine coordinates. Its
 PNG marks expected sprocket lines in yellow, the expected pocket centerline in
 cyan, the measured sprocket line in magenta, detected holes in yellow, and
-measured pocket centers in green. A passed result selects a measured occupied
-pocket in the draft. It does not lower a nozzle, index tape, measure pickup Z,
-or create an active `Feeder`.
+geometry-derived pocket centers in green. A passed result selects a measured
+occupied pocket in the draft. It does not lower a nozzle, index tape, measure
+pickup Z, or create an active `Feeder`.
 
 Qualify pickup Z, vacuum hold, bottom vision, and release after a passed live
 holdout:
