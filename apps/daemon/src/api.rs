@@ -115,7 +115,7 @@ const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
 const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v5";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v3";
-const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v3";
+const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v4";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
 const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
@@ -24072,6 +24072,8 @@ async fn release_part_at_board_and_verify(
     let mut corrected_move_count = 0;
     let mut previous_sensor_released = false;
     let mut previous_retained_part = false;
+    let blowoff_id = blowoff_actuator_id_for_nozzle(&step.nozzle_id)
+        .ok_or_else(|| "placement nozzle has no blowoff actuator".to_string())?;
 
     for attempt in 1..=MAXIMUM_RELEASE_ATTEMPTS {
         let mut attempt_level = place_level;
@@ -24144,21 +24146,21 @@ async fn release_part_at_board_and_verify(
             .disable_actuator(sensor_id.into())
             .await
             .map_err(|error| error.to_string())?;
-        if mechanical_recovery {
-            let blowoff_id = blowoff_actuator_id_for_nozzle(&step.nozzle_id)
-                .ok_or_else(|| "placement nozzle has no blowoff actuator".to_string())?;
-            state
-                .machine
-                .actuate(lease_id, blowoff_id.into(), true)
-                .await
-                .map_err(|error| error.to_string())?;
-            tokio::time::sleep(Duration::from_millis(pickup.board_release_valve_pulse_ms)).await;
-            state
-                .machine
-                .disable_actuator(blowoff_id.into())
-                .await
-                .map_err(|error| error.to_string())?;
-        }
+        state
+            .machine
+            .actuate(lease_id, blowoff_id.into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(pickup.board_release_valve_pulse_ms)).await;
+        state
+            .machine
+            .disable_actuator(blowoff_id.into())
+            .await
+            .map_err(|error| error.to_string())?;
+        findings.push(format!(
+            "pulsed the {} blowoff valve during board release attempt {attempt}",
+            step.nozzle_id,
+        ));
         tokio::time::sleep(Duration::from_millis(pickup.release_settle_ms)).await;
         let raw_values =
             collect_sensor_values(state, lease_id, sensor_id, pickup.release_sample_count).await?;
