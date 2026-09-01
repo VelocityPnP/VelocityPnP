@@ -2785,6 +2785,26 @@ N1 vacuum characterization. No additional board release reached the adaptive
 depth schedule during this session because component acquisition did not
 pass.
 
+### Source-package pose gate
+
+Guarded placement v9 now compares each fresh source-pocket image with the
+retained source images from successful pickup-return qualifications. It uses
+the best valid match across the sequence. This avoids a false rejection when
+one reference differs because a flat part moved or rotated inside its pocket.
+The comparison checks occupancy, relative center, and centered package
+appearance before nozzle descent.
+
+The retained flat pocket-22 image scored 0.522, 0.711, and 0.757 against the
+three successful references. The retained edge-standing pocket-13 image
+scored 0.042, 0.143, and 0.238. The 0.55 minimum therefore accepts the known
+flat pose and rejects the known edge pose. The replay used only retained
+images and did not move the machine.
+
+Each run stores `source-pocket-pose-inspection.png` and a structured report
+that names the selected successful qualification. The source-pose reanalysis
+route can replay old placement evidence without changing the placement
+status. Physical validation still needs a restored N1 vacuum calibration.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

@@ -846,20 +846,31 @@ shared -180/+180 endpoint.
 
 A physical placement binds its reservation to the available strip pocket at
 the planned pick position. It then captures that pocket with the top camera
-and uses the measured component center for the pickup move. A missing part or
-a center correction larger than the configured part-offset bound stops the
-operation before the nozzle descends. The ordinary executor also rejects a
-board reference after an earlier physical run reached its placement pose.
+and uses the measured component center for the pickup move. It also compares
+the source package with all retained source images from the feeder's successful
+pickup sequence. The best match must pass occupancy, center, and appearance
+checks. This rejects an edge-standing package before nozzle descent without a
+fixed package-luma rule. The report and
+`source-pocket-pose-inspection.png` identify the selected successful reference.
+A missing part, a bad source pose, or a center correction larger than the
+configured part-offset bound stops the operation before the nozzle descends.
+Use
+`POST /placement-executions/EXECUTION_UUID/reanalyze-source-pose` to apply the
+current source-pose check to a retained attempt without machine motion. The
+Python client method is `reanalyze_placement_source_pose()`.
+
+The ordinary executor also rejects a board reference after an earlier physical
+run reached its placement pose.
 This prevents a failed release or inspection from causing a second component
 to be stacked on the same target. Rework needs a separate explicit workflow.
 
-Before pickup, guarded placement version 8 also registers the bare local
+Before pickup, guarded placement version 9 also registers the bare local
 two-terminal pad pair. It stores `board-target-registration.png` and applies
 the bounded local XY correction to the placement pose. A missing or ambiguous
 pad pair stops the operation before pickup. The retained report keeps the
 nominal board pose and records the local correction separately.
 
-If the nominal pickup center produces no vacuum transition, version 8 can make
+If the nominal pickup center produces no vacuum transition, version 9 can make
 one bounded XY retry. It requires at least two recent, passed top inspections
 for the same job, nozzle, and part. Their residuals must agree within 0.20 mm.
 The retry applies the opposite mean residual and rejects a correction below

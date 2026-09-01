@@ -741,6 +741,34 @@ pub struct StripFeederPocketReturnReport {
     pub findings: Vec<String>,
 }
 
+/// Top-camera evidence that a source package has a known pickable pose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederSourcePoseReport {
+    pub algorithm_version: String,
+    pub reference_qualification_id: Uuid,
+    pub reference_nominal_center_machine_mm: [f64; 2],
+    pub reference_camera_pose: Pose,
+    pub reference_occupancy: StripPocketOccupancy,
+    pub reference_confidence: f64,
+    #[serde(default)]
+    pub reference_measured_center_machine_mm: Option<[f64; 2]>,
+    pub candidate_nominal_center_machine_mm: [f64; 2],
+    pub candidate_camera_pose: Pose,
+    pub candidate_occupancy: StripPocketOccupancy,
+    pub candidate_confidence: f64,
+    #[serde(default)]
+    pub candidate_measured_center_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub relative_center_shift_mm: Option<f64>,
+    #[serde(default)]
+    pub appearance_similarity: Option<f64>,
+    pub minimum_appearance_similarity: f64,
+    pub passed: bool,
+    pub artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// Evidence from one bounded pickup, bottom inspection, and release cycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederPickupQualificationReport {
@@ -1127,6 +1155,9 @@ pub struct PlacementExecutionReport {
     /// Each nominal or learned XY pickup attempt, in execution order.
     #[serde(default)]
     pub pickup_attempts: Vec<PlacementPickupAttemptReport>,
+    /// Comparison of the source package with a prior successful pickup pose.
+    #[serde(default)]
+    pub source_pose_inspection: Option<StripFeederSourcePoseReport>,
     #[serde(default)]
     pub pickup_report: Option<StripFeederPickupQualificationReport>,
     #[serde(default)]

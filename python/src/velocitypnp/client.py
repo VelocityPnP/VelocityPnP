@@ -1526,6 +1526,15 @@ class Client:
             f"/placement-executions/{execution_id}/reanalyze-placement",
         )
 
+    def reanalyze_placement_source_pose(
+        self, execution_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        """Recheck a retained source-pocket image without machine motion."""
+        return self._request(
+            "POST",
+            f"/placement-executions/{execution_id}/reanalyze-source-pose",
+        )
+
     def placement_outcomes(self) -> list[dict[str, Any]]:
         return self._request("GET", "/placement-outcomes")["outcomes"]
 

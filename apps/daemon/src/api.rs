@@ -80,10 +80,11 @@ use velocitypnp_vision::{
     fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
     inspect_held_part_difference, inspect_held_part_difference_with_orientation,
     inspect_placed_part_with_orientation, inspect_strip_feeder_pocket_return,
-    interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
-    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, reanalyze_workspace_seam_health, register_two_terminal_placement_target,
+    inspect_strip_feeder_source_pose, interpolate_planar_camera_model, mean_nozzle_detection,
+    measure_known_feature_surface_fraction, measure_workspace_parallax,
+    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
+    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    reanalyze_workspace_seam_health, register_two_terminal_placement_target,
     render_board_fiducial_evidence, render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
@@ -92,11 +93,11 @@ use velocitypnp_vision::{
     CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
     DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
     HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame,
-    StripFeederInventoryBuild, StripFeederInventorySourceMosaic, V4l2CaptureConfig,
-    VisualHomingPlan, WorkspaceCameraApertureComposite, WorkspaceHeightComposite,
-    WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject,
-    WorkspaceParallaxObservation, WorkspaceParallaxReport, WorkspaceParallaxStream,
-    WorkspaceRasterEvidence, WorkspaceRefinementPatch, WorkspaceScanPlan,
+    StripFeederInventoryBuild, StripFeederInventorySourceMosaic, StripFeederSourcePoseArtifacts,
+    V4l2CaptureConfig, VisualHomingPlan, WorkspaceCameraApertureComposite,
+    WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream,
+    WorkspaceObservedObject, WorkspaceParallaxObservation, WorkspaceParallaxReport,
+    WorkspaceParallaxStream, WorkspaceRasterEvidence, WorkspaceRefinementPatch, WorkspaceScanPlan,
     WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport, WorkspaceSeamStatus,
     MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
     MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
@@ -125,7 +126,7 @@ const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
 const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v8";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v9";
 const MINIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 2;
 const MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 3;
 const MAXIMUM_PICKUP_FEEDBACK_SPREAD_MM: f64 = 0.20;
@@ -145,6 +146,7 @@ const POST_RELEASE_NOZZLE_ARTIFACT: &str = "post-release-nozzle.png";
 const POST_RELEASE_NOZZLE_INSPECTION_ARTIFACT: &str = "post-release-nozzle-inspection.png";
 const SOURCE_POCKET_BEFORE_ARTIFACT: &str = "source-pocket-before.png";
 const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspection.png";
+const SOURCE_POCKET_POSE_INSPECTION_ARTIFACT: &str = "source-pocket-pose-inspection.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
@@ -971,6 +973,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/placement-executions/{id}/reanalyze-placement",
             post(reanalyze_placement_execution),
+        )
+        .route(
+            "/api/v1/placement-executions/{id}/reanalyze-source-pose",
+            post(reanalyze_placement_source_pose),
         )
         .route(
             "/api/v1/placement-executions/{id}/retained-part-recovery",
@@ -6481,6 +6487,130 @@ struct PreparedStripFeederPickup {
     part_orientation: PartOrientation,
     source_rotation_deg: f64,
     artifact_target: TransferArtifactTarget,
+}
+
+struct SourcePoseReference {
+    qualification_id: Uuid,
+    frame: GrayFrame,
+    camera_pose: Pose,
+    pocket_machine_mm: [f64; 2],
+}
+
+fn load_source_pose_references(
+    state: &AppState,
+    registration: &StripFeederRegistration,
+) -> Result<Vec<SourcePoseReference>, String> {
+    let mut qualification_ids = Vec::new();
+    if let Some(id) = registration.latest_pickup_qualification_id {
+        qualification_ids.push(id);
+    }
+    for id in registration
+        .latest_pickup_sequence_qualification_ids
+        .iter()
+        .rev()
+        .copied()
+    {
+        if !qualification_ids.contains(&id) {
+            qualification_ids.push(id);
+        }
+    }
+    let mut references = Vec::new();
+    for qualification_id in qualification_ids {
+        let Some(run) = state
+            .store
+            .get_strip_feeder_pickup_qualification(qualification_id)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        let Some(report) = run.report.as_ref() else {
+            continue;
+        };
+        let Some(return_verification) = report.return_verification.as_ref() else {
+            continue;
+        };
+        if run.registration_id != registration.id
+            || run.calibration_id != registration.calibration_id
+            || run.status != OperationStatus::Succeeded
+            || !report.passed
+            || !report.vacuum_acquired
+            || !report.vacuum_held_after_transfer
+            || !report
+                .inspection
+                .as_ref()
+                .is_some_and(|inspection| inspection.passed)
+            || !return_verification.passed
+            || return_verification.before_occupancy != StripPocketOccupancy::Occupied
+        {
+            continue;
+        }
+        let Some(camera_pose) = return_verification.before_camera_pose else {
+            continue;
+        };
+        let Some((media_type, data)) = state
+            .store
+            .get_strip_feeder_pickup_artifact(qualification_id, SOURCE_POCKET_BEFORE_ARTIFACT)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if media_type != "image/png" {
+            continue;
+        }
+        let frame = decode_gray_png(&data).map_err(|error| error.to_string())?;
+        references.push(SourcePoseReference {
+            qualification_id,
+            frame,
+            camera_pose,
+            pocket_machine_mm: report.pocket_machine_mm,
+        });
+    }
+    if references.is_empty() {
+        Err("feeder has no retained successful pickup-pose reference".into())
+    } else {
+        Ok(references)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_source_pose_against_references(
+    references: Vec<SourcePoseReference>,
+    candidate: &GrayFrame,
+    candidate_camera_pose: Pose,
+    candidate_pocket_machine_mm: [f64; 2],
+    camera_model: &PlanarCameraModel,
+    registration: &StripFeederRegistration,
+    artifact_name: &str,
+) -> Result<StripFeederSourcePoseArtifacts, String> {
+    let mut best: Option<StripFeederSourcePoseArtifacts> = None;
+    for reference in references {
+        let inspection = inspect_strip_feeder_source_pose(
+            &reference.frame,
+            reference.camera_pose,
+            reference.pocket_machine_mm,
+            reference.qualification_id,
+            candidate,
+            candidate_camera_pose,
+            candidate_pocket_machine_mm,
+            camera_model,
+            registration,
+            artifact_name,
+        )
+        .map_err(|error| error.to_string())?;
+        let rank = |inspection: &StripFeederSourcePoseArtifacts| {
+            (
+                inspection.report.passed,
+                inspection.report.appearance_similarity.unwrap_or(-1.0),
+            )
+        };
+        if best
+            .as_ref()
+            .is_none_or(|current| rank(&inspection) > rank(current))
+        {
+            best = Some(inspection);
+        }
+    }
+    best.ok_or_else(|| "feeder has no usable successful pickup-pose reference".into())
 }
 
 #[derive(Clone, Copy)]
@@ -22718,6 +22848,7 @@ async fn execute_retained_part_recovery_task(
         pickup_open_nozzle_raw_values: Vec::new(),
         pickup_search_samples: Vec::new(),
         pickup_attempts: Vec::new(),
+        source_pose_inspection: None,
         pickup_report: None,
         board_target_registration: None,
         top_inspection: None,
@@ -23377,6 +23508,7 @@ async fn execute_guarded_placement_task(
         pickup_open_nozzle_raw_values: Vec::new(),
         pickup_search_samples: Vec::new(),
         pickup_attempts: Vec::new(),
+        source_pose_inspection: None,
         pickup_report: None,
         board_target_registration: None,
         top_inspection: None,
@@ -24672,6 +24804,7 @@ async fn acquire_physical_placement_part(
         &source_before,
     )?;
     let source_after = source_before.clone();
+    let source_inspection_frame = source_before.clone();
     let registration = prepared.registration.clone();
     let camera_model = prepared.top_camera_model.clone();
     let source_inspection = tokio::task::spawn_blocking(move || {
@@ -24695,6 +24828,47 @@ async fn acquire_physical_placement_part(
         SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
         &source_inspection.preview,
     )?;
+    let references = load_source_pose_references(state, &prepared.registration)?;
+    let candidate_pose = source_before_pose;
+    let candidate_pocket = nominal_pocket_machine_mm;
+    let source_pose_registration = prepared.registration.clone();
+    let source_pose_camera_model = prepared.top_camera_model.clone();
+    let source_pose_inspection = tokio::task::spawn_blocking(move || {
+        inspect_source_pose_against_references(
+            references,
+            &source_inspection_frame,
+            candidate_pose,
+            candidate_pocket,
+            &source_pose_camera_model,
+            &source_pose_registration,
+            SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    persist_transfer_rgb_artifact(
+        state,
+        prepared,
+        SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
+        &source_pose_inspection.preview,
+    )?;
+    for artifact in [
+        SOURCE_POCKET_BEFORE_ARTIFACT,
+        SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
+        SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
+    ] {
+        if !report.artifact_names.iter().any(|name| name == artifact) {
+            report.artifact_names.push(artifact.into());
+        }
+    }
+    report
+        .findings
+        .extend(source_pose_inspection.report.findings.iter().cloned());
+    report.source_pose_inspection = Some(source_pose_inspection.report.clone());
+    persist_placement_progress(state, run, report)?;
+    if !source_pose_inspection.report.passed {
+        return Err("top vision rejected the source package pose before nozzle descent".into());
+    }
     if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
         return Err("top vision did not confirm a part in the reserved pocket".into());
     }
@@ -24990,6 +25164,7 @@ async fn acquire_physical_placement_part(
             BARE_NOZZLE_ARTIFACT.into(),
             SOURCE_POCKET_BEFORE_ARTIFACT.into(),
             SOURCE_POCKET_PICK_INSPECTION_ARTIFACT.into(),
+            SOURCE_POCKET_POSE_INSPECTION_ARTIFACT.into(),
             HELD_PART_ARTIFACT.into(),
             HELD_PART_INITIAL_INSPECTION_ARTIFACT.into(),
         ];
@@ -25433,6 +25608,144 @@ async fn get_part_placement_process(
         surface_offset_mm,
         &outcomes,
     )))
+}
+
+async fn reanalyze_placement_source_pose(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<PlacementExecutionRun>> {
+    let mut run = state
+        .store
+        .get_placement_execution(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement execution not found"))?;
+    if matches!(
+        run.status,
+        OperationStatus::Pending | OperationStatus::Running
+    ) {
+        return Err(ApiError::bad_request("placement evidence is not complete"));
+    }
+    let mut report = run
+        .report
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("placement has no retained report"))?;
+    if report.simulated {
+        return Err(ApiError::bad_request(
+            "simulated placement has no retained source image",
+        ));
+    }
+    let registration = state
+        .store
+        .list_strip_feeder_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|registration| {
+            registration.calibration_id == run.calibration_id
+                && registration.active_feeder_id == Some(report.feeder_id)
+        })
+        .ok_or_else(|| ApiError::bad_request("placement feeder registration is missing"))?;
+    let pocket_index = report
+        .pocket_index
+        .ok_or_else(|| ApiError::bad_request("placement has no retained pocket index"))?;
+    let candidate_pocket_machine_mm = report
+        .source_pose_inspection
+        .as_ref()
+        .map(|inspection| inspection.candidate_nominal_center_machine_mm)
+        .or_else(|| {
+            registration
+                .pockets
+                .iter()
+                .find(|pocket| pocket.pocket_index == pocket_index)
+                .map(|pocket| {
+                    pocket
+                        .measured_center_machine_mm
+                        .unwrap_or(pocket.nominal_center_machine_mm)
+                })
+        })
+        .or_else(|| {
+            registration
+                .pocket_centers_machine_mm
+                .get(pocket_index as usize)
+                .copied()
+        })
+        .ok_or_else(|| ApiError::bad_request("placement pocket center is not retained"))?;
+    let candidate_camera_pose = report
+        .source_pose_inspection
+        .as_ref()
+        .map(|inspection| inspection.candidate_camera_pose)
+        .unwrap_or(Pose {
+            x_mm: candidate_pocket_machine_mm[0],
+            y_mm: candidate_pocket_machine_mm[1],
+            z_mm: state.profile.safe_z_mm,
+            rotation_deg: 0.0,
+        });
+    let (media_type, data) = state
+        .store
+        .get_placement_execution_artifact(id, SOURCE_POCKET_BEFORE_ARTIFACT)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement source-pocket image not found"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::bad_request(
+            "placement source-pocket artifact is not a PNG",
+        ));
+    }
+    let candidate = decode_gray_png(&data).map_err(ApiError::internal)?;
+    let references =
+        load_source_pose_references(&state, &registration).map_err(ApiError::bad_request)?;
+    let (_, camera_model) = load_workspace_camera_model(&state, run.calibration_id)?;
+    let source_pose_registration = registration.clone();
+    let inspection = tokio::task::spawn_blocking(move || {
+        inspect_source_pose_against_references(
+            references,
+            &candidate,
+            candidate_camera_pose,
+            candidate_pocket_machine_mm,
+            &camera_model,
+            &source_pose_registration,
+            SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    persist_placement_rgb_artifact(
+        &state,
+        id,
+        SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
+        &inspection.preview,
+    )
+    .map_err(ApiError::internal)?;
+    if let Some(prior) = report.source_pose_inspection.as_ref() {
+        report
+            .findings
+            .retain(|finding| !prior.findings.contains(finding));
+    }
+    report
+        .findings
+        .retain(|finding| !finding.contains("retained source-pose reanalysis"));
+    report.findings.extend(inspection.report.findings.clone());
+    report.findings.push(if inspection.report.passed {
+        "retained source-pose reanalysis passed".into()
+    } else {
+        "retained source-pose reanalysis failed".into()
+    });
+    if !report
+        .artifact_names
+        .iter()
+        .any(|name| name == SOURCE_POCKET_POSE_INSPECTION_ARTIFACT)
+    {
+        report
+            .artifact_names
+            .push(SOURCE_POCKET_POSE_INSPECTION_ARTIFACT.into());
+    }
+    report.source_pose_inspection = Some(inspection.report);
+    run.report = Some(report);
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_placement_execution(&run)
+        .map_err(ApiError::internal)?;
+    Ok(Json(run))
 }
 
 async fn reanalyze_placement_execution(
@@ -26523,6 +26836,7 @@ mod tests {
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
             pickup_attempts: Vec::new(),
+            source_pose_inspection: None,
             pickup_report: Some(pickup),
             board_target_registration: None,
             top_inspection: Some(top_inspection),
@@ -27398,6 +27712,7 @@ mod tests {
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
             pickup_attempts: Vec::new(),
+            source_pose_inspection: None,
             pickup_report: None,
             board_target_registration: None,
             top_inspection: None,

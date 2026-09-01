@@ -7,16 +7,19 @@ use std::f64::consts::PI;
 use velocitypnp_domain::{
     PlanarCameraModel, Pose, StripFeederLaneProposal, StripFeederLiveHoldoutReport,
     StripFeederPocketObservation, StripFeederPocketReturnReport, StripFeederRegistration,
-    StripFeederRejectedLattice, StripPocketOccupancy, WorkspaceBoardCandidate,
+    StripFeederRejectedLattice, StripFeederSourcePoseReport, StripPocketOccupancy,
+    WorkspaceBoardCandidate,
 };
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v3";
 pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v4";
+pub const STRIP_FEEDER_SOURCE_POSE_ALGORITHM: &str = "strip_feeder_source_pose.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
 const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
 const MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY: f64 = 0.55;
+const MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY: f64 = 0.55;
 const POCKET_RETURN_INTERIOR_SCALE: f64 = 0.60;
 const MAXIMUM_POCKET_RETURN_APPEARANCE_SHIFT_MM: f64 = 0.16;
 const MAXIMUM_POCKET_RETURN_APPEARANCE_ROTATION_DEG: i32 = 15;
@@ -68,6 +71,215 @@ pub struct StripFeederLiveHoldoutArtifacts {
 pub struct StripFeederPocketReturnArtifacts {
     pub report: StripFeederPocketReturnReport,
     pub preview: RgbFrame,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripFeederSourcePoseArtifacts {
+    pub report: StripFeederSourcePoseReport,
+    pub preview: RgbFrame,
+}
+
+/// Compares a source package with a prior package that passed pickup.
+#[allow(clippy::too_many_arguments)]
+pub fn inspect_strip_feeder_source_pose(
+    reference: &GrayFrame,
+    reference_camera_pose: Pose,
+    reference_pocket_machine_mm: [f64; 2],
+    reference_qualification_id: uuid::Uuid,
+    candidate: &GrayFrame,
+    candidate_camera_pose: Pose,
+    candidate_pocket_machine_mm: [f64; 2],
+    camera_model: &PlanarCameraModel,
+    registration: &StripFeederRegistration,
+    artifact_name: &str,
+) -> Result<StripFeederSourcePoseArtifacts> {
+    ensure!(
+        camera_model.role == velocitypnp_domain::CameraRole::TopCamera,
+        "source pose inspection requires a top-camera model"
+    );
+    ensure!(
+        reference.width == candidate.width && reference.height == candidate.height,
+        "source pose frames changed dimensions"
+    );
+    let along = normalized(subtract(
+        registration.pick_centerline_machine_mm[1],
+        registration.pick_centerline_machine_mm[0],
+    ))
+    .ok_or_else(|| anyhow::anyhow!("source pose centerline has no direction"))?;
+    let cross = [-along[1], along[0]];
+    let cross_span_mm = registration.tape_width_mm + 2.0 * LIVE_HOLDOUT_CROSS_MARGIN_MM;
+    let along_span_mm = (registration.tape_pitch_mm * 3.0).max(12.0);
+    let rectify = |frame: &GrayFrame, pose: Pose, center: [f64; 2]| {
+        rectify_live_tape_frames(
+            std::slice::from_ref(frame),
+            &[pose],
+            camera_model,
+            center,
+            cross,
+            along,
+            cross_span_mm,
+            along_span_mm,
+        )
+    };
+    let reference_crop = rectify(
+        reference,
+        reference_camera_pose,
+        reference_pocket_machine_mm,
+    )?;
+    let candidate_crop = rectify(
+        candidate,
+        candidate_camera_pose,
+        candidate_pocket_machine_mm,
+    )?;
+    let center_cross_mm = cross_span_mm * 0.5;
+    let center_along_mm = along_span_mm * 0.5;
+    let measure = |crop: &GrayFrame| {
+        measure_pocket_image_center(
+            crop,
+            center_cross_mm,
+            center_along_mm,
+            cross_span_mm,
+            along_span_mm,
+            registration.tape_pitch_mm,
+            registration.tape_width_mm,
+        )
+    };
+    let reference_center = measure(&reference_crop);
+    let candidate_center = measure(&candidate_crop);
+    let local_center = |measurement: Option<PocketImageCenter>| {
+        measurement
+            .map(|measurement| measurement.center_mm)
+            .unwrap_or([center_cross_mm, center_along_mm])
+    };
+    let reference_local_center = local_center(reference_center);
+    let candidate_local_center = local_center(candidate_center);
+    let reference_confidence = pocket_occupancy_evidence(
+        &reference_crop,
+        reference_local_center[0],
+        reference_local_center[1],
+        cross_span_mm,
+        along_span_mm,
+        registration.tape_pitch_mm,
+    );
+    let candidate_confidence = pocket_occupancy_evidence(
+        &candidate_crop,
+        candidate_local_center[0],
+        candidate_local_center[1],
+        cross_span_mm,
+        along_span_mm,
+        registration.tape_pitch_mm,
+    );
+    let reference_occupancy = pocket_occupancy_from_evidence(reference_confidence);
+    let candidate_occupancy = pocket_occupancy_from_evidence(candidate_confidence);
+    let to_machine = |nominal: [f64; 2], local: [f64; 2]| {
+        add(
+            nominal,
+            add(
+                scale(cross, local[0] - center_cross_mm),
+                scale(along, local[1] - center_along_mm),
+            ),
+        )
+    };
+    let reference_machine = reference_center
+        .map(|measurement| to_machine(reference_pocket_machine_mm, measurement.center_mm));
+    let candidate_machine = candidate_center
+        .map(|measurement| to_machine(candidate_pocket_machine_mm, measurement.center_mm));
+    let relative_center_shift_mm =
+        reference_center
+            .zip(candidate_center)
+            .map(|(reference, candidate)| {
+                (candidate.center_mm[0] - reference.center_mm[0])
+                    .hypot(candidate.center_mm[1] - reference.center_mm[1])
+            });
+    let appearance_match =
+        reference_center
+            .zip(candidate_center)
+            .and_then(|(reference, candidate)| {
+                let half_span_mm = pocket_return_patch_half_span_mm(registration, cross, along);
+                let interior_half_span_mm = [
+                    half_span_mm[0] * POCKET_RETURN_INTERIOR_SCALE,
+                    half_span_mm[1] * POCKET_RETURN_INTERIOR_SCALE,
+                ];
+                centered_pocket_patch_similarity(
+                    &reference_crop,
+                    reference.center_px,
+                    &candidate_crop,
+                    candidate.center_px,
+                    interior_half_span_mm,
+                )
+            });
+    let appearance_similarity = appearance_match.map(|measurement| measurement.similarity);
+    let maximum_relative_center_shift_mm = registration.tape_pitch_mm * 0.25;
+    let passed = reference_occupancy == StripPocketOccupancy::Occupied
+        && candidate_occupancy == StripPocketOccupancy::Occupied
+        && relative_center_shift_mm.is_some_and(|shift| shift <= maximum_relative_center_shift_mm)
+        && appearance_similarity
+            .is_some_and(|similarity| similarity >= MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY);
+    let mut findings = Vec::new();
+    if reference_occupancy != StripPocketOccupancy::Occupied {
+        findings.push("the successful pickup reference is not visibly occupied".into());
+    }
+    if candidate_occupancy != StripPocketOccupancy::Occupied {
+        findings.push("the requested source pocket is not visibly occupied".into());
+    }
+    if reference_center.is_none() || candidate_center.is_none() {
+        findings.push("the package center was not measured in both source views".into());
+    }
+    if relative_center_shift_mm.is_some_and(|shift| shift > maximum_relative_center_shift_mm) {
+        findings.push(format!(
+            "the source package center differs from the reference by more than {maximum_relative_center_shift_mm:.3} mm"
+        ));
+    }
+    if appearance_similarity
+        .is_none_or(|similarity| similarity < MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY)
+    {
+        findings.push(format!(
+            "the source package does not match the successful pickup pose at \
+             {MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY:.2} or better",
+        ));
+    }
+    if let Some(measurement) = appearance_match {
+        findings.push(format!(
+            "source appearance aligned by cross {:+.3} mm, along {:+.3} mm, and {:+.1} degrees",
+            measurement.shift_cross_mm, measurement.shift_along_mm, measurement.rotation_deg,
+        ));
+    }
+    if passed {
+        findings.push("top vision matched a prior package pose that passed pickup".into());
+    }
+    let preview = render_pocket_return_preview(
+        &reference_crop,
+        &candidate_crop,
+        reference_occupancy,
+        candidate_occupancy,
+        appearance_similarity
+            .is_some_and(|similarity| similarity >= MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY),
+        reference_center.map(|measurement| measurement.center_px),
+        candidate_center.map(|measurement| measurement.center_px),
+    );
+    Ok(StripFeederSourcePoseArtifacts {
+        report: StripFeederSourcePoseReport {
+            algorithm_version: STRIP_FEEDER_SOURCE_POSE_ALGORITHM.into(),
+            reference_qualification_id,
+            reference_nominal_center_machine_mm: reference_pocket_machine_mm,
+            reference_camera_pose,
+            reference_occupancy,
+            reference_confidence,
+            reference_measured_center_machine_mm: reference_machine,
+            candidate_nominal_center_machine_mm: candidate_pocket_machine_mm,
+            candidate_camera_pose,
+            candidate_occupancy,
+            candidate_confidence,
+            candidate_measured_center_machine_mm: candidate_machine,
+            relative_center_shift_mm,
+            appearance_similarity,
+            minimum_appearance_similarity: MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY,
+            passed,
+            artifact_name: artifact_name.into(),
+            findings,
+        },
+        preview,
+    })
 }
 
 /// Checks the same pocket before pickup and after a return operation.
@@ -4015,6 +4227,46 @@ mod tests {
             StripPocketOccupancy::Occupied
         );
         assert_eq!(returned.preview.width, 700);
+
+        let reference_id = Uuid::new_v4();
+        let flat_pose = inspect_strip_feeder_source_pose(
+            &returned_frame,
+            pose,
+            [112.0, 72.0],
+            reference_id,
+            &returned_frame,
+            pose,
+            [112.0, 72.0],
+            &model,
+            &registration,
+            "source-pose.png",
+        )
+        .unwrap();
+        assert!(flat_pose.report.passed, "{:?}", flat_pose.report.findings);
+        assert_eq!(flat_pose.report.reference_qualification_id, reference_id);
+
+        let mut edge_pose_frame = returned_frame.clone();
+        for y in 230..=270 {
+            for x in 230..=270 {
+                edge_pose_frame.pixels[(y * width + x) as usize] = 105;
+            }
+        }
+        paint_rectangle(&mut edge_pose_frame, [250, 250], [4, 14], 25);
+        paint_rectangle(&mut edge_pose_frame, [250, 250], [1, 11], 225);
+        let edge_pose = inspect_strip_feeder_source_pose(
+            &returned_frame,
+            pose,
+            [112.0, 72.0],
+            reference_id,
+            &edge_pose_frame,
+            pose,
+            [112.0, 72.0],
+            &model,
+            &registration,
+            "source-pose.png",
+        )
+        .unwrap();
+        assert!(!edge_pose.report.passed, "{:?}", edge_pose.report);
 
         let empty = GrayFrame {
             width,

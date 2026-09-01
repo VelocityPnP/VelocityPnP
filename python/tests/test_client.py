@@ -1191,6 +1191,16 @@ class ClientTests(unittest.TestCase):
             "/placement-executions/execution/reanalyze-placement",
         )
 
+        with patch.object(client, "_request", return_value=execution) as send:
+            self.assertEqual(
+                client.reanalyze_placement_source_pose("execution"),
+                execution,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/placement-executions/execution/reanalyze-source-pose",
+        )
+
         outcome = {"execution_id": "execution", "automatic_disposition": "good"}
         with patch.object(
             client,

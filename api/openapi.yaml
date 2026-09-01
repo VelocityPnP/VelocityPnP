@@ -1508,6 +1508,18 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PlacementExecutionRun" }
+  /placement-executions/{id}/reanalyze-source-pose:
+    post:
+      operationId: reanalyzePlacementSourcePose
+      description: Compares a retained source image with successful pickup poses without motion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Placement execution with updated source-pose evidence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlacementExecutionRun" }
   /placement-executions/{id}/outcome:
     get:
       operationId: getPlacementOutcome
@@ -3259,6 +3271,53 @@ components:
         passed: { type: boolean }
         artifact_name: { type: string }
         findings: { type: array, items: { type: string } }
+    StripFeederSourcePoseReport:
+      type: object
+      required:
+        - algorithm_version
+        - reference_qualification_id
+        - reference_nominal_center_machine_mm
+        - reference_camera_pose
+        - reference_occupancy
+        - reference_confidence
+        - reference_measured_center_machine_mm
+        - candidate_nominal_center_machine_mm
+        - candidate_camera_pose
+        - candidate_occupancy
+        - candidate_confidence
+        - candidate_measured_center_machine_mm
+        - relative_center_shift_mm
+        - appearance_similarity
+        - minimum_appearance_similarity
+        - passed
+        - artifact_name
+        - findings
+      properties:
+        algorithm_version: { type: string }
+        reference_qualification_id: { type: string, format: uuid }
+        reference_nominal_center_machine_mm: { $ref: "#/components/schemas/Point2d" }
+        reference_camera_pose: { $ref: "#/components/schemas/Pose" }
+        reference_occupancy: { type: string, enum: [occupied, empty, uncertain] }
+        reference_confidence: { type: number, minimum: 0, maximum: 1 }
+        reference_measured_center_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        candidate_nominal_center_machine_mm: { $ref: "#/components/schemas/Point2d" }
+        candidate_camera_pose: { $ref: "#/components/schemas/Pose" }
+        candidate_occupancy: { type: string, enum: [occupied, empty, uncertain] }
+        candidate_confidence: { type: number, minimum: 0, maximum: 1 }
+        candidate_measured_center_machine_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        relative_center_shift_mm: { type: [number, "null"], minimum: 0 }
+        appearance_similarity:
+          { type: [number, "null"], minimum: -1, maximum: 1 }
+        minimum_appearance_similarity: { type: number, minimum: -1, maximum: 1 }
+        passed: { type: boolean }
+        artifact_name: { type: string }
+        findings: { type: array, items: { type: string } }
     StripFeederPickupQualificationReport:
       type: object
       required:
@@ -3642,6 +3701,7 @@ components:
         - pickup_open_nozzle_raw_values
         - pickup_search_samples
         - pickup_attempts
+        - source_pose_inspection
         - pickup_report
         - board_target_registration
         - top_inspection
@@ -3684,6 +3744,10 @@ components:
         pickup_attempts:
           type: array
           items: { $ref: "#/components/schemas/PlacementPickupAttemptReport" }
+        source_pose_inspection:
+          oneOf:
+            - { $ref: "#/components/schemas/StripFeederSourcePoseReport" }
+            - type: "null"
         pickup_report:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }

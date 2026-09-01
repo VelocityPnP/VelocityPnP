@@ -1108,6 +1108,27 @@ export interface StripFeederPickupQualificationRun {
   message: string | null;
 }
 
+export interface StripFeederSourcePoseReport {
+  algorithm_version: string;
+  reference_qualification_id: string;
+  reference_nominal_center_machine_mm: [number, number];
+  reference_camera_pose: Pose;
+  reference_occupancy: "occupied" | "empty" | "uncertain";
+  reference_confidence: number;
+  reference_measured_center_machine_mm: [number, number] | null;
+  candidate_nominal_center_machine_mm: [number, number];
+  candidate_camera_pose: Pose;
+  candidate_occupancy: "occupied" | "empty" | "uncertain";
+  candidate_confidence: number;
+  candidate_measured_center_machine_mm: [number, number] | null;
+  relative_center_shift_mm: number | null;
+  appearance_similarity: number | null;
+  minimum_appearance_similarity: number;
+  passed: boolean;
+  artifact_name: string;
+  findings: string[];
+}
+
 export interface PlacementExecutionReport {
   algorithm_version: string;
   simulated: boolean;
@@ -1150,6 +1171,7 @@ export interface PlacementExecutionReport {
     samples: VacuumProbeSample[];
     contact: VacuumProbeSample | null;
   }>;
+  source_pose_inspection: StripFeederSourcePoseReport | null;
   pickup_report: StripFeederPickupQualificationReport | null;
   board_target_registration: {
     algorithm_version: string;
