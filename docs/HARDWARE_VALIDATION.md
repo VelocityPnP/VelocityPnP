@@ -2745,6 +2745,46 @@ results, for a 50% pass rate. It does not qualify the process.
 No more physical placements ran after the operator found the stacks. The
 machine remained homed with the nozzle at safe Z31.5.
 
+### Bounded pickup retry and live feeder correction
+
+On 2026-09-01, guarded placement v8 added one bounded pickup XY retry. It
+uses the opposite mean of two or three agreeing, passed top-placement
+residuals for the same job, nozzle, and part. The current R4 and R1 evidence
+produced X-0.260 mm and Y+0.250 mm. Each attempt stores its command, head pose,
+sensor series, and contact result.
+
+Placement `fb6ed874-7688-4560-9399-4cc274462303` tested the retry at pocket
+0. Both the nominal and corrected attempts remained near the open N1 value
+and found no contact through nozzle Z3.6. The executor retracted, disabled
+vacuum, stopped before board contact, and retained both attempt reports.
+
+Initial live holdouts at pockets 13 and 22 reported false 1.687 mm and
+1.647 mm corrections. They used component foreground centroids as tape
+geometry. Holdout v3 now derives pocket centers from the sprocket line, tape
+centerline, and periodic phase. It also keeps a requested pocket when that
+pocket has strong occupied evidence. Holdout
+`10ebadce-f0be-479b-aaff-bf8e9382791e` then kept pocket 13 and passed with
+four sprockets, a 0.258 mm correction, and 77% occupancy confidence.
+
+Placement `06372c2a-3751-4249-91b3-4a3739d06b8e` repeated the nominal and
+bounded corrected pickup at pocket 13. Both attempts found no contact. Its
+source image showed that the resistor was standing on its edge, so it was not
+a valid seal target. The existing source-pose inspection did not reject this
+case.
+
+N1 reference probe `4b5fa236-c0c9-45e6-882b-cab6eeaa42fc` then completed
+with a failed seal report. Its open median was 236 counts. The best observed
+value was 227 counts at nozzle Z3.0, for a 9-count signal against the validated
+10-count minimum. Target-centering residual was 0.053 mm. No contact was
+accepted. The failed report invalidated the N1 contact and vacuum
+characterization branch, so later physical placements are gated.
+
+The machine finished homed, fault-free, and at safe Z31.5. Before more N1
+placements, inspect and reseat N045 and check its pneumatic path. Then rerun
+N1 vacuum characterization. No additional board release reached the adaptive
+depth schedule during this session because component acquisition did not
+pass.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
