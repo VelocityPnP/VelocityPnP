@@ -648,8 +648,11 @@ Version 3 derives the stored pocket center and correction only from the
 sprocket line, tape centerline, and periodic pocket phase. A loose component
 can move inside its pocket, and image clutter can move its foreground
 centroid. Neither effect is tape geometry. Foreground support still selects an
-occupied pocket. The pickup operation measures the component center again in
-a fresh top-camera image immediately before nozzle motion.
+occupied pocket. If the requested pocket has strong occupied evidence, it is
+kept even when a visible neighbor has a stronger response. A neighbor is used
+only when the requested pocket is not occupied. The pickup operation measures
+the component center again in a fresh top-camera image immediately before
+nozzle motion.
 
 The persistent report gives predicted and measured machine coordinates. Its
 PNG marks expected sprocket lines in yellow, the expected pocket centerline in

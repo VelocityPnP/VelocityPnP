@@ -671,11 +671,16 @@ pub fn analyze_live_strip_feeder_holdout(
             measured_center.map_or(0.0, |measurement| measurement.confidence),
         ));
     }
-    let selected = visible_pockets.iter().max_by(|first, second| {
-        first
-            .2
-            .total_cmp(&second.2)
-            .then_with(|| first.3.total_cmp(&second.3))
+    let requested_occupied = visible_pockets.iter().find(|item| {
+        item.0 == 0 && pocket_occupancy_from_evidence(item.2) == StripPocketOccupancy::Occupied
+    });
+    let selected = requested_occupied.or_else(|| {
+        visible_pockets.iter().max_by(|first, second| {
+            first
+                .2
+                .total_cmp(&second.2)
+                .then_with(|| first.3.total_cmp(&second.3))
+        })
     });
     let occupancy_confidence = selected.map_or(0.0, |item| item.2);
     let occupancy = pocket_occupancy_from_evidence(occupancy_confidence);
@@ -3897,7 +3902,13 @@ mod tests {
                 center_x,
                 250 + y_mm * 25,
                 11,
-                if y_mm == 0 { 25 } else { 165 },
+                if y_mm == 2 {
+                    0
+                } else if y_mm == 0 {
+                    25
+                } else {
+                    165
+                },
             );
         }
         let frame = GrayFrame {
@@ -3977,6 +3988,7 @@ mod tests {
         assert!(result.report.passed, "{:?}", result.report.findings);
         assert_eq!(result.report.sprocket_center_count, 4);
         assert_eq!(result.report.occupancy, StripPocketOccupancy::Occupied);
+        assert_eq!(result.report.predicted_pocket_machine_mm, [112.0, 72.0]);
         // A loose component can move inside its pocket. The sprocket lattice,
         // not the component centroid, defines the pocket correction.
         assert!(result.report.correction_magnitude_mm < 0.15);
