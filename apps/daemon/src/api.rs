@@ -123,7 +123,8 @@ const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const MINIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 0.70;
 const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
-const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v2";
+const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
+const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v6";
 const PLACEMENT_OUTCOME_ALGORITHM: &str = "placement_outcome.v2";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
@@ -21508,6 +21509,10 @@ struct StartRetainedPartRecoveryRequest {
     confirmed_external_safety_checks: bool,
     confirmed_part_is_attached: bool,
     confirmed_target_is_empty: bool,
+    #[serde(default)]
+    placement_seating_offset_mm: Option<f64>,
+    #[serde(default)]
+    target_placement_reference: Option<String>,
 }
 
 struct PreparedRetainedPartRecovery {
@@ -21690,7 +21695,7 @@ async fn prepare_retained_part_recovery(
             plan.report.errors.join("; ")
         )));
     }
-    let step = plan
+    let source_step = plan
         .steps
         .get(source_run.step_index as usize)
         .cloned()
@@ -21700,16 +21705,55 @@ async fn prepare_retained_part_recovery(
                 "job plan changed after the source placement; recovery needs operator review",
             )
         })?;
-    if step.nozzle_id != source_report.nozzle_id
-        || step.part_key != source_report.part_key
-        || step.board_instance_id
+    if source_step.nozzle_id != source_report.nozzle_id
+        || source_step.part_key != source_report.part_key
+        || source_step.board_instance_id
             != source_report
                 .board_instance_id
-                .unwrap_or(step.board_instance_id)
+                .unwrap_or(source_step.board_instance_id)
     {
         return Err(ApiError::bad_request(
             "source placement does not match the current job target",
         ));
+    }
+    let (target_step_index, mut step) = if let Some(target_reference) = body
+        .target_placement_reference
+        .as_deref()
+        .filter(|reference| !reference.trim().is_empty())
+    {
+        plan.steps
+            .iter()
+            .enumerate()
+            .find(|(_, step)| step.placement_reference == target_reference)
+            .map(|(index, step)| (index as u32, step.clone()))
+            .ok_or_else(|| ApiError::bad_request("recovery target is not in the current job"))?
+    } else {
+        (source_run.step_index, source_step.clone())
+    };
+    if step.part_key != source_step.part_key
+        || step.nozzle_id != source_step.nozzle_id
+        || step.feeder_id != source_step.feeder_id
+        || step.board_instance_id != source_step.board_instance_id
+    {
+        return Err(ApiError::bad_request(
+            "recovery target must use the same part, nozzle, feeder, and board",
+        ));
+    }
+    if let Some(offset_mm) = body.placement_seating_offset_mm {
+        if !offset_mm.is_finite()
+            || !(MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM..=0.5).contains(&offset_mm)
+        {
+            return Err(ApiError::bad_request(
+                "retained-part recovery seating offset must be from -0.50 to +0.50 mm",
+            ));
+        }
+        step.board_place.z_mm += offset_mm - step.placement_seating_offset_mm;
+        step.placement_seating_offset_mm = offset_mm;
+        if !state.profile.bounds.contains(step.board_place) {
+            return Err(ApiError::bad_request(
+                "retained-part recovery seating override is outside machine bounds",
+            ));
+        }
     }
     validate_guarded_board_surface(state, &step, source_run.calibration_id)?;
     let registration = state
@@ -21741,7 +21785,7 @@ async fn prepare_retained_part_recovery(
         id: Uuid::new_v4(),
         operation_id: operation.id,
         job_id: source_run.job_id,
-        step_index: source_run.step_index,
+        step_index: target_step_index,
         calibration_id: source_run.calibration_id,
         status: OperationStatus::Pending,
         created_at: now,
@@ -22634,6 +22678,18 @@ async fn execute_retained_part_recovery_task(
             source_run.id,
         )],
     };
+    if (step.placement_seating_offset_mm - source_report.placement_seating_offset_mm).abs() > 1e-9 {
+        report.findings.push(format!(
+            "recovery overrode the source seating offset from {:+.3} to {:+.3} mm",
+            source_report.placement_seating_offset_mm, step.placement_seating_offset_mm,
+        ));
+    }
+    if step.placement_reference != source_report.placement_reference {
+        report.findings.push(format!(
+            "recovery redirected the retained part from {} to the confirmed empty {} target",
+            source_report.placement_reference, step.placement_reference,
+        ));
+    }
     run.report = Some(report.clone());
     state
         .store
@@ -23153,12 +23209,21 @@ fn record_retained_part_recovery_attempt(
         .into_iter()
         .filter(|run| run.job_id == recovery.job_id)
     {
-        let Some(step) = job_run.steps.iter_mut().find(|step| {
-            step.step_index == recovery.step_index
-                && step.attempt_execution_ids.contains(&source_execution_id)
-        }) else {
+        let Some(source_step_index) = job_run
+            .steps
+            .iter()
+            .position(|step| step.attempt_execution_ids.contains(&source_execution_id))
+        else {
             continue;
         };
+        let Some(target_step_index) = job_run
+            .steps
+            .iter()
+            .position(|step| step.step_index == recovery.step_index)
+        else {
+            continue;
+        };
+        let step = &mut job_run.steps[target_step_index];
         if !step.attempt_execution_ids.contains(&recovery.id) {
             step.attempt_execution_ids.push(recovery.id);
         }
@@ -23174,6 +23239,13 @@ fn record_retained_part_recovery_attempt(
             step.message = Some("retained-part recovery passed bottom and top vision".into());
         } else {
             step.message = recovery.message.clone();
+        }
+        if recovery.status == OperationStatus::Succeeded && source_step_index != target_step_index {
+            let source_step = &mut job_run.steps[source_step_index];
+            source_step.message = Some(format!(
+                "retained part was redirected to {}; this target remains unfilled",
+                report.placement_reference,
+            ));
         }
         job_run.updated_at = Utc::now();
         state
@@ -24043,6 +24115,15 @@ fn blowoff_actuator_id_for_nozzle(nozzle_id: &str) -> Option<&'static str> {
     }
 }
 
+fn bounded_board_release_retry_depth_mm(
+    configured_depth_mm: f64,
+    placement_seating_offset_mm: f64,
+) -> f64 {
+    configured_depth_mm.min(
+        (placement_seating_offset_mm - MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM).max(0.0),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn release_part_at_board_and_verify(
     state: &AppState,
@@ -24084,7 +24165,11 @@ async fn release_part_at_board_and_verify(
                 let retained_part = observations.last().ok_or_else(|| {
                     "placement release recovery has no retained-part observation".to_string()
                 })?;
-                let retry_nozzle_z_mm = step.board_place.z_mm - pickup.board_release_retry_depth_mm;
+                let retry_depth_mm = bounded_board_release_retry_depth_mm(
+                    pickup.board_release_retry_depth_mm,
+                    step.placement_seating_offset_mm,
+                );
+                let retry_nozzle_z_mm = step.board_place.z_mm - retry_depth_mm;
                 let retry_controller_z_mm = state
                     .profile
                     .z_kinematics
@@ -24114,7 +24199,7 @@ async fn release_part_at_board_and_verify(
                     recovery.replacement_correction_x_mm,
                     recovery.replacement_correction_y_mm,
                     recovery.rotation_error_deg,
-                    pickup.board_release_retry_depth_mm,
+                    retry_depth_mm,
                 ));
             }
             let current_pose =
@@ -29573,6 +29658,13 @@ mod tests {
         assert_eq!(blowoff_actuator_id_for_nozzle("N1"), Some("blowoff_1"));
         assert_eq!(blowoff_actuator_id_for_nozzle("N2"), Some("blowoff_2"));
         assert_eq!(blowoff_actuator_id_for_nozzle("unknown"), None);
+    }
+
+    #[test]
+    fn board_release_retry_does_not_exceed_the_recovery_seating_limit() {
+        assert!((bounded_board_release_retry_depth_mm(0.1, -0.3) - 0.1).abs() < 1e-12);
+        assert!((bounded_board_release_retry_depth_mm(0.1, -0.45) - 0.05).abs() < 1e-12);
+        assert_eq!(bounded_board_release_retry_depth_mm(0.1, -0.5), 0.0);
     }
 
     #[test]

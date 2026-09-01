@@ -890,6 +890,13 @@ nozzle valve open for 500 ms with the pump off. A second bottom-camera capture
 must prove a clear nozzle before the pocket is consumed or placement continues.
 The depth and pulse duration are machine-profile values.
 
+Retained-part recovery can set an explicit `placement_seating_offset_mm` from
+-0.50 to +0.50 mm for a bounded diagnostic release. This override does not
+change the normal job-planner range. Its deeper retry is clamped at -0.50 mm.
+An optional `target_placement_reference` can redirect the held part to a
+confirmed empty job target only when the part, nozzle, feeder, and board are
+the same. The recovery report records both overrides.
+
 The planned nozzle-contact Z keeps four terms separate:
 
 ```text
