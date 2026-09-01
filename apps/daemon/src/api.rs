@@ -42,10 +42,10 @@ use velocitypnp_domain::{
     NozzleRunoutSample, Operation, OperationStatus, Part, PartOrientation,
     PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
     PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
-    PlacementProcessEstimate, PlacementReleaseAttemptReport, PlanarCameraCalibrationReport,
-    PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
-    StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
-    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
+    PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
+    PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
+    Residuals, SensorReading, StripFeederInventoryReport, StripFeederInventorySummary,
+    StripFeederLiveHoldoutRun, StripFeederPickupDisposition, StripFeederPickupQualificationReport,
     StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketState,
     StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
     StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
@@ -125,7 +125,12 @@ const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
 const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v7";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v8";
+const MINIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 2;
+const MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 3;
+const MAXIMUM_PICKUP_FEEDBACK_SPREAD_MM: f64 = 0.20;
+const MINIMUM_PICKUP_FEEDBACK_CORRECTION_MM: f64 = 0.05;
+const MAXIMUM_PICKUP_FEEDBACK_CORRECTION_MM: f64 = 0.45;
 const PLACEMENT_OUTCOME_ALGORITHM: &str = "placement_outcome.v2";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
 const BOARD_SURFACE_APERTURE_FRACTION: f64 = 0.65;
@@ -22712,6 +22717,7 @@ async fn execute_retained_part_recovery_task(
         pocket_index: source_report.pocket_index,
         pickup_open_nozzle_raw_values: Vec::new(),
         pickup_search_samples: Vec::new(),
+        pickup_attempts: Vec::new(),
         pickup_report: None,
         board_target_registration: None,
         top_inspection: None,
@@ -23370,6 +23376,7 @@ async fn execute_guarded_placement_task(
         pocket_index: physical.as_ref().map(|prepared| prepared.run.pocket_index),
         pickup_open_nozzle_raw_values: Vec::new(),
         pickup_search_samples: Vec::new(),
+        pickup_attempts: Vec::new(),
         pickup_report: None,
         board_target_registration: None,
         top_inspection: None,
@@ -23834,9 +23841,14 @@ async fn execute_physical_guarded_placement(
             .ok_or_else(|| "local placement target has no Y correction".to_string())?,
     ];
 
-    let acquired =
-        acquire_physical_placement_part(state, prepared, step.board_place.rotation_deg, report)
-            .await;
+    let acquired = acquire_physical_placement_part(
+        state,
+        run,
+        prepared,
+        step.board_place.rotation_deg,
+        report,
+    )
+    .await;
     let acquired = match acquired {
         Ok(acquired) => acquired,
         Err(error) => {
@@ -24538,8 +24550,62 @@ fn translation_only_jog_target(pose: Pose) -> JogTarget {
     }
 }
 
+fn bounded_pickup_feedback_correction(offsets_mm: &[[f64; 2]]) -> Option<[f64; 2]> {
+    if offsets_mm.len() < MINIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT
+        || offsets_mm.len() > MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT
+        || offsets_mm.iter().flatten().any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let spread_mm = offsets_mm
+        .iter()
+        .enumerate()
+        .flat_map(|(index, left)| {
+            offsets_mm[index + 1..]
+                .iter()
+                .map(move |right| (left[0] - right[0]).hypot(left[1] - right[1]))
+        })
+        .fold(0.0_f64, f64::max);
+    if spread_mm > MAXIMUM_PICKUP_FEEDBACK_SPREAD_MM {
+        return None;
+    }
+    let divisor = offsets_mm.len() as f64;
+    let observed = offsets_mm.iter().fold([0.0, 0.0], |sum, offset| {
+        [sum[0] + offset[0], sum[1] + offset[1]]
+    });
+    let correction = [-observed[0] / divisor, -observed[1] / divisor];
+    let magnitude_mm = correction[0].hypot(correction[1]);
+    (MINIMUM_PICKUP_FEEDBACK_CORRECTION_MM..=MAXIMUM_PICKUP_FEEDBACK_CORRECTION_MM)
+        .contains(&magnitude_mm)
+        .then_some(correction)
+}
+
+fn recent_pickup_feedback_correction(
+    state: &AppState,
+    run: &PlacementExecutionRun,
+    nozzle_id: &str,
+    part_key: &str,
+) -> Option<([f64; 2], usize)> {
+    let mut prior = state.store.list_placement_executions().ok()?;
+    prior.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let offsets = prior
+        .iter()
+        .filter(|prior| prior.id != run.id && prior.job_id == run.job_id)
+        .filter(|prior| prior.status == OperationStatus::Succeeded)
+        .filter_map(|prior| prior.report.as_ref())
+        .filter(|report| report.nozzle_id == nozzle_id && report.part_key == part_key)
+        .filter_map(|report| report.top_inspection.as_ref())
+        .filter(|inspection| inspection.passed)
+        .filter_map(|inspection| inspection.offset_x_mm.zip(inspection.offset_y_mm))
+        .map(|(x_mm, y_mm)| [x_mm, y_mm])
+        .take(MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT)
+        .collect::<Vec<_>>();
+    bounded_pickup_feedback_correction(&offsets).map(|correction| (correction, offsets.len()))
+}
+
 async fn acquire_physical_placement_part(
     state: &AppState,
+    run: &PlacementExecutionRun,
     prepared: &PreparedStripFeederPickup,
     target_rotation_deg: f64,
     report: &mut PlacementExecutionReport,
@@ -24650,87 +24716,170 @@ async fn acquire_physical_placement_part(
         .filter(|_| prepared.height_model_has_working_plane_transfer)
         .and_then(|model| model.tip_offset_correction_at(alignment_nozzle_z_mm))
         .ok_or_else(|| "placement pickup Z is outside the height model".to_string())?;
-    let pickup_head = [
+    let nominal_pickup_head = [
         pocket_machine_mm[0] - current_tip_offset.x_mm - height_correction[0],
         pocket_machine_mm[1] - current_tip_offset.y_mm - height_correction[1],
     ];
     let approach_controller_z_mm = z_kinematics
         .controller_z(nozzle_id, search.start_nozzle_z_mm)
         .ok_or_else(|| "placement pickup approach Z is outside bounds".to_string())?;
-    let level_target = JogTarget {
-        x_mm: pickup_head[0],
-        y_mm: pickup_head[1],
-        z_mm: z_kinematics.level_controller_z_mm,
-        rotation_deg: None,
-    };
-    state
-        .machine
-        .jog(prepared.lease_id, level_target, vacuum.xy_feed_mm_per_min)
-        .await
-        .map_err(|error| error.to_string())?;
-    state
-        .machine
-        .jog(
-            prepared.lease_id,
-            JogTarget {
-                z_mm: approach_controller_z_mm,
-                ..level_target
-            },
-            vacuum.z_approach_feed_mm_per_min,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    let feedback =
+        recent_pickup_feedback_correction(state, run, nozzle_id, report.part_key.as_str());
+    let mut center_corrections = vec![[0.0, 0.0]];
+    if let Some((correction, sample_count)) = feedback {
+        center_corrections.push(correction);
+        report.findings.push(format!(
+            "prepared one bounded pickup retry at X{:+.3} Y{:+.3} mm from {sample_count} recent placement residuals",
+            correction[0], correction[1],
+        ));
+    }
     report.stages.push(PlacementExecutionStageReport {
         stage: PlacementExecutionStage::PickApproach,
         passed: true,
         message: format!(
-            "reserved pocket {} and used the live holdout correction",
+            "reserved pocket {} and prepared {} bounded pickup-center attempt(s)",
             prepared.run.pocket_index,
+            center_corrections.len(),
         ),
     });
-    state
+    let current_rotation_deg = state
         .machine
-        .actuate(prepared.lease_id, sensor_id.clone(), true)
-        .await
-        .map_err(|error| error.to_string())?;
-    tokio::time::sleep(Duration::from_millis(vacuum.vacuum_settle_ms)).await;
-    let descent = execute_vacuum_probe_descent(
-        state,
-        prepared.lease_id,
-        nozzle_id,
-        sensor_id,
-        pickup_head[0],
-        pickup_head[1],
-        search,
-        Some(&prepared.vacuum_characterization),
-    )
-    .await;
-    let (open_nozzle_raw_values, pickup_samples, contact) = match descent {
-        Ok(result) => result,
-        Err(error) => {
-            return Err(cleanup_unconfirmed_pickup(state, prepared, sensor_id, error).await)
+        .status()
+        .pose
+        .map_or(0.0, |pose| pose.rotation_deg);
+    let mut acquired_probe = None;
+    for (attempt_index, center_correction_mm) in center_corrections.iter().copied().enumerate() {
+        let pickup_head = [
+            nominal_pickup_head[0] + center_correction_mm[0],
+            nominal_pickup_head[1] + center_correction_mm[1],
+        ];
+        let level_target = JogTarget {
+            x_mm: pickup_head[0],
+            y_mm: pickup_head[1],
+            z_mm: z_kinematics.level_controller_z_mm,
+            rotation_deg: None,
+        };
+        for z_mm in [z_kinematics.level_controller_z_mm, approach_controller_z_mm] {
+            if !state.profile.bounds.contains(Pose {
+                x_mm: pickup_head[0],
+                y_mm: pickup_head[1],
+                z_mm,
+                rotation_deg: current_rotation_deg,
+            }) {
+                return Err("pickup-center retry is outside machine bounds".into());
+            }
         }
-    };
-    report.pickup_open_nozzle_raw_values = open_nozzle_raw_values.clone();
-    report.pickup_search_samples = pickup_samples.clone();
-    let Some(contact) = contact else {
-        return Err(cleanup_unconfirmed_pickup(
+        state
+            .machine
+            .jog(prepared.lease_id, level_target, vacuum.xy_feed_mm_per_min)
+            .await
+            .map_err(|error| error.to_string())?;
+        state
+            .machine
+            .jog(
+                prepared.lease_id,
+                JogTarget {
+                    z_mm: approach_controller_z_mm,
+                    ..level_target
+                },
+                vacuum.z_approach_feed_mm_per_min,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        state
+            .machine
+            .actuate(prepared.lease_id, sensor_id.clone(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::sleep(Duration::from_millis(vacuum.vacuum_settle_ms)).await;
+        let (open_nozzle_raw_values, pickup_samples, contact) = match execute_vacuum_probe_descent(
             state,
-            prepared,
+            prepared.lease_id,
+            nozzle_id,
             sensor_id,
-            "placement pickup found no vacuum transition".into(),
+            pickup_head[0],
+            pickup_head[1],
+            search,
+            Some(&prepared.vacuum_characterization),
         )
-        .await);
-    };
-    if !vacuum_value_is_acquired(&prepared.vacuum_characterization, contact.median_raw_value) {
-        return Err(cleanup_unconfirmed_pickup(
-            state,
-            prepared,
-            sensor_id,
-            "placement pickup did not pass the calibrated acquire threshold".into(),
-        )
-        .await);
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(cleanup_unconfirmed_pickup(state, prepared, sensor_id, error).await)
+            }
+        };
+        report.pickup_open_nozzle_raw_values = open_nozzle_raw_values.clone();
+        report
+            .pickup_search_samples
+            .extend(pickup_samples.iter().cloned());
+        report.pickup_attempts.push(PlacementPickupAttemptReport {
+            attempt_index: attempt_index as u32 + 1,
+            center_correction_mm,
+            head_machine_mm: pickup_head,
+            open_nozzle_raw_values: open_nozzle_raw_values.clone(),
+            samples: pickup_samples.clone(),
+            contact: contact.clone(),
+        });
+        persist_placement_progress(state, run, report)?;
+        if let Some(contact) = contact {
+            if !vacuum_value_is_acquired(
+                &prepared.vacuum_characterization,
+                contact.median_raw_value,
+            ) {
+                return Err(cleanup_unconfirmed_pickup(
+                    state,
+                    prepared,
+                    sensor_id,
+                    "placement pickup did not pass the calibrated acquire threshold".into(),
+                )
+                .await);
+            }
+            acquired_probe = Some((
+                pickup_head,
+                level_target,
+                open_nozzle_raw_values,
+                pickup_samples,
+                contact,
+            ));
+            break;
+        }
+        if attempt_index + 1 < center_corrections.len() {
+            state
+                .machine
+                .jog(
+                    prepared.lease_id,
+                    level_target,
+                    vacuum.z_approach_feed_mm_per_min,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            state
+                .machine
+                .disable_actuator(sensor_id.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            report.findings.push(format!(
+                "pickup-center attempt {} found no vacuum transition; continuing to the learned correction",
+                attempt_index + 1,
+            ));
+            persist_placement_progress(state, run, report)?;
+        }
     }
+    let Some((pickup_head, level_target, open_nozzle_raw_values, pickup_samples, contact)) =
+        acquired_probe
+    else {
+        return Err(cleanup_unconfirmed_pickup(
+            state,
+            prepared,
+            sensor_id,
+            format!(
+                "placement pickup found no vacuum transition after {} bounded center attempt(s)",
+                center_corrections.len(),
+            ),
+        )
+        .await);
+    };
     let pickup_controller_z_mm = contact.controller_z_mm;
     let result: Result<AcquiredPlacementPart, String> = async {
         state
@@ -26230,6 +26379,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stable_placement_residuals_produce_opposite_pickup_correction() {
+        let correction =
+            bounded_pickup_feedback_correction(&[[0.22, -0.32], [0.30, -0.18]]).unwrap();
+
+        assert!((correction[0] + 0.26).abs() < 1e-9);
+        assert!((correction[1] - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pickup_feedback_rejects_weak_divergent_or_large_evidence() {
+        assert!(bounded_pickup_feedback_correction(&[[0.20, -0.20]]).is_none());
+        assert!(bounded_pickup_feedback_correction(&[[0.10, 0.10], [0.35, 0.35],]).is_none());
+        assert!(bounded_pickup_feedback_correction(&[[0.40, 0.30], [0.40, 0.30],]).is_none());
+    }
+
     fn test_pickup_qualification(
         registration: &StripFeederRegistration,
         pocket_index: u32,
@@ -26357,6 +26522,7 @@ mod tests {
             pocket_index: Some(1),
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
+            pickup_attempts: Vec::new(),
             pickup_report: Some(pickup),
             board_target_registration: None,
             top_inspection: Some(top_inspection),
@@ -26390,18 +26556,28 @@ mod tests {
     fn placement_report_round_trip_retains_failed_pickup_search() {
         let mut report = test_passed_placement_report(Uuid::new_v4());
         report.pickup_open_nozzle_raw_values = vec![1, 2, 3];
-        report.pickup_search_samples = vec![VacuumProbeSample {
+        let sample = VacuumProbeSample {
             nozzle_z_mm: 3.7,
             controller_z_mm: 3.7,
             raw_values: vec![8, 9, 9],
             median_raw_value: 9.0,
             signal_delta_counts: 8.0,
+        };
+        report.pickup_search_samples = vec![sample.clone()];
+        report.pickup_attempts = vec![PlacementPickupAttemptReport {
+            attempt_index: 1,
+            center_correction_mm: [-0.26, 0.25],
+            head_machine_mm: [100.0, 120.0],
+            open_nozzle_raw_values: vec![1, 2, 3],
+            samples: vec![sample],
+            contact: None,
         }];
 
         let restored: PlacementExecutionReport =
             serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
         assert_eq!(restored.pickup_open_nozzle_raw_values, vec![1, 2, 3]);
         assert_eq!(restored.pickup_search_samples, report.pickup_search_samples);
+        assert_eq!(restored.pickup_attempts, report.pickup_attempts);
     }
 
     #[tokio::test]
@@ -27221,6 +27397,7 @@ mod tests {
             pocket_index: None,
             pickup_open_nozzle_raw_values: Vec::new(),
             pickup_search_samples: Vec::new(),
+            pickup_attempts: Vec::new(),
             pickup_report: None,
             board_target_registration: None,
             top_inspection: None,

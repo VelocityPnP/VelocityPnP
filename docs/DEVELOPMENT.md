@@ -848,11 +848,20 @@ board reference after an earlier physical run reached its placement pose.
 This prevents a failed release or inspection from causing a second component
 to be stacked on the same target. Rework needs a separate explicit workflow.
 
-Before pickup, guarded placement version 7 also registers the bare local
+Before pickup, guarded placement version 8 also registers the bare local
 two-terminal pad pair. It stores `board-target-registration.png` and applies
 the bounded local XY correction to the placement pose. A missing or ambiguous
 pad pair stops the operation before pickup. The retained report keeps the
 nominal board pose and records the local correction separately.
+
+If the nominal pickup center produces no vacuum transition, version 8 can make
+one bounded XY retry. It requires at least two recent, passed top inspections
+for the same job, nozzle, and part. Their residuals must agree within 0.20 mm.
+The retry applies the opposite mean residual and rejects a correction below
+0.05 mm or above 0.45 mm. A weak vacuum transition does not retry. Each descent,
+sensor series, head position, and correction is stored in `pickup_attempts`.
+This provides a narrow recovery for measured nozzle-position residuals without
+turning pickup into an unbounded search.
 
 Bottom alignment places from its last observed pose. Each commanded
 translation is followed by another bottom-camera capture. The final measured

@@ -1066,6 +1066,22 @@ pub struct PlacementReleaseAttemptReport {
     pub artifact_names: Vec<String>,
 }
 
+/// Sensor and motion evidence from one bounded pickup-center attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementPickupAttemptReport {
+    pub attempt_index: u32,
+    /// Command correction relative to the fresh top-camera component center.
+    pub center_correction_mm: [f64; 2],
+    /// Physical head XY used for the vacuum descent.
+    pub head_machine_mm: [f64; 2],
+    #[serde(default)]
+    pub open_nozzle_raw_values: Vec<i64>,
+    #[serde(default)]
+    pub samples: Vec<VacuumProbeSample>,
+    #[serde(default)]
+    pub contact: Option<VacuumProbeSample>,
+}
+
 /// Evidence from one guarded placement-plan step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacementExecutionReport {
@@ -1108,6 +1124,9 @@ pub struct PlacementExecutionReport {
     /// Full Z-search evidence retained even when pickup does not find contact.
     #[serde(default)]
     pub pickup_search_samples: Vec<VacuumProbeSample>,
+    /// Each nominal or learned XY pickup attempt, in execution order.
+    #[serde(default)]
+    pub pickup_attempts: Vec<PlacementPickupAttemptReport>,
     #[serde(default)]
     pub pickup_report: Option<StripFeederPickupQualificationReport>,
     #[serde(default)]

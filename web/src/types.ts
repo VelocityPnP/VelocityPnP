@@ -1142,6 +1142,14 @@ export interface PlacementExecutionReport {
   pocket_index: number | null;
   pickup_open_nozzle_raw_values: number[];
   pickup_search_samples: VacuumProbeSample[];
+  pickup_attempts: Array<{
+    attempt_index: number;
+    center_correction_mm: [number, number];
+    head_machine_mm: [number, number];
+    open_nozzle_raw_values: number[];
+    samples: VacuumProbeSample[];
+    contact: VacuumProbeSample | null;
+  }>;
   pickup_report: StripFeederPickupQualificationReport | null;
   board_target_registration: {
     algorithm_version: string;

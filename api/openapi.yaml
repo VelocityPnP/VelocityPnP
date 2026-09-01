@@ -3587,6 +3587,37 @@ components:
             - { $ref: "#/components/schemas/HeldPartAlignmentReport" }
             - type: "null"
         artifact_names: { type: array, items: { type: string } }
+    PlacementPickupAttemptReport:
+      type: object
+      required:
+        - attempt_index
+        - center_correction_mm
+        - head_machine_mm
+        - open_nozzle_raw_values
+        - samples
+        - contact
+      properties:
+        attempt_index: { type: integer, minimum: 1 }
+        center_correction_mm:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number, format: double }
+        head_machine_mm:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number, format: double }
+        open_nozzle_raw_values:
+          type: array
+          items: { type: integer, format: int64 }
+        samples:
+          type: array
+          items: { $ref: "#/components/schemas/VacuumProbeSample" }
+        contact:
+          oneOf:
+            - { $ref: "#/components/schemas/VacuumProbeSample" }
+            - type: "null"
     PlacementExecutionReport:
       type: object
       required:
@@ -3610,6 +3641,7 @@ components:
         - pocket_index
         - pickup_open_nozzle_raw_values
         - pickup_search_samples
+        - pickup_attempts
         - pickup_report
         - board_target_registration
         - top_inspection
@@ -3649,6 +3681,9 @@ components:
         pickup_search_samples:
           type: array
           items: { $ref: "#/components/schemas/VacuumProbeSample" }
+        pickup_attempts:
+          type: array
+          items: { $ref: "#/components/schemas/PlacementPickupAttemptReport" }
         pickup_report:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }
