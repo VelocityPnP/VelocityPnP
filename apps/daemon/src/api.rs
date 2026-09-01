@@ -123,6 +123,7 @@ const MINIMUM_RETAINED_PART_LUMA_RATIO: f64 = 0.35;
 const MINIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 0.70;
 const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
+const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v2";
 const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v6";
 const PLACEMENT_OUTCOME_ALGORITHM: &str = "placement_outcome.v2";
 const BOARD_SURFACE_MEASUREMENT_ALGORITHM: &str = "board_surface_parallax.v2";
@@ -22597,7 +22598,7 @@ async fn execute_retained_part_recovery_task(
     run.status = OperationStatus::Running;
     run.updated_at = Utc::now();
     let mut report = PlacementExecutionReport {
-        algorithm_version: "retained_part_recovery.v1".into(),
+        algorithm_version: RETAINED_PART_RECOVERY_ALGORITHM.into(),
         simulated: false,
         board_instance_id: Some(step.board_instance_id),
         placement_reference: step.placement_reference.clone(),
@@ -22803,6 +22804,14 @@ async fn execute_physical_retained_part_recovery(
         .calibration_rotation_reference(lease_id, step.nozzle_id.clone())
         .await
         .map_err(|error| error.to_string())?;
+    state
+        .machine
+        .calibration_rotate_nozzle(lease_id, step.nozzle_id.clone(), 0.0)
+        .await
+        .map_err(|error| format!("retained-part rotation reset failed: {error}"))?;
+    report.findings.push(
+        "restored the nozzle rotation reference before measuring the retained-part pose".into(),
+    );
     let [runout_x_mm, runout_y_mm] = prepared
         .geometry
         .runout_correction_at(controller_angle_deg)
@@ -23061,7 +23070,7 @@ async fn execute_physical_retained_part_recovery(
         release_verification,
         nozzle_clear,
     );
-    pickup_report.algorithm_version = "retained_part_recovery.v1".into();
+    pickup_report.algorithm_version = RETAINED_PART_RECOVERY_ALGORITHM.into();
     pickup_report.vacuum_held_after_transfer = acquired
         .held_median_raw_value
         .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value));

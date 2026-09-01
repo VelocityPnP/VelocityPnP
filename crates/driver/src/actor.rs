@@ -1121,6 +1121,14 @@ mod tests {
             n1_reference
         );
         assert_eq!(handle.status().pose.unwrap().rotation_deg, 180.0);
+        assert_eq!(
+            handle
+                .calibration_rotate_nozzle(lease.id, "N1".into(), 0.0)
+                .await
+                .unwrap(),
+            n1_reference
+        );
+        assert_eq!(handle.status().pose.unwrap().rotation_deg, n1_reference);
 
         let error = handle
             .calibration_rotate_nozzle(lease.id, "N1".into(), 180.1)
