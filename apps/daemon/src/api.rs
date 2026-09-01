@@ -966,6 +966,10 @@ pub fn router(state: AppState) -> Router {
             post(reanalyze_placement_execution),
         )
         .route(
+            "/api/v1/placement-executions/{id}/retained-part-recovery",
+            post(start_retained_part_recovery),
+        )
+        .route(
             "/api/v1/placement-executions/{id}/outcome",
             get(get_placement_outcome).post(review_placement_outcome),
         )
@@ -21497,6 +21501,26 @@ struct PreparedGuardedPlacementExecution {
     physical: Option<PreparedStripFeederPickup>,
 }
 
+#[derive(Debug, Deserialize)]
+struct StartRetainedPartRecoveryRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+    confirmed_part_is_attached: bool,
+    confirmed_target_is_empty: bool,
+}
+
+struct PreparedRetainedPartRecovery {
+    lease_id: Uuid,
+    operation: Operation,
+    run: PlacementExecutionRun,
+    source_run: PlacementExecutionRun,
+    source_report: PlacementExecutionReport,
+    step: PlanStep,
+    motion_planner: MotionPlanner,
+    physical: PreparedStripFeederPickup,
+    bare: GrayFrame,
+}
+
 async fn start_guarded_placement_execution(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
@@ -21522,6 +21546,381 @@ async fn start_guarded_placement_execution(
         ),
     );
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn start_retained_part_recovery(
+    State(state): State<AppState>,
+    Path(source_execution_id): Path<Uuid>,
+    Json(body): Json<StartRetainedPartRecoveryRequest>,
+) -> ApiResult<(StatusCode, Json<StartGuardedPlacementExecutionResponse>)> {
+    let prepared = prepare_retained_part_recovery(&state, source_execution_id, body).await?;
+    let response = StartGuardedPlacementExecutionResponse {
+        execution: prepared.run.clone(),
+        operation: prepared.operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        prepared.operation.clone(),
+        execute_retained_part_recovery_task(task_state, prepared),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn prepare_retained_part_recovery(
+    state: &AppState,
+    source_execution_id: Uuid,
+    body: StartRetainedPartRecoveryRequest,
+) -> ApiResult<PreparedRetainedPartRecovery> {
+    if !body.confirmed_external_safety_checks
+        || !body.confirmed_part_is_attached
+        || !body.confirmed_target_is_empty
+    {
+        return Err(ApiError::bad_request(
+            "retained-part recovery requires confirmation that the part is attached, the original target is empty, the PCB is fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    let source_run = state
+        .store
+        .get_placement_execution(source_execution_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("source placement execution not found"))?;
+    let source_report = source_run
+        .report
+        .as_ref()
+        .filter(|report| !report.simulated)
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("source placement has no physical report"))?;
+    if !source_report
+        .stages
+        .iter()
+        .any(|stage| stage.stage == PlacementExecutionStage::Placement && stage.passed)
+        || source_report
+            .top_inspection
+            .as_ref()
+            .is_some_and(|inspection| inspection.passed)
+    {
+        return Err(ApiError::bad_request(
+            "retained-part recovery requires prior board contact without a passed top inspection",
+        ));
+    }
+    let source_pickup = source_report
+        .pickup_report
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("source placement has no held-part evidence"))?;
+    if source_pickup.inspection.is_none()
+        || source_pickup
+            .alignment
+            .as_ref()
+            .is_none_or(|alignment| !alignment.passed)
+    {
+        return Err(ApiError::bad_request(
+            "source placement has no passed bottom-camera alignment",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.simulated
+        || status.state != MachineState::Ready
+        || !status.homed
+        || status.pose.is_none()
+    {
+        return Err(ApiError::bad_request(
+            "retained-part recovery requires a homed ready physical machine",
+        ));
+    }
+    if status.calibration_revision != Some(source_run.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "retained-part recovery requires fine XYZ homing with calibration {}",
+            source_run.calibration_id,
+        )));
+    }
+
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(state)?;
+    ensure_no_active_board_registrations(state)?;
+    ensure_no_active_board_surface_measurements(state)?;
+    ensure_no_active_strip_feeder_holdouts(state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(state)?;
+    ensure_no_active_placement_executions(state)?;
+    let job_motion_is_active = state
+        .store
+        .list_job_executions()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .any(|run| {
+            matches!(
+                run.status,
+                JobExecutionStatus::Pending | JobExecutionStatus::Running
+            )
+        });
+    if job_motion_is_active {
+        return Err(ApiError::bad_request(
+            "retained-part recovery cannot run during active job motion",
+        ));
+    }
+
+    let job = state
+        .store
+        .get_job(source_run.job_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("source placement job not found"))?;
+    let boards = state
+        .store
+        .list_boards()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|board| (board.id, board))
+        .collect::<HashMap<_, _>>();
+    let feeders = state.store.list_feeders().map_err(ApiError::internal)?;
+    let parts = state
+        .store
+        .list_parts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|part| (part.key.clone(), part))
+        .collect::<HashMap<_, _>>();
+    let plan = plan_job(&job, &boards, &feeders, &parts, &state.profile);
+    if !plan.report.ready {
+        return Err(ApiError::bad_request(format!(
+            "retained-part recovery preflight failed: {}",
+            plan.report.errors.join("; ")
+        )));
+    }
+    let step = plan
+        .steps
+        .get(source_run.step_index as usize)
+        .cloned()
+        .filter(|step| step.placement_reference == source_report.placement_reference)
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "job plan changed after the source placement; recovery needs operator review",
+            )
+        })?;
+    if step.nozzle_id != source_report.nozzle_id
+        || step.part_key != source_report.part_key
+        || step.board_instance_id
+            != source_report
+                .board_instance_id
+                .unwrap_or(step.board_instance_id)
+    {
+        return Err(ApiError::bad_request(
+            "source placement does not match the current job target",
+        ));
+    }
+    validate_guarded_board_surface(state, &step, source_run.calibration_id)?;
+    let registration = state
+        .store
+        .list_strip_feeder_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|registration| registration.active_feeder_id == Some(step.feeder_id))
+        .ok_or_else(|| ApiError::bad_request("source feeder registration is missing"))?;
+    if registration.calibration_id != source_run.calibration_id {
+        return Err(ApiError::bad_request(
+            "source feeder calibration does not match the recovery calibration",
+        ));
+    }
+    let (media_type, bare_data) = state
+        .store
+        .get_placement_execution_artifact(source_execution_id, BARE_NOZZLE_ARTIFACT)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::bad_request("source placement has no bare-nozzle image"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::bad_request(
+            "source bare-nozzle artifact is not a PNG",
+        ));
+    }
+    let bare = decode_gray_png(&bare_data).map_err(ApiError::internal)?;
+    let operation = Operation::pending("job.retained_part_recovery.physical");
+    let now = Utc::now();
+    let run = PlacementExecutionRun {
+        id: Uuid::new_v4(),
+        operation_id: operation.id,
+        job_id: source_run.job_id,
+        step_index: source_run.step_index,
+        calibration_id: source_run.calibration_id,
+        status: OperationStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        report: None,
+        message: None,
+    };
+    let physical = prepare_retained_part_physical_context(
+        state,
+        &run,
+        registration,
+        &step,
+        body.lease_id,
+        &source_report,
+    )?;
+    let motion_calibration = load_job_motion_calibration(state, source_run.calibration_id)?;
+    let motion_planner = MotionPlanner::new(state.profile.bounds, Some(motion_calibration));
+    state
+        .machine
+        .renew_lease(body.lease_id, 900)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&operation)
+        .and_then(|_| state.store.put_placement_execution(&run))
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    Ok(PreparedRetainedPartRecovery {
+        lease_id: body.lease_id,
+        operation,
+        run,
+        source_run,
+        source_report,
+        step,
+        motion_planner,
+        physical,
+        bare,
+    })
+}
+
+fn prepare_retained_part_physical_context(
+    state: &AppState,
+    placement_run: &PlacementExecutionRun,
+    mut registration: StripFeederRegistration,
+    step: &PlanStep,
+    lease_id: Uuid,
+    source_report: &PlacementExecutionReport,
+) -> ApiResult<PreparedStripFeederPickup> {
+    let pickup_profile = state.profile.strip_feeder_pickup.as_ref().ok_or_else(|| {
+        ApiError::bad_request("active profile does not define strip-feeder pickup")
+    })?;
+    pickup_profile.validate().map_err(ApiError::bad_request)?;
+    let source_pickup = source_report
+        .pickup_report
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("source placement has no pickup report"))?;
+    let pocket_index = source_report
+        .pocket_index
+        .ok_or_else(|| ApiError::bad_request("source placement has no pocket index"))?;
+    registration.selected_pocket_index = Some(pocket_index);
+    registration.selected_pocket_machine_mm = Some(source_pickup.pocket_machine_mm);
+
+    let bottom = state
+        .profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define bottom vision"))?;
+    let nozzle = bottom
+        .nozzles
+        .iter()
+        .find(|nozzle| nozzle.nozzle_id == step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("recovery placement nozzle is unknown"))?;
+    let (mut snapshot, top_camera_model) =
+        load_workspace_camera_model(state, placement_run.calibration_id)?;
+    let artifacts_changed =
+        crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)
+            .map_err(ApiError::bad_request)?;
+    let runtime_artifact = CalibrationArtifactId::runtime_tip_transform(&step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("recovery placement nozzle is unknown"))?;
+    let contact_artifact = CalibrationArtifactId::vacuum_contact(&step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("recovery placement nozzle is unknown"))?;
+    let characterization_artifact = CalibrationArtifactId::vacuum_characterization(&step.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("recovery placement nozzle is unknown"))?;
+    for (artifact, message) in [
+        (runtime_artifact, "current runtime tip transform"),
+        (contact_artifact, "current reference contact"),
+        (characterization_artifact, "current vacuum characterization"),
+    ] {
+        if !crate::calibration_artifacts::artifact_tree_is_current(state, &snapshot, artifact) {
+            return Err(ApiError::bad_request(format!(
+                "retained-part recovery requires a {message}"
+            )));
+        }
+    }
+    let reference_contact: VacuumProbeReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(&snapshot, contact_artifact)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored recovery contact is invalid"))?;
+    let vacuum_characterization: VacuumSensorCharacterizationReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(&snapshot, characterization_artifact)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored recovery vacuum reference is invalid"))?;
+    if !reference_contact.passed
+        || reference_contact.contact_nozzle_z_mm.is_none()
+        || !vacuum_characterization.passed
+        || !vacuum_characterization.reference_seal_validated
+    {
+        return Err(ApiError::bad_request(
+            "retained-part recovery requires passing contact and vacuum references",
+        ));
+    }
+    let geometry = calibrated_nozzle_geometry(&snapshot, &step.nozzle_id)?;
+    if geometry.tip_id != nozzle.expected_tip_id {
+        return Err(ApiError::bad_request(
+            "recovery placement tip does not match the calibrated nozzle",
+        ));
+    }
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let head_reference = calibrated_head_reference(&snapshot, visual.pixel_error_to_machine_mm)?;
+    let height_model = calibrated_nozzle_height_model(&snapshot, &step.nozzle_id)?;
+    let height_model_has_working_plane_transfer = height_model
+        .as_ref()
+        .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
+    if !height_model_has_working_plane_transfer
+        || height_model
+            .as_ref()
+            .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
+            .is_none()
+    {
+        return Err(ApiError::bad_request(
+            "retained-part recovery needs a height model for the placement Z",
+        ));
+    }
+    if artifacts_changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    let top_camera_profile = stored_camera_profile(state, CameraRole::TopCamera)?;
+    let top_camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let synthetic_pickup_run = StripFeederPickupQualificationRun {
+        id: placement_run.id,
+        operation_id: placement_run.operation_id,
+        registration_id: registration.id,
+        profile_id: state.profile.id.clone(),
+        calibration_id: placement_run.calibration_id,
+        status: OperationStatus::Pending,
+        created_at: placement_run.created_at,
+        updated_at: placement_run.updated_at,
+        nozzle_id: step.nozzle_id.clone(),
+        pocket_index,
+        fallback_drop_surface_machine_mm: None,
+        report: None,
+        message: None,
+    };
+    Ok(PreparedStripFeederPickup {
+        run: synthetic_pickup_run,
+        registration,
+        lease_id,
+        geometry,
+        head_reference,
+        height_model,
+        height_model_has_working_plane_transfer,
+        reference_contact,
+        vacuum_characterization,
+        top_camera_model,
+        top_camera_profile,
+        top_camera_path,
+        part_orientation: step.part_orientation,
+        source_rotation_deg: step.feeder_part_rotation_deg,
+        artifact_target: TransferArtifactTarget::PlacementExecution(placement_run.id),
+    })
 }
 
 async fn prepare_guarded_placement_execution(
@@ -22177,6 +22576,603 @@ fn promote_strip_feeder_after_placement(
         .store
         .put_strip_feeder_registration(&registration)
         .map_err(|error| error.to_string())
+}
+
+async fn execute_retained_part_recovery_task(
+    state: AppState,
+    prepared: PreparedRetainedPartRecovery,
+) -> Result<Option<String>, String> {
+    let _motion_guard = state.workspace_scan_motion_lock.lock().await;
+    let PreparedRetainedPartRecovery {
+        lease_id,
+        operation: _,
+        mut run,
+        source_run,
+        source_report,
+        step,
+        motion_planner,
+        physical,
+        bare,
+    } = prepared;
+    run.status = OperationStatus::Running;
+    run.updated_at = Utc::now();
+    let mut report = PlacementExecutionReport {
+        algorithm_version: "retained_part_recovery.v1".into(),
+        simulated: false,
+        board_instance_id: Some(step.board_instance_id),
+        placement_reference: step.placement_reference.clone(),
+        part_key: step.part_key.clone(),
+        feeder_id: step.feeder_id,
+        nozzle_id: step.nozzle_id.clone(),
+        part_orientation: step.part_orientation,
+        feeder_part_rotation_deg: step.feeder_part_rotation_deg,
+        feeder_pick: source_report.feeder_pick,
+        board_place: step.board_place,
+        part_height_mm: step.part_height_mm,
+        placement_surface_offset_mm: step.placement_surface_offset_mm,
+        placement_seating_offset_mm: step.placement_seating_offset_mm,
+        pocket_index: source_report.pocket_index,
+        pickup_open_nozzle_raw_values: Vec::new(),
+        pickup_search_samples: Vec::new(),
+        pickup_report: None,
+        board_target_registration: None,
+        top_inspection: None,
+        artifact_names: Vec::new(),
+        corrected_move_count: 0,
+        passed: false,
+        stages: vec![PlacementExecutionStageReport {
+            stage: PlacementExecutionStage::Preflight,
+            passed: true,
+            message: format!(
+                "source execution {} and an empty {} target were confirmed for retained-part recovery",
+                source_run.id, step.placement_reference,
+            ),
+        }],
+        findings: vec![format!(
+            "recovery continued the part retained by source execution {} without consuming another feeder pocket",
+            source_run.id,
+        )],
+    };
+    run.report = Some(report.clone());
+    state
+        .store
+        .put_placement_execution(&run)
+        .map_err(|error| error.to_string())?;
+    let result = execute_physical_retained_part_recovery(
+        &state,
+        &run,
+        &step,
+        lease_id,
+        &motion_planner,
+        &physical,
+        &bare,
+        &source_report,
+        &mut report,
+    )
+    .await;
+    match result {
+        Ok(()) => {
+            report.passed = true;
+            report.stages.push(PlacementExecutionStageReport {
+                stage: PlacementExecutionStage::Complete,
+                passed: true,
+                message: "retained part was placed and inspected without another pickup".into(),
+            });
+            run.status = OperationStatus::Succeeded;
+            run.message = Some(format!(
+                "Recovered retained part onto {}",
+                step.placement_reference
+            ));
+        }
+        Err(error) => {
+            let _ = state
+                .machine
+                .disable_actuator(physical.vacuum_characterization.sensor_id.clone())
+                .await;
+            report.findings.push(error.clone());
+            run.status = OperationStatus::Failed;
+            run.message = Some(error);
+        }
+    }
+    run.report = Some(report);
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_placement_execution(&run)
+        .map_err(|error| error.to_string())?;
+    persist_automatic_placement_outcome(&state, &run).map_err(|error| error.to_string())?;
+    record_retained_part_recovery_attempt(&state, source_run.id, &run)?;
+    if run.status == OperationStatus::Succeeded {
+        Ok(run.message)
+    } else {
+        Err(run
+            .message
+            .clone()
+            .unwrap_or_else(|| "retained-part recovery failed".into()))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_physical_retained_part_recovery(
+    state: &AppState,
+    run: &PlacementExecutionRun,
+    step: &PlanStep,
+    lease_id: Uuid,
+    planner: &MotionPlanner,
+    prepared: &PreparedStripFeederPickup,
+    bare: &GrayFrame,
+    source_report: &PlacementExecutionReport,
+    report: &mut PlacementExecutionReport,
+) -> Result<(), String> {
+    let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
+    let bottom = state.profile.bottom_vision.as_ref().unwrap();
+    let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
+    let sensor_id = prepared.vacuum_characterization.sensor_id.as_str();
+    let camera_profile =
+        stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let camera_path =
+        camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let nozzle = bottom
+        .nozzles
+        .iter()
+        .find(|nozzle| nozzle.nozzle_id == step.nozzle_id)
+        .ok_or_else(|| "retained-part nozzle is not in the bottom-vision profile".to_string())?;
+    state
+        .machine
+        .actuate(lease_id, sensor_id.into(), true)
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::time::sleep(Duration::from_millis(vacuum.vacuum_settle_ms)).await;
+
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let (board_before, _) = capture_top_pocket_mean(
+        state,
+        prepared,
+        [step.board_place.x_mm, step.board_place.y_mm],
+        pickup.inspection_sample_count,
+    )
+    .await?;
+    persist_placement_gray_artifact(
+        state,
+        run.id,
+        BOARD_PLACEMENT_BEFORE_ARTIFACT,
+        &board_before,
+    )?;
+    let top_mapping = local_planar_camera_mapping(
+        &prepared.top_camera_model,
+        prepared.top_camera_model.center_x_px,
+        prepared.top_camera_model.center_y_px,
+    )
+    .ok_or_else(|| "top-camera recovery mapping is invalid".to_string())?;
+    let target_registration = register_two_terminal_placement_target(
+        &board_before,
+        [
+            prepared.top_camera_model.center_x_px,
+            prepared.top_camera_model.center_y_px,
+        ],
+        top_mapping,
+        step.body_width_mm,
+        step.body_length_mm,
+        step.board_place.rotation_deg,
+        BOARD_TARGET_REGISTRATION_ARTIFACT,
+    )
+    .map_err(|error| error.to_string())?;
+    persist_placement_rgb_artifact(
+        state,
+        run.id,
+        BOARD_TARGET_REGISTRATION_ARTIFACT,
+        &target_registration.preview,
+    )?;
+    let target_report = target_registration.report;
+    report.artifact_names.extend([
+        BOARD_PLACEMENT_BEFORE_ARTIFACT.into(),
+        BOARD_TARGET_REGISTRATION_ARTIFACT.into(),
+    ]);
+    report.board_target_registration = Some(target_report.clone());
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::BoardTargetRegistration,
+        passed: target_report.passed,
+        message: target_report.findings[0].clone(),
+    });
+    persist_placement_progress(state, run, report)?;
+    if !target_report.passed {
+        return Err("top vision did not register the empty recovery target".into());
+    }
+    let local_target_correction_mm = [
+        target_report
+            .correction_x_mm
+            .ok_or_else(|| "recovery target has no X correction".to_string())?,
+        target_report
+            .correction_y_mm
+            .ok_or_else(|| "recovery target has no Y correction".to_string())?,
+    ];
+
+    persist_placement_gray_artifact(state, run.id, BARE_NOZZLE_ARTIFACT, bare)?;
+    let controller_angle_deg = state
+        .machine
+        .calibration_rotation_reference(lease_id, step.nozzle_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let [runout_x_mm, runout_y_mm] = prepared
+        .geometry
+        .runout_correction_at(controller_angle_deg)
+        .ok_or_else(|| "retained-part runout correction is invalid".to_string())?;
+    let current_tip_offset = CurrentTipOffset {
+        x_mm: prepared.geometry.head_offset_x_mm - runout_x_mm,
+        y_mm: prepared.geometry.head_offset_y_mm - runout_y_mm,
+    };
+    let bottom_pose = state
+        .machine
+        .jog(
+            lease_id,
+            bottom.nozzle_target(nozzle),
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let held = capture_bottom_mean_with_lights(
+        state,
+        lease_id,
+        &camera_profile,
+        &camera_path,
+        pickup.inspection_sample_count,
+    )
+    .await?;
+    persist_placement_gray_artifact(state, run.id, HELD_PART_ARTIFACT, &held)?;
+    let mut initial = inspect_held_part_difference_with_orientation(
+        bare,
+        &held,
+        [bottom.frame_center_x_px, bottom.frame_center_y_px],
+        prepared.head_reference.bottom_camera_mapping,
+        pickup.maximum_part_offset_mm,
+        pickup.minimum_part_size_mm,
+        pickup.maximum_part_size_mm,
+        prepared.part_orientation,
+        HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+    )
+    .map_err(|error| error.to_string())?;
+    apply_expected_held_part_size_gate(
+        &mut initial.report,
+        prepared.registration.surveyed_part_size_mm,
+        "source feeder survey",
+    );
+    apply_registered_orientation_fallback(
+        &mut initial.report,
+        prepared.part_orientation,
+        prepared.source_rotation_deg,
+        prepared.registration.surveyed_part_size_mm,
+        pickup,
+    );
+    persist_placement_rgb_artifact(
+        state,
+        run.id,
+        HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+        &initial.preview,
+    )?;
+    if !initial.report.passed {
+        return Err("bottom vision did not confirm the retained resistor".into());
+    }
+    let (_, alignment) = align_held_part(
+        state,
+        prepared,
+        bare,
+        initial,
+        bottom_pose,
+        &camera_profile,
+        &camera_path,
+        step.board_place.rotation_deg,
+        true,
+    )
+    .await?;
+    if !alignment.passed {
+        return Err("bottom vision did not align the retained resistor".into());
+    }
+    let inspection = alignment
+        .observations
+        .last()
+        .map(|observation| observation.inspection.clone())
+        .ok_or_else(|| "retained-part alignment has no inspection".to_string())?;
+    let held_raw_values =
+        collect_sensor_values(state, lease_id, sensor_id, pickup.held_sample_count).await?;
+    let held_median_raw_value = median_raw(&held_raw_values);
+    let source_pickup = source_report
+        .pickup_report
+        .as_ref()
+        .ok_or_else(|| "source placement lost its pickup report".to_string())?;
+    let contact = source_pickup
+        .pickup_controller_z_mm
+        .and_then(|controller_z_mm| {
+            source_pickup
+                .pickup_samples
+                .iter()
+                .min_by(|left, right| {
+                    (left.controller_z_mm - controller_z_mm)
+                        .abs()
+                        .total_cmp(&(right.controller_z_mm - controller_z_mm).abs())
+                })
+                .cloned()
+        })
+        .ok_or_else(|| "source placement has no pickup contact sample".to_string())?;
+    let mut artifact_names = vec![
+        BARE_NOZZLE_ARTIFACT.into(),
+        HELD_PART_ARTIFACT.into(),
+        HELD_PART_INITIAL_INSPECTION_ARTIFACT.into(),
+    ];
+    for name in &alignment.artifact_names {
+        if !artifact_names.contains(name) {
+            artifact_names.push(name.clone());
+        }
+    }
+    let acquired = AcquiredPlacementPart {
+        current_tip_offset,
+        bottom_pose,
+        bare: bare.clone(),
+        pickup_center_machine_mm: source_pickup.pocket_machine_mm,
+        pickup_head_machine_mm: [
+            source_report.feeder_pick.x_mm,
+            source_report.feeder_pick.y_mm,
+        ],
+        contact,
+        open_nozzle_raw_values: source_pickup.open_nozzle_raw_values.clone(),
+        pickup_samples: source_pickup.pickup_samples.clone(),
+        held_raw_values,
+        held_median_raw_value,
+        inspection,
+        alignment,
+        artifact_names,
+    };
+    report.pickup_open_nozzle_raw_values = acquired.open_nozzle_raw_values.clone();
+    report.pickup_search_samples = acquired.pickup_samples.clone();
+    report
+        .artifact_names
+        .extend(acquired.artifact_names.clone());
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::Pickup,
+        passed: true,
+        message: "bottom vision confirmed the previously acquired resistor remained on N1".into(),
+    });
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::BottomInspection,
+        passed: true,
+        message: format!(
+            "bottom vision re-aligned the retained resistor to {:.3} degrees with {:.3} mm residual",
+            step.board_place.rotation_deg,
+            acquired
+                .alignment
+                .final_centering_residual_mm
+                .unwrap_or_default(),
+        ),
+    });
+    persist_placement_progress(state, run, report)?;
+
+    let height_correction = prepared
+        .height_model
+        .as_ref()
+        .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
+        .ok_or_else(|| "recovery placement Z is outside the height model".to_string())?;
+    let [place_head_x_mm, place_head_y_mm] = resolved_physical_place_head_xy(
+        [step.board_place.x_mm, step.board_place.y_mm],
+        local_target_correction_mm,
+        acquired.current_tip_offset,
+        height_correction,
+        &acquired.alignment,
+    )?;
+    let place_controller_z_mm = z_kinematics
+        .controller_z(&step.nozzle_id, step.board_place.z_mm)
+        .ok_or_else(|| "recovery placement Z is outside controller bounds".to_string())?;
+    let current_pose = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "retained-part recovery lost the controller pose".to_string())?;
+    let mut motion_state = planner
+        .initial_state(current_pose)
+        .map_err(|error| error.to_string())?;
+    let place_level = Pose {
+        x_mm: place_head_x_mm,
+        y_mm: place_head_y_mm,
+        z_mm: z_kinematics.level_controller_z_mm,
+        rotation_deg: current_pose.rotation_deg,
+    };
+    let place_contact = Pose {
+        z_mm: place_controller_z_mm,
+        ..place_level
+    };
+    for (target, feed) in [
+        (place_level, vacuum.xy_feed_mm_per_min),
+        (place_contact, vacuum.z_approach_feed_mm_per_min),
+    ] {
+        let planned = execute_job_motion(
+            &state.machine,
+            lease_id,
+            planner,
+            &mut motion_state,
+            target,
+            feed,
+            MotionMode::Calibrated,
+        )
+        .await?;
+        report.corrected_move_count += u32::from(planned.correction.applied());
+    }
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::PlaceApproach,
+        passed: true,
+        message: format!(
+            "moved the retained resistor above the registered target at X{:+.3} Y{:+.3} mm",
+            local_target_correction_mm[0], local_target_correction_mm[1],
+        ),
+    });
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::Placement,
+        passed: true,
+        message: format!(
+            "reached recovery contact Z{:.3} with seating offset {:+.3} mm",
+            step.board_place.z_mm, step.placement_seating_offset_mm,
+        ),
+    });
+    persist_placement_progress(state, run, report)?;
+
+    let board_release = release_part_at_board_and_verify(
+        state,
+        run.id,
+        step,
+        lease_id,
+        planner,
+        place_level,
+        place_contact,
+        prepared,
+        &acquired,
+    )
+    .await?;
+    report.corrected_move_count += board_release.corrected_move_count;
+    let nozzle_clear = board_release.verification.nozzle_clear;
+    let release_raw_values = board_release.release_raw_values;
+    let release_verification = board_release.verification;
+    report
+        .artifact_names
+        .extend(release_verification.artifact_names.clone());
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::Release,
+        passed: nozzle_clear,
+        message: release_verification
+            .findings
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "release verification produced no finding".into()),
+    });
+    let mut pickup_report = build_placement_pickup_report(
+        prepared,
+        &acquired,
+        [
+            step.board_place.x_mm + local_target_correction_mm[0],
+            step.board_place.y_mm + local_target_correction_mm[1],
+        ],
+        release_raw_values,
+        release_verification,
+        nozzle_clear,
+    );
+    pickup_report.algorithm_version = "retained_part_recovery.v1".into();
+    pickup_report.vacuum_held_after_transfer = acquired
+        .held_median_raw_value
+        .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value));
+    pickup_report.findings = vec![
+        "bottom vision recovered a previously acquired part without another feeder pickup".into(),
+    ];
+    report.pickup_report = Some(pickup_report);
+    persist_placement_progress(state, run, report)?;
+    if !nozzle_clear {
+        return Err("retained resistor did not release after the bounded recovery attempts".into());
+    }
+
+    let (board_after, _) = capture_top_pocket_mean(
+        state,
+        prepared,
+        [step.board_place.x_mm, step.board_place.y_mm],
+        pickup.inspection_sample_count,
+    )
+    .await?;
+    persist_placement_gray_artifact(state, run.id, BOARD_PLACEMENT_AFTER_ARTIFACT, &board_after)?;
+    let placement_center_tolerance_mm = (0.5 * step.body_width_mm)
+        .max(0.25)
+        .min(pickup.maximum_part_offset_mm);
+    let top_inspection = inspect_placed_part_with_orientation(
+        &board_before,
+        &board_after,
+        [
+            prepared.top_camera_model.center_x_px,
+            prepared.top_camera_model.center_y_px,
+        ],
+        top_mapping,
+        step.body_width_mm,
+        step.body_length_mm,
+        step.board_place.rotation_deg,
+        placement_center_tolerance_mm,
+        MAX_PLACED_PART_ROTATION_ERROR_DEG,
+        step.part_orientation,
+        BOARD_PLACEMENT_INSPECTION_ARTIFACT,
+    )
+    .map_err(|error| error.to_string())?;
+    persist_placement_rgb_artifact(
+        state,
+        run.id,
+        BOARD_PLACEMENT_INSPECTION_ARTIFACT,
+        &top_inspection.preview,
+    )?;
+    report.artifact_names.extend([
+        BOARD_PLACEMENT_AFTER_ARTIFACT.into(),
+        BOARD_PLACEMENT_INSPECTION_ARTIFACT.into(),
+    ]);
+    report.top_inspection = Some(top_inspection.report.clone());
+    report.stages.push(PlacementExecutionStageReport {
+        stage: PlacementExecutionStage::TopInspection,
+        passed: top_inspection.report.passed,
+        message: if top_inspection.report.passed {
+            "top vision confirmed the recovered resistor at the target".into()
+        } else {
+            "top vision did not confirm the recovered resistor".into()
+        },
+    });
+    persist_placement_progress(state, run, report)?;
+    if !top_inspection.report.passed {
+        return Err("top vision did not confirm the recovered resistor placement".into());
+    }
+    Ok(())
+}
+
+fn record_retained_part_recovery_attempt(
+    state: &AppState,
+    source_execution_id: Uuid,
+    recovery: &PlacementExecutionRun,
+) -> Result<(), String> {
+    let Some(report) = recovery.report.as_ref() else {
+        return Ok(());
+    };
+    for mut job_run in state
+        .store
+        .list_job_executions()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|run| run.job_id == recovery.job_id)
+    {
+        let Some(step) = job_run.steps.iter_mut().find(|step| {
+            step.step_index == recovery.step_index
+                && step.attempt_execution_ids.contains(&source_execution_id)
+        }) else {
+            continue;
+        };
+        if !step.attempt_execution_ids.contains(&recovery.id) {
+            step.attempt_execution_ids.push(recovery.id);
+        }
+        step.execution_id = Some(recovery.id);
+        step.board_contacted = report
+            .stages
+            .iter()
+            .any(|stage| stage.stage == PlacementExecutionStage::Placement && stage.passed);
+        let (disposition, _) = classify_placement_outcome(report);
+        step.outcome_disposition = Some(disposition);
+        if recovery.status == OperationStatus::Succeeded {
+            step.status = JobExecutionStepStatus::Succeeded;
+            step.message = Some("retained-part recovery passed bottom and top vision".into());
+        } else {
+            step.message = recovery.message.clone();
+        }
+        job_run.updated_at = Utc::now();
+        state
+            .store
+            .put_job_execution(&job_run)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 async fn execute_guarded_placement_task(
@@ -28315,6 +29311,39 @@ mod tests {
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("PCB and feeders are fixed"));
         assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn retained_part_recovery_requires_all_operator_confirmations() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/placement-executions/{}/retained-part-recovery",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": true,
+                            "confirmed_part_is_attached": true,
+                            "confirmed_target_is_empty": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("part is attached"));
+        assert!(message.contains("original target is empty"));
+        assert!(message.contains("power isolation"));
     }
 
     #[test]
