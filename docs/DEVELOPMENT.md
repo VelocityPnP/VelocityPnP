@@ -864,13 +864,13 @@ run reached its placement pose.
 This prevents a failed release or inspection from causing a second component
 to be stacked on the same target. Rework needs a separate explicit workflow.
 
-Before pickup, guarded placement version 9 also registers the bare local
+Before pickup, guarded placement version 10 also registers the bare local
 two-terminal pad pair. It stores `board-target-registration.png` and applies
 the bounded local XY correction to the placement pose. A missing or ambiguous
 pad pair stops the operation before pickup. The retained report keeps the
 nominal board pose and records the local correction separately.
 
-If the nominal pickup center produces no vacuum transition, version 9 can make
+If the nominal pickup center produces no vacuum transition, version 10 can make
 one bounded XY retry. It requires at least two recent, passed top inspections
 for the same job, nozzle, and part. Their residuals must agree within 0.20 mm.
 The retry applies the opposite mean residual and rejects a correction below
@@ -899,6 +899,12 @@ preserves motion phase but cannot prove that phase in the final image. Use
 `POST /placement-executions/EXECUTION_UUID/reanalyze-placement` or the Python
 client's `reanalyze_placement()` method to apply the current detector to saved
 evidence without machine motion.
+
+Every physical run that reaches board contact retains
+`board-placement-after.png`, including a failed or uncertain release. A failed
+release does not claim a passed top inspection, but its raw top-camera image
+remains available for offline analysis. The runner also keeps the raw
+`held-part.png` bottom-camera image for every acquired part.
 
 Physical success consumes the reserved feeder pocket only after release
 evidence. A failure before confirmed release tries to return the held part to

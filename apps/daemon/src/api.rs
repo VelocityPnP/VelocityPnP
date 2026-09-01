@@ -126,7 +126,7 @@ const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
 const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v9";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v10";
 const MINIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 2;
 const MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 3;
 const MAXIMUM_PICKUP_FEEDBACK_SPREAD_MM: f64 = 0.20;
@@ -23308,7 +23308,28 @@ async fn execute_physical_retained_part_recovery(
         prepared,
         &acquired,
     )
-    .await?;
+    .await;
+    let board_release = match board_release {
+        Ok(board_release) => board_release,
+        Err(error) => {
+            if let Err(capture_error) = capture_post_contact_board_frame(
+                state,
+                run,
+                step,
+                prepared,
+                pickup.inspection_sample_count,
+                report,
+            )
+            .await
+            {
+                report.findings.push(format!(
+                    "top-camera post-contact evidence capture failed: {capture_error}"
+                ));
+                let _ = persist_placement_progress(state, run, report);
+            }
+            return Err(error);
+        }
+    };
     let VerifiedBoardRelease {
         release_raw_values,
         verification: release_verification,
@@ -23354,18 +23375,18 @@ async fn execute_physical_retained_part_recovery(
     ];
     report.pickup_report = Some(pickup_report);
     persist_placement_progress(state, run, report)?;
+    let board_after = capture_post_contact_board_frame(
+        state,
+        run,
+        step,
+        prepared,
+        pickup.inspection_sample_count,
+        report,
+    )
+    .await?;
     if !nozzle_clear {
         return Err("retained resistor did not release after the bounded recovery attempts".into());
     }
-
-    let (board_after, _) = capture_top_pocket_mean(
-        state,
-        prepared,
-        [step.board_place.x_mm, step.board_place.y_mm],
-        pickup.inspection_sample_count,
-    )
-    .await?;
-    persist_placement_gray_artifact(state, run.id, BOARD_PLACEMENT_AFTER_ARTIFACT, &board_after)?;
     let placement_center_tolerance_mm = (0.5 * step.body_width_mm)
         .max(0.25)
         .min(pickup.maximum_part_offset_mm);
@@ -23392,10 +23413,9 @@ async fn execute_physical_retained_part_recovery(
         BOARD_PLACEMENT_INSPECTION_ARTIFACT,
         &top_inspection.preview,
     )?;
-    report.artifact_names.extend([
-        BOARD_PLACEMENT_AFTER_ARTIFACT.into(),
-        BOARD_PLACEMENT_INSPECTION_ARTIFACT.into(),
-    ]);
+    report
+        .artifact_names
+        .push(BOARD_PLACEMENT_INSPECTION_ARTIFACT.into());
     report.top_inspection = Some(top_inspection.report.clone());
     report.stages.push(PlacementExecutionStageReport {
         stage: PlacementExecutionStage::TopInspection,
@@ -24160,19 +24180,15 @@ async fn execute_physical_guarded_placement(
         }
         part_no_longer_safe_for_source_return = true;
 
-        let (board_after, _) = capture_top_pocket_mean(
+        let board_after = capture_post_contact_board_frame(
             state,
+            run,
+            step,
             prepared,
-            [step.board_place.x_mm, step.board_place.y_mm],
             pickup.inspection_sample_count,
+            report,
         )
         .await?;
-        persist_placement_gray_artifact(
-            state,
-            run.id,
-            BOARD_PLACEMENT_AFTER_ARTIFACT,
-            &board_after,
-        )?;
         let placement_center_tolerance_mm = (0.5 * step.body_width_mm)
             .max(0.25)
             .min(pickup.maximum_part_offset_mm);
@@ -24199,10 +24215,9 @@ async fn execute_physical_guarded_placement(
             BOARD_PLACEMENT_INSPECTION_ARTIFACT,
             &top_inspection.preview,
         )?;
-        report.artifact_names.extend([
-            BOARD_PLACEMENT_AFTER_ARTIFACT.into(),
-            BOARD_PLACEMENT_INSPECTION_ARTIFACT.into(),
-        ]);
+        report
+            .artifact_names
+            .push(BOARD_PLACEMENT_INSPECTION_ARTIFACT.into());
         report.top_inspection = Some(top_inspection.report.clone());
         report.pickup_report = Some(build_placement_pickup_report(
             prepared,
@@ -24249,6 +24264,23 @@ async fn execute_physical_guarded_placement(
         Ok(())
     }
     .await;
+    if placement_result.is_err() && placement_post_contact_image_is_missing(report) {
+        if let Err(capture_error) = capture_post_contact_board_frame(
+            state,
+            run,
+            step,
+            prepared,
+            pickup.inspection_sample_count,
+            report,
+        )
+        .await
+        {
+            report.findings.push(format!(
+                "top-camera post-contact evidence capture failed: {capture_error}"
+            ));
+            let _ = persist_placement_progress(state, run, report);
+        }
+    }
     match placement_result {
         Ok(()) => Ok(()),
         Err(error) if part_no_longer_safe_for_source_return => Err(error),
@@ -24268,6 +24300,18 @@ async fn execute_physical_guarded_placement(
             })
         }
     }
+}
+
+fn placement_post_contact_image_is_missing(report: &PlacementExecutionReport) -> bool {
+    let board_contacted = report
+        .stages
+        .iter()
+        .any(|stage| stage.stage == PlacementExecutionStage::Placement && stage.passed);
+    let board_after_retained = report
+        .artifact_names
+        .iter()
+        .any(|name| name == BOARD_PLACEMENT_AFTER_ARTIFACT);
+    board_contacted && !board_after_retained
 }
 
 struct VerifiedBoardRelease {
@@ -25386,6 +25430,38 @@ fn persist_placement_progress(
         .store
         .put_placement_execution(&updated)
         .map_err(|error| error.to_string())
+}
+
+async fn capture_post_contact_board_frame(
+    state: &AppState,
+    run: &PlacementExecutionRun,
+    step: &PlanStep,
+    prepared: &PreparedStripFeederPickup,
+    sample_count: u32,
+    report: &mut PlacementExecutionReport,
+) -> Result<GrayFrame, String> {
+    let (frame, _) = capture_top_pocket_mean(
+        state,
+        prepared,
+        [step.board_place.x_mm, step.board_place.y_mm],
+        sample_count,
+    )
+    .await?;
+    persist_placement_gray_artifact(state, run.id, BOARD_PLACEMENT_AFTER_ARTIFACT, &frame)?;
+    if !report
+        .artifact_names
+        .iter()
+        .any(|name| name == BOARD_PLACEMENT_AFTER_ARTIFACT)
+    {
+        report
+            .artifact_names
+            .push(BOARD_PLACEMENT_AFTER_ARTIFACT.into());
+    }
+    report
+        .findings
+        .push("retained a top-camera board image after physical contact".into());
+    persist_placement_progress(state, run, report)?;
+    Ok(frame)
 }
 
 fn ensure_no_active_placement_executions(state: &AppState) -> ApiResult<()> {
@@ -26846,6 +26922,25 @@ mod tests {
             stages: Vec::new(),
             findings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn post_contact_capture_is_required_until_the_raw_image_is_retained() {
+        let mut report = test_passed_placement_report(Uuid::new_v4());
+
+        assert!(!placement_post_contact_image_is_missing(&report));
+
+        report.stages.push(PlacementExecutionStageReport {
+            stage: PlacementExecutionStage::Placement,
+            passed: true,
+            message: "fixture reached board contact".into(),
+        });
+        assert!(placement_post_contact_image_is_missing(&report));
+
+        report
+            .artifact_names
+            .push(BOARD_PLACEMENT_AFTER_ARTIFACT.into());
+        assert!(!placement_post_contact_image_is_missing(&report));
     }
 
     #[test]

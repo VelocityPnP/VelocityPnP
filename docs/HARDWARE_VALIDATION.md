@@ -2805,6 +2805,15 @@ that names the selected successful qualification. The source-pose reanalysis
 route can replay old placement evidence without changing the placement
 status. Physical validation still needs a restored N1 vacuum calibration.
 
+The job evidence audit found that successful placements retained both the raw
+bottom-camera held-part image and the raw top-camera post-placement image.
+Some older failed release and recovery attempts reached board contact but did
+not retain the top-camera after image. Guarded placement v10 now captures
+`board-placement-after.png` after every physical board contact, before it
+returns an uncertain retained part or reports release failure. This path still
+needs a physical release-failure or ordinary placement check after N1 vacuum
+calibration is restored.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
