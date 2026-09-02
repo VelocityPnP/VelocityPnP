@@ -2818,6 +2818,19 @@ that names the selected successful qualification. The source-pose reanalysis
 route can replay old placement evidence without changing the placement
 status. Physical validation still needs a restored N1 vacuum calibration.
 
+The robust vacuum gate then passed N1 at nozzle Z3.1 with a 9-count median
+change and an 8-count robust gap. N2 characterization passed with a 12-count
+median change and an 11-count robust gap. Standard home, fine XYZ home, and
+both nozzle characterization branches passed.
+
+The next R21 attempt stopped before descent because its flat resistor had the
+unmarked face up. Its appearance similarity was only 0.156 against marked-face
+references. Source-pose v2 now permits an alternate geometry gate only for
+axis-symmetric parts. The retained flat case measured 2.006 by 1.232 mm and
+passed against the registered package size. The retained edge-standing case
+measured only 0.400 by 0.480 mm and remained rejected. Both checks replayed
+retained images without motion.
+
 The job evidence audit found that successful placements retained both the raw
 bottom-camera held-part image and the raw top-camera post-placement image.
 Some older failed release and recovery attempts reached board contact but did

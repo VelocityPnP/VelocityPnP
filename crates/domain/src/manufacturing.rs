@@ -763,6 +763,14 @@ pub struct StripFeederSourcePoseReport {
     #[serde(default)]
     pub appearance_similarity: Option<f64>,
     pub minimum_appearance_similarity: f64,
+    #[serde(default)]
+    pub reference_package_size_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub candidate_package_size_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub flat_geometry_passed: bool,
+    #[serde(default)]
+    pub face_texture_change_allowed: bool,
     pub passed: bool,
     pub artifact_name: String,
     #[serde(default)]

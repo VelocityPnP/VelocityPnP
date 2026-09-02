@@ -14,7 +14,7 @@ use velocitypnp_domain::{
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v3";
 pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v4";
-pub const STRIP_FEEDER_SOURCE_POSE_ALGORITHM: &str = "strip_feeder_source_pose.v1";
+pub const STRIP_FEEDER_SOURCE_POSE_ALGORITHM: &str = "strip_feeder_source_pose.v2";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
 const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
@@ -91,6 +91,7 @@ pub fn inspect_strip_feeder_source_pose(
     candidate_pocket_machine_mm: [f64; 2],
     camera_model: &PlanarCameraModel,
     registration: &StripFeederRegistration,
+    allow_face_texture_change: bool,
     artifact_name: &str,
 ) -> Result<StripFeederSourcePoseArtifacts> {
     ensure!(
@@ -210,11 +211,46 @@ pub fn inspect_strip_feeder_source_pose(
             });
     let appearance_similarity = appearance_match.map(|measurement| measurement.similarity);
     let maximum_relative_center_shift_mm = registration.tape_pitch_mm * 0.25;
+    let expected_package_size_mm = registration
+        .measured_part_size_mm
+        .or(registration.surveyed_part_size_mm);
+    let reference_package_size_mm =
+        reference_center
+            .zip(expected_package_size_mm)
+            .and_then(|(center, expected)| {
+                measure_source_package_size(
+                    &reference_crop,
+                    center,
+                    cross_span_mm,
+                    along_span_mm,
+                    expected,
+                )
+            });
+    let candidate_package_size_mm =
+        candidate_center
+            .zip(expected_package_size_mm)
+            .and_then(|(center, expected)| {
+                measure_source_package_size(
+                    &candidate_crop,
+                    center,
+                    cross_span_mm,
+                    along_span_mm,
+                    expected,
+                )
+            });
+    let flat_geometry_passed = allow_face_texture_change
+        && reference_package_size_mm
+            .zip(expected_package_size_mm)
+            .is_some_and(|(measured, expected)| source_package_size_matches(measured, expected))
+        && candidate_package_size_mm
+            .zip(expected_package_size_mm)
+            .is_some_and(|(measured, expected)| source_package_size_matches(measured, expected));
+    let appearance_passed = appearance_similarity
+        .is_some_and(|similarity| similarity >= MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY);
     let passed = reference_occupancy == StripPocketOccupancy::Occupied
         && candidate_occupancy == StripPocketOccupancy::Occupied
         && relative_center_shift_mm.is_some_and(|shift| shift <= maximum_relative_center_shift_mm)
-        && appearance_similarity
-            .is_some_and(|similarity| similarity >= MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY);
+        && (appearance_passed || flat_geometry_passed);
     let mut findings = Vec::new();
     if reference_occupancy != StripPocketOccupancy::Occupied {
         findings.push("the successful pickup reference is not visibly occupied".into());
@@ -230,13 +266,14 @@ pub fn inspect_strip_feeder_source_pose(
             "the source package center differs from the reference by more than {maximum_relative_center_shift_mm:.3} mm"
         ));
     }
-    if appearance_similarity
-        .is_none_or(|similarity| similarity < MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY)
-    {
+    if !appearance_passed && !flat_geometry_passed {
         findings.push(format!(
             "the source package does not match the successful pickup pose at \
              {MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY:.2} or better",
         ));
+    }
+    if allow_face_texture_change && !flat_geometry_passed {
+        findings.push("the source package does not have the expected flat geometry".into());
     }
     if let Some(measurement) = appearance_match {
         findings.push(format!(
@@ -245,15 +282,18 @@ pub fn inspect_strip_feeder_source_pose(
         ));
     }
     if passed {
-        findings.push("top vision matched a prior package pose that passed pickup".into());
+        findings.push(if appearance_passed {
+            "top vision matched a prior package pose that passed pickup".into()
+        } else {
+            "flat axis-symmetric package geometry passed despite changed face texture".into()
+        });
     }
     let preview = render_pocket_return_preview(
         &reference_crop,
         &candidate_crop,
         reference_occupancy,
         candidate_occupancy,
-        appearance_similarity
-            .is_some_and(|similarity| similarity >= MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY),
+        appearance_passed || flat_geometry_passed,
         reference_center.map(|measurement| measurement.center_px),
         candidate_center.map(|measurement| measurement.center_px),
     );
@@ -274,12 +314,65 @@ pub fn inspect_strip_feeder_source_pose(
             relative_center_shift_mm,
             appearance_similarity,
             minimum_appearance_similarity: MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY,
+            reference_package_size_mm,
+            candidate_package_size_mm,
+            flat_geometry_passed,
+            face_texture_change_allowed: allow_face_texture_change,
             passed,
             artifact_name: artifact_name.into(),
             findings,
         },
         preview,
     })
+}
+
+fn measure_source_package_size(
+    crop: &GrayFrame,
+    center: PocketImageCenter,
+    cross_span_mm: f64,
+    along_span_mm: f64,
+    expected_size_mm: [f64; 2],
+) -> Option<[f64; 2]> {
+    let mut expected = expected_size_mm;
+    expected.sort_by(f64::total_cmp);
+    if expected[0] < 0.1 || !expected.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let mut candidates = detect_rectangular_features(crop, cross_span_mm, along_span_mm, true)
+        .ok()?
+        .into_iter()
+        .filter_map(|feature| {
+            let center_error = (feature.cross_mm - center.center_mm[0])
+                .hypot(feature.along_mm - center.center_mm[1]);
+            let mut size = [feature.cross_size_mm, feature.along_size_mm];
+            size.sort_by(f64::total_cmp);
+            (center_error <= 1.50).then_some((feature, size, center_error))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|first, second| {
+        let score = |candidate: &(RectangularFeature, [f64; 2], f64)| {
+            let (_, size, center_error) = candidate;
+            center_error / 0.75
+                + (size[0] / expected[0]).ln().abs()
+                + (size[1] / expected[1]).ln().abs()
+        };
+        score(first).total_cmp(&score(second))
+    });
+    candidates
+        .first()
+        .map(|(feature, _, _)| [feature.cross_size_mm, feature.along_size_mm])
+        .or(Some(center.support_size_mm))
+}
+
+fn source_package_size_matches(measured_size_mm: [f64; 2], expected_size_mm: [f64; 2]) -> bool {
+    let mut measured = measured_size_mm;
+    let mut expected = expected_size_mm;
+    measured.sort_by(f64::total_cmp);
+    expected.sort_by(f64::total_cmp);
+    measured[0] >= 0.45 * expected[0]
+        && measured[0] <= 1.60 * expected[0]
+        && measured[1] >= 0.55 * expected[1]
+        && measured[1] <= 1.60 * expected[1]
 }
 
 /// Checks the same pocket before pickup and after a return operation.
@@ -504,6 +597,7 @@ struct CircleFeature {
 struct PocketImageCenter {
     center_px: [f64; 2],
     center_mm: [f64; 2],
+    support_size_mm: [f64; 2],
     confidence: f64,
 }
 
@@ -1311,15 +1405,21 @@ fn measure_pocket_image_center(
     let mut weight_sum = 0.0;
     let mut weighted_x = 0.0;
     let mut weighted_y = 0.0;
+    let mut weighted_x_squared = 0.0;
+    let mut weighted_y_squared = 0.0;
     let mut support = 0_u32;
     for y in y_min..=y_max {
         for x in x_min..=x_max {
             let value = f64::from(crop.pixels[(y * crop.width + x) as usize]);
             let weight = ((value - background).abs() - threshold).max(0.0);
             if weight > 0.0 {
+                let center_x = f64::from(x) + 0.5;
+                let center_y = f64::from(y) + 0.5;
                 weight_sum += weight;
-                weighted_x += (f64::from(x) + 0.5) * weight;
-                weighted_y += (f64::from(y) + 0.5) * weight;
+                weighted_x += center_x * weight;
+                weighted_y += center_y * weight;
+                weighted_x_squared += center_x.powi(2) * weight;
+                weighted_y_squared += center_y.powi(2) * weight;
                 support += 1;
             }
         }
@@ -1333,6 +1433,12 @@ fn measure_pocket_image_center(
         center_px[0] / f64::from(crop.width) * cross_span_mm,
         center_px[1] / f64::from(crop.height) * along_span_mm,
     ];
+    let variance_x = (weighted_x_squared / weight_sum - center_px[0].powi(2)).max(0.0);
+    let variance_y = (weighted_y_squared / weight_sum - center_px[1].powi(2)).max(0.0);
+    let support_size_mm = [
+        (12.0 * variance_x).sqrt() / f64::from(crop.width) * cross_span_mm,
+        (12.0 * variance_y).sqrt() / f64::from(crop.height) * along_span_mm,
+    ];
     let support_fraction = f64::from(support) / area;
     let mean_weight = weight_sum / f64::from(support);
     let confidence =
@@ -1340,6 +1446,7 @@ fn measure_pocket_image_center(
     Some(PocketImageCenter {
         center_px,
         center_mm,
+        support_size_mm,
         confidence,
     })
 }
@@ -4168,7 +4275,7 @@ mod tests {
             selected_pocket_index: None,
             pickup_z_mm: None,
             surveyed_part_size_mm: None,
-            measured_part_size_mm: None,
+            measured_part_size_mm: Some([0.84, 1.64]),
             measured_part_rotation_deg: None,
             measured_part_confidence: None,
             active_feeder_id: None,
@@ -4239,11 +4346,42 @@ mod tests {
             [112.0, 72.0],
             &model,
             &registration,
+            false,
             "source-pose.png",
         )
         .unwrap();
         assert!(flat_pose.report.passed, "{:?}", flat_pose.report.findings);
         assert_eq!(flat_pose.report.reference_qualification_id, reference_id);
+
+        let mut marked_face = frame.clone();
+        paint_rectangle(&mut marked_face, [250, 250], [20, 10], 25);
+        paint_rectangle(&mut marked_face, [250, 250], [7, 4], 225);
+        let mut unmarked_face = frame.clone();
+        paint_rectangle(&mut unmarked_face, [250, 250], [20, 10], 225);
+        let flipped_flat_pose = inspect_strip_feeder_source_pose(
+            &marked_face,
+            pose,
+            [112.0, 72.0],
+            reference_id,
+            &unmarked_face,
+            pose,
+            [112.0, 72.0],
+            &model,
+            &registration,
+            true,
+            "source-pose.png",
+        )
+        .unwrap();
+        assert!(
+            flipped_flat_pose.report.passed,
+            "{:?}",
+            flipped_flat_pose.report
+        );
+        assert!(flipped_flat_pose.report.flat_geometry_passed);
+        assert!(flipped_flat_pose
+            .report
+            .appearance_similarity
+            .is_some_and(|similarity| similarity < MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY));
 
         let mut edge_pose_frame = returned_frame.clone();
         for y in 230..=270 {
@@ -4263,6 +4401,7 @@ mod tests {
             [112.0, 72.0],
             &model,
             &registration,
+            true,
             "source-pose.png",
         )
         .unwrap();

@@ -1010,6 +1010,12 @@ operator recovery. Then use `resume-job-execution` with a new lease and current
 fine XYZ home. The daemon pauses active jobs after restart and retains all
 placement attempt IDs and evidence.
 
+Before nozzle descent, source-pose vision compares the fresh pocket image with
+retained successful pickup-return images. Directed parts must match the known
+face texture. Axis-symmetric parts can also pass from a package rectangle that
+matches the registered part size. This permits a passive part with its unmarked
+face up, but rejects the narrow geometry of a part that stands on its edge.
+
 ### Automatic board registration
 
 Register a visually matched board after the machine is coarse-homed and the

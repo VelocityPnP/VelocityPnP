@@ -3289,6 +3289,10 @@ components:
         - relative_center_shift_mm
         - appearance_similarity
         - minimum_appearance_similarity
+        - reference_package_size_mm
+        - candidate_package_size_mm
+        - flat_geometry_passed
+        - face_texture_change_allowed
         - passed
         - artifact_name
         - findings
@@ -3315,6 +3319,16 @@ components:
         appearance_similarity:
           { type: [number, "null"], minimum: -1, maximum: 1 }
         minimum_appearance_similarity: { type: number, minimum: -1, maximum: 1 }
+        reference_package_size_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        candidate_package_size_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/Point2d" }
+            - type: "null"
+        flat_geometry_passed: { type: boolean }
+        face_texture_change_allowed: { type: boolean }
         passed: { type: boolean }
         artifact_name: { type: string }
         findings: { type: array, items: { type: string } }

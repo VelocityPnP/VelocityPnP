@@ -1124,6 +1124,10 @@ export interface StripFeederSourcePoseReport {
   relative_center_shift_mm: number | null;
   appearance_similarity: number | null;
   minimum_appearance_similarity: number;
+  reference_package_size_mm: [number, number] | null;
+  candidate_package_size_mm: [number, number] | null;
+  flat_geometry_passed: boolean;
+  face_texture_change_allowed: boolean;
   passed: boolean;
   artifact_name: string;
   findings: string[];

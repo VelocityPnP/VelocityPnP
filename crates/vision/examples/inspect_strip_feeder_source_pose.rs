@@ -7,12 +7,13 @@ use velocitypnp_vision::{decode_gray_png, encode_rgb_png, inspect_strip_feeder_s
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     anyhow::ensure!(
-        arguments.len() == 18,
+        arguments.len() == 19,
         "usage: inspect_strip_feeder_source_pose REFERENCE CANDIDATE MODEL \
          REGISTRATION OUTPUT QUALIFICATION_UUID REFERENCE_X REFERENCE_Y \
          REFERENCE_POSE_X REFERENCE_POSE_Y REFERENCE_POSE_Z \
          REFERENCE_POSE_ROTATION CANDIDATE_X CANDIDATE_Y CANDIDATE_POSE_X \
-         CANDIDATE_POSE_Y CANDIDATE_POSE_Z CANDIDATE_POSE_ROTATION"
+         CANDIDATE_POSE_Y CANDIDATE_POSE_Z CANDIDATE_POSE_ROTATION \
+         ALLOW_FACE_TEXTURE_CHANGE"
     );
     let number = |index: usize| -> Result<f64> {
         arguments[index]
@@ -32,6 +33,9 @@ fn main() -> Result<()> {
     let model: PlanarCameraModel = serde_json::from_slice(&fs::read(&arguments[2])?)?;
     let registration: StripFeederRegistration = serde_json::from_slice(&fs::read(&arguments[3])?)?;
     let qualification_id = arguments[5].parse::<Uuid>()?;
+    let allow_face_texture_change = arguments[18]
+        .parse::<bool>()
+        .context("invalid face-texture policy")?;
     let result = inspect_strip_feeder_source_pose(
         &reference,
         pose(8)?,
@@ -42,6 +46,7 @@ fn main() -> Result<()> {
         [number(12)?, number(13)?],
         &model,
         &registration,
+        allow_face_texture_change,
         &arguments[4],
     )?;
     fs::write(&arguments[4], encode_rgb_png(&result.preview)?)?;

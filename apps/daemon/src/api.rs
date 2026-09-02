@@ -6580,6 +6580,7 @@ fn inspect_source_pose_against_references(
     candidate_pocket_machine_mm: [f64; 2],
     camera_model: &PlanarCameraModel,
     registration: &StripFeederRegistration,
+    allow_face_texture_change: bool,
     artifact_name: &str,
 ) -> Result<StripFeederSourcePoseArtifacts, String> {
     let mut best: Option<StripFeederSourcePoseArtifacts> = None;
@@ -6594,6 +6595,7 @@ fn inspect_source_pose_against_references(
             candidate_pocket_machine_mm,
             camera_model,
             registration,
+            allow_face_texture_change,
             artifact_name,
         )
         .map_err(|error| error.to_string())?;
@@ -24908,6 +24910,8 @@ async fn acquire_physical_placement_part(
     let candidate_pocket = nominal_pocket_machine_mm;
     let source_pose_registration = prepared.registration.clone();
     let source_pose_camera_model = prepared.top_camera_model.clone();
+    let allow_face_texture_change =
+        matches!(prepared.part_orientation, PartOrientation::AxisSymmetric);
     let source_pose_inspection = tokio::task::spawn_blocking(move || {
         inspect_source_pose_against_references(
             references,
@@ -24916,6 +24920,7 @@ async fn acquire_physical_placement_part(
             candidate_pocket,
             &source_pose_camera_model,
             &source_pose_registration,
+            allow_face_texture_change,
             SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
         )
     })
@@ -25800,6 +25805,10 @@ async fn reanalyze_placement_source_pose(
     let references =
         load_source_pose_references(&state, &registration).map_err(ApiError::bad_request)?;
     let (_, camera_model) = load_workspace_camera_model(&state, run.calibration_id)?;
+    let allow_face_texture_change = matches!(
+        registration_part_orientation(&state, &registration)?.0,
+        PartOrientation::AxisSymmetric
+    );
     let source_pose_registration = registration.clone();
     let inspection = tokio::task::spawn_blocking(move || {
         inspect_source_pose_against_references(
@@ -25809,6 +25818,7 @@ async fn reanalyze_placement_source_pose(
             candidate_pocket_machine_mm,
             &camera_model,
             &source_pose_registration,
+            allow_face_texture_change,
             SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
         )
     })
