@@ -9049,7 +9049,16 @@ fn placement_available_strip_feeder_pocket(
     registration: &StripFeederRegistration,
     planned_pick: Pose,
 ) -> Option<&StripFeederPocketState> {
-    planned_available_strip_feeder_pocket(registration, planned_pick)
+    registration
+        .selected_pocket_index
+        .and_then(|selected_index| {
+            registration.pockets.iter().find(|pocket| {
+                pocket.pocket_index == selected_index
+                    && pocket.status == StripFeederPocketStatus::Available
+                    && pocket.occupancy == StripPocketOccupancy::Occupied
+            })
+        })
+        .or_else(|| planned_available_strip_feeder_pocket(registration, planned_pick))
         .or_else(|| registration.next_available_pocket(None))
 }
 
@@ -26743,6 +26752,30 @@ mod tests {
             Pose {
                 x_mm: 100.0,
                 y_mm: 100.0,
+                ..Pose::ORIGIN
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selected.pocket_index, 3);
+    }
+
+    #[test]
+    fn placement_prefers_the_fresh_holdout_pocket_over_a_stale_plan_pose() {
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        registration.selected_pocket_index = Some(3);
+
+        let selected = placement_available_strip_feeder_pocket(
+            &registration,
+            Pose {
+                x_mm: 10.0,
+                y_mm: 0.0,
                 ..Pose::ORIGIN
             },
         )
