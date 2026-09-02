@@ -1274,6 +1274,12 @@ both nozzles are level at controller Z=31.5, lowers the selected nozzle to the
 clear search start, starts the pump, and descends at fixed X/Y. A stable vacuum
 transition defines contact. The pump stops before the nozzle retracts.
 
+The contact gate uses both the median signal change and the robust separation
+between the open and candidate-seal sample distributions. The attached V3
+profile requires an 8-count median change and a 3-count distribution gap.
+This accepts the repeated, non-overlapping 9-count N1 seal but rejects a
+large median change if its raw samples overlap the open-nozzle distribution.
+
 The attached V3 profile currently bounds the search from nozzle Z=5.0 to
 Z=3.0. N1 produced a stable vacuum transition at Z=3.4. The lower limit leaves
 four 0.1 mm steps for detection variation but prevents deep travel if the

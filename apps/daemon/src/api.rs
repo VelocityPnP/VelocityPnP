@@ -13474,6 +13474,11 @@ async fn execute_vacuum_probe_descent(
 ) -> Result<(Vec<i64>, Vec<VacuumProbeSample>, Option<VacuumProbeSample>), String> {
     let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
     let probe = state.profile.vacuum_calibration.as_ref().unwrap();
+    let minimum_distribution_gap_counts = state
+        .profile
+        .vacuum_characterization
+        .as_ref()
+        .map_or(1, |profile| profile.minimum_distribution_gap_counts);
     let open_nozzle_raw_values =
         collect_sensor_values(state, lease_id, sensor_id, probe.baseline_sample_count).await?;
     let open_median = median_raw(&open_nozzle_raw_values)
@@ -13520,7 +13525,12 @@ async fn execute_vacuum_probe_descent(
         let calibrated_acquired = calibrated_acquisition.is_some_and(|characterization| {
             vacuum_value_is_acquired(characterization, median_raw_value)
         });
-        if signal_delta_counts >= probe.minimum_signal_delta_counts as f64 {
+        if vacuum_probe_sample_is_contact(
+            &open_nozzle_raw_values,
+            &sample.raw_values,
+            probe.minimum_signal_delta_counts,
+            minimum_distribution_gap_counts,
+        ) {
             consecutive += 1;
         } else {
             consecutive = 0;
@@ -13531,6 +13541,27 @@ async fn execute_vacuum_probe_descent(
         }
     }
     Ok((open_nozzle_raw_values, samples, None))
+}
+
+fn vacuum_probe_sample_is_contact(
+    open_raw_values: &[i64],
+    sample_raw_values: &[i64],
+    minimum_signal_delta_counts: i64,
+    minimum_distribution_gap_counts: i64,
+) -> bool {
+    let Some(open) = VacuumStateStatistics::from_raw(open_raw_values.to_vec()) else {
+        return false;
+    };
+    let Some(sample) = VacuumStateStatistics::from_raw(sample_raw_values.to_vec()) else {
+        return false;
+    };
+    calculate_vacuum_classification_thresholds(
+        &open,
+        &sample,
+        minimum_signal_delta_counts,
+        minimum_distribution_gap_counts,
+    )
+    .is_some_and(|thresholds| thresholds.passed)
 }
 
 async fn collect_sensor_values(
@@ -31120,6 +31151,22 @@ mod tests {
         assert_eq!(median_raw(&[255, 254, 255, 200, 255]), Some(255.0));
         assert_eq!(median_raw(&[226, 225, 227, 226]), Some(226.0));
         assert_eq!(median_raw(&[]), None);
+    }
+
+    #[test]
+    fn vacuum_probe_accepts_a_stable_nine_count_seal() {
+        let open = [238, 238, 238, 238, 237, 237, 237, 237, 236, 236];
+        let sealed = [228, 228, 228, 227, 227];
+
+        assert!(vacuum_probe_sample_is_contact(&open, &sealed, 8, 3));
+    }
+
+    #[test]
+    fn vacuum_probe_rejects_a_noisy_median_shift() {
+        let open = [238, 238, 238, 238, 237, 237, 237, 237, 236, 236];
+        let noisy = [224, 224, 224, 240, 240];
+
+        assert!(!vacuum_probe_sample_is_contact(&open, &noisy, 8, 3));
     }
 
     #[test]

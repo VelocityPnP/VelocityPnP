@@ -169,7 +169,7 @@
     "vacuum_settle_ms": 500,
     "baseline_sample_count": 10,
     "step_sample_count": 5,
-    "minimum_signal_delta_counts": 10,
+    "minimum_signal_delta_counts": 8,
     "required_consecutive_steps": 1
   },
   "vacuum_characterization": {

@@ -2785,6 +2785,19 @@ N1 vacuum characterization. No additional board release reached the adaptive
 depth schedule during this session because component acquisition did not
 pass.
 
+After a restart, standard XYZ home and fine XYZ home passed. A repeated N1
+probe had an open median of 237 counts and a sealed median of 228 counts at
+nozzle Z3.1 and Z3.0. The 9-count change reproduced the prior result. The
+open values ranged from 236 to 238, and the sealed values ranged from 227 to
+228. Their distributions did not overlap, but the fixed 10-count rule again
+rejected the seal.
+
+The probe gate now requires both an 8-count median change and the existing
+3-count robust distribution gap. This bound is below the repeated 9-count N1
+signal, but it still rejects overlapping noisy samples. Physical validation
+must repeat the probe and characterization with this gate before placement
+continues.
+
 ### Source-package pose gate
 
 Guarded placement v9 now compares each fresh source-pocket image with the
