@@ -37,6 +37,8 @@ This repository contains the first working platform slice:
   fiducials, with persisted visual evidence and residual-gated transforms
 - strip-feeder drafts, center-refined live holdouts, and closed-loop pickup
   qualification
+- hash-checked CPU ONNX source-component inference with non-authoritative
+  detector comparison and retained review evidence
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

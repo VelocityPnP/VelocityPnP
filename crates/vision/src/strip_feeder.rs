@@ -5,10 +5,10 @@ use opencv::core::{self, Mat, MatTraitConst, Point, Point2f, Rect, Size, Vector,
 use opencv::imgproc;
 use std::f64::consts::PI;
 use velocitypnp_domain::{
-    PlanarCameraModel, Pose, StripFeederLaneProposal, StripFeederLiveHoldoutReport,
-    StripFeederPocketObservation, StripFeederPocketReturnReport, StripFeederRegistration,
-    StripFeederRejectedLattice, StripFeederSourcePoseReport, StripPocketOccupancy,
-    WorkspaceBoardCandidate,
+    PlanarCameraModel, Pose, SourceComponentModelPrediction, StripFeederLaneProposal,
+    StripFeederLiveHoldoutReport, StripFeederPocketObservation, StripFeederPocketReturnReport,
+    StripFeederRegistration, StripFeederRejectedLattice, StripFeederSourcePoseReport,
+    StripPocketOccupancy, WorkspaceBoardCandidate,
 };
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
@@ -224,6 +224,33 @@ pub fn draft_strip_feeder_source_component(
         },
         crop,
     })
+}
+
+/// Draw deterministic and learned outlines on the exact model input crop.
+pub fn render_source_component_shadow_preview(
+    crop: &GrayFrame,
+    deterministic_outline_px: Option<[[f64; 2]; 4]>,
+    prediction: &SourceComponentModelPrediction,
+) -> RgbFrame {
+    let mut pixels = Vec::with_capacity(crop.pixels.len() * 3);
+    for luma in &crop.pixels {
+        pixels.extend_from_slice(&[*luma, *luma, *luma]);
+    }
+    let mut preview = RgbFrame {
+        width: crop.width,
+        height: crop.height,
+        pixels,
+    };
+    if let Some(outline) = deterministic_outline_px {
+        draw_closed_polyline(&mut preview, &outline, [50, 235, 120]);
+    }
+    if prediction.class.occupied() {
+        draw_closed_polyline(&mut preview, &prediction.pose.outline_px, [30, 220, 245]);
+        draw_cross(&mut preview, prediction.pose.center_px, 5.0, [30, 220, 245]);
+    } else {
+        draw_cross(&mut preview, prediction.pose.center_px, 5.0, [245, 80, 70]);
+    }
+    preview
 }
 
 /// Compares a source package with a prior package that passed pickup.

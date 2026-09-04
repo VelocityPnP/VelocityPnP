@@ -392,6 +392,15 @@ class Client:
             "GET", f"/strip-feeder-source-captures/{capture_id}",
         )
 
+    def reanalyze_strip_feeder_source_capture_model(
+        self, capture_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        """Run the configured learned model on retained source images."""
+        return self._request(
+            "POST",
+            f"/strip-feeder-source-captures/{capture_id}/reanalyze-model",
+        )
+
     def create_strip_feeder_draft(
         self,
         scan_id: str | uuid.UUID,

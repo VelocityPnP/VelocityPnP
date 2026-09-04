@@ -420,6 +420,15 @@ class ClientTests(unittest.TestCase):
             "GET", "/strip-feeder-source-captures/capture",
         )
 
+        with patch.object(client, "_request", return_value={"id": "capture"}) as send:
+            self.assertEqual(
+                client.reanalyze_strip_feeder_source_capture_model("capture"),
+                {"id": "capture"},
+            )
+        send.assert_called_once_with(
+            "POST", "/strip-feeder-source-captures/capture/reanalyze-model",
+        )
+
         draft = {"id": "draft", "status": "vision_draft"}
         with patch.object(client, "_request", return_value=draft) as send:
             self.assertEqual(

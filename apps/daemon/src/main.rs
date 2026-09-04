@@ -38,6 +38,10 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:4080")]
     listen: SocketAddr,
 
+    /// Directory with model-manifest.json and its source-component ONNX file.
+    #[arg(long, env = "VELOCITYPNP_SOURCE_COMPONENT_MODEL_DIR")]
+    source_component_model_dir: Option<PathBuf>,
+
     /// Serve a production web build and use it as SPA fallback.
     #[arg(long)]
     web_dir: Option<PathBuf>,
@@ -77,7 +81,8 @@ async fn main() -> Result<()> {
     let machine = MachineHandle::spawn(driver, profile.clone());
     let shutdown_machine = machine.clone();
     let store = Store::open(&args.database)?;
-    let state = api::AppState::new(machine, profile, store);
+    let state = api::AppState::new(machine, profile, store)
+        .with_source_component_model_package(args.source_component_model_dir.as_deref());
     state.spawn_event_journal();
 
     let mut app = api::router(state);

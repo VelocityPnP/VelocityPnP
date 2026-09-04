@@ -44,7 +44,8 @@ use velocitypnp_domain::{
     PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
     PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
-    Residuals, SensorReading, StripFeederInventoryLane, StripFeederInventoryReport,
+    Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
+    SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
     StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupDisposition,
     StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
     StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
@@ -64,6 +65,7 @@ use velocitypnp_domain::{
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
+use velocitypnp_model::{SourceComponentModel, SourceComponentModelStatus};
 use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::{
     plan_job, MotionCalibration, MotionMode, MotionPlanner, MotionState, PlanStep, PlannedMotion,
@@ -77,17 +79,18 @@ use velocitypnp_vision::{
     compare_workspace_reconnaissance, compose_workspace_refinements,
     composite_workspace_camera_aperture, decode_gray_png, decode_rgb_png,
     detect_board_fiducial_near, detect_bright_fiducial_near, detect_bright_reference_pad,
-    detect_camera_target, detect_installed_plate_hole, discover_workspace_objects, encode_gray_png,
-    encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
-    fit_nozzle_runout, fit_planar_camera_model, fit_top_side_board_registration,
-    inspect_held_part_difference, inspect_held_part_difference_with_orientation,
-    inspect_placed_part_with_orientation, inspect_strip_feeder_pocket_return,
-    inspect_strip_feeder_source_pose, interpolate_planar_camera_model, mean_nozzle_detection,
-    measure_known_feature_surface_fraction, measure_workspace_parallax,
-    merge_workspace_height_maps, monotonic_timestamp, plan_bottom_camera_correction,
-    plan_pixel_correction, plan_visual_homing, plan_workspace_scan, query_camera_controls,
-    reanalyze_workspace_seam_health, register_two_terminal_placement_target,
-    render_board_fiducial_evidence, render_workspace_height_mosaic_with_consistency,
+    detect_camera_target, detect_installed_plate_hole, discover_workspace_objects,
+    draft_strip_feeder_source_component, encode_gray_png, encode_rgb_png, encode_rgba_png,
+    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
+    fit_planar_camera_model, fit_top_side_board_registration, inspect_held_part_difference,
+    inspect_held_part_difference_with_orientation, inspect_placed_part_with_orientation,
+    inspect_strip_feeder_pocket_return, inspect_strip_feeder_source_pose,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
+    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
+    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
+    query_camera_controls, reanalyze_workspace_seam_health, register_two_terminal_placement_target,
+    render_board_fiducial_evidence, render_source_component_shadow_preview,
+    render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
@@ -95,19 +98,19 @@ use velocitypnp_vision::{
     CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
     DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
     HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame,
-    StripFeederInventoryBuild, StripFeederInventorySourceMosaic, StripFeederSourcePoseArtifacts,
-    V4l2CaptureConfig, VisualHomingPlan, WorkspaceCameraApertureComposite,
-    WorkspaceHeightComposite, WorkspaceHeightMap, WorkspaceMosaic, WorkspaceMosaicStream,
-    WorkspaceObservedObject, WorkspaceParallaxObservation, WorkspaceParallaxReport,
-    WorkspaceParallaxStream, WorkspaceRasterEvidence, WorkspaceRefinementPatch, WorkspaceScanPlan,
-    WorkspaceSeamHealthArtifacts, WorkspaceSeamHealthReport, WorkspaceSeamStatus,
-    MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA, MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO,
-    MAX_WORKSPACE_SURFACE_FRACTION, MIN_REFINEMENT_COMPOSITE_COVERAGE,
-    MIN_REFINEMENT_TEXTURE_RETENTION_RATIO, MIN_WORKSPACE_SURFACE_FRACTION,
-    STRIP_FEEDER_INVENTORY_ALGORITHM, STRIP_FEEDER_VISION_ALGORITHM,
-    WORKSPACE_BOARD_DISCOVERY_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT,
-    WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT, WORKSPACE_CHANGE_SET_ARTIFACT,
-    WORKSPACE_HEIGHT_CANDIDATE_STEP,
+    StripFeederInventoryBuild, StripFeederInventorySourceMosaic, StripFeederSourceComponentDraft,
+    StripFeederSourcePoseArtifacts, V4l2CaptureConfig, VisualHomingPlan,
+    WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
+    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject, WorkspaceParallaxObservation,
+    WorkspaceParallaxReport, WorkspaceParallaxStream, WorkspaceRasterEvidence,
+    WorkspaceRefinementPatch, WorkspaceScanPlan, WorkspaceSeamHealthArtifacts,
+    WorkspaceSeamHealthReport, WorkspaceSeamStatus, MAX_REFINEMENT_BOUNDARY_DISAGREEMENT_P95_LUMA,
+    MAX_REFINEMENT_SEAM_DISCONTINUITY_RATIO, MAX_WORKSPACE_SURFACE_FRACTION,
+    MIN_REFINEMENT_COMPOSITE_COVERAGE, MIN_REFINEMENT_TEXTURE_RETENTION_RATIO,
+    MIN_WORKSPACE_SURFACE_FRACTION, STRIP_FEEDER_INVENTORY_ALGORITHM,
+    STRIP_FEEDER_VISION_ALGORITHM, WORKSPACE_BOARD_DISCOVERY_ALGORITHM,
+    WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT, WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT,
+    WORKSPACE_CHANGE_SET_ARTIFACT, WORKSPACE_HEIGHT_CANDIDATE_STEP,
 };
 
 const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
@@ -150,6 +153,8 @@ const SOURCE_POCKET_BEFORE_ARTIFACT: &str = "source-pocket-before.png";
 const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspection.png";
 const SOURCE_POCKET_POSE_INSPECTION_ARTIFACT: &str = "source-pocket-pose-inspection.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
+const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v1";
+const MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION: f64 = 0.04;
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
 const BOARD_TARGET_REGISTRATION_ARTIFACT: &str = "board-target-registration.png";
@@ -236,6 +241,8 @@ pub struct AppState {
     camera_capture_lock: Arc<tokio::sync::Mutex<()>>,
     workspace_scan_admission_lock: Arc<tokio::sync::Mutex<()>>,
     workspace_scan_motion_lock: Arc<tokio::sync::Mutex<()>>,
+    source_component_model: Option<Arc<SourceComponentModel>>,
+    source_component_model_status: Arc<SourceComponentModelStatus>,
 }
 
 impl AppState {
@@ -247,6 +254,8 @@ impl AppState {
             camera_capture_lock: Arc::new(tokio::sync::Mutex::new(())),
             workspace_scan_admission_lock: Arc::new(tokio::sync::Mutex::new(())),
             workspace_scan_motion_lock: Arc::new(tokio::sync::Mutex::new(())),
+            source_component_model: None,
+            source_component_model_status: Arc::new(SourceComponentModelStatus::disabled()),
         };
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
@@ -259,6 +268,35 @@ impl AppState {
         state.recover_interrupted_job_executions();
         state.refresh_automatic_placement_outcomes();
         state
+    }
+
+    pub fn with_source_component_model_package(mut self, package_dir: Option<&FilePath>) -> Self {
+        let Some(package_dir) = package_dir else {
+            return self;
+        };
+        match SourceComponentModel::load(package_dir) {
+            Ok(model) => {
+                let status = model.status();
+                tracing::info!(
+                    path = %model.package_dir().display(),
+                    sha256 = status.artifact_sha256.as_deref().unwrap_or_default(),
+                    "loaded source-component shadow model"
+                );
+                self.source_component_model = Some(Arc::new(model));
+                self.source_component_model_status = Arc::new(status);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %package_dir.display(),
+                    %error,
+                    "source-component shadow model is disabled"
+                );
+                self.source_component_model = None;
+                self.source_component_model_status =
+                    Arc::new(SourceComponentModelStatus::invalid(error.to_string()));
+            }
+        }
+        self
     }
 
     fn refresh_automatic_placement_outcomes(&self) {
@@ -984,6 +1022,10 @@ pub fn router(state: AppState) -> Router {
             get(get_strip_feeder_source_capture),
         )
         .route(
+            "/api/v1/strip-feeder-source-captures/{id}/reanalyze-model",
+            post(reanalyze_strip_feeder_source_capture_model),
+        )
+        .route(
             "/api/v1/strip-feeder-source-captures/{id}/artifacts/{name}",
             get(get_strip_feeder_source_capture_artifact),
         )
@@ -1125,6 +1167,9 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "simulated": state.machine.status().simulated,
+        "models": {
+            "source_component_pose": state.source_component_model_status.as_ref(),
+        },
     }))
 }
 
@@ -6354,6 +6399,209 @@ fn ensure_no_active_strip_feeder_source_captures(state: &AppState) -> ApiResult<
     Ok(())
 }
 
+struct SourceComponentShadowArtifacts {
+    report: SourceComponentShadowReport,
+    crop: GrayFrame,
+    preview: RgbFrame,
+}
+
+fn build_source_component_shadow_report(
+    deterministic: &StripFeederSourceComponentDraft,
+    prediction: SourceComponentModelPrediction,
+    crop: &GrayFrame,
+    artifact_stem: &str,
+) -> SourceComponentShadowReport {
+    let learned_occupied = prediction.class.occupied();
+    let occupancy_agreement = match deterministic.occupancy {
+        StripPocketOccupancy::Occupied => learned_occupied,
+        StripPocketOccupancy::Empty => !learned_occupied,
+        StripPocketOccupancy::Uncertain => false,
+    };
+    let center_delta_px = deterministic
+        .center_px
+        .filter(|_| learned_occupied)
+        .map(|center| {
+            (center[0] - prediction.pose.center_px[0])
+                .hypot(center[1] - prediction.pose.center_px[1])
+        });
+    let maximum_center_delta_px =
+        f64::from(crop.width.min(crop.height)) * MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION;
+    let center_agreement = match (deterministic.occupancy, learned_occupied) {
+        (StripPocketOccupancy::Occupied, true) => {
+            center_delta_px.is_some_and(|delta| delta <= maximum_center_delta_px)
+        }
+        (StripPocketOccupancy::Empty, false) => true,
+        _ => false,
+    };
+    let on_edge = prediction.class == SourceComponentClass::ComponentOnEdge;
+    let review_required = deterministic.review_required
+        || !prediction.confidence_gate_passed
+        || !occupancy_agreement
+        || !center_agreement
+        || on_edge;
+    let mut findings = prediction.findings.clone();
+    findings.push("the learned result is shadow evidence and cannot control motion".into());
+    if deterministic.review_required {
+        findings.push("the deterministic detector requires review".into());
+    }
+    if deterministic.occupancy == StripPocketOccupancy::Uncertain {
+        findings.push("the deterministic occupancy is uncertain".into());
+    } else if !occupancy_agreement {
+        findings.push("learned and deterministic occupancy disagree".into());
+    }
+    if !center_agreement {
+        findings.push(format!(
+            "learned and deterministic centers differ by more than {maximum_center_delta_px:.1} pixels"
+        ));
+    }
+    if on_edge {
+        findings.push("the learned model marks the component as on edge".into());
+    }
+    SourceComponentShadowReport {
+        algorithm_version: SOURCE_COMPONENT_SHADOW_ALGORITHM.into(),
+        deterministic_algorithm_version: deterministic.algorithm_version.clone(),
+        deterministic_occupancy: deterministic.occupancy,
+        deterministic_confidence: deterministic.occupancy_confidence,
+        deterministic_center_px: deterministic.center_px,
+        deterministic_outline_px: deterministic.outline_px,
+        prediction,
+        occupancy_agreement,
+        center_delta_px,
+        review_required,
+        control_authorized: false,
+        report_artifact_name: format!("{artifact_stem}-source-component-shadow.json"),
+        preview_artifact_name: format!("{artifact_stem}-source-component-shadow.png"),
+        crop_artifact_name: format!("{artifact_stem}-source-component-crop.png"),
+        findings,
+    }
+}
+
+fn analyze_source_component_shadow(
+    model: &SourceComponentModel,
+    frame: &GrayFrame,
+    camera_pose: Pose,
+    pocket_machine_mm: [f64; 2],
+    camera_model: &PlanarCameraModel,
+    registration: &StripFeederRegistration,
+    artifact_stem: &str,
+) -> Result<SourceComponentShadowArtifacts, String> {
+    let deterministic = draft_strip_feeder_source_component(
+        frame,
+        camera_pose,
+        pocket_machine_mm,
+        camera_model,
+        registration,
+    )
+    .map_err(|error| error.to_string())?;
+    let prediction = model
+        .predict_gray(
+            deterministic.crop.width,
+            deterministic.crop.height,
+            &deterministic.crop.pixels,
+        )
+        .map_err(|error| error.to_string())?;
+    let report = build_source_component_shadow_report(
+        &deterministic.report,
+        prediction,
+        &deterministic.crop,
+        artifact_stem,
+    );
+    let preview = render_source_component_shadow_preview(
+        &deterministic.crop,
+        deterministic.report.outline_px,
+        &report.prediction,
+    );
+    Ok(SourceComponentShadowArtifacts {
+        report,
+        crop: deterministic.crop,
+        preview,
+    })
+}
+
+fn persist_source_component_shadow_artifacts(
+    state: &AppState,
+    capture_id: Uuid,
+    artifacts: &SourceComponentShadowArtifacts,
+) -> Result<(), String> {
+    let report = serde_json::to_vec_pretty(&artifacts.report).map_err(|error| error.to_string())?;
+    let crop = encode_gray_png(&artifacts.crop).map_err(|error| error.to_string())?;
+    let preview = encode_rgb_png(&artifacts.preview).map_err(|error| error.to_string())?;
+    for (name, media_type, data) in [
+        (
+            artifacts.report.report_artifact_name.as_str(),
+            "application/json",
+            report.as_slice(),
+        ),
+        (
+            artifacts.report.crop_artifact_name.as_str(),
+            "image/png",
+            crop.as_slice(),
+        ),
+        (
+            artifacts.report.preview_artifact_name.as_str(),
+            "image/png",
+            preview.as_slice(),
+        ),
+    ] {
+        state
+            .store
+            .put_strip_feeder_source_capture_artifact(capture_id, name, media_type, data)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn analyze_and_persist_source_component_shadow(
+    state: &AppState,
+    capture_id: Uuid,
+    frame: GrayFrame,
+    camera_pose: Pose,
+    pocket_machine_mm: [f64; 2],
+    registration: StripFeederRegistration,
+    artifact_name: &str,
+) -> Option<SourceComponentShadowReport> {
+    let model = state.source_component_model.clone()?;
+    let camera_model = match load_workspace_camera_model(state, registration.calibration_id) {
+        Ok((_, model)) => model,
+        Err(error) => {
+            tracing::warn!(%error.message, capture_id = %capture_id, "source-component shadow camera model is unavailable");
+            return None;
+        }
+    };
+    let artifact_stem = artifact_name
+        .strip_suffix(".png")
+        .unwrap_or(artifact_name)
+        .to_string();
+    let analysis = match tokio::task::spawn_blocking(move || {
+        analyze_source_component_shadow(
+            &model,
+            &frame,
+            camera_pose,
+            pocket_machine_mm,
+            &camera_model,
+            &registration,
+            &artifact_stem,
+        )
+    })
+    .await
+    {
+        Ok(Ok(analysis)) => analysis,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, capture_id = %capture_id, "source-component shadow inference failed");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(%error, capture_id = %capture_id, "source-component shadow task failed");
+            return None;
+        }
+    };
+    if let Err(error) = persist_source_component_shadow_artifacts(state, capture_id, &analysis) {
+        tracing::warn!(%error, capture_id = %capture_id, "source-component shadow persistence failed");
+        return None;
+    }
+    Some(analysis.report)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_strip_feeder_source_capture_task(
     state: AppState,
@@ -6512,6 +6760,36 @@ async fn capture_inventory_source_targets(
             .store
             .put_strip_feeder_source_capture_artifact(run.id, &artifact_name, "image/png", &encoded)
             .map_err(|error| error.to_string())?;
+        let source_component_shadow = if state.source_component_model.is_some() {
+            match state
+                .store
+                .get_strip_feeder_registration(target.registration_id)
+                .map_err(|error| error.to_string())?
+            {
+                Some(registration) => {
+                    analyze_and_persist_source_component_shadow(
+                        state,
+                        run.id,
+                        frame.clone(),
+                        camera_pose,
+                        target.observation.center_machine_mm,
+                        registration,
+                        &artifact_name,
+                    )
+                    .await
+                }
+                None => {
+                    tracing::warn!(
+                        registration_id = %target.registration_id,
+                        capture_id = %run.id,
+                        "source-component shadow registration is unavailable"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         run.samples.push(StripFeederSourceCaptureSample {
             inventory_index: target.inventory_index,
             registration_id: target.registration_id,
@@ -6524,6 +6802,7 @@ async fn capture_inventory_source_targets(
             pocket_machine_mm: target.observation.center_machine_mm,
             camera_pose,
             artifact_name,
+            source_component_shadow,
         });
         run.updated_at = Utc::now();
         state
@@ -6544,6 +6823,85 @@ async fn get_strip_feeder_source_capture(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("strip feeder source capture not found"))
+}
+
+async fn reanalyze_strip_feeder_source_capture_model(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<StripFeederSourceCaptureRun>> {
+    let model = state.source_component_model.clone().ok_or_else(|| {
+        ApiError::bad_request(
+            state
+                .source_component_model_status
+                .reason
+                .as_deref()
+                .unwrap_or("source-component model is unavailable"),
+        )
+    })?;
+    let mut run = state
+        .store
+        .get_strip_feeder_source_capture(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder source capture not found"))?;
+    if matches!(
+        run.status,
+        OperationStatus::Pending | OperationStatus::Running
+    ) {
+        return Err(ApiError::bad_request(
+            "source capture evidence is not complete",
+        ));
+    }
+    let (_, camera_model) = load_workspace_camera_model(&state, run.calibration_id)?;
+    for sample in &mut run.samples {
+        let registration = state
+            .store
+            .get_strip_feeder_registration(sample.registration_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::bad_request("source capture registration is missing"))?;
+        let (media_type, data) = state
+            .store
+            .get_strip_feeder_source_capture_artifact(id, &sample.artifact_name)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("source capture image is missing"))?;
+        if media_type != "image/png" {
+            return Err(ApiError::bad_request(
+                "source capture artifact is not a PNG",
+            ));
+        }
+        let frame = decode_gray_png(&data).map_err(ApiError::internal)?;
+        let artifact_stem = sample
+            .artifact_name
+            .strip_suffix(".png")
+            .unwrap_or(&sample.artifact_name)
+            .to_string();
+        let sample_camera_model = camera_model.clone();
+        let sample_model = model.clone();
+        let camera_pose = sample.camera_pose;
+        let pocket_machine_mm = sample.pocket_machine_mm;
+        let artifacts = tokio::task::spawn_blocking(move || {
+            analyze_source_component_shadow(
+                &sample_model,
+                &frame,
+                camera_pose,
+                pocket_machine_mm,
+                &sample_camera_model,
+                &registration,
+                &artifact_stem,
+            )
+        })
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+        persist_source_component_shadow_artifacts(&state, id, &artifacts)
+            .map_err(ApiError::internal)?;
+        sample.source_component_shadow = Some(artifacts.report);
+    }
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_strip_feeder_source_capture(&run)
+        .map_err(ApiError::internal)?;
+    Ok(Json(run))
 }
 
 async fn get_strip_feeder_source_capture_artifact(
@@ -28794,6 +29152,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["models"]["source_component_pose"]["state"], "disabled");
+    }
+
+    #[tokio::test]
+    async fn source_component_reanalysis_requires_a_ready_model() {
+        let response = router(test_state())
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/strip-feeder-source-captures/{}/reanalyze-model",
+                    Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn source_component_shadow_requires_review_for_detector_disagreement() {
+        let deterministic = StripFeederSourceComponentDraft {
+            algorithm_version: "deterministic.fixture".into(),
+            occupancy: StripPocketOccupancy::Occupied,
+            occupancy_confidence: 0.9,
+            expected_size_mm: Some([1.6, 0.8]),
+            measured_size_mm: Some([1.6, 0.8]),
+            center_px: Some([50.0, 50.0]),
+            outline_px: Some([[40.0, 45.0], [60.0, 45.0], [60.0, 55.0], [40.0, 55.0]]),
+            rotation_deg: Some(0.0),
+            review_required: false,
+            findings: Vec::new(),
+        };
+        let prediction = SourceComponentModelPrediction {
+            contract_version: "velocitypnp.source-component-pose.v1".into(),
+            model_artifact_sha256: "0".repeat(64),
+            runtime: "fixture".into(),
+            class: SourceComponentClass::Empty,
+            probabilities: velocitypnp_domain::SourceComponentClassProbabilities {
+                empty: 0.9,
+                component_flat: 0.05,
+                component_on_edge: 0.05,
+            },
+            class_confidence: 0.9,
+            class_margin: 0.85,
+            confidence_gate_passed: true,
+            pose: velocitypnp_domain::SourceComponentPosePrediction {
+                center_px: [50.0, 50.0],
+                size_px: [20.0, 10.0],
+                rotation_deg_mod_180: 0.0,
+                outline_px: [[40.0, 45.0], [60.0, 45.0], [60.0, 55.0], [40.0, 55.0]],
+                valid: true,
+            },
+            findings: Vec::new(),
+        };
+        let crop = GrayFrame {
+            width: 100,
+            height: 100,
+            pixels: vec![127; 10_000],
+        };
+
+        let report = build_source_component_shadow_report(
+            &deterministic,
+            prediction.clone(),
+            &crop,
+            "sample",
+        );
+
+        assert!(!report.occupancy_agreement);
+        assert!(report.review_required);
+        assert!(!report.control_authorized);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.contains("disagree")));
+
+        let mut missing_center = deterministic;
+        missing_center.center_px = None;
+        missing_center.outline_px = None;
+        let mut occupied_prediction = prediction;
+        occupied_prediction.class = SourceComponentClass::ComponentFlat;
+        let report = build_source_component_shadow_report(
+            &missing_center,
+            occupied_prediction,
+            &crop,
+            "sample",
+        );
+        assert!(report.occupancy_agreement);
+        assert!(report.center_delta_px.is_none());
+        assert!(report.review_required);
     }
 
     #[tokio::test]

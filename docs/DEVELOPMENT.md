@@ -672,6 +672,58 @@ annotated image per sample and an evaluation contact sheet. Versioned baseline
 summaries are in `docs/baselines/`. Model weights and full training output stay
 with the ignored dataset and are not source artifacts.
 
+### Source-component model runtime
+
+The daemon can load one source-component model package in shadow mode:
+
+```bash
+cargo run -p velocitypnpd -- \
+  --source-component-model-dir \
+  datasets/source-components-v2/training/source-component-pose-v1
+```
+
+`VELOCITYPNP_SOURCE_COMPONENT_MODEL_DIR` sets the same option. The package must
+contain `model-manifest.json` and its declared ONNX file. Startup checks the v1
+input and output contract, class order, ONNX opset, Apache-2.0 artifact terms,
+file size, and SHA-256 digest. An invalid or absent package disables learned
+inference. It does not prevent the daemon from starting. `/api/v1/health`
+reports `disabled`, `invalid`, or `ready` and includes the loaded artifact
+digest when ready.
+
+The Rust runtime uses the pinned Apache-2.0/MIT `tract-onnx` 0.22 release. It
+runs on CPU and does not require Python, PyTorch, ONNX Runtime, or a GPU on the
+machine controller.
+
+Replay the Rust preprocessing and runtime against the accepted evaluation
+split:
+
+```bash
+cargo run --release -p velocitypnp-model \
+  --example evaluate_source_component -- \
+  datasets/source-components-v2/training/source-component-pose-v1 \
+  datasets/source-components-v2
+```
+
+The command fails if a runtime prediction changes an accepted evaluation
+class. It also reports the mean decoded center error in source-image pixels.
+
+New inventory source-capture samples run both the deterministic detector and
+the learned model. Each sample keeps the decoded prediction, model digest,
+detector agreement, center difference, and review decision. It also retains a
+rectified crop, JSON report, and PNG comparison. Green marks show the
+deterministic outline. Cyan marks show the learned outline. Existing retained
+captures can be processed without motion:
+
+```text
+POST /api/v1/strip-feeder-source-captures/CAPTURE_UUID/reanalyze-model
+```
+
+The Python client method is
+`reanalyze_strip_feeder_source_capture_model()`. The initial probability,
+margin, and detector-agreement limits are diagnostic gates. They are not
+production-qualified. Every report sets `control_authorized` to false. Model
+output cannot select a pocket, approve a pick, or command motion.
+
 For a later capture session, carry reviewed labels into a new dataset without
 showing them again:
 

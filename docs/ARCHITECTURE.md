@@ -147,6 +147,13 @@ Streaming surveys also require two consistent neighboring registrations before
 they apply a correction. This prevents an isolated match on a repetitive plate
 grid from moving one tile away from its calibrated pose.
 
+The model crate owns learned-model package validation and CPU ONNX inference.
+The daemon accepts only the declared source-component v1 contract, class order,
+Apache-2.0 artifact terms, file size, and SHA-256 digest. Learned pocket results
+run beside the deterministic detector and are stored as review evidence. The
+model path does not cross the motion-authority boundary until separate dataset,
+confidence, and hardware gates are complete.
+
 Strip-feeder registrations retain per-pocket occupancy and operational state.
 The store reserves one occupied pocket in a SQLite transaction. Pickup evidence
 settles that reservation as returned, consumed, retryable, or in need of

@@ -24,6 +24,7 @@ uuid.workspace = true
 velocitypnp-domain = { path = "../../crates/domain" }
 velocitypnp-driver = { path = "../../crates/driver" }
 velocitypnp-kicad = { path = "../../crates/kicad" }
+velocitypnp-model = { path = "../../crates/model" }
 velocitypnp-openpnp = { path = "../../crates/openpnp" }
 velocitypnp-planner = { path = "../../crates/planner" }
 velocitypnp-store = { path = "../../crates/store" }

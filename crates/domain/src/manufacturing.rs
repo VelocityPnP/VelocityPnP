@@ -531,6 +531,80 @@ pub struct StripFeederLiveHoldoutRun {
     pub message: Option<String>,
 }
 
+/// Class order exported by the source-component pose model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceComponentClass {
+    Empty,
+    ComponentFlat,
+    ComponentOnEdge,
+}
+
+impl SourceComponentClass {
+    pub fn occupied(self) -> bool {
+        !matches!(self, Self::Empty)
+    }
+}
+
+/// Normalized class probabilities for one source-pocket crop.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SourceComponentClassProbabilities {
+    pub empty: f64,
+    pub component_flat: f64,
+    pub component_on_edge: f64,
+}
+
+/// Pose decoded from the fixed model input back into source-crop pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceComponentPosePrediction {
+    pub center_px: [f64; 2],
+    pub size_px: [f64; 2],
+    pub rotation_deg_mod_180: f64,
+    pub outline_px: [[f64; 2]; 4],
+    pub valid: bool,
+}
+
+/// One versioned learned prediction. It is not an instruction to move.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceComponentModelPrediction {
+    pub contract_version: String,
+    pub model_artifact_sha256: String,
+    pub runtime: String,
+    pub class: SourceComponentClass,
+    pub probabilities: SourceComponentClassProbabilities,
+    pub class_confidence: f64,
+    pub class_margin: f64,
+    pub confidence_gate_passed: bool,
+    pub pose: SourceComponentPosePrediction,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Comparison between the learned result and the active deterministic result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceComponentShadowReport {
+    pub algorithm_version: String,
+    pub deterministic_algorithm_version: String,
+    pub deterministic_occupancy: StripPocketOccupancy,
+    pub deterministic_confidence: f64,
+    #[serde(default)]
+    pub deterministic_center_px: Option<[f64; 2]>,
+    #[serde(default)]
+    pub deterministic_outline_px: Option<[[f64; 2]; 4]>,
+    pub prediction: SourceComponentModelPrediction,
+    pub occupancy_agreement: bool,
+    #[serde(default)]
+    pub center_delta_px: Option<f64>,
+    pub review_required: bool,
+    /// This stays false until a separate promotion gate is complete.
+    pub control_authorized: bool,
+    pub report_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub crop_artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// One centered top-camera source image selected from a persisted feeder
 /// inventory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -546,6 +620,8 @@ pub struct StripFeederSourceCaptureSample {
     pub pocket_machine_mm: [f64; 2],
     pub camera_pose: Pose,
     pub artifact_name: String,
+    #[serde(default)]
+    pub source_component_shadow: Option<SourceComponentShadowReport>,
 }
 
 /// Persistent state for a safe-Z feeder source-image capture batch.

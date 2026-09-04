@@ -166,6 +166,10 @@ The project is organized by measurable gates rather than calendar estimates.
   deterministic detector on accepted evaluation labels
 - [x] Select a license-compatible runtime model and export the oriented
   source-component detector for daemon integration
+- [x] Load hash-checked source-component model packages in the Rust daemon and
+  persist shadow predictions, deterministic comparisons, and review artifacts
+- [ ] Calibrate learned-model confidence gates on independent machines and
+  component families before model output can affect feeder or motion decisions
 - [x] Add package-template pose comparison after live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
