@@ -44,21 +44,23 @@ use velocitypnp_domain::{
     PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
     PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
-    Residuals, SensorReading, StripFeederInventoryReport, StripFeederInventorySummary,
-    StripFeederLiveHoldoutRun, StripFeederPickupDisposition, StripFeederPickupQualificationReport,
-    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketState,
+    Residuals, SensorReading, StripFeederInventoryLane, StripFeederInventoryReport,
+    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupDisposition,
+    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
+    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
     StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
-    VacuumSensorCharacterizationReport, VacuumStateStatistics, VisualHomingProfile,
-    VisualHomingValidationReport, VisualHomingValidationSample, WorkspaceArtifactRetention,
-    WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary,
-    WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary, WorkspaceChangeSetReport,
-    WorkspaceChangeSetSummary, WorkspaceHeightMapSummary, WorkspaceInventoryBaseline,
-    WorkspaceMosaicLayerReport, WorkspaceObjectClass, WorkspaceParallaxSummary,
-    WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
-    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
-    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
-    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
+    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
+    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
+    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
+    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
+    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
+    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
+    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
+    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
+    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
+    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
+    WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -251,6 +253,7 @@ impl AppState {
         state.recover_interrupted_board_registrations();
         state.recover_interrupted_board_surface_measurements();
         state.recover_interrupted_strip_feeder_holdouts();
+        state.recover_interrupted_strip_feeder_source_captures();
         state.recover_interrupted_strip_feeder_pickups();
         state.recover_interrupted_placement_executions();
         state.recover_interrupted_job_executions();
@@ -503,6 +506,46 @@ impl AppState {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(%error, "failed to inspect strip feeder holdout operation")
+                }
+            }
+        }
+    }
+
+    fn recover_interrupted_strip_feeder_source_captures(&self) {
+        let Ok(runs) = self.store.list_strip_feeder_source_captures() else {
+            tracing::error!("failed to inspect feeder source captures during startup");
+            return;
+        };
+        for mut run in runs.into_iter().filter(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        }) {
+            let message = "daemon restarted before the feeder source capture completed";
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.into());
+            run.updated_at = Utc::now();
+            if let Err(error) = self.store.put_strip_feeder_source_capture(&run) {
+                tracing::error!(%error, capture_id = %run.id, "failed to recover feeder source capture");
+            }
+            match self.store.get_operation(run.operation_id) {
+                Ok(Some(mut operation))
+                    if matches!(
+                        operation.status,
+                        OperationStatus::Pending | OperationStatus::Running
+                    ) =>
+                {
+                    operation.status = OperationStatus::Failed;
+                    operation.message = Some(message.into());
+                    operation.updated_at = Utc::now();
+                    if let Err(error) = self.store.put_operation(&operation) {
+                        tracing::error!(%error, operation_id = %operation.id, "failed to recover feeder source capture operation");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, "failed to inspect feeder source capture operation")
                 }
             }
         }
@@ -774,6 +817,14 @@ pub fn router(state: AppState) -> Router {
             post(build_strip_feeder_inventory_report),
         )
         .route(
+            "/api/v1/workspace-scans/{id}/strip-feeder-inventory/registrations",
+            post(promote_strip_feeder_inventory),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/strip-feeder-inventory/source-captures",
+            post(start_strip_feeder_source_capture),
+        )
+        .route(
             "/api/v1/workspace-scans/{id}/inventory-baseline",
             post(activate_workspace_inventory_baseline),
         )
@@ -927,6 +978,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/strip-feeder-live-holdouts/{id}/artifacts/{name}",
             get(get_strip_feeder_live_holdout_artifact),
+        )
+        .route(
+            "/api/v1/strip-feeder-source-captures/{id}",
+            get(get_strip_feeder_source_capture),
+        )
+        .route(
+            "/api/v1/strip-feeder-source-captures/{id}/artifacts/{name}",
+            get(get_strip_feeder_source_capture_artifact),
         )
         .route(
             "/api/v1/strip-feeder-pickup-qualifications/{id}",
@@ -5687,6 +5746,823 @@ async fn build_strip_feeder_inventory_report(
     Ok(Json(inventory.report))
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct InventoryRegistrationBinding {
+    inventory_index: u32,
+    created: bool,
+    registration: StripFeederRegistration,
+}
+
+async fn promote_strip_feeder_inventory(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let (scan, inventory) = load_strip_feeder_inventory(&state, scan_id)?;
+    let bindings = promote_inventory_registrations(&state, &scan, &inventory)?;
+    let created_count = bindings.iter().filter(|binding| binding.created).count();
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "workspace_scan_id": scan_id,
+            "created_count": created_count,
+            "registrations": bindings,
+        })),
+    ))
+}
+
+fn load_strip_feeder_inventory(
+    state: &AppState,
+    scan_id: Uuid,
+) -> ApiResult<(WorkspaceScanReport, StripFeederInventoryReport)> {
+    let scan = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "strip feeder inventory requires a successful workspace scan",
+        ));
+    }
+    let summary = scan.strip_feeder_inventory.as_ref().ok_or_else(|| {
+        ApiError::bad_request("workspace scan has no persisted strip feeder inventory")
+    })?;
+    if summary.algorithm_version != STRIP_FEEDER_INVENTORY_ALGORITHM {
+        return Err(ApiError::bad_request(format!(
+            "strip feeder inventory uses unsupported algorithm {}",
+            summary.algorithm_version,
+        )));
+    }
+    let (media_type, data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &summary.report_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder inventory report not found"))?;
+    if media_type != "application/json" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "strip feeder inventory report is not JSON"
+        )));
+    }
+    let inventory: StripFeederInventoryReport =
+        serde_json::from_slice(&data).map_err(ApiError::internal)?;
+    if inventory.algorithm_version != STRIP_FEEDER_INVENTORY_ALGORITHM
+        || inventory.workspace_scan_id != scan.id
+    {
+        return Err(ApiError::bad_request(
+            "strip feeder inventory report is stale or incompatible",
+        ));
+    }
+    Ok((scan, inventory))
+}
+
+fn promote_inventory_registrations(
+    state: &AppState,
+    scan: &WorkspaceScanReport,
+    inventory: &StripFeederInventoryReport,
+) -> ApiResult<Vec<InventoryRegistrationBinding>> {
+    let mut existing = state
+        .store
+        .list_strip_feeder_registrations()
+        .map_err(ApiError::internal)?;
+    let mut bindings = Vec::with_capacity(inventory.lanes.len());
+    for lane in &inventory.lanes {
+        let matched = existing
+            .iter()
+            .filter(|registration| {
+                registration.profile_id == scan.profile_id
+                    && registration.calibration_id == scan.calibration_id
+            })
+            .filter_map(|registration| {
+                inventory_registration_distance_mm(lane, registration)
+                    .map(|distance| (registration, distance))
+            })
+            .min_by(|(first, first_distance), (second, second_distance)| {
+                inventory_registration_rank(first, *first_distance)
+                    .total_cmp(&inventory_registration_rank(second, *second_distance))
+            })
+            .map(|(registration, _)| registration.clone());
+        let (registration, created) = if let Some(registration) = matched {
+            (registration, false)
+        } else {
+            let registration = registration_from_inventory_lane(scan, lane)?;
+            state
+                .store
+                .put_strip_feeder_registration(&registration)
+                .map_err(ApiError::internal)?;
+            existing.push(registration.clone());
+            (registration, true)
+        };
+        bindings.push(InventoryRegistrationBinding {
+            inventory_index: lane.inventory_index,
+            created,
+            registration,
+        });
+    }
+    Ok(bindings)
+}
+
+fn inventory_registration_rank(registration: &StripFeederRegistration, distance_mm: f64) -> f64 {
+    let unbound_penalty = if registration.active_feeder_id.is_some() {
+        0.0
+    } else {
+        10.0
+    };
+    let unidentified_penalty = if registration.part_key.is_some() {
+        0.0
+    } else {
+        1.0
+    };
+    unbound_penalty + unidentified_penalty + distance_mm
+}
+
+fn inventory_registration_distance_mm(
+    lane: &StripFeederInventoryLane,
+    registration: &StripFeederRegistration,
+) -> Option<f64> {
+    let width_mm = lane.proposal.tape_width_mm?;
+    let pitch_mm = lane.proposal.component_pitch_mm?;
+    let centerline = lane.proposal.pick_centerline_machine_mm?;
+    if (width_mm - registration.tape_width_mm).abs() > 0.25
+        || (pitch_mm - registration.tape_pitch_mm).abs() > 0.25
+        || angle_difference_deg(
+            lane.proposal.tape_rotation_deg,
+            registration.tape_rotation_deg,
+        )
+        .abs()
+            > 2.0
+    {
+        return None;
+    }
+    let direction = [
+        registration.pick_centerline_machine_mm[1][0]
+            - registration.pick_centerline_machine_mm[0][0],
+        registration.pick_centerline_machine_mm[1][1]
+            - registration.pick_centerline_machine_mm[0][1],
+    ];
+    let length = direction[0].hypot(direction[1]);
+    if length <= 1e-9 || !length.is_finite() {
+        return None;
+    }
+    let midpoint = [
+        0.5 * (centerline[0][0] + centerline[1][0]),
+        0.5 * (centerline[0][1] + centerline[1][1]),
+    ];
+    let delta = [
+        midpoint[0] - registration.pick_centerline_machine_mm[0][0],
+        midpoint[1] - registration.pick_centerline_machine_mm[0][1],
+    ];
+    let distance_mm = (delta[0] * direction[1] - delta[1] * direction[0]).abs() / length;
+    (distance_mm <= 1.5).then_some(distance_mm)
+}
+
+fn registration_from_inventory_lane(
+    scan: &WorkspaceScanReport,
+    lane: &StripFeederInventoryLane,
+) -> ApiResult<StripFeederRegistration> {
+    let proposal = &lane.proposal;
+    let tape_width_mm = proposal.tape_width_mm.ok_or_else(|| {
+        ApiError::bad_request("inventory lane tape width requires operator review")
+    })?;
+    let tape_pitch_mm = proposal.component_pitch_mm.ok_or_else(|| {
+        ApiError::bad_request("inventory lane component pitch requires operator review")
+    })?;
+    let pick_centerline_machine_mm = proposal.pick_centerline_machine_mm.ok_or_else(|| {
+        ApiError::bad_request("inventory lane centerline requires operator review")
+    })?;
+    if proposal.pocket_centers_machine_mm.is_empty() {
+        return Err(ApiError::bad_request(
+            "inventory lane has no pocket-center hypotheses",
+        ));
+    }
+    let now = Utc::now();
+    let pockets = proposal
+        .pocket_centers_machine_mm
+        .iter()
+        .enumerate()
+        .filter_map(|(index, center)| {
+            let pocket_index = u32::try_from(index).ok()?;
+            let observation = proposal
+                .pocket_observations
+                .iter()
+                .find(|observation| observation.pocket_index == pocket_index);
+            let occupancy = observation
+                .map(|observation| observation.occupancy)
+                .unwrap_or(StripPocketOccupancy::Uncertain);
+            Some(StripFeederPocketState {
+                pocket_index,
+                nominal_center_machine_mm: *center,
+                measured_center_machine_mm: observation.map(|item| item.center_machine_mm),
+                occupancy,
+                occupancy_confidence: observation.map_or(0.0, |item| item.confidence),
+                status: match occupancy {
+                    StripPocketOccupancy::Occupied => StripFeederPocketStatus::Available,
+                    StripPocketOccupancy::Empty => StripFeederPocketStatus::Empty,
+                    StripPocketOccupancy::Uncertain => StripFeederPocketStatus::NeedsReview,
+                },
+                attempt_count: 0,
+                consecutive_failure_count: 0,
+                reservation_id: None,
+                last_qualification_id: None,
+                last_outcome: None,
+                updated_at: now,
+            })
+        })
+        .collect();
+    Ok(StripFeederRegistration {
+        id: Uuid::new_v4(),
+        profile_id: scan.profile_id.clone(),
+        calibration_id: scan.calibration_id,
+        source_scan_id: lane.source_scan_id,
+        source_candidate_index: lane.source_candidate_index,
+        source_proposal_index: lane.source_proposal_index,
+        created_at: now,
+        updated_at: now,
+        status: StripFeederRegistrationStatus::VisionDraft,
+        name: format!("Inventory feeder {}", lane.inventory_index + 1),
+        part_key: None,
+        part_rotation_deg: None,
+        tape_width_mm,
+        tape_pitch_mm,
+        tape_rotation_deg: proposal.tape_rotation_deg,
+        pick_centerline_machine_mm,
+        pocket_centers_machine_mm: proposal.pocket_centers_machine_mm.clone(),
+        pockets,
+        selected_pocket_machine_mm: None,
+        selected_pocket_index: None,
+        pickup_z_mm: None,
+        surveyed_part_size_mm: proposal.component_size_mm,
+        measured_part_size_mm: None,
+        measured_part_rotation_deg: None,
+        measured_part_confidence: None,
+        active_feeder_id: None,
+        latest_live_holdout_id: None,
+        latest_pickup_qualification_id: None,
+        pickup_sequence_passed: false,
+        latest_pickup_sequence_qualification_ids: Vec::new(),
+        latest_placement_validation_id: None,
+        vision_confidence: proposal.confidence,
+        vision_review_required: proposal.review_required,
+        findings: vec![
+            format!(
+                "promoted from workspace feeder inventory {} lane {}",
+                scan.id,
+                lane.inventory_index + 1,
+            ),
+            "part identity and orientation are not assigned".into(),
+            "live pocket occupancy and pickup Z are not measured".into(),
+        ],
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct StartStripFeederSourceCaptureRequest {
+    lease_id: Uuid,
+    #[serde(default = "default_inventory_capture_occupied_count")]
+    occupied_count: u32,
+    #[serde(default = "default_inventory_capture_empty_count")]
+    empty_count: u32,
+    #[serde(default)]
+    lane_indices: Vec<u32>,
+    #[serde(default)]
+    confirmed_external_safety_checks: bool,
+}
+
+fn default_inventory_capture_occupied_count() -> u32 {
+    12
+}
+
+fn default_inventory_capture_empty_count() -> u32 {
+    12
+}
+
+#[derive(Debug, Serialize)]
+struct StartStripFeederSourceCaptureResponse {
+    capture: StripFeederSourceCaptureRun,
+    operation: Operation,
+}
+
+#[derive(Debug, Clone)]
+struct InventorySourceCaptureTarget {
+    inventory_index: u32,
+    registration_id: Uuid,
+    source_scan_id: Uuid,
+    source_candidate_index: u32,
+    source_proposal_index: u32,
+    observation: StripFeederPocketObservation,
+}
+
+async fn start_strip_feeder_source_capture(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+    Json(body): Json<StartStripFeederSourceCaptureRequest>,
+) -> ApiResult<(StatusCode, Json<StartStripFeederSourceCaptureResponse>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "feeder source capture requires confirmation that the tape is fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    let total_count = body.occupied_count.saturating_add(body.empty_count);
+    if total_count == 0 || total_count > 48 {
+        return Err(ApiError::bad_request(
+            "feeder source capture requires between 1 and 48 images",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed || status.pose.is_none() {
+        return Err(ApiError::bad_request(
+            "feeder source capture requires a homed ready machine",
+        ));
+    }
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_source_captures(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    let (scan, inventory) = load_strip_feeder_inventory(&state, scan_id)?;
+    if scan.profile_id != state.profile.id {
+        return Err(ApiError::bad_request(
+            "feeder source inventory uses a different machine profile",
+        ));
+    }
+    if !status.simulated && status.calibration_revision != Some(scan.calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "feeder source capture requires fine XYZ homing with calibration {}",
+            scan.calibration_id,
+        )));
+    }
+    let bindings = promote_inventory_registrations(&state, &scan, &inventory)?;
+    let selected_lanes = body.lane_indices.iter().copied().collect::<BTreeSet<_>>();
+    if selected_lanes.len() != body.lane_indices.len() {
+        return Err(ApiError::bad_request(
+            "feeder source capture lane indices must be unique",
+        ));
+    }
+    if let Some(index) = selected_lanes.iter().find(|index| {
+        !inventory
+            .lanes
+            .iter()
+            .any(|lane| lane.inventory_index == **index)
+    }) {
+        return Err(ApiError::bad_request(format!(
+            "feeder source capture lane index {index} is absent",
+        )));
+    }
+    let targets = select_inventory_source_capture_targets(
+        &inventory,
+        &bindings,
+        &selected_lanes,
+        body.occupied_count,
+        body.empty_count,
+    )?;
+    if targets.iter().any(|target| {
+        !state.profile.bounds.contains(Pose {
+            x_mm: target.observation.center_machine_mm[0],
+            y_mm: target.observation.center_machine_mm[1],
+            z_mm: state.profile.safe_z_mm,
+            rotation_deg: 0.0,
+        })
+    }) {
+        return Err(ApiError::bad_request(
+            "feeder source capture target is outside machine bounds",
+        ));
+    }
+    let camera_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let visual = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let targets = order_inventory_source_capture_targets(
+        targets,
+        [visual.seed_pose.x_mm, visual.seed_pose.y_mm],
+    );
+    let operation = Operation::pending("vision.strip_feeder_source_capture");
+    let now = Utc::now();
+    let capture = StripFeederSourceCaptureRun {
+        id: Uuid::new_v4(),
+        operation_id: operation.id,
+        workspace_scan_id: scan.id,
+        profile_id: scan.profile_id,
+        calibration_id: scan.calibration_id,
+        status: OperationStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        requested_occupied_count: body.occupied_count,
+        requested_empty_count: body.empty_count,
+        lane_indices: if selected_lanes.is_empty() {
+            inventory
+                .lanes
+                .iter()
+                .map(|lane| lane.inventory_index)
+                .collect()
+        } else {
+            selected_lanes.iter().copied().collect()
+        },
+        samples: Vec::new(),
+        message: None,
+    };
+    state
+        .machine
+        .renew_lease(body.lease_id, 1_800)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .put_strip_feeder_source_capture(&capture)
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartStripFeederSourceCaptureResponse {
+        capture: capture.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    spawn_prepared_operation(
+        state,
+        operation,
+        execute_strip_feeder_source_capture_task(
+            task_state,
+            capture,
+            targets,
+            camera_profile,
+            camera_path,
+            visual,
+            body.lease_id,
+        ),
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+fn select_inventory_source_capture_targets(
+    inventory: &StripFeederInventoryReport,
+    bindings: &[InventoryRegistrationBinding],
+    selected_lanes: &BTreeSet<u32>,
+    occupied_count: u32,
+    empty_count: u32,
+) -> ApiResult<Vec<InventorySourceCaptureTarget>> {
+    let registration_ids = bindings
+        .iter()
+        .map(|binding| (binding.inventory_index, binding.registration.id))
+        .collect::<BTreeMap<_, _>>();
+    let mut targets = select_inventory_occupancy_targets(
+        inventory,
+        &registration_ids,
+        selected_lanes,
+        StripPocketOccupancy::Occupied,
+        occupied_count,
+    )?;
+    targets.extend(select_inventory_occupancy_targets(
+        inventory,
+        &registration_ids,
+        selected_lanes,
+        StripPocketOccupancy::Empty,
+        empty_count,
+    )?);
+    Ok(targets)
+}
+
+fn select_inventory_occupancy_targets(
+    inventory: &StripFeederInventoryReport,
+    registration_ids: &BTreeMap<u32, Uuid>,
+    selected_lanes: &BTreeSet<u32>,
+    occupancy: StripPocketOccupancy,
+    count: u32,
+) -> ApiResult<Vec<InventorySourceCaptureTarget>> {
+    let mut by_lane = BTreeMap::new();
+    for lane in &inventory.lanes {
+        if !selected_lanes.is_empty() && !selected_lanes.contains(&lane.inventory_index) {
+            continue;
+        }
+        let registration_id = registration_ids
+            .get(&lane.inventory_index)
+            .copied()
+            .ok_or_else(|| ApiError::internal("inventory lane has no registration binding"))?;
+        let mut observations = lane
+            .proposal
+            .pocket_observations
+            .iter()
+            .filter(|observation| observation.occupancy == occupancy)
+            .cloned()
+            .collect::<Vec<_>>();
+        observations.sort_by_key(|observation| observation.pocket_index);
+        let mut spread = Vec::with_capacity(observations.len());
+        let mut take_first = true;
+        while !observations.is_empty() {
+            let index = if take_first {
+                0
+            } else {
+                observations.len() - 1
+            };
+            spread.push(observations.remove(index));
+            take_first = !take_first;
+        }
+        if !spread.is_empty() {
+            by_lane.insert(lane.inventory_index, (lane, registration_id, spread));
+        }
+    }
+    let available = by_lane
+        .values()
+        .map(|(_, _, observations)| observations.len())
+        .sum::<usize>();
+    if available < count as usize {
+        return Err(ApiError::bad_request(format!(
+            "feeder inventory has only {available} {occupancy:?} pockets in the selected lanes",
+        )));
+    }
+    let mut selected = Vec::with_capacity(count as usize);
+    let mut round = 0;
+    while selected.len() < count as usize {
+        let mut progressed = false;
+        for (inventory_index, (lane, registration_id, observations)) in &by_lane {
+            let Some(observation) = observations.get(round).cloned() else {
+                continue;
+            };
+            selected.push(InventorySourceCaptureTarget {
+                inventory_index: *inventory_index,
+                registration_id: *registration_id,
+                source_scan_id: lane.source_scan_id,
+                source_candidate_index: lane.source_candidate_index,
+                source_proposal_index: lane.source_proposal_index,
+                observation,
+            });
+            progressed = true;
+            if selected.len() == count as usize {
+                break;
+            }
+        }
+        if !progressed {
+            break;
+        }
+        round += 1;
+    }
+    Ok(selected)
+}
+
+fn order_inventory_source_capture_targets(
+    mut targets: Vec<InventorySourceCaptureTarget>,
+    start_machine_mm: [f64; 2],
+) -> Vec<InventorySourceCaptureTarget> {
+    let mut ordered = Vec::with_capacity(targets.len());
+    let mut current = start_machine_mm;
+    while !targets.is_empty() {
+        let nearest = targets
+            .iter()
+            .enumerate()
+            .min_by(|(_, first), (_, second)| {
+                let distance = |target: &InventorySourceCaptureTarget| {
+                    (target.observation.center_machine_mm[0] - current[0])
+                        .hypot(target.observation.center_machine_mm[1] - current[1])
+                };
+                distance(first).total_cmp(&distance(second))
+            })
+            .map(|(index, _)| index)
+            .expect("a non-empty target list has a nearest item");
+        let target = targets.remove(nearest);
+        current = target.observation.center_machine_mm;
+        ordered.push(target);
+    }
+    ordered
+}
+
+fn ensure_no_active_strip_feeder_source_captures(state: &AppState) -> ApiResult<()> {
+    let active = state
+        .store
+        .list_strip_feeder_source_captures()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .any(|run| {
+            matches!(
+                run.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        });
+    if active {
+        return Err(ApiError::bad_request(
+            "a strip feeder source capture is already active",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_strip_feeder_source_capture_task(
+    state: AppState,
+    mut run: StripFeederSourceCaptureRun,
+    targets: Vec<InventorySourceCaptureTarget>,
+    camera_profile: CameraProfile,
+    camera_path: String,
+    visual: VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
+    run.status = OperationStatus::Running;
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_strip_feeder_source_capture(&run)
+        .map_err(|error| error.to_string())?;
+    let result = execute_strip_feeder_source_capture(
+        &state,
+        &mut run,
+        targets,
+        &camera_profile,
+        &camera_path,
+        &visual,
+        lease_id,
+    )
+    .await;
+    match result {
+        Ok(()) => {
+            let occupied = run
+                .samples
+                .iter()
+                .filter(|sample| sample.expected_occupancy == StripPocketOccupancy::Occupied)
+                .count();
+            let empty = run.samples.len() - occupied;
+            let message = format!(
+                "Captured {} centered feeder source images: {occupied} expected occupied and {empty} expected empty",
+                run.samples.len(),
+            );
+            run.status = OperationStatus::Succeeded;
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            state
+                .store
+                .put_strip_feeder_source_capture(&run)
+                .map_err(|error| error.to_string())?;
+            Ok(Some(message))
+        }
+        Err(message) => {
+            run.status = OperationStatus::Failed;
+            run.message = Some(message.clone());
+            run.updated_at = Utc::now();
+            if let Err(error) = state.store.put_strip_feeder_source_capture(&run) {
+                tracing::error!(%error, capture_id = %run.id, "failed to persist feeder source capture failure");
+            }
+            Err(message)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_strip_feeder_source_capture(
+    state: &AppState,
+    run: &mut StripFeederSourceCaptureRun,
+    targets: Vec<InventorySourceCaptureTarget>,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<(), String> {
+    let _motion_guard = state.workspace_scan_motion_lock.lock().await;
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "visual home before feeder source capture failed: {}",
+            error.message
+        )
+    })?;
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let capture_result = capture_inventory_source_targets(
+        state,
+        run,
+        targets,
+        camera_profile,
+        camera_path,
+        visual,
+        lease_id,
+    )
+    .await;
+    let return_result = state
+        .machine
+        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
+        .await;
+    let lights_result = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = return_result {
+        return Err(format!("feeder source capture return move failed: {error}"));
+    }
+    if let Err(error) = lights_result {
+        return Err(format!(
+            "feeder source capture light cleanup failed: {error}"
+        ));
+    }
+    capture_result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_inventory_source_targets(
+    state: &AppState,
+    run: &mut StripFeederSourceCaptureRun,
+    targets: Vec<InventorySourceCaptureTarget>,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    visual: &VisualHomingProfile,
+    lease_id: Uuid,
+) -> Result<(), String> {
+    for target in targets {
+        state
+            .machine
+            .renew_lease(lease_id, 1_800)
+            .await
+            .map_err(|error| error.to_string())?;
+        let requested_pose = Pose {
+            x_mm: target.observation.center_machine_mm[0],
+            y_mm: target.observation.center_machine_mm[1],
+            z_mm: state.profile.safe_z_mm,
+            rotation_deg: 0.0,
+        };
+        let camera_pose =
+            jog_board_registration_target(state, lease_id, requested_pose, visual).await?;
+        let frame = capture_profiled_frame(state, camera_profile, camera_path)
+            .await
+            .map_err(|error| error.message)?;
+        let artifact_name = format!(
+            "lane-{:03}-pocket-{:03}.png",
+            target.inventory_index, target.observation.pocket_index,
+        );
+        let encoded = encode_gray_png(&frame).map_err(|error| error.to_string())?;
+        state
+            .store
+            .put_strip_feeder_source_capture_artifact(run.id, &artifact_name, "image/png", &encoded)
+            .map_err(|error| error.to_string())?;
+        run.samples.push(StripFeederSourceCaptureSample {
+            inventory_index: target.inventory_index,
+            registration_id: target.registration_id,
+            source_scan_id: target.source_scan_id,
+            source_candidate_index: target.source_candidate_index,
+            source_proposal_index: target.source_proposal_index,
+            pocket_index: target.observation.pocket_index,
+            expected_occupancy: target.observation.occupancy,
+            expected_occupancy_confidence: target.observation.confidence,
+            pocket_machine_mm: target.observation.center_machine_mm,
+            camera_pose,
+            artifact_name,
+        });
+        run.updated_at = Utc::now();
+        state
+            .store
+            .put_strip_feeder_source_capture(run)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn get_strip_feeder_source_capture(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<StripFeederSourceCaptureRun>> {
+    state
+        .store
+        .get_strip_feeder_source_capture(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("strip feeder source capture not found"))
+}
+
+async fn get_strip_feeder_source_capture_artifact(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    let (media_type, data) = state
+        .store
+        .get_strip_feeder_source_capture_artifact(id, &name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder source capture artifact not found"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(data))
+        .map_err(ApiError::internal)
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateStripFeederRegistrationRequest {
     scan_id: Uuid,
@@ -6399,15 +7275,30 @@ async fn measure_strip_feeder_live_holdout(
     let registration = registration.clone();
     let camera_model = camera_model.clone();
     let predicted = run.predicted_pocket_machine_mm;
-    let analysis = tokio::task::spawn_blocking(move || {
-        analyze_live_strip_feeder_holdout(
+    let retained_step = run.sample_count.max(1) as usize;
+    let (analysis, retained_frames) = tokio::task::spawn_blocking(move || {
+        let analysis = analyze_live_strip_feeder_holdout(
             &frames,
             &camera_poses,
             &camera_model,
             &registration,
             predicted,
             "live-pocket-holdout.png",
-        )
+        )?;
+        let retained_frames = frames
+            .iter()
+            .zip(&camera_poses)
+            .step_by(retained_step)
+            .enumerate()
+            .map(|(index, (frame, pose))| {
+                Ok((
+                    format!("source-pocket-frame-{index:03}.png"),
+                    *pose,
+                    encode_gray_png(frame)?,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok::<_, anyhow::Error>((analysis, retained_frames))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -6422,7 +7313,16 @@ async fn measure_strip_feeder_live_holdout(
             &encoded,
         )
         .map_err(|error| error.to_string())?;
-    Ok(analysis.report)
+    let mut report = analysis.report;
+    for (name, pose, encoded) in retained_frames {
+        state
+            .store
+            .put_strip_feeder_holdout_artifact(run.id, &name, "image/png", &encoded)
+            .map_err(|error| error.to_string())?;
+        report.source_frame_artifact_names.push(name);
+        report.source_frame_camera_poses.push(pose);
+    }
+    Ok(report)
 }
 
 async fn get_strip_feeder_live_holdout(
@@ -9074,6 +9974,28 @@ fn vacuum_value_is_acquired(
             value >= characterization.acquire_threshold_raw_value
         }
     }
+}
+
+fn marginal_transfer_vacuum_is_separated(
+    open: &VacuumStateStatistics,
+    expected_polarity: VacuumSignalPolarity,
+    minimum_signal_delta_counts: i64,
+    minimum_distribution_gap_counts: i64,
+    held_raw_values: &[i64],
+) -> bool {
+    let Some(held) = VacuumStateStatistics::from_raw(held_raw_values.to_vec()) else {
+        return false;
+    };
+    let minimum_fused_delta_counts = ((minimum_signal_delta_counts + 1) / 2)
+        .max(minimum_distribution_gap_counts)
+        .max(1);
+    calculate_vacuum_classification_thresholds(
+        open,
+        &held,
+        minimum_fused_delta_counts,
+        minimum_distribution_gap_counts,
+    )
+    .is_some_and(|thresholds| thresholds.passed && thresholds.signal_polarity == expected_polarity)
 }
 
 fn vacuum_value_is_released(
@@ -24961,9 +25883,9 @@ async fn acquire_physical_placement_part(
     if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
         return Err("top vision did not confirm a part in the reserved pocket".into());
     }
-    let pocket_machine_mm = source_inspection
+    let pocket_machine_mm = source_pose_inspection
         .report
-        .before_measured_center_machine_mm
+        .candidate_measured_center_machine_mm
         .ok_or_else(|| "top vision did not locate the reserved-pocket part".to_string())?;
     let pocket_center_correction_mm = (pocket_machine_mm[0] - nominal_pocket_machine_mm[0])
         .hypot(pocket_machine_mm[1] - nominal_pocket_machine_mm[1]);
@@ -25083,6 +26005,12 @@ async fn acquire_physical_placement_part(
             open_nozzle_raw_values: open_nozzle_raw_values.clone(),
             samples: pickup_samples.clone(),
             contact: contact.clone(),
+            held_raw_values: Vec::new(),
+            held_median_raw_value: None,
+            vacuum_held_after_transfer: None,
+            transfer_hold_accepted: None,
+            held_part_inspection: None,
+            artifact_names: Vec::new(),
         });
         persist_placement_progress(state, run, report)?;
         if let Some(contact) = contact {
@@ -25176,11 +26104,14 @@ async fn acquire_physical_placement_part(
         )
         .await?;
         let held_median_raw_value = median_raw(&held_raw_values);
-        if !held_median_raw_value
-            .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value))
-        {
-            return Err("placement pickup did not retain calibrated vacuum hold".into());
+        let vacuum_held_after_transfer = held_median_raw_value
+            .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value));
+        if let Some(attempt) = report.pickup_attempts.last_mut() {
+            attempt.held_raw_values = held_raw_values.clone();
+            attempt.held_median_raw_value = held_median_raw_value;
+            attempt.vacuum_held_after_transfer = Some(vacuum_held_after_transfer);
         }
+        persist_placement_progress(state, run, report)?;
         let held = capture_bottom_mean_with_lights(
             state,
             prepared.lease_id,
@@ -25220,6 +26151,49 @@ async fn acquire_physical_placement_part(
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
             &initial.preview,
         )?;
+        for artifact in [HELD_PART_ARTIFACT, HELD_PART_INITIAL_INSPECTION_ARTIFACT] {
+            if !report.artifact_names.iter().any(|name| name == artifact) {
+                report.artifact_names.push(artifact.into());
+            }
+        }
+        if let Some(attempt) = report.pickup_attempts.last_mut() {
+            attempt.held_part_inspection = Some(initial.report.clone());
+            attempt.artifact_names = vec![
+                HELD_PART_ARTIFACT.into(),
+                HELD_PART_INITIAL_INSPECTION_ARTIFACT.into(),
+            ];
+        }
+        let transfer_hold_accepted = vacuum_held_after_transfer
+            || (initial.report.passed
+                && marginal_transfer_vacuum_is_separated(
+                    &prepared.vacuum_characterization.pump_on_open,
+                    prepared.vacuum_characterization.signal_polarity,
+                    prepared.vacuum_characterization.minimum_signal_delta_counts,
+                    prepared
+                        .vacuum_characterization
+                        .minimum_distribution_gap_counts,
+                    &held_raw_values,
+                ));
+        if let Some(attempt) = report.pickup_attempts.last_mut() {
+            attempt.transfer_hold_accepted = Some(transfer_hold_accepted);
+        }
+        if transfer_hold_accepted && !vacuum_held_after_transfer {
+            report.findings.push(
+                "bottom vision and a separated vacuum distribution accepted a marginal transfer hold"
+                    .into(),
+            );
+        }
+        persist_placement_progress(state, run, report)?;
+        if !transfer_hold_accepted {
+            return Err(format!(
+                "placement pickup did not retain calibrated vacuum hold; bottom vision {} a held part",
+                if initial.report.passed {
+                    "confirmed"
+                } else {
+                    "did not confirm"
+                },
+            ));
+        }
         if !initial.report.passed {
             return Err("bottom vision did not confirm the held part".into());
         }
@@ -26823,6 +27797,134 @@ mod tests {
         }
     }
 
+    fn test_inventory_lane(index: u32, x_mm: f64) -> StripFeederInventoryLane {
+        let observations = (0..4)
+            .map(|pocket_index| StripFeederPocketObservation {
+                pocket_index,
+                center_machine_mm: [x_mm, 200.0 - f64::from(pocket_index) * 4.0],
+                occupancy: if pocket_index % 2 == 0 {
+                    StripPocketOccupancy::Occupied
+                } else {
+                    StripPocketOccupancy::Empty
+                },
+                confidence: 0.9,
+                component_outline_machine_mm: Vec::new(),
+                component_size_mm: None,
+            })
+            .collect::<Vec<_>>();
+        StripFeederInventoryLane {
+            inventory_index: index,
+            source_scan_id: Uuid::new_v4(),
+            source_scan_ids: Vec::new(),
+            source_candidate_index: 0,
+            source_proposal_index: index,
+            strip_outline_machine_mm: Vec::new(),
+            negative_end_truncated: false,
+            positive_end_truncated: false,
+            proposal: velocitypnp_domain::StripFeederLaneProposal {
+                proposal_index: index,
+                tape_rotation_deg: -90.0,
+                sprocket_pitch_mm: 4.0,
+                sprocket_pitch_residual_p95_mm: 0.1,
+                sprocket_center_count: 8,
+                sprocket_centers_machine_mm: Vec::new(),
+                tape_width_mm: Some(8.0),
+                component_pitch_mm: Some(4.0),
+                pick_centerline_machine_mm: Some([[x_mm, 204.0], [x_mm, 184.0]]),
+                pocket_centers_machine_mm: observations
+                    .iter()
+                    .map(|observation| observation.center_machine_mm)
+                    .collect(),
+                component_size_mm: Some([1.6, 0.8]),
+                pocket_observations: observations,
+                present_count: 2,
+                absent_count: 2,
+                uncertain_count: 0,
+                confidence: 0.9,
+                review_required: false,
+                findings: Vec::new(),
+            },
+        }
+    }
+
+    fn test_inventory_report(lanes: Vec<StripFeederInventoryLane>) -> StripFeederInventoryReport {
+        StripFeederInventoryReport {
+            algorithm_version: STRIP_FEEDER_INVENTORY_ALGORITHM.into(),
+            workspace_scan_id: Uuid::new_v4(),
+            source_mosaic_artifact_name: "mosaic.png".into(),
+            report_artifact_name: "strip-feeder-inventory.json".into(),
+            preview_artifact_name: "mosaic-strip-feeder-inventory.png".into(),
+            created_at: Utc::now(),
+            source_scan_ids: Vec::new(),
+            evidence_mosaics: Vec::new(),
+            preview_raster_transform: None,
+            lane_count: lanes.len() as u32,
+            populated_lane_count: lanes.len() as u32,
+            present_count: lanes.len() as u32 * 2,
+            absent_count: lanes.len() as u32 * 2,
+            uncertain_count: 0,
+            coverage_complete: true,
+            recommended_rescan_region: None,
+            lanes,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inventory_registration_match_rejects_a_false_tape_width() {
+        let lane = test_inventory_lane(0, 100.0);
+        let mut registration = test_pickup_registration(Utc::now());
+        registration.pick_centerline_machine_mm = [[100.2, 204.0], [100.2, 184.0]];
+        registration.tape_rotation_deg = -90.0;
+        assert!(inventory_registration_distance_mm(&lane, &registration).is_some());
+
+        registration.tape_width_mm = 12.0;
+        assert!(inventory_registration_distance_mm(&lane, &registration).is_none());
+    }
+
+    #[test]
+    fn inventory_capture_selection_balances_classes_across_lanes() {
+        let inventory = test_inventory_report(vec![
+            test_inventory_lane(0, 100.0),
+            test_inventory_lane(1, 112.0),
+            test_inventory_lane(2, 124.0),
+        ]);
+        let bindings = inventory
+            .lanes
+            .iter()
+            .map(|lane| {
+                let mut registration = test_pickup_registration(Utc::now());
+                registration.id = Uuid::new_v4();
+                InventoryRegistrationBinding {
+                    inventory_index: lane.inventory_index,
+                    created: false,
+                    registration,
+                }
+            })
+            .collect::<Vec<_>>();
+        let targets =
+            select_inventory_source_capture_targets(&inventory, &bindings, &BTreeSet::new(), 6, 6)
+                .unwrap();
+
+        assert_eq!(targets.len(), 12);
+        for inventory_index in 0..3 {
+            assert_eq!(
+                targets
+                    .iter()
+                    .filter(|target| target.inventory_index == inventory_index)
+                    .count(),
+                4
+            );
+        }
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|target| { target.observation.occupancy == StripPocketOccupancy::Occupied })
+                .count(),
+            6
+        );
+    }
+
     #[test]
     fn live_holdout_defaults_to_the_first_available_occupied_pocket() {
         let now = Utc::now();
@@ -27054,6 +28156,12 @@ mod tests {
             open_nozzle_raw_values: vec![1, 2, 3],
             samples: vec![sample],
             contact: None,
+            held_raw_values: vec![4, 5, 6],
+            held_median_raw_value: Some(5.0),
+            vacuum_held_after_transfer: Some(false),
+            transfer_hold_accepted: Some(false),
+            held_part_inspection: None,
+            artifact_names: vec![HELD_PART_ARTIFACT.into()],
         }];
 
         let restored: PlacementExecutionReport =
@@ -30656,6 +31764,35 @@ mod tests {
 
         assert!(!post_release_matches_held_part(&held, &bore_change));
         assert!(!post_release_matches_held_part(&held, &opposite_polarity));
+    }
+
+    #[test]
+    fn marginal_transfer_vacuum_requires_a_separated_matching_signal() {
+        let open =
+            VacuumStateStatistics::from_raw(vec![239, 238, 238, 238, 238, 237, 237, 237, 237, 236])
+                .unwrap();
+
+        assert!(marginal_transfer_vacuum_is_separated(
+            &open,
+            VacuumSignalPolarity::LowerIsMoreVacuum,
+            8,
+            3,
+            &[232; 10],
+        ));
+        assert!(!marginal_transfer_vacuum_is_separated(
+            &open,
+            VacuumSignalPolarity::LowerIsMoreVacuum,
+            8,
+            3,
+            &[237; 10],
+        ));
+        assert!(!marginal_transfer_vacuum_is_separated(
+            &open,
+            VacuumSignalPolarity::HigherIsMoreVacuum,
+            8,
+            3,
+            &[232; 10],
+        ));
     }
 
     #[tokio::test]

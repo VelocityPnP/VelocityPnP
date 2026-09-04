@@ -11,8 +11,8 @@ use velocitypnp_domain::{
     CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job, JobExecutionRun,
     MachineEvent, Operation, Part, PlacementExecutionRun, PlacementOutcomeRecord,
     StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun, StripFeederPocketOutcome,
-    StripFeederPocketStatus, StripFeederRegistration, StripPocketOccupancy,
-    WorkspaceInventoryBaseline, WorkspaceScanReport,
+    StripFeederPocketStatus, StripFeederRegistration, StripFeederSourceCaptureRun,
+    StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -134,6 +134,16 @@ impl Store {
             );
             INSERT OR IGNORE INTO schema_version(version, applied_at)
                 VALUES (7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            CREATE TABLE IF NOT EXISTS strip_feeder_source_capture_artifacts (
+                capture_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(capture_id, name)
+            );
+            INSERT OR IGNORE INTO schema_version(version, applied_at)
+                VALUES (8, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             "#,
         )?;
         Ok(())
@@ -822,6 +832,63 @@ impl Store {
         id: Uuid,
     ) -> Result<Option<StripFeederLiveHoldoutRun>> {
         self.get("strip_feeder_live_holdout", id)
+    }
+
+    pub fn put_strip_feeder_source_capture(&self, run: &StripFeederSourceCaptureRun) -> Result<()> {
+        self.put("strip_feeder_source_capture", run.id, run)
+    }
+
+    pub fn list_strip_feeder_source_captures(&self) -> Result<Vec<StripFeederSourceCaptureRun>> {
+        self.list("strip_feeder_source_capture")
+    }
+
+    pub fn get_strip_feeder_source_capture(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StripFeederSourceCaptureRun>> {
+        self.get("strip_feeder_source_capture", id)
+    }
+
+    pub fn put_strip_feeder_source_capture_artifact(
+        &self,
+        capture_id: Uuid,
+        name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(!name.is_empty(), "source capture artifact name is empty");
+        anyhow::ensure!(
+            !media_type.is_empty(),
+            "source capture artifact media type is empty"
+        );
+        self.connection.lock().execute(
+            r#"INSERT INTO strip_feeder_source_capture_artifacts(
+                 capture_id, name, media_type, data, created_at
+               ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ON CONFLICT(capture_id, name) DO UPDATE SET
+                 media_type = excluded.media_type,
+                 data = excluded.data,
+                 created_at = excluded.created_at"#,
+            params![capture_id.to_string(), name, media_type, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_strip_feeder_source_capture_artifact(
+        &self,
+        capture_id: Uuid,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT media_type, data FROM strip_feeder_source_capture_artifacts \
+                 WHERE capture_id = ?1 AND name = ?2",
+                params![capture_id.to_string(), name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn put_strip_feeder_pickup_qualification(
@@ -1577,6 +1644,27 @@ mod tests {
         assert_eq!(
             store
                 .get_strip_feeder_holdout_artifact(holdout_id, "live-pocket-holdout.png")
+                .unwrap(),
+            Some(("image/png".into(), data.to_vec()))
+        );
+    }
+
+    #[test]
+    fn strip_feeder_source_capture_artifact_round_trip_retains_evidence() {
+        let store = Store::memory().unwrap();
+        let capture_id = Uuid::new_v4();
+        let data = [1, 3, 5, 7];
+        store
+            .put_strip_feeder_source_capture_artifact(
+                capture_id,
+                "lane-000-pocket-001.png",
+                "image/png",
+                &data,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_strip_feeder_source_capture_artifact(capture_id, "lane-000-pocket-001.png",)
                 .unwrap(),
             Some(("image/png".into(), data.to_vec()))
         );

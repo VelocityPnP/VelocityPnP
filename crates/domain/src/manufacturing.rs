@@ -500,6 +500,12 @@ pub struct StripFeederLiveHoldoutReport {
     pub confidence: f64,
     pub passed: bool,
     pub artifact_name: String,
+    /// Raw, unannotated top-camera frames retained for dataset review.
+    #[serde(default)]
+    pub source_frame_artifact_names: Vec<String>,
+    /// Camera pose for each retained source frame, in matching order.
+    #[serde(default)]
+    pub source_frame_camera_poses: Vec<Pose>,
     #[serde(default)]
     pub findings: Vec<String>,
 }
@@ -521,6 +527,44 @@ pub struct StripFeederLiveHoldoutRun {
     pub predicted_pocket_machine_mm: [f64; 2],
     #[serde(default)]
     pub report: Option<StripFeederLiveHoldoutReport>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// One centered top-camera source image selected from a persisted feeder
+/// inventory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederSourceCaptureSample {
+    pub inventory_index: u32,
+    pub registration_id: Uuid,
+    pub source_scan_id: Uuid,
+    pub source_candidate_index: u32,
+    pub source_proposal_index: u32,
+    pub pocket_index: u32,
+    pub expected_occupancy: StripPocketOccupancy,
+    pub expected_occupancy_confidence: f64,
+    pub pocket_machine_mm: [f64; 2],
+    pub camera_pose: Pose,
+    pub artifact_name: String,
+}
+
+/// Persistent state for a safe-Z feeder source-image capture batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederSourceCaptureRun {
+    pub id: Uuid,
+    pub operation_id: Uuid,
+    pub workspace_scan_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub status: crate::OperationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub requested_occupied_count: u32,
+    pub requested_empty_count: u32,
+    #[serde(default)]
+    pub lane_indices: Vec<u32>,
+    #[serde(default)]
+    pub samples: Vec<StripFeederSourceCaptureSample>,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -766,7 +810,11 @@ pub struct StripFeederSourcePoseReport {
     #[serde(default)]
     pub reference_package_size_mm: Option<[f64; 2]>,
     #[serde(default)]
+    pub reference_component_outline_machine_mm: Option<[[f64; 2]; 4]>,
+    #[serde(default)]
     pub candidate_package_size_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub candidate_component_outline_machine_mm: Option<[[f64; 2]; 4]>,
     #[serde(default)]
     pub flat_geometry_passed: bool,
     #[serde(default)]
@@ -1116,6 +1164,22 @@ pub struct PlacementPickupAttemptReport {
     pub samples: Vec<VacuumProbeSample>,
     #[serde(default)]
     pub contact: Option<VacuumProbeSample>,
+    /// Vacuum evidence collected after the lifted part reaches the bottom
+    /// camera.
+    #[serde(default)]
+    pub held_raw_values: Vec<i64>,
+    #[serde(default)]
+    pub held_median_raw_value: Option<f64>,
+    #[serde(default)]
+    pub vacuum_held_after_transfer: Option<bool>,
+    /// Final fused vacuum-and-vision decision for continued transfer.
+    #[serde(default)]
+    pub transfer_hold_accepted: Option<bool>,
+    /// Bottom-camera evidence collected before a failed hold is recovered.
+    #[serde(default)]
+    pub held_part_inspection: Option<HeldPartInspectionReport>,
+    #[serde(default)]
+    pub artifact_names: Vec<String>,
 }
 
 /// Evidence from one guarded placement-plan step.

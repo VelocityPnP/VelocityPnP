@@ -371,6 +371,55 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.build_strip_feeder_inventory("workspace", [("scan", -1)])
 
+        promoted = {"workspace_scan_id": "workspace", "created_count": 5}
+        with patch.object(client, "_request", return_value=promoted) as send:
+            self.assertEqual(
+                client.promote_strip_feeder_inventory("workspace"), promoted,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/workspace-scans/workspace/"
+            "strip-feeder-inventory/registrations",
+            {},
+        )
+
+        capture = {"capture": {"id": "capture"}, "operation": {"id": "op"}}
+        with patch.object(client, "_request", return_value=capture) as send:
+            self.assertEqual(
+                client.start_strip_feeder_source_capture(
+                    "workspace", "lease", occupied_count=8, empty_count=8,
+                    lane_indices=[0, 2, 4], safety_checks_confirmed=True,
+                ),
+                capture,
+            )
+        send.assert_called_once_with(
+            "POST",
+            "/workspace-scans/workspace/"
+            "strip-feeder-inventory/source-captures",
+            {
+                "lease_id": "lease",
+                "occupied_count": 8,
+                "empty_count": 8,
+                "lane_indices": [0, 2, 4],
+                "confirmed_external_safety_checks": True,
+            },
+        )
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_source_capture("workspace", "lease")
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_source_capture(
+                "workspace", "lease", occupied_count=0, empty_count=0,
+                safety_checks_confirmed=True,
+            )
+
+        with patch.object(client, "_request", return_value={"id": "capture"}) as send:
+            self.assertEqual(
+                client.strip_feeder_source_capture("capture"), {"id": "capture"},
+            )
+        send.assert_called_once_with(
+            "GET", "/strip-feeder-source-captures/capture",
+        )
+
         draft = {"id": "draft", "status": "vision_draft"}
         with patch.object(client, "_request", return_value=draft) as send:
             self.assertEqual(

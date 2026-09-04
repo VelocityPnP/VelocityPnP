@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.08-py3@sha256:237ecf9ac7373daf91b31bb4f86651ce1ce57b676366ed435aa1aba61dad81d5
+FROM ${BASE_IMAGE}
+
+COPY python/training/requirements.spark.txt /tmp/velocitypnp-requirements.txt
+RUN python -m pip install --no-cache-dir \
+    -r /tmp/velocitypnp-requirements.txt
+
+WORKDIR /workspace
+ENV PYTHONPATH=/workspace/python/training
+
+LABEL org.opencontainers.image.title="VelocityPnP model training"
+LABEL org.opencontainers.image.licenses="Apache-2.0"

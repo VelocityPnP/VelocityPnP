@@ -6,6 +6,7 @@
 /web/*.tsbuildinfo
 /web/vite.config.js
 /web/vite.config.d.ts
+/datasets/
 *.db
 *.db-shm
 *.db-wal

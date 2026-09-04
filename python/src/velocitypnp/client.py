@@ -337,6 +337,61 @@ class Client:
             },
         )
 
+    def promote_strip_feeder_inventory(
+        self, workspace_scan_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        """Create or reuse one persistent registration for each inventory lane."""
+        return self._request(
+            "POST",
+            f"/workspace-scans/{workspace_scan_id}/"
+            "strip-feeder-inventory/registrations",
+            {},
+        )
+
+    def start_strip_feeder_source_capture(
+        self,
+        workspace_scan_id: str | uuid.UUID,
+        lease_id: str | uuid.UUID,
+        *,
+        occupied_count: int = 12,
+        empty_count: int = 12,
+        lane_indices: list[int] | None = None,
+        safety_checks_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Capture centered safe-Z images from persisted inventory pockets."""
+        if not safety_checks_confirmed:
+            raise ValueError(
+                "feeder source capture requires explicit confirmation that the "
+                "tape is fixed, both nozzles are level, the envelope is clear, "
+                "and power isolation is reachable"
+            )
+        if occupied_count < 0 or empty_count < 0:
+            raise ValueError("source capture counts must not be negative")
+        if occupied_count + empty_count == 0 or occupied_count + empty_count > 48:
+            raise ValueError("source capture requires between 1 and 48 images")
+        lanes = lane_indices or []
+        if len(lanes) != len(set(lanes)) or any(index < 0 for index in lanes):
+            raise ValueError("lane_indices must be unique and not negative")
+        return self._request(
+            "POST",
+            f"/workspace-scans/{workspace_scan_id}/"
+            "strip-feeder-inventory/source-captures",
+            {
+                "lease_id": str(lease_id),
+                "occupied_count": occupied_count,
+                "empty_count": empty_count,
+                "lane_indices": lanes,
+                "confirmed_external_safety_checks": True,
+            },
+        )
+
+    def strip_feeder_source_capture(
+        self, capture_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET", f"/strip-feeder-source-captures/{capture_id}",
+        )
+
     def create_strip_feeder_draft(
         self,
         scan_id: str | uuid.UUID,

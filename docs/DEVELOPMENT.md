@@ -513,6 +513,188 @@ orientation ticks in cyan and KiCad fiducials in yellow. These marks use the
 canonical outline orientation for diagnostic preview. They do not resolve a
 square board's orientation ambiguity.
 
+### Source-component learning dataset
+
+Raw `source-pocket-before.png` artifacts can seed an oriented component
+detector without more machine motion. The exporter rectifies each image to the
+carrier-tape axes and applies the current deterministic detector as weak
+supervision:
+
+```bash
+cargo run -p velocitypnpd --example export_source_component_dataset -- \
+  velocitypnp.db datasets/source-components-v1 EVAL_REGISTRATION_UUID
+```
+
+A persisted workspace inventory can supply a balanced set of centered,
+safe-Z camera frames. First, bind each inventory lane to an existing feeder
+registration or create an inactive vision draft:
+
+```bash
+cargo run --release -p velocitypnp -- \
+  promote-strip-feeder-inventory SCAN_UUID
+```
+
+This command reuses a registration only when its tape width, pocket pitch,
+angle, and cross-lane position agree with the inventory. Thus, an old false
+feeder proposal does not replace the measured inventory geometry. Then capture
+known occupied and empty pockets after coarse and fine XYZ home:
+
+```bash
+cargo run --release -p velocitypnp -- \
+  capture-strip-feeder-sources SCAN_UUID \
+  --lease LEASE_UUID --occupied 12 --empty 12 \
+  --lane 0 --lane 1 --lane 2 --lane 3 --lane 4 --lane 5 \
+  --confirm-safety-checks
+```
+
+Omit `--lane` to use all inventory lanes. Selection is balanced across lanes
+and takes samples from both ends of each known occupancy run. The camera stays
+at safe Z. The operation visual-homes once, follows a short travel route, and
+stores every raw frame and its inventory lineage in SQLite. It does not infer
+tape width again or depend on a temporary mosaic file. Query a run with:
+
+```bash
+cargo run --release -p velocitypnp -- \
+  strip-feeder-source-capture CAPTURE_UUID
+```
+
+Inventory occupancy is capture evidence, not final ground truth. Review it
+when tape contents changed after the source scan.
+
+One physical feeder registration must stay entirely in the evaluation split.
+Do not split repeated views of one strip or pocket between training and
+evaluation. The exporter writes raw rectified crops, a provenance manifest,
+and `review.html`. Draft labels are not ground truth.
+Open the review page and mark each sample as accepted, needs adjustment, empty,
+on its edge, or rejected. Keep evaluation labels out of model fitting and
+threshold tuning. An on-edge component is a labeled non-pickable pose. Reject
+only an unusable image, such as a blurred or incorrect crop.
+
+The OBB represents presence, center, extent, and an undirected package axis.
+It cannot distinguish rotations that differ by 180 degrees. A later directed
+package dataset must add a polarity keypoint or a separate orientation label.
+Model confidence is not a ground-truth field. Calibrate it only against the
+accepted evaluation set.
+
+Copy the downloaded first review to `review-decisions.json` in the dataset
+directory. Then make learned correction proposals:
+
+```bash
+cargo run -p velocitypnpd --example refine_source_component_dataset -- \
+  datasets/source-components-v1
+```
+
+The refinement keeps accepted labels and empty images unchanged. For each
+known part, it learns the median box extent from accepted examples and from
+verified carried ground truth. It applies that extent at the detected center
+of each flat part that needs adjustment. It does not treat this weak label as
+final ground truth. Open
+`review-refined.html` to accept or edit each proposal. Drag a box to move it,
+drag a square handle to resize it, and drag the round handle to rotate it.
+On-edge parts keep a separate class and require explicit review.
+
+Save the second review, and then promote the reviewed labels:
+
+```bash
+cargo run -p velocitypnpd --example finalize_source_component_dataset -- \
+  datasets/source-components-v1 review-refined-decisions.json
+```
+
+A relative review filename is resolved inside the dataset directory. An
+absolute path can select a downloaded review file elsewhere.
+
+The finalizer validates the review set, class names, image bounds, OBB
+rectangularity, and point order. It writes the result and split assignments to
+the provenance-bearing `manifest.ground-truth.json`. Empty images have no
+outline. Rejected images stay in the manifest as excluded samples.
+
+### Source-component model training
+
+VelocityPnP uses its own compact PyTorch model for pocket occupancy and
+oriented component pose. It has no pretrained parameters. The source,
+checkpoint, and exported model use Apache-2.0 terms. PyTorch uses BSD-3-Clause
+terms. The model reads reviewed outlines directly from
+`manifest.ground-truth.json`.
+
+Create a CPU-only environment and validate the finalized dataset:
+
+```bash
+sudo apt-get install python3-venv
+python3 -m venv .venv-training
+.venv-training/bin/python -m pip install \
+  -r python/training-requirements.txt
+.venv-training/bin/python python/tools/train_source_component_pose.py \
+  datasets/source-components-v2 --validate-only
+```
+
+Start the reproducible baseline run:
+
+```bash
+.venv-training/bin/python python/tools/train_source_component_pose.py \
+  datasets/source-components-v2
+```
+
+The default run uses a 192-pixel input, batch size 16, seed 0, deterministic
+training, and early stopping. Limited translation, scale, flip, brightness,
+contrast, and noise augmentation reflect the installed camera. The best
+checkpoint, ONNX model, report, histories, and evaluation images are stored
+under the dataset's ignored `training/` directory. The report records dataset,
+source, environment, parameter, metric, and artifact hashes.
+
+The laptop can validate data and run small smoke tests. Use the pinned NVIDIA
+PyTorch container on an ARM64 DGX Spark for full runs:
+
+```bash
+python/training/run-container.sh \
+  datasets/source-components-v2 source-component-pose-v1
+```
+
+The container tag is local. Its base image uses a fixed manifest digest.
+
+The evaluation feeder must contain examples for each class that is used as a
+production gate. A missing class is reported as an evaluation limitation. Do
+not tune a production confidence threshold against this held-out split.
+
+Verify that the ONNX export gives the same values as PyTorch:
+
+```bash
+.venv-training/bin/python \
+  python/tools/verify_source_component_pose.py \
+  datasets/source-components-v2 \
+  datasets/source-components-v2/training/source-component-pose-v1/best.pt \
+  datasets/source-components-v2/training/source-component-pose-v1/best.onnx
+```
+
+The verifier fails for a class change or an output difference above 0.0001.
+Training reports empty-pocket false detections, recall, oriented intersection
+over union, center error, size error, and axis error. It also writes one
+annotated image per sample and an evaluation contact sheet. Versioned baseline
+summaries are in `docs/baselines/`. Model weights and full training output stay
+with the ignored dataset and are not source artifacts.
+
+For a later capture session, carry reviewed labels into a new dataset without
+showing them again:
+
+```bash
+cargo run -p velocitypnpd --example export_source_component_dataset -- \
+  velocitypnp.db datasets/source-components-v2 EVAL_REGISTRATION_UUID \
+  --carry-reviewed datasets/source-components-v1
+```
+
+The exporter carries a label only when the source ID, source SHA-256 digest,
+and generated image bytes all match. It writes verified labels to
+`manifest.carried-ground-truth.json`. The draft manifest and `review.html`
+contain only new samples. The finalizer checks the carried image hashes and
+combines the carried and newly reviewed labels in the final dataset.
+
+New live-pocket holdouts retain one unannotated frame from each camera pose as
+`source-pocket-frame-NNN.png`. The holdout report records the matching camera
+poses. The four offset poses measure tape geometry and can show only part of a
+neighboring pocket. The dataset exporter uses only the pose nearest the
+requested pocket as a component sample. It also rejects captures without a
+three-hole sprocket lattice. An explicit pocket index can therefore collect
+occupied, empty, edge, and difficult examples without lowering a nozzle.
+
 Classification is not accepted job registration: this no-motion stage does not
 create a `BoardInstance`, move the camera, resolve a symmetric outline, or
 accept a design-to-machine transform. Use the local fiducial workflow below.
@@ -846,7 +1028,14 @@ shared -180/+180 endpoint.
 
 A physical placement binds its reservation to the available strip pocket at
 the planned pick position. It then captures that pocket with the top camera
-and uses the measured component center for the pickup move. It also compares
+and uses the measured component center for the pickup move. Source-pose
+version 3 first detects a package-sized rectangular edge. If glare breaks the
+edge, it finds the dark package core within a region bounded by the surveyed
+package size and measures the current core bounds. The report retains the four
+machine-space outline corners.
+The preview uses a cyan cross for the nominal pocket center, a green rectangle
+for the component outline, a magenta circle for the component center, and a
+yellow cross for the nozzle target. It also compares
 the source package with all retained source images from the feeder's successful
 pickup sequence. The best match must pass occupancy, center, and appearance
 checks. This rejects an edge-standing package before nozzle descent without a

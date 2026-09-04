@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "run": "source-component-pose-v1-spark-conditional-state",
+  "completed_at": "2026-09-04T01:33:55.411836+00:00",
+  "contract_version": "velocitypnp.source-component-pose.v1",
+  "dataset": {
+    "manifest_sha256": "ac9b085fba9c62fb7a23f23a3186cafefb12e41c4c0b2830d3cb2cd955bb5671",
+    "content_sha256": "b375d59af60d81b4468dc13dae48c5e2f7fc19d4116ed2bbd64fd168dd6a5001",
+    "train_samples": 78,
+    "evaluation_samples": 11
+  },
+  "training": {
+    "device": "NVIDIA GB10",
+    "torch": "2.14.0a0+4fdf77b940.nv26.08",
+    "duration_seconds": 121.20181319769472,
+    "parameter_count": 970911,
+    "pretrained_weights": false,
+    "completed_epochs": 165,
+    "best_epoch": 125
+  },
+  "metrics": {
+    "occupancy": {
+      "true_positives": 8,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "pose": {
+      "mean_center_error_input_px": 1.0958559289574623,
+      "maximum_center_error_input_px": 2.177924156188965,
+      "mean_size_error_input_px": 1.1325194388628006,
+      "mean_angle_error_degrees_mod_180": 0.9180235373128616,
+      "mean_oriented_iou": 0.8014291197369722
+    }
+  },
+  "artifacts": {
+    "checkpoint_sha256": "30945f441d64f642d0b3d98b49fb9774ff1ddc095e4c0d9f6436a0d7302420b4",
+    "onnx_sha256": "320e2bfc54642daebcd33254d3e2b7fac38079a74ad87cb77f9ace682a12a0ac"
+  },
+  "onnx_parity": {
+    "sample_count": 11,
+    "absolute_tolerance": 0.0001,
+    "maximum_logit_difference": 0.000011920928955078125,
+    "maximum_pose_difference": 0.0000037550926208496094,
+    "class_mismatches": 0,
+    "passed": true
+  },
+  "license": {
+    "artifact": "Apache-2.0",
+    "training_code": "Apache-2.0",
+    "training_framework": "BSD-3-Clause"
+  },
+  "limitations": [
+    "The evaluation split is too small for a production gate.",
+    "The evaluation split has no component_on_edge examples.",
+    "The data comes from one machine and a small number of sessions.",
+    "The v1 contract does not predict component polarity."
+  ]
+}

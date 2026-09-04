@@ -43,10 +43,12 @@ pub use placed_part::{
 };
 pub use strip_feeder::{
     analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate,
-    inspect_strip_feeder_pocket_return, inspect_strip_feeder_source_pose,
-    StripFeederLiveHoldoutArtifacts, StripFeederPocketReturnArtifacts,
-    StripFeederSourcePoseArtifacts, StripFeederVisionArtifacts,
-    STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM, STRIP_FEEDER_POCKET_RETURN_ALGORITHM,
+    draft_strip_feeder_source_component, inspect_strip_feeder_pocket_return,
+    inspect_strip_feeder_source_pose, StripFeederLiveHoldoutArtifacts,
+    StripFeederPocketReturnArtifacts, StripFeederSourceComponentDraft,
+    StripFeederSourceComponentDraftArtifacts, StripFeederSourcePoseArtifacts,
+    StripFeederVisionArtifacts, STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM,
+    STRIP_FEEDER_POCKET_RETURN_ALGORITHM, STRIP_FEEDER_SOURCE_COMPONENT_DRAFT_ALGORITHM,
     STRIP_FEEDER_SOURCE_POSE_ALGORITHM, STRIP_FEEDER_SPROCKET_PITCH_MM,
     STRIP_FEEDER_VISION_ALGORITHM,
 };

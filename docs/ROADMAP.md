@@ -154,6 +154,18 @@ The project is organized by measurable gates rather than calendar estimates.
   board and feeder changes on attached hardware
 - [ ] Add learned semantic segmentation with versioned datasets, calibrated
   confidence, and machine/configuration holdout tests
+- [x] Add a provenance-bearing source-component draft exporter with
+  registration-grouped train/evaluation splits and operator review
+- [x] Add review-guided flat-box refinement and an oriented box editor for
+  difficult and on-edge source components
+- [x] Add persistent, inventory-driven safe-Z capture of balanced occupied and
+  empty pocket views, with exact-hash label carry-forward and new-only review
+- [ ] Extend balanced source capture across more component families and
+  independent machine sessions
+- [x] Fine-tune an oriented source-component detector and compare it with the
+  deterministic detector on accepted evaluation labels
+- [x] Select a license-compatible runtime model and export the oriented
+  source-component detector for daemon integration
 - [x] Add package-template pose comparison after live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures

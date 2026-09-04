@@ -2840,6 +2840,65 @@ returns an uncertain retained part or reports release failure. This path still
 needs a physical release-failure or ordinary placement check after N1 vacuum
 calibration is restored.
 
+### Feeder 5 pickup and failed-hold evidence
+
+On 2026-09-02, coarse home `be0feefe-a0da-4f38-8769-c4b11ead0ba9` and fine
+XYZ home `fd988552-fcd2-48eb-99b4-df5ce13820fc` passed. The fine-home Z
+correction was +0.100 mm. The first N1 characterization did not reproduce its
+borderline probe contact. A second probe and characterization passed with a
+9.5-count median seal change and an 8.5-count robust distribution gap.
+
+Feeder 5 scan `395cd0ae-1eb4-486c-a7a7-c7d1bbe2b5e4` retained 82 native
+frames. It had complete coverage and accepted all 121 overlap registrations.
+The survey measured an approximately 1.45 by 1.00 mm package. Registration
+`afaf9bce-ac9b-4773-8f26-1e1152dc13ce` assigns these parts to the 0603
+axis-symmetric test-resistor policy. This assignment is for process testing;
+the electrical identity is not visually verified.
+
+Pickup qualification `1fd2cd4f-80a8-4aa2-b32c-47fb55fe4666` passed at
+nozzle Z4.300. Bottom vision measured a 1.787 by 1.088 mm part and a 0.027 mm
+final center residual. One release attempt cleared N045. Top vision measured
+a 0.007 mm return shift and 0.824 appearance similarity, so the return passed.
+
+Job execution `060a759f-0a69-45db-9b79-9ed984584c5f` tried R24 twice with
+two different feeder pockets. Both pickups crossed the calibrated acquire
+threshold, but neither retained calibrated vacuum hold after transfer to the
+bottom-camera pose. Both parts were returned to their source pockets. No board
+contact occurred. The job remains in `needs_attention` state.
+
+These failures exposed an evidence gap. The executor collected post-transfer
+vacuum samples but returned before it persisted them or captured the bottom
+camera. It now persists the samples, median, hold result, raw bottom image,
+and initial held-part inspection before it recovers a failed hold.
+
+A deployed diagnostic retry reproduced the strict hold failure at 232 counts,
+0.66 counts above the calibrated acquire threshold. Bottom vision found a
+1.777 by 1.148 mm held part with 96% confidence after the full source-to-camera
+move. A fused gate now accepts this case only when bottom vision passes and
+the held vacuum distribution has the characterized polarity, at least half
+the reference-seal median change, and the full robust distribution gap. An
+open-nozzle distribution or a failed camera result cannot bypass the strict
+gate. Physical placement validation of the fused gate remains.
+
+After deployment, coarse home `ecadbd15-93a4-4ab3-8480-02eea53c84f7`
+and fine XYZ home `e2338f1d-e3e5-423c-a2cd-8898b9f3a587` passed. Feeder 5
+pocket 1 then passed live holdout with a 0.243 mm correction and 96% occupancy
+confidence. Placement retry `30b10e6b-f0d4-4c5f-921d-0dbd73db804d`
+registered the R24 pad pair with a 0.144 mm correction and found the source
+part with top vision. Its pickup search produced only a 3-count change through
+nozzle Z3.700, below the 8-count acquire gate. It stopped before bottom-camera
+or board motion. A second live holdout found the part still in pocket 1 with
+93% occupancy confidence. This retry did not reach the fused transfer gate.
+
+An offline replay of its retained source image exposed two different centers.
+The old broad contrast centroid was X130.403/Y186.133. Source-pose version 3
+detected the component core and measured a 1.040 by 0.680 mm outline. The new
+component and nozzle target is X130.504/Y186.010. This changes the old target
+by X+0.101/Y-0.123 mm. The replay artifact separates the nominal pocket
+center, component outline, component center, and nozzle target. No machine
+motion was used for this replay. A later pickup must validate the corrected
+center.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

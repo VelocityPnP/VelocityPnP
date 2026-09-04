@@ -1,7 +1,7 @@
 use crate::opencv_backend::gray_frame_to_mat;
 use crate::{GrayFrame, RgbFrame};
 use anyhow::{ensure, Result};
-use opencv::core::{self, Mat, Point, Point2f, Size, Vector};
+use opencv::core::{self, Mat, MatTraitConst, Point, Point2f, Rect, Size, Vector, CV_32S};
 use opencv::imgproc;
 use std::f64::consts::PI;
 use velocitypnp_domain::{
@@ -14,7 +14,9 @@ use velocitypnp_domain::{
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
 pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v3";
 pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v4";
-pub const STRIP_FEEDER_SOURCE_POSE_ALGORITHM: &str = "strip_feeder_source_pose.v2";
+pub const STRIP_FEEDER_SOURCE_POSE_ALGORITHM: &str = "strip_feeder_source_pose.v3";
+pub const STRIP_FEEDER_SOURCE_COMPONENT_DRAFT_ALGORITHM: &str =
+    "strip_feeder_source_component_draft.v1";
 pub const STRIP_FEEDER_SPROCKET_PITCH_MM: f64 = 4.0;
 
 const LIVE_HOLDOUT_CROSS_MARGIN_MM: f64 = 3.0;
@@ -77,6 +79,151 @@ pub struct StripFeederPocketReturnArtifacts {
 pub struct StripFeederSourcePoseArtifacts {
     pub report: StripFeederSourcePoseReport,
     pub preview: RgbFrame,
+}
+
+/// A review-only component label made from one raw source-pocket image.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct StripFeederSourceComponentDraft {
+    pub algorithm_version: String,
+    pub occupancy: StripPocketOccupancy,
+    pub occupancy_confidence: f64,
+    pub expected_size_mm: Option<[f64; 2]>,
+    pub measured_size_mm: Option<[f64; 2]>,
+    pub center_px: Option<[f64; 2]>,
+    pub outline_px: Option<[[f64; 2]; 4]>,
+    /// Rotation in the rectified crop. The first draft is aligned to the tape
+    /// axes and cannot resolve a directed 180-degree package orientation.
+    pub rotation_deg: Option<f64>,
+    pub review_required: bool,
+    pub findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripFeederSourceComponentDraftArtifacts {
+    pub report: StripFeederSourceComponentDraft,
+    pub crop: GrayFrame,
+}
+
+/// Rectifies one source pocket and produces a draft component label.
+///
+/// This output is weak supervision. It must not become ground truth until an
+/// operator accepts or corrects it.
+pub fn draft_strip_feeder_source_component(
+    frame: &GrayFrame,
+    camera_pose: Pose,
+    pocket_machine_mm: [f64; 2],
+    camera_model: &PlanarCameraModel,
+    registration: &StripFeederRegistration,
+) -> Result<StripFeederSourceComponentDraftArtifacts> {
+    ensure!(
+        camera_model.role == velocitypnp_domain::CameraRole::TopCamera,
+        "source component drafting requires a top-camera model"
+    );
+    let along = normalized(subtract(
+        registration.pick_centerline_machine_mm[1],
+        registration.pick_centerline_machine_mm[0],
+    ))
+    .ok_or_else(|| anyhow::anyhow!("source component centerline has no direction"))?;
+    let cross = [-along[1], along[0]];
+    let cross_span_mm = registration.tape_width_mm + 2.0 * LIVE_HOLDOUT_CROSS_MARGIN_MM;
+    let along_span_mm = (registration.tape_pitch_mm * 3.0).max(12.0);
+    let crop = rectify_live_tape_frames(
+        std::slice::from_ref(frame),
+        &[camera_pose],
+        camera_model,
+        pocket_machine_mm,
+        cross,
+        along,
+        cross_span_mm,
+        along_span_mm,
+    )?;
+    let nominal_center_mm = [cross_span_mm * 0.5, along_span_mm * 0.5];
+    let pocket_center = measure_pocket_image_center(
+        &crop,
+        nominal_center_mm[0],
+        nominal_center_mm[1],
+        cross_span_mm,
+        along_span_mm,
+        registration.tape_pitch_mm,
+        registration.tape_width_mm,
+    );
+    let expected_size_mm = registration
+        .surveyed_part_size_mm
+        .or(registration.measured_part_size_mm);
+    let package = pocket_center
+        .zip(expected_size_mm)
+        .and_then(|(center, expected)| {
+            measure_source_package(&crop, center, cross_span_mm, along_span_mm, expected)
+        });
+    let measured_center_mm = package
+        .map(|package| package.center_mm)
+        .or_else(|| pocket_center.map(|center| center.center_mm));
+    let occupancy_confidence = measured_center_mm
+        .map(|center| {
+            pocket_occupancy_evidence(
+                &crop,
+                center[0],
+                center[1],
+                cross_span_mm,
+                along_span_mm,
+                registration.tape_pitch_mm,
+            )
+        })
+        .unwrap_or_default();
+    let occupancy = pocket_occupancy_from_evidence(occupancy_confidence);
+    let center_px = package
+        .map(|package| local_mm_to_pixel(&crop, package.center_mm, cross_span_mm, along_span_mm));
+    let outline_px = package.map(|package| {
+        let half_cross = 0.5 * package.size_mm[0];
+        let half_along = 0.5 * package.size_mm[1];
+        [
+            [-half_cross, -half_along],
+            [half_cross, -half_along],
+            [half_cross, half_along],
+            [-half_cross, half_along],
+        ]
+        .map(|offset| {
+            local_mm_to_pixel(
+                &crop,
+                [
+                    package.center_mm[0] + offset[0],
+                    package.center_mm[1] + offset[1],
+                ],
+                cross_span_mm,
+                along_span_mm,
+            )
+        })
+    });
+    let review_required = !matches!(
+        (occupancy, package),
+        (StripPocketOccupancy::Occupied, Some(_)) | (StripPocketOccupancy::Empty, None)
+    );
+    let mut findings = vec![
+        "the label is an automatic draft and requires operator review".into(),
+        "the crop is rectified to the carrier-tape cross and travel axes".into(),
+    ];
+    if package.is_some() {
+        findings.push(
+            "the box rotation uses the tape axis and does not encode package polarity".into(),
+        );
+    } else {
+        findings.push("no bounded component outline was measured".into());
+    }
+    Ok(StripFeederSourceComponentDraftArtifacts {
+        report: StripFeederSourceComponentDraft {
+            algorithm_version: STRIP_FEEDER_SOURCE_COMPONENT_DRAFT_ALGORITHM.into(),
+            occupancy,
+            occupancy_confidence,
+            expected_size_mm,
+            measured_size_mm: package.map(|package| package.size_mm),
+            center_px,
+            outline_px,
+            rotation_deg: package.map(|_| 0.0),
+            review_required,
+            findings,
+        },
+        crop,
+    })
 }
 
 /// Compares a source package with a prior package that passed pickup.
@@ -147,13 +294,42 @@ pub fn inspect_strip_feeder_source_pose(
     };
     let reference_center = measure(&reference_crop);
     let candidate_center = measure(&candidate_crop);
-    let local_center = |measurement: Option<PocketImageCenter>| {
-        measurement
-            .map(|measurement| measurement.center_mm)
+    let expected_package_size_mm = registration
+        .surveyed_part_size_mm
+        .or(registration.measured_part_size_mm);
+    let reference_package =
+        reference_center
+            .zip(expected_package_size_mm)
+            .and_then(|(center, expected)| {
+                measure_source_package(
+                    &reference_crop,
+                    center,
+                    cross_span_mm,
+                    along_span_mm,
+                    expected,
+                )
+            });
+    let candidate_package =
+        candidate_center
+            .zip(expected_package_size_mm)
+            .and_then(|(center, expected)| {
+                measure_source_package(
+                    &candidate_crop,
+                    center,
+                    cross_span_mm,
+                    along_span_mm,
+                    expected,
+                )
+            });
+    let local_center = |package: Option<SourcePackageMeasurement>,
+                        measurement: Option<PocketImageCenter>| {
+        package
+            .map(|package| package.center_mm)
+            .or_else(|| measurement.map(|measurement| measurement.center_mm))
             .unwrap_or([center_cross_mm, center_along_mm])
     };
-    let reference_local_center = local_center(reference_center);
-    let candidate_local_center = local_center(candidate_center);
+    let reference_local_center = local_center(reference_package, reference_center);
+    let candidate_local_center = local_center(candidate_package, candidate_center);
     let reference_confidence = pocket_occupancy_evidence(
         &reference_crop,
         reference_local_center[0],
@@ -181,63 +357,80 @@ pub fn inspect_strip_feeder_source_pose(
             ),
         )
     };
-    let reference_machine = reference_center
-        .map(|measurement| to_machine(reference_pocket_machine_mm, measurement.center_mm));
-    let candidate_machine = candidate_center
-        .map(|measurement| to_machine(candidate_pocket_machine_mm, measurement.center_mm));
-    let relative_center_shift_mm =
-        reference_center
-            .zip(candidate_center)
-            .map(|(reference, candidate)| {
-                (candidate.center_mm[0] - reference.center_mm[0])
-                    .hypot(candidate.center_mm[1] - reference.center_mm[1])
-            });
-    let appearance_match =
-        reference_center
-            .zip(candidate_center)
-            .and_then(|(reference, candidate)| {
-                let half_span_mm = pocket_return_patch_half_span_mm(registration, cross, along);
-                let interior_half_span_mm = [
-                    half_span_mm[0] * POCKET_RETURN_INTERIOR_SCALE,
-                    half_span_mm[1] * POCKET_RETURN_INTERIOR_SCALE,
-                ];
-                centered_pocket_patch_similarity(
-                    &reference_crop,
-                    reference.center_px,
-                    &candidate_crop,
-                    candidate.center_px,
-                    interior_half_span_mm,
-                )
-            });
+    let reference_machine =
+        reference_center.map(|_| to_machine(reference_pocket_machine_mm, reference_local_center));
+    let candidate_machine =
+        candidate_center.map(|_| to_machine(candidate_pocket_machine_mm, candidate_local_center));
+    let relative_center_shift_mm = reference_center.zip(candidate_center).map(|_| {
+        (candidate_local_center[0] - reference_local_center[0])
+            .hypot(candidate_local_center[1] - reference_local_center[1])
+    });
+    let appearance_match = reference_center.zip(candidate_center).and_then(|_| {
+        let half_span_mm = pocket_return_patch_half_span_mm(registration, cross, along);
+        let interior_half_span_mm = [
+            half_span_mm[0] * POCKET_RETURN_INTERIOR_SCALE,
+            half_span_mm[1] * POCKET_RETURN_INTERIOR_SCALE,
+        ];
+        centered_pocket_patch_similarity(
+            &reference_crop,
+            local_mm_to_pixel(
+                &reference_crop,
+                reference_local_center,
+                cross_span_mm,
+                along_span_mm,
+            ),
+            &candidate_crop,
+            local_mm_to_pixel(
+                &candidate_crop,
+                candidate_local_center,
+                cross_span_mm,
+                along_span_mm,
+            ),
+            interior_half_span_mm,
+        )
+    });
     let appearance_similarity = appearance_match.map(|measurement| measurement.similarity);
     let maximum_relative_center_shift_mm = registration.tape_pitch_mm * 0.25;
-    let expected_package_size_mm = registration
-        .measured_part_size_mm
-        .or(registration.surveyed_part_size_mm);
-    let reference_package_size_mm =
-        reference_center
-            .zip(expected_package_size_mm)
-            .and_then(|(center, expected)| {
-                measure_source_package_size(
-                    &reference_crop,
-                    center,
-                    cross_span_mm,
-                    along_span_mm,
-                    expected,
-                )
-            });
-    let candidate_package_size_mm =
-        candidate_center
-            .zip(expected_package_size_mm)
-            .and_then(|(center, expected)| {
-                measure_source_package_size(
-                    &candidate_crop,
-                    center,
-                    cross_span_mm,
-                    along_span_mm,
-                    expected,
-                )
-            });
+    let reference_package_size_mm = reference_package.map(|package| package.size_mm);
+    let candidate_package_size_mm = candidate_package.map(|package| package.size_mm);
+    let component_outline = |nominal: [f64; 2], package: SourcePackageMeasurement| {
+        let half_cross = 0.5 * package.size_mm[0];
+        let half_along = 0.5 * package.size_mm[1];
+        [
+            to_machine(
+                nominal,
+                [
+                    package.center_mm[0] - half_cross,
+                    package.center_mm[1] - half_along,
+                ],
+            ),
+            to_machine(
+                nominal,
+                [
+                    package.center_mm[0] + half_cross,
+                    package.center_mm[1] - half_along,
+                ],
+            ),
+            to_machine(
+                nominal,
+                [
+                    package.center_mm[0] + half_cross,
+                    package.center_mm[1] + half_along,
+                ],
+            ),
+            to_machine(
+                nominal,
+                [
+                    package.center_mm[0] - half_cross,
+                    package.center_mm[1] + half_along,
+                ],
+            ),
+        ]
+    };
+    let reference_component_outline_machine_mm =
+        reference_package.map(|package| component_outline(reference_pocket_machine_mm, package));
+    let candidate_component_outline_machine_mm =
+        candidate_package.map(|package| component_outline(candidate_pocket_machine_mm, package));
     let flat_geometry_passed = allow_face_texture_change
         && reference_package_size_mm
             .zip(expected_package_size_mm)
@@ -275,6 +468,17 @@ pub fn inspect_strip_feeder_source_pose(
     if allow_face_texture_change && !flat_geometry_passed {
         findings.push("the source package does not have the expected flat geometry".into());
     }
+    if reference_package.is_none() || candidate_package.is_none() {
+        findings.push(
+            "an explicit component outline was not found in both source views; the contrast centroid was used as a fallback"
+                .into(),
+        );
+    } else {
+        findings.push(
+            "cyan marks the nominal pocket center, green marks the component outline, magenta marks the component center, and yellow marks the nozzle target"
+                .into(),
+        );
+    }
     if let Some(measurement) = appearance_match {
         findings.push(format!(
             "source appearance aligned by cross {:+.3} mm, along {:+.3} mm, and {:+.1} degrees",
@@ -288,14 +492,15 @@ pub fn inspect_strip_feeder_source_pose(
             "flat axis-symmetric package geometry passed despite changed face texture".into()
         });
     }
-    let preview = render_pocket_return_preview(
+    let preview = render_source_pose_preview(
         &reference_crop,
         &candidate_crop,
-        reference_occupancy,
-        candidate_occupancy,
-        appearance_passed || flat_geometry_passed,
-        reference_center.map(|measurement| measurement.center_px),
-        candidate_center.map(|measurement| measurement.center_px),
+        reference_local_center,
+        candidate_local_center,
+        reference_package,
+        candidate_package,
+        cross_span_mm,
+        along_span_mm,
     );
     Ok(StripFeederSourcePoseArtifacts {
         report: StripFeederSourcePoseReport {
@@ -315,7 +520,9 @@ pub fn inspect_strip_feeder_source_pose(
             appearance_similarity,
             minimum_appearance_similarity: MINIMUM_SOURCE_POSE_APPEARANCE_SIMILARITY,
             reference_package_size_mm,
+            reference_component_outline_machine_mm,
             candidate_package_size_mm,
+            candidate_component_outline_machine_mm,
             flat_geometry_passed,
             face_texture_change_allowed: allow_face_texture_change,
             passed,
@@ -326,13 +533,13 @@ pub fn inspect_strip_feeder_source_pose(
     })
 }
 
-fn measure_source_package_size(
+fn measure_source_package(
     crop: &GrayFrame,
     center: PocketImageCenter,
     cross_span_mm: f64,
     along_span_mm: f64,
     expected_size_mm: [f64; 2],
-) -> Option<[f64; 2]> {
+) -> Option<SourcePackageMeasurement> {
     let mut expected = expected_size_mm;
     expected.sort_by(f64::total_cmp);
     if expected[0] < 0.1 || !expected.iter().all(|value| value.is_finite()) {
@@ -360,8 +567,151 @@ fn measure_source_package_size(
     });
     candidates
         .first()
-        .map(|(feature, _, _)| [feature.cross_size_mm, feature.along_size_mm])
-        .or(Some(center.support_size_mm))
+        .map(|(feature, _, _)| SourcePackageMeasurement {
+            center_mm: [feature.cross_mm, feature.along_mm],
+            size_mm: [feature.cross_size_mm, feature.along_size_mm],
+        })
+        .or_else(|| {
+            measure_dark_source_package(
+                crop,
+                center,
+                cross_span_mm,
+                along_span_mm,
+                expected_size_mm,
+            )
+            .ok()
+            .flatten()
+        })
+}
+
+fn measure_dark_source_package(
+    crop: &GrayFrame,
+    center: PocketImageCenter,
+    cross_span_mm: f64,
+    along_span_mm: f64,
+    expected_size_mm: [f64; 2],
+) -> Result<Option<SourcePackageMeasurement>> {
+    let x_px_per_mm = f64::from(crop.width) / cross_span_mm;
+    let y_px_per_mm = f64::from(crop.height) / along_span_mm;
+    let mut expected = expected_size_mm;
+    expected.sort_by(f64::total_cmp);
+    let half_extent_mm = (1.35 * expected[1]).clamp(1.25, 2.75);
+    let center_px = local_mm_to_pixel(crop, center.center_mm, cross_span_mm, along_span_mm);
+    let left = (center_px[0] - half_extent_mm * x_px_per_mm)
+        .floor()
+        .max(0.0) as i32;
+    let right = (center_px[0] + half_extent_mm * x_px_per_mm)
+        .ceil()
+        .min(f64::from(crop.width)) as i32;
+    let top = (center_px[1] - half_extent_mm * y_px_per_mm)
+        .floor()
+        .max(0.0) as i32;
+    let bottom = (center_px[1] + half_extent_mm * y_px_per_mm)
+        .ceil()
+        .min(f64::from(crop.height)) as i32;
+    if right - left < 12 || bottom - top < 12 {
+        return Ok(None);
+    }
+    let source = gray_frame_to_mat(crop)?;
+    let roi = Mat::roi(&source, Rect::new(left, top, right - left, bottom - top))?;
+    let mut blurred = Mat::default();
+    imgproc::gaussian_blur(
+        &roi,
+        &mut blurred,
+        Size::new(3, 3),
+        0.0,
+        0.0,
+        core::BORDER_DEFAULT,
+    )?;
+    let mut mask = Mat::default();
+    let otsu_threshold = imgproc::threshold(
+        &blurred,
+        &mut mask,
+        0.0,
+        255.0,
+        imgproc::THRESH_BINARY_INV | imgproc::THRESH_OTSU,
+    )?;
+    let core_threshold = (otsu_threshold - 40.0).clamp(32.0, 192.0);
+    imgproc::threshold(
+        &blurred,
+        &mut mask,
+        core_threshold,
+        255.0,
+        imgproc::THRESH_BINARY_INV,
+    )?;
+    let kernel =
+        imgproc::get_structuring_element(imgproc::MORPH_RECT, Size::new(3, 3), Point::new(-1, -1))?;
+    let mask_source = mask.try_clone()?;
+    imgproc::morphology_ex(
+        &mask_source,
+        &mut mask,
+        imgproc::MORPH_OPEN,
+        &kernel,
+        Point::new(-1, -1),
+        1,
+        core::BORDER_CONSTANT,
+        imgproc::morphology_default_border_value()?,
+    )?;
+    let mut labels = Mat::default();
+    let mut stats = Mat::default();
+    let mut centroids = Mat::default();
+    let count = imgproc::connected_components_with_stats(
+        &mask,
+        &mut labels,
+        &mut stats,
+        &mut centroids,
+        8,
+        CV_32S,
+    )?;
+    let expected_area_mm2 = expected[0] * expected[1];
+    let mut candidates = Vec::new();
+    for label in 1..count {
+        let area_px = f64::from(*stats.at_2d::<i32>(label, imgproc::CC_STAT_AREA)?);
+        let component_left = *stats.at_2d::<i32>(label, imgproc::CC_STAT_LEFT)?;
+        let component_top = *stats.at_2d::<i32>(label, imgproc::CC_STAT_TOP)?;
+        let width_px = *stats.at_2d::<i32>(label, imgproc::CC_STAT_WIDTH)?;
+        let height_px = *stats.at_2d::<i32>(label, imgproc::CC_STAT_HEIGHT)?;
+        let size_mm = [
+            f64::from(width_px) / x_px_per_mm,
+            f64::from(height_px) / y_px_per_mm,
+        ];
+        let area_mm2 = area_px / (x_px_per_mm * y_px_per_mm);
+        if area_mm2 < 0.08 * expected_area_mm2
+            || area_mm2 > 1.60 * expected_area_mm2
+            || size_mm[0].max(size_mm[1]) > 1.60 * expected[1]
+            || size_mm[0].min(size_mm[1]) < 0.12
+        {
+            continue;
+        }
+        let component_center_px = [
+            f64::from(left + component_left) + 0.5 * f64::from(width_px),
+            f64::from(top + component_top) + 0.5 * f64::from(height_px),
+        ];
+        let component_center_mm = [
+            component_center_px[0] / x_px_per_mm,
+            component_center_px[1] / y_px_per_mm,
+        ];
+        let center_error_mm = (component_center_mm[0] - center.center_mm[0])
+            .hypot(component_center_mm[1] - center.center_mm[1]);
+        if center_error_mm > 0.80 {
+            continue;
+        }
+        let fill = area_px / f64::from((width_px * height_px).max(1));
+        let aspect = size_mm[0].max(size_mm[1]) / size_mm[0].min(size_mm[1]);
+        let expected_aspect = expected[1] / expected[0];
+        let score = center_error_mm / 0.40
+            + (aspect / expected_aspect).ln().abs()
+            + 0.35 * (1.0 - fill.clamp(0.0, 1.0));
+        candidates.push((
+            score,
+            SourcePackageMeasurement {
+                center_mm: component_center_mm,
+                size_mm,
+            },
+        ));
+    }
+    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    Ok(candidates.first().map(|candidate| candidate.1))
 }
 
 fn source_package_size_matches(measured_size_mm: [f64; 2], expected_size_mm: [f64; 2]) -> bool {
@@ -597,8 +947,13 @@ struct CircleFeature {
 struct PocketImageCenter {
     center_px: [f64; 2],
     center_mm: [f64; 2],
-    support_size_mm: [f64; 2],
     confidence: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourcePackageMeasurement {
+    center_mm: [f64; 2],
+    size_mm: [f64; 2],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1083,6 +1438,8 @@ pub fn analyze_live_strip_feeder_holdout(
             confidence,
             passed,
             artifact_name: artifact_name.into(),
+            source_frame_artifact_names: Vec::new(),
+            source_frame_camera_poses: Vec::new(),
             findings,
         },
         preview,
@@ -1109,6 +1466,8 @@ fn failed_live_holdout_report(
         confidence: 0.0,
         passed: false,
         artifact_name: artifact_name.into(),
+        source_frame_artifact_names: Vec::new(),
+        source_frame_camera_poses: Vec::new(),
         findings,
     }
 }
@@ -1405,8 +1764,6 @@ fn measure_pocket_image_center(
     let mut weight_sum = 0.0;
     let mut weighted_x = 0.0;
     let mut weighted_y = 0.0;
-    let mut weighted_x_squared = 0.0;
-    let mut weighted_y_squared = 0.0;
     let mut support = 0_u32;
     for y in y_min..=y_max {
         for x in x_min..=x_max {
@@ -1418,8 +1775,6 @@ fn measure_pocket_image_center(
                 weight_sum += weight;
                 weighted_x += center_x * weight;
                 weighted_y += center_y * weight;
-                weighted_x_squared += center_x.powi(2) * weight;
-                weighted_y_squared += center_y.powi(2) * weight;
                 support += 1;
             }
         }
@@ -1433,12 +1788,6 @@ fn measure_pocket_image_center(
         center_px[0] / f64::from(crop.width) * cross_span_mm,
         center_px[1] / f64::from(crop.height) * along_span_mm,
     ];
-    let variance_x = (weighted_x_squared / weight_sum - center_px[0].powi(2)).max(0.0);
-    let variance_y = (weighted_y_squared / weight_sum - center_px[1].powi(2)).max(0.0);
-    let support_size_mm = [
-        (12.0 * variance_x).sqrt() / f64::from(crop.width) * cross_span_mm,
-        (12.0 * variance_y).sqrt() / f64::from(crop.height) * along_span_mm,
-    ];
     let support_fraction = f64::from(support) / area;
     let mean_weight = weight_sum / f64::from(support);
     let confidence =
@@ -1446,7 +1795,6 @@ fn measure_pocket_image_center(
     Some(PocketImageCenter {
         center_px,
         center_mm,
-        support_size_mm,
         confidence,
     })
 }
@@ -1635,6 +1983,90 @@ fn render_pocket_return_preview(
             [245, 70, 65]
         },
     );
+    frame
+}
+
+fn local_mm_to_pixel(
+    frame: &GrayFrame,
+    local_mm: [f64; 2],
+    cross_span_mm: f64,
+    along_span_mm: f64,
+) -> [f64; 2] {
+    [
+        local_mm[0] / cross_span_mm * f64::from(frame.width),
+        local_mm[1] / along_span_mm * f64::from(frame.height),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_source_pose_preview(
+    reference: &GrayFrame,
+    candidate: &GrayFrame,
+    reference_center_mm: [f64; 2],
+    candidate_center_mm: [f64; 2],
+    reference_package: Option<SourcePackageMeasurement>,
+    candidate_package: Option<SourcePackageMeasurement>,
+    cross_span_mm: f64,
+    along_span_mm: f64,
+) -> RgbFrame {
+    let width = reference.width + candidate.width;
+    let height = reference.height.max(candidate.height);
+    let mut frame = RgbFrame {
+        width,
+        height,
+        pixels: vec![0; (width * height * 3) as usize],
+    };
+    for (offset_x, source) in [(0, reference), (reference.width, candidate)] {
+        for y in 0..source.height {
+            for x in 0..source.width {
+                let luma = source.pixels[(y * source.width + x) as usize];
+                let destination = ((y * width + offset_x + x) * 3) as usize;
+                frame.pixels[destination..destination + 3].fill(luma);
+            }
+        }
+    }
+    for (offset_x, source, center_mm, package) in [
+        (0, reference, reference_center_mm, reference_package),
+        (
+            reference.width,
+            candidate,
+            candidate_center_mm,
+            candidate_package,
+        ),
+    ] {
+        let offset = [f64::from(offset_x), 0.0];
+        let nominal = [
+            f64::from(offset_x) + f64::from(source.width) * 0.5,
+            f64::from(source.height) * 0.5,
+        ];
+        draw_cross(&mut frame, nominal, 8.0, [0, 210, 255]);
+        let center = add(
+            local_mm_to_pixel(source, center_mm, cross_span_mm, along_span_mm),
+            offset,
+        );
+        if let Some(package) = package {
+            let half_size_px = [
+                0.5 * package.size_mm[0] / cross_span_mm * f64::from(source.width),
+                0.5 * package.size_mm[1] / along_span_mm * f64::from(source.height),
+            ];
+            let corners = [
+                [center[0] - half_size_px[0], center[1] - half_size_px[1]],
+                [center[0] + half_size_px[0], center[1] - half_size_px[1]],
+                [center[0] + half_size_px[0], center[1] + half_size_px[1]],
+                [center[0] - half_size_px[0], center[1] + half_size_px[1]],
+            ];
+            for index in 0..corners.len() {
+                draw_line(
+                    &mut frame,
+                    corners[index],
+                    corners[(index + 1) % corners.len()],
+                    [50, 235, 120],
+                );
+            }
+        }
+        draw_circle(&mut frame, center, 3.0, [235, 70, 235]);
+        draw_cross(&mut frame, center, 5.0, [255, 215, 45]);
+    }
     frame
 }
 
@@ -4203,6 +4635,32 @@ mod tests {
     }
 
     #[test]
+    fn dark_package_core_centers_an_outline_inside_a_larger_pocket() {
+        let width = 350_u32;
+        let height = 500_u32;
+        let mut crop = GrayFrame {
+            width,
+            height,
+            pixels: vec![235_u8; (width * height) as usize],
+        };
+        paint_rectangle(&mut crop, [175, 250], [28, 17], 190);
+        paint_rectangle(&mut crop, [184, 263], [16, 7], 55);
+        paint_rectangle(&mut crop, [169, 263], [3, 7], 220);
+        paint_rectangle(&mut crop, [199, 263], [3, 7], 220);
+        let pocket_center =
+            measure_pocket_image_center(&crop, 7.0, 10.0, 14.0, 20.0, 4.0, 8.0).unwrap();
+
+        let package = measure_dark_source_package(&crop, pocket_center, 14.0, 20.0, [1.0, 1.45])
+            .unwrap()
+            .unwrap();
+
+        assert!((package.center_mm[0] - 7.36).abs() < 0.12, "{package:?}");
+        assert!((package.center_mm[1] - 10.52).abs() < 0.12, "{package:?}");
+        assert!((package.size_mm[0] - 0.84).abs() < 0.05, "{package:?}");
+        assert!((package.size_mm[1] - 0.56).abs() < 0.05, "{package:?}");
+    }
+
+    #[test]
     fn live_holdout_rectifies_the_camera_and_selects_an_occupied_pocket() {
         let width = 500_u32;
         let height = 500_u32;
@@ -4313,6 +4771,15 @@ mod tests {
         assert!(result.report.correction_magnitude_mm < 0.15);
         assert_eq!(result.preview.width, 350);
         assert_eq!(result.preview.height, 500);
+
+        let draft =
+            draft_strip_feeder_source_component(&frame, pose, [112.0, 72.0], &model, &registration)
+                .unwrap();
+        assert_eq!(draft.crop.width, 350);
+        assert_eq!(draft.crop.height, 300);
+        assert_eq!(draft.report.occupancy, StripPocketOccupancy::Occupied);
+        assert!(draft.report.outline_px.is_some());
+        assert!(!draft.report.review_required);
 
         let mut returned_frame = frame.clone();
         paint_disc(&mut returned_frame.pixels, width, height, 285, 250, 11, 105);

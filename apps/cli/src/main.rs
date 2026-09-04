@@ -115,6 +115,28 @@ enum Command {
         #[arg(long = "source", required = true)]
         sources: Vec<String>,
     },
+    PromoteStripFeederInventory {
+        scan: Uuid,
+    },
+    CaptureStripFeederSources {
+        scan: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value_t = 12)]
+        occupied: u32,
+        #[arg(long, default_value_t = 12)]
+        empty: u32,
+        /// Inventory lane index. Repeat to restrict the capture batch.
+        #[arg(long = "lane")]
+        lanes: Vec<u32>,
+        /// Confirm fixed tape, level nozzles, a clear envelope, and reachable
+        /// power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    StripFeederSourceCapture {
+        capture: Uuid,
+    },
     SaveStripFeederDraft {
         scan: Uuid,
         #[arg(long)]
@@ -695,6 +717,42 @@ async fn main() -> Result<()> {
                 &client,
                 &format!("{base}/workspace-scans/{scan}/strip-feeder-inventory"),
                 Some(json!({"evidence_sources": evidence_sources})),
+            )
+            .await?
+        }
+        Command::PromoteStripFeederInventory { scan } => {
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/strip-feeder-inventory/registrations"),
+                Some(json!({})),
+            )
+            .await?
+        }
+        Command::CaptureStripFeederSources {
+            scan,
+            lease,
+            occupied,
+            empty,
+            lanes,
+            confirm_safety_checks,
+        } => {
+            post(
+                &client,
+                &format!("{base}/workspace-scans/{scan}/strip-feeder-inventory/source-captures"),
+                Some(json!({
+                    "lease_id": lease,
+                    "occupied_count": occupied,
+                    "empty_count": empty,
+                    "lane_indices": lanes,
+                    "confirmed_external_safety_checks": confirm_safety_checks,
+                })),
+            )
+            .await?
+        }
+        Command::StripFeederSourceCapture { capture } => {
+            get(
+                &client,
+                &format!("{base}/strip-feeder-source-captures/{capture}"),
             )
             .await?
         }
@@ -1686,6 +1744,47 @@ mod tests {
                 scan: parsed_scan,
                 sources,
             } if parsed_scan == scan && sources == vec![source]
+        ));
+
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "promote-strip-feeder-inventory",
+            &scan.to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::PromoteStripFeederInventory { scan: parsed } if parsed == scan
+        ));
+
+        let lease = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "capture-strip-feeder-sources",
+            &scan.to_string(),
+            "--lease",
+            &lease.to_string(),
+            "--occupied",
+            "8",
+            "--empty",
+            "6",
+            "--lane",
+            "0",
+            "--lane",
+            "2",
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::CaptureStripFeederSources {
+                scan: parsed_scan,
+                lease: parsed_lease,
+                occupied: 8,
+                empty: 6,
+                lanes,
+                confirm_safety_checks: true,
+            } if parsed_scan == scan && parsed_lease == lease && lanes == vec![0, 2]
         ));
     }
 }
