@@ -1065,13 +1065,14 @@ cargo run --release -p velocitypnp -- qualify-strip-feeder-pickup \
   --confirm-safety-checks
 ```
 
-The runner first captures the bare nozzle at every requested angle. After
-pickup, it rotates the held part through the same angles and captures each
-matching view. Fixed camera features therefore stay fixed, while every model
-input uses a bare-nozzle reference at the correct nozzle angle. The runner
-checks vacuum before each held capture, permits no more than 12 unique angles,
-restores the original nozzle angle, and uses the normal verified pocket-return
-path. A lost vacuum hold stops the sweep and starts recovery.
+The runner first uses a fresh top-camera frame to reject an empty or unsafe
+source pocket. It then captures the bare nozzle at every requested angle.
+After pickup, it rotates the held part through the same angles and captures
+each matching view. Fixed camera features therefore stay fixed, while every
+model input uses a bare-nozzle reference at the correct nozzle angle. The
+runner checks vacuum before each held capture, permits no more than 12 unique
+angles, restores the original nozzle angle, and uses the normal verified
+pocket-return path. A lost vacuum hold stops the sweep and starts recovery.
 
 The report records requested and actual angles, vacuum samples, deterministic
 inspection, optional learned shadow output, and artifact names. The held-part

@@ -293,7 +293,7 @@ impl AppState {
                 tracing::info!(
                     path = %model.package_dir().display(),
                     sha256 = status.artifact_sha256.as_deref().unwrap_or_default(),
-                    "loaded source-component shadow model"
+                    "loaded source-component model"
                 );
                 self.source_component_model = Some(Arc::new(model));
                 self.source_component_model_status = Arc::new(status);
@@ -302,7 +302,7 @@ impl AppState {
                 tracing::warn!(
                     path = %package_dir.display(),
                     %error,
-                    "source-component shadow model is disabled"
+                    "source-component model is disabled"
                 );
                 self.source_component_model = None;
                 self.source_component_model_status =
@@ -8178,54 +8178,64 @@ async fn select_source_component_pick_center(
     let learned_flat = prediction.class == SourceComponentClass::ComponentFlat;
     let learned_control_ready =
         learned_flat && prediction.confidence_gate_passed && prediction.pose.valid;
-    if prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty {
-        return Err("the source-component model reports an empty qualification pocket".into());
-    }
-    if prediction.confidence_gate_passed
-        && prediction.class == SourceComponentClass::ComponentOnEdge
-    {
-        return Err("the source-component model reports a component on edge".into());
-    }
-    let learned_measurement = if learned_control_ready {
-        let center_machine_mm = source_component_crop_pixel_to_machine(
+    let mut rejection =
+        if prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty {
+            Some("the source-component model reports an empty qualification pocket".into())
+        } else if prediction.confidence_gate_passed
+            && prediction.class == SourceComponentClass::ComponentOnEdge
+        {
+            Some("the source-component model reports a component on edge".into())
+        } else {
+            None
+        };
+    let learned_measurement = if learned_control_ready && rejection.is_none() {
+        match source_component_crop_pixel_to_machine(
             &analysis.crop,
             prediction.pose.center_px,
             nominal_pocket_machine_mm,
             &prepared.registration,
-        )
-        .map_err(|error| error.to_string())?;
-        let nominal_offset_mm = (center_machine_mm[0] - nominal_pocket_machine_mm[0])
-            .hypot(center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-        let cv_delta_mm = (center_machine_mm[0] - deterministic_center_machine_mm[0])
-            .hypot(center_machine_mm[1] - deterministic_center_machine_mm[1]);
-        if nominal_offset_mm > maximum_offset_mm {
-            return Err(format!(
-                "learned source-component center correction {nominal_offset_mm:.3} mm exceeds the configured bound"
-            ));
+        ) {
+            Ok(center_machine_mm) => {
+                let nominal_offset_mm = (center_machine_mm[0] - nominal_pocket_machine_mm[0])
+                    .hypot(center_machine_mm[1] - nominal_pocket_machine_mm[1]);
+                let cv_delta_mm = (center_machine_mm[0] - deterministic_center_machine_mm[0])
+                    .hypot(center_machine_mm[1] - deterministic_center_machine_mm[1]);
+                if nominal_offset_mm > maximum_offset_mm {
+                    rejection = Some(format!(
+                        "learned source-component center correction {nominal_offset_mm:.3} mm exceeds the configured bound"
+                    ));
+                    None
+                } else if cv_delta_mm > maximum_offset_mm {
+                    rejection = Some(format!(
+                        "learned and CV source-component centers differ by {cv_delta_mm:.3} mm, beyond the configured bound"
+                    ));
+                    None
+                } else {
+                    Some((center_machine_mm, nominal_offset_mm, cv_delta_mm))
+                }
+            }
+            Err(error) => {
+                rejection = Some(error.to_string());
+                None
+            }
         }
-        if cv_delta_mm > maximum_offset_mm {
-            return Err(format!(
-                "learned and CV source-component centers differ by {cv_delta_mm:.3} mm, beyond the configured bound"
-            ));
-        }
-        Some((center_machine_mm, nominal_offset_mm, cv_delta_mm))
     } else {
         None
     };
 
+    analysis.report.algorithm_version = SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM.into();
+    analysis
+        .report
+        .findings
+        .retain(|finding| !finding.contains("shadow evidence"));
     let (center_machine_mm, method_finding) = if let Some((
         learned_center_machine_mm,
         learned_nominal_offset_mm,
         learned_cv_delta_mm,
     )) = learned_measurement
     {
-        analysis.report.algorithm_version = SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM.into();
         analysis.report.control_authorized = true;
         analysis.report.review_required = false;
-        analysis
-            .report
-            .findings
-            .retain(|finding| !finding.contains("shadow evidence"));
         analysis.report.findings.push(format!(
             "the learned flat-component center is authorized for this pickup; it is {learned_nominal_offset_mm:.3} mm from nominal and {learned_cv_delta_mm:.3} mm from CV"
         ));
@@ -8235,6 +8245,17 @@ async fn select_source_component_pick_center(
                 "the source-component model supplied the pickup center with {:.1}% class confidence",
                 100.0 * prediction.class_confidence
             ),
+        )
+    } else if let Some(error) = rejection.as_deref() {
+        analysis.report.control_authorized = false;
+        analysis.report.review_required = true;
+        analysis
+            .report
+            .findings
+            .push(format!("pickup control rejected this prediction: {error}"));
+        (
+            deterministic_center_machine_mm,
+            "the source-component control gate rejected motion".into(),
         )
     } else {
         analysis.report.findings.push(
@@ -8279,6 +8300,9 @@ async fn select_source_component_pick_center(
         &analysis.report.preview_artifact_name,
         &analysis.preview,
     )?;
+    if let Some(error) = rejection {
+        return Err(error);
+    }
     Ok(SourceComponentPickControl {
         center_machine_mm,
         artifact_names: vec![
@@ -9482,51 +9506,6 @@ async fn execute_physical_strip_feeder_pickup(
         .disable_actuator(sensor_id.clone())
         .await
         .map_err(|error| format!("pickup could not establish the vacuum-off state: {error}"))?;
-    execute_visual_home(
-        state,
-        VisualHomingRequest {
-            lease_id: prepared.lease_id,
-            apply_offset: true,
-            move_to_seed: true,
-        },
-    )
-    .await
-    .map_err(|error| error.message)?;
-    let current_tip_offset = measure_current_tip_offset(
-        state,
-        prepared.lease_id,
-        nozzle_id,
-        &prepared.head_reference,
-    )
-    .await?;
-    let bottom_pose = state
-        .machine
-        .status()
-        .pose
-        .ok_or_else(|| "pickup lost the centered bottom-camera pose".to_string())?;
-    let bare = capture_bottom_mean_with_lights(
-        state,
-        prepared.lease_id,
-        &camera_profile,
-        &camera_path,
-        pickup_profile.inspection_sample_count,
-    )
-    .await?;
-    persist_transfer_gray_artifact(state, prepared, BARE_NOZZLE_ARTIFACT, &bare)?;
-    artifact_names.push(BARE_NOZZLE_ARTIFACT.into());
-    let bare_rotation_captures = capture_bare_nozzle_rotation_sweep(
-        state,
-        prepared,
-        &camera_profile,
-        &camera_path,
-        pickup_profile.inspection_sample_count,
-    )
-    .await?;
-    artifact_names.extend(
-        bare_rotation_captures
-            .iter()
-            .map(|capture| capture.artifact_name.clone()),
-    );
     let (source_before, source_before_pose) = capture_top_pocket_mean(
         state,
         prepared,
@@ -9598,6 +9577,52 @@ async fn execute_physical_strip_feeder_pickup(
     artifact_names.extend(source_control.artifact_names);
     findings.extend(source_control.findings);
     let pocket_machine_mm = source_control.center_machine_mm;
+
+    execute_visual_home(
+        state,
+        VisualHomingRequest {
+            lease_id: prepared.lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let current_tip_offset = measure_current_tip_offset(
+        state,
+        prepared.lease_id,
+        nozzle_id,
+        &prepared.head_reference,
+    )
+    .await?;
+    let bottom_pose = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "pickup lost the centered bottom-camera pose".to_string())?;
+    let bare = capture_bottom_mean_with_lights(
+        state,
+        prepared.lease_id,
+        &camera_profile,
+        &camera_path,
+        pickup_profile.inspection_sample_count,
+    )
+    .await?;
+    persist_transfer_gray_artifact(state, prepared, BARE_NOZZLE_ARTIFACT, &bare)?;
+    artifact_names.push(BARE_NOZZLE_ARTIFACT.into());
+    let bare_rotation_captures = capture_bare_nozzle_rotation_sweep(
+        state,
+        prepared,
+        &camera_profile,
+        &camera_path,
+        pickup_profile.inspection_sample_count,
+    )
+    .await?;
+    artifact_names.extend(
+        bare_rotation_captures
+            .iter()
+            .map(|capture| capture.artifact_name.clone()),
+    );
 
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
     let height_correction = prepared
