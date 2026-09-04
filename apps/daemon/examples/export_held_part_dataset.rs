@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -32,6 +32,8 @@ struct DatasetManifest {
     classes: Vec<String>,
     evaluation_registration_ids: Vec<Uuid>,
     split_policy: String,
+    carried_ground_truth_manifest: Option<String>,
+    carried_sample_count: usize,
     notes: Vec<String>,
     samples: Vec<DatasetSample>,
 }
@@ -69,13 +71,74 @@ struct DatasetSample {
     deterministic: HeldPartInspectionReport,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReviewedGroundTruthManifest {
+    classes: Vec<String>,
+    samples: Vec<ReviewedGroundTruthSample>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ReviewedGroundTruthSample {
+    id: String,
+    split: String,
+    group_id: Uuid,
+    source_kind: String,
+    source_id: Uuid,
+    source_artifact: String,
+    observation_kind: String,
+    bare_source_sha256: String,
+    observed_source_sha256: String,
+    bare_image_path: String,
+    observed_image_path: String,
+    bare_image_sha256: String,
+    observed_image_sha256: String,
+    width_px: u32,
+    height_px: u32,
+    nozzle_id: String,
+    part_key: Option<String>,
+    orientation: PartOrientation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_nozzle_rotation_offset_deg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actual_nozzle_rotation_offset_deg: Option<f64>,
+    evidence: Vec<String>,
+    draft_state: String,
+    deterministic: HeldPartInspectionReport,
+    included: bool,
+    class_name: Option<String>,
+    outline_px: Option<[[f64; 2]; 4]>,
+    marker_status: String,
+    marker_end_px: Option<[f64; 2]>,
+    label_source: String,
+    review_note: String,
+}
+
+struct ReviewedDataset {
+    root: PathBuf,
+    draft_manifest_sha256: String,
+    ground_truth_manifest_sha256: String,
+    samples_by_id: BTreeMap<String, ReviewedGroundTruthSample>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CarriedGroundTruthManifest {
+    schema_version: u32,
+    source_dataset: String,
+    source_draft_manifest_sha256: String,
+    source_ground_truth_manifest_sha256: String,
+    classes: Vec<String>,
+    samples: Vec<ReviewedGroundTruthSample>,
+}
+
 struct ExportContext<'a> {
     output: &'a Path,
     profile: &'a MachineProfile,
     evaluation_groups: &'a BTreeSet<Uuid>,
     parts: &'a BTreeMap<String, Part>,
+    reviewed: Option<&'a ReviewedDataset>,
     mappings: BTreeMap<Uuid, [[f64; 2]; 2]>,
     samples: Vec<DatasetSample>,
+    carried_samples: Vec<ReviewedGroundTruthSample>,
     omitted_incompatible_pairs: usize,
 }
 
@@ -90,20 +153,37 @@ struct Observation<'a> {
     part_key: Option<&'a str>,
     requested_nozzle_rotation_offset_deg: Option<f64>,
     actual_nozzle_rotation_offset_deg: Option<f64>,
+    learned_outline_px: Option<[[f64; 2]; 4]>,
     evidence: Vec<String>,
 }
 
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    let mut positional = Vec::new();
+    let mut reviewed_root = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == "--carry-reviewed" {
+            index += 1;
+            let path = arguments
+                .get(index)
+                .context("--carry-reviewed requires a dataset directory")?;
+            reviewed_root = Some(PathBuf::from(path));
+        } else {
+            positional.push(arguments[index].clone());
+        }
+        index += 1;
+    }
     ensure!(
-        arguments.len() >= 4,
+        positional.len() >= 4,
         "usage: export_held_part_dataset DATABASE PROFILE OUTPUT_DIR \
-         EVAL_REGISTRATION_UUID [EVAL_REGISTRATION_UUID ...]"
+         EVAL_REGISTRATION_UUID [EVAL_REGISTRATION_UUID ...] \
+         [--carry-reviewed DATASET_DIR]"
     );
-    let database = PathBuf::from(&arguments[0]);
-    let profile_path = PathBuf::from(&arguments[1]);
-    let output = PathBuf::from(&arguments[2]);
-    let evaluation_groups = arguments[3..]
+    let database = PathBuf::from(&positional[0]);
+    let profile_path = PathBuf::from(&positional[1]);
+    let output = PathBuf::from(&positional[2]);
+    let evaluation_groups = positional[3..]
         .iter()
         .map(|value| {
             value
@@ -111,6 +191,10 @@ fn main() -> Result<()> {
                 .with_context(|| format!("invalid evaluation registration {value}"))
         })
         .collect::<Result<BTreeSet<_>>>()?;
+    let reviewed = reviewed_root
+        .as_deref()
+        .map(load_reviewed_dataset)
+        .transpose()?;
     ensure!(database.is_file(), "database does not exist");
     ensure!(profile_path.is_file(), "machine profile does not exist");
     ensure!(
@@ -170,8 +254,10 @@ fn main() -> Result<()> {
         profile: &profile,
         evaluation_groups: &evaluation_groups,
         parts: &parts,
+        reviewed: reviewed.as_ref(),
         mappings: BTreeMap::new(),
         samples: Vec::new(),
+        carried_samples: Vec::new(),
         omitted_incompatible_pairs: 0,
     };
 
@@ -182,11 +268,19 @@ fn main() -> Result<()> {
         "no paired bottom-camera images were found"
     );
     ensure!(
-        context.samples.iter().any(|sample| sample.split == "train"),
+        context.samples.iter().any(|sample| sample.split == "train")
+            || context
+                .carried_samples
+                .iter()
+                .any(|sample| sample.split == "train"),
         "the train split is empty"
     );
     ensure!(
-        context.samples.iter().any(|sample| sample.split == "eval"),
+        context.samples.iter().any(|sample| sample.split == "eval")
+            || context
+                .carried_samples
+                .iter()
+                .any(|sample| sample.split == "eval"),
         "the evaluation split is empty"
     );
     context.samples.sort_by_key(|sample| {
@@ -198,6 +292,36 @@ fn main() -> Result<()> {
             sample.source_artifact.clone(),
         )
     });
+    context
+        .carried_samples
+        .sort_by(|first, second| first.id.cmp(&second.id));
+
+    let carried_manifest_name = reviewed
+        .as_ref()
+        .map(|_| "manifest.carried-ground-truth.json".to_string());
+    if let Some(reviewed) = &reviewed {
+        let carried = CarriedGroundTruthManifest {
+            schema_version: 1,
+            source_dataset: reviewed.root.display().to_string(),
+            source_draft_manifest_sha256: reviewed.draft_manifest_sha256.clone(),
+            source_ground_truth_manifest_sha256: reviewed.ground_truth_manifest_sha256.clone(),
+            classes: vec![
+                "component_flat".into(),
+                "component_on_edge".into(),
+                "multiple_components".into(),
+            ],
+            samples: context.carried_samples.clone(),
+        };
+        fs::write(
+            output.join(
+                carried_manifest_name
+                    .as_deref()
+                    .expect("a reviewed dataset has a carried manifest"),
+            ),
+            serde_json::to_vec_pretty(&carried)?,
+        )?;
+    }
+    let carried_count = context.carried_samples.len();
 
     let manifest = DatasetManifest {
         schema_version: 1,
@@ -216,8 +340,11 @@ fn main() -> Result<()> {
         split_policy:
             "all images from one feeder registration or retained feeder identity stay in one split"
                 .into(),
+        carried_ground_truth_manifest: carried_manifest_name,
+        carried_sample_count: carried_count,
         notes: vec![
             "draft labels are weak supervision, not ground truth".into(),
+            "reviewed labels are carried only when both source and crop hashes match".into(),
             "each sample keeps aligned-size bare and observed camera crops".into(),
             "empty is an included negative state with no component outline".into(),
             "the multiple-components class uses one enclosing oriented box".into(),
@@ -239,9 +366,12 @@ fn main() -> Result<()> {
     )?;
     fs::write(
         output.join("README.txt"),
-        "Open review.html. Compare the bare reference with the observed image.\n\
-         Correct the state and green oriented box. Mark a polarity end only when\n\
-         it is visible. Download review-decisions.json when all samples are done.\n",
+        format!(
+            "Open review.html. Review only the new image pairs.\n\
+             {carried_count} prior reviewed labels were carried without another review.\n\
+             Correct the state and green oriented box. Mark a polarity end only when\n\
+             it is visible. Download review-decisions.json when all samples are done.\n"
+        ),
     )?;
 
     let train = manifest
@@ -262,8 +392,9 @@ fn main() -> Result<()> {
         .filter(|sample| sample.draft_state == "evidence_conflict")
         .count();
     println!(
-        "exported {} paired samples: {train} train, {evaluation} eval, \
-         {held} held, {release} post-release, {conflicts} evidence conflicts",
+        "exported {} new paired samples and carried {carried_count} reviewed samples: \
+         {train} new train, {evaluation} new eval, {held} held, {release} post-release, \
+         {conflicts} evidence conflicts",
         manifest.samples.len(),
     );
     println!("review {}", output.join("review.html").display());
@@ -339,6 +470,11 @@ fn export_pickup_qualifications(
                         .map(|capture| capture.requested_rotation_offset_deg),
                     actual_nozzle_rotation_offset_deg: rotation_capture
                         .map(|capture| capture.held_rotation_offset_deg),
+                    learned_outline_px: rotation_capture.and_then(|capture| {
+                        let prediction = &capture.shadow.as_ref()?.prediction;
+                        (prediction.class.occupied() && prediction.pose.valid)
+                            .then_some(prediction.pose.outline_px)
+                    }),
                     evidence,
                 },
             )?;
@@ -393,6 +529,7 @@ fn export_placement_executions(
                     part_key: Some(&report.part_key),
                     requested_nozzle_rotation_offset_deg: None,
                     actual_nozzle_rotation_offset_deg: None,
+                    learned_outline_px: None,
                     evidence,
                 },
             )?;
@@ -458,7 +595,10 @@ fn export_observation(
         .outline_px
         .map(|outline| shift_outline(outline, origin));
     let part = observation.part_key.and_then(|key| context.parts.get(key));
-    let seed_outline = draft_outline.unwrap_or_else(|| seed_outline(part, CROP_SIZE_PX));
+    let seed_outline = observation
+        .learned_outline_px
+        .or(draft_outline)
+        .unwrap_or_else(|| seed_outline(part, CROP_SIZE_PX));
     let evidence_expected = expected_presence(&observation.evidence);
     let detected = artifacts.report.detected;
     let draft_state = match evidence_expected {
@@ -481,13 +621,36 @@ fn export_observation(
         observation.source_kind, observation.source_id
     );
     ensure!(
-        !context.samples.iter().any(|sample| sample.id == id),
+        !context.samples.iter().any(|sample| sample.id == id)
+            && !context.carried_samples.iter().any(|sample| sample.id == id),
         "duplicate dataset sample {id}"
     );
-    let bare_path = format!("images/{split}/{id}-bare.png");
-    let observed_path = format!("images/{split}/{id}-observed.png");
     let encoded_bare = encode_gray_png(&bare_crop)?;
     let encoded_observed = encode_gray_png(&observed_crop)?;
+    let bare_source_sha256 = hex_sha256(bare_bytes);
+    let observed_source_sha256 = hex_sha256(observed_bytes);
+    if let Some(reviewed) = context.reviewed {
+        if let Some(carried) = carry_reviewed_sample(
+            reviewed,
+            &id,
+            &bare_source_sha256,
+            &observed_source_sha256,
+            &encoded_bare,
+            &encoded_observed,
+        )? {
+            write_carried_image(context.output, &carried.bare_image_path, &encoded_bare, &id)?;
+            write_carried_image(
+                context.output,
+                &carried.observed_image_path,
+                &encoded_observed,
+                &id,
+            )?;
+            context.carried_samples.push(carried);
+            return Ok(());
+        }
+    }
+    let bare_path = format!("images/{split}/{id}-bare.png");
+    let observed_path = format!("images/{split}/{id}-observed.png");
     fs::write(context.output.join(&bare_path), &encoded_bare)?;
     fs::write(context.output.join(&observed_path), &encoded_observed)?;
     let (draft_marker_status, draft_marker_end_px) = draft_marker(
@@ -505,8 +668,8 @@ fn export_observation(
         source_id: observation.source_id,
         source_artifact: observation.artifact_name.into(),
         observation_kind: observation.observation_kind.into(),
-        bare_source_sha256: hex_sha256(bare_bytes),
-        observed_source_sha256: hex_sha256(observed_bytes),
+        bare_source_sha256,
+        observed_source_sha256,
         bare_image_path: bare_path,
         observed_image_path: observed_path,
         bare_image_sha256: hex_sha256(&encoded_bare),
@@ -518,7 +681,15 @@ fn export_observation(
         orientation,
         requested_nozzle_rotation_offset_deg: observation.requested_nozzle_rotation_offset_deg,
         actual_nozzle_rotation_offset_deg: observation.actual_nozzle_rotation_offset_deg,
-        evidence: observation.evidence,
+        evidence: if observation.learned_outline_px.is_some() {
+            [
+                observation.evidence,
+                vec!["learned_model_box_proposal".into()],
+            ]
+            .concat()
+        } else {
+            observation.evidence
+        },
         draft_state: draft_state.into(),
         draft_outline_px: draft_outline,
         seed_outline_px: seed_outline,
@@ -527,6 +698,96 @@ fn export_observation(
         deterministic: artifacts.report,
     });
     Ok(())
+}
+
+fn load_reviewed_dataset(root: &Path) -> Result<ReviewedDataset> {
+    let draft_path = root.join("manifest.draft.json");
+    let ground_truth_path = root.join("manifest.ground-truth.json");
+    let draft_bytes =
+        fs::read(&draft_path).with_context(|| format!("cannot read {}", draft_path.display()))?;
+    let ground_truth_bytes = fs::read(&ground_truth_path)
+        .with_context(|| format!("cannot read {}", ground_truth_path.display()))?;
+    let ground_truth: ReviewedGroundTruthManifest = serde_json::from_slice(&ground_truth_bytes)?;
+    ensure!(
+        ground_truth.classes == ["component_flat", "component_on_edge", "multiple_components"],
+        "reviewed dataset uses different classes"
+    );
+    let sample_count = ground_truth.samples.len();
+    let samples_by_id = ground_truth
+        .samples
+        .into_iter()
+        .map(|sample| (sample.id.clone(), sample))
+        .collect::<BTreeMap<_, _>>();
+    ensure!(
+        samples_by_id.len() == sample_count,
+        "reviewed ground truth has duplicate sample IDs"
+    );
+    Ok(ReviewedDataset {
+        root: root.to_path_buf(),
+        draft_manifest_sha256: hex_sha256(&draft_bytes),
+        ground_truth_manifest_sha256: hex_sha256(&ground_truth_bytes),
+        samples_by_id,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn carry_reviewed_sample(
+    reviewed: &ReviewedDataset,
+    id: &str,
+    bare_source_sha256: &str,
+    observed_source_sha256: &str,
+    encoded_bare: &[u8],
+    encoded_observed: &[u8],
+) -> Result<Option<ReviewedGroundTruthSample>> {
+    let Some(sample) = reviewed.samples_by_id.get(id) else {
+        return Ok(None);
+    };
+    if sample.bare_source_sha256 != bare_source_sha256
+        || sample.observed_source_sha256 != observed_source_sha256
+        || sample.bare_image_sha256 != hex_sha256(encoded_bare)
+        || sample.observed_image_sha256 != hex_sha256(encoded_observed)
+    {
+        return Ok(None);
+    }
+    for (path, expected) in [
+        (&sample.bare_image_path, encoded_bare),
+        (&sample.observed_image_path, encoded_observed),
+    ] {
+        let relative = safe_image_path(path, id)?;
+        let prior = fs::read(reviewed.root.join(relative)).with_context(|| {
+            format!(
+                "cannot read reviewed image {}",
+                reviewed.root.join(relative).display()
+            )
+        })?;
+        if prior != expected {
+            return Ok(None);
+        }
+    }
+    Ok(Some(sample.clone()))
+}
+
+fn write_carried_image(output: &Path, path: &str, data: &[u8], id: &str) -> Result<()> {
+    let relative = safe_image_path(path, id)?;
+    let destination = output.join(relative);
+    let parent = destination
+        .parent()
+        .context("carried image has no parent")?;
+    fs::create_dir_all(parent)?;
+    fs::write(destination, data)?;
+    Ok(())
+}
+
+fn safe_image_path<'a>(path: &'a str, id: &str) -> Result<&'a Path> {
+    let relative = Path::new(path);
+    ensure!(
+        !relative.is_absolute()
+            && relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "reviewed sample {id} has an unsafe image path"
+    );
+    Ok(relative)
 }
 
 fn observation_kind(name: &str) -> Option<&'static str> {
@@ -879,5 +1140,15 @@ mod tests {
         assert!(
             draft_state_priority("evidence_conflict") < draft_state_priority("evidence_agreement")
         );
+    }
+
+    #[test]
+    fn carried_images_require_relative_normal_paths() {
+        assert_eq!(
+            safe_image_path("images/train/pair.png", "pair").unwrap(),
+            Path::new("images/train/pair.png")
+        );
+        assert!(safe_image_path("../pair.png", "pair").is_err());
+        assert!(safe_image_path("/tmp/pair.png", "pair").is_err());
     }
 }

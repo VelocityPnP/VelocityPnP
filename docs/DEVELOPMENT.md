@@ -783,6 +783,24 @@ identity. Supply at least one registration for evaluation. The current-machine
 evaluation split is provisional. A production gate also needs independent
 machine sessions and more component families.
 
+For a later capture session, carry unchanged reviewed labels into a new
+dataset. The exporter checks both retained source hashes and both generated
+crop hashes before it carries a label:
+
+```bash
+cargo run --release -p velocitypnpd \
+  --example export_held_part_dataset -- \
+  velocitypnp.db profiles/lumenpnp-v3.0.4.json \
+  datasets/held-parts-v2 EVAL_REGISTRATION_UUID \
+  --carry-reviewed datasets/held-parts-v1
+```
+
+The new draft manifest and `review.html` contain only new or changed pairs.
+The finalizer validates `manifest.carried-ground-truth.json` and combines its
+labels with the newly reviewed labels. It preserves the prior split and feeder
+group for carried samples, even if later machine setup changed an active
+feeder link.
+
 The exporter stores 512-pixel bare and observed crops. It includes initial
 held views, corrected held views, and every retained post-release view. The
 current deterministic detector supplies a weak oriented-box proposal. Vacuum,

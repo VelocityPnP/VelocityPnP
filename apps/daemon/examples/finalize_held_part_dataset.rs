@@ -20,6 +20,10 @@ struct DraftManifest {
     classes: Vec<String>,
     evaluation_registration_ids: Vec<Uuid>,
     split_policy: String,
+    #[serde(default)]
+    carried_ground_truth_manifest: Option<String>,
+    #[serde(default)]
+    carried_sample_count: usize,
     notes: Vec<String>,
     samples: Vec<DraftSample>,
 }
@@ -97,11 +101,13 @@ struct GroundTruthManifest {
     classes: Vec<String>,
     evaluation_registration_ids: Vec<Uuid>,
     split_policy: String,
+    carried_ground_truth_manifest: Option<String>,
+    carried_ground_truth_manifest_sha256: Option<String>,
     notes: Vec<String>,
     samples: Vec<GroundTruthSample>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct GroundTruthSample {
     id: String,
     split: String,
@@ -137,6 +143,12 @@ struct GroundTruthSample {
     review_note: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CarriedGroundTruthManifest {
+    classes: Vec<String>,
+    samples: Vec<GroundTruthSample>,
+}
+
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     ensure!(
@@ -157,9 +169,40 @@ fn main() -> Result<()> {
         .with_context(|| format!("cannot read {}", review_input.display()))?;
     let manifest: DraftManifest = serde_json::from_slice(&manifest_bytes)?;
     let review: ReviewFile = serde_json::from_slice(&review_bytes)?;
+    let carried_path = manifest
+        .carried_ground_truth_manifest
+        .as_deref()
+        .map(|name| root.join(name));
+    let carried_bytes = carried_path
+        .as_ref()
+        .map(fs::read)
+        .transpose()
+        .context("cannot read carried held-part ground truth")?;
+    let carried: Option<CarriedGroundTruthManifest> = carried_bytes
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()?;
     validate_review(&manifest, &review)?;
 
-    let mut samples = Vec::with_capacity(manifest.samples.len());
+    if let Some(carried) = &carried {
+        ensure!(
+            carried.classes == manifest.classes,
+            "carried ground truth uses different classes"
+        );
+        ensure!(
+            carried.samples.len() == manifest.carried_sample_count,
+            "carried sample count does not match the draft manifest"
+        );
+        validate_carried_samples(&root, &manifest, carried)?;
+    } else {
+        ensure!(
+            manifest.carried_sample_count == 0,
+            "draft manifest declares absent carried samples"
+        );
+    }
+
+    let carried_count = carried.as_ref().map_or(0, |value| value.samples.len());
+    let mut samples = Vec::with_capacity(manifest.samples.len() + carried_count);
     for sample in manifest.samples {
         validate_sample_images(&root, &sample)?;
         let decision = &review.decisions[&sample.id];
@@ -199,6 +242,9 @@ fn main() -> Result<()> {
             review_note: decision.note.clone(),
         });
     }
+    if let Some(carried) = carried {
+        samples.extend(carried.samples);
+    }
     for split in ["train", "eval"] {
         ensure!(
             samples
@@ -213,6 +259,7 @@ fn main() -> Result<()> {
     let mut notes = manifest.notes;
     notes.extend([
         "every included label passed explicit operator review".into(),
+        "unchanged prior labels were carried after source and image hash checks".into(),
         "rejected image pairs remain as excluded provenance records".into(),
         "directed-end labels exist only where the marker was visible".into(),
     ]);
@@ -231,6 +278,8 @@ fn main() -> Result<()> {
         classes: manifest.classes,
         evaluation_registration_ids: manifest.evaluation_registration_ids,
         split_policy: manifest.split_policy,
+        carried_ground_truth_manifest: manifest.carried_ground_truth_manifest,
+        carried_ground_truth_manifest_sha256: carried_bytes.as_deref().map(hex_sha256),
         notes,
         samples,
     };
@@ -339,6 +388,76 @@ fn validate_sample_images(root: &Path, sample: &DraftSample) -> Result<()> {
     Ok(())
 }
 
+fn validate_carried_samples(
+    root: &Path,
+    manifest: &DraftManifest,
+    carried: &CarriedGroundTruthManifest,
+) -> Result<()> {
+    let new_ids = manifest
+        .samples
+        .iter()
+        .map(|sample| sample.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let carried_ids = carried
+        .samples
+        .iter()
+        .map(|sample| sample.id.as_str())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        carried_ids.len() == carried.samples.len(),
+        "carried ground truth has duplicate sample IDs"
+    );
+    ensure!(
+        carried_ids.is_disjoint(&new_ids),
+        "carried ground truth overlaps the new review set"
+    );
+    for sample in &carried.samples {
+        ensure!(
+            matches!(sample.split.as_str(), "train" | "eval"),
+            "carried sample {} has invalid split {}",
+            sample.id,
+            sample.split
+        );
+        for (path, digest) in [
+            (&sample.bare_image_path, &sample.bare_image_sha256),
+            (&sample.observed_image_path, &sample.observed_image_sha256),
+        ] {
+            let relative = Path::new(path);
+            ensure!(
+                !relative.is_absolute()
+                    && relative
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_))),
+                "carried sample {} has an unsafe image path",
+                sample.id
+            );
+            let bytes = fs::read(root.join(relative))
+                .with_context(|| format!("cannot read carried image {path}"))?;
+            ensure!(
+                hex_sha256(&bytes) == *digest,
+                "carried sample {} image changed",
+                sample.id
+            );
+        }
+        let label = ResolvedLabel {
+            included: sample.included,
+            class_name: sample.class_name.clone(),
+            outline_px: sample.outline_px,
+            marker_status: sample.marker_status.clone(),
+            marker_end_px: sample.marker_end_px,
+        };
+        validate_resolved_label(
+            &manifest.classes,
+            sample.width_px,
+            sample.height_px,
+            sample.orientation,
+            &label,
+        )
+        .with_context(|| format!("carried sample {} has an invalid label", sample.id))?;
+    }
+    Ok(())
+}
+
 fn resolve_decision(decision: &ReviewDecision) -> Result<ResolvedLabel> {
     match decision.decision.as_str() {
         "accept" => Ok(ResolvedLabel {
@@ -375,6 +494,22 @@ fn resolve_decision(decision: &ReviewDecision) -> Result<ResolvedLabel> {
 }
 
 fn validate_label(classes: &[String], sample: &DraftSample, label: &ResolvedLabel) -> Result<()> {
+    validate_resolved_label(
+        classes,
+        sample.width_px,
+        sample.height_px,
+        sample.orientation,
+        label,
+    )
+}
+
+fn validate_resolved_label(
+    classes: &[String],
+    width_px: u32,
+    height_px: u32,
+    orientation: PartOrientation,
+    label: &ResolvedLabel,
+) -> Result<()> {
     if !label.included || label.class_name.is_none() {
         ensure!(
             label.outline_px.is_none()
@@ -389,7 +524,7 @@ fn validate_label(classes: &[String], sample: &DraftSample, label: &ResolvedLabe
         classes.iter().any(|value| value == class_name),
         "unknown class {class_name}"
     );
-    validate_outline(label.outline_px.unwrap(), sample.width_px, sample.height_px)?;
+    validate_outline(label.outline_px.unwrap(), width_px, height_px)?;
     ensure!(
         matches!(
             label.marker_status.as_str(),
@@ -400,7 +535,7 @@ fn validate_label(classes: &[String], sample: &DraftSample, label: &ResolvedLabe
     );
     if label.marker_status == "visible" {
         ensure!(
-            sample.orientation.is_directed(),
+            orientation.is_directed(),
             "axis-symmetric part has a directed end"
         );
         let marker = label
@@ -408,8 +543,8 @@ fn validate_label(classes: &[String], sample: &DraftSample, label: &ResolvedLabe
             .context("visible marker has no endpoint")?;
         ensure!(
             marker.into_iter().all(f64::is_finite)
-                && (0.0..=f64::from(sample.width_px)).contains(&marker[0])
-                && (0.0..=f64::from(sample.height_px)).contains(&marker[1]),
+                && (0.0..=f64::from(width_px)).contains(&marker[0])
+                && (0.0..=f64::from(height_px)).contains(&marker[1]),
             "directed endpoint is outside the image"
         );
     } else {
