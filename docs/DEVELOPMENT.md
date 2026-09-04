@@ -818,9 +818,10 @@ python python/tools/train_held_part_pose.py \
 
 The held-part model takes the bare-nozzle and observed images as one six-channel
 input. It predicts bare, flat, or on-edge state, one oriented package box, and
-a directed package axis. The directed-axis loss applies only to reviewed images
-with a visible end. This first contract cannot detect multiple components
-because the current dataset has no examples.
+an undirected package axis. Its rotation repeats after 180 degrees. Reviewed
+directed-end labels remain in the dataset for future work, but v1 does not use
+or output them. This first contract cannot detect multiple components because
+the current dataset has no examples.
 
 Train on an NVIDIA system with the pinned container:
 

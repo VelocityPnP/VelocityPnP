@@ -115,12 +115,8 @@ def calculate_loss(
     images: torch.Tensor,
     classes: torch.Tensor,
     targets: torch.Tensor,
-    directions: torch.Tensor,
-    directed: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    logits, predictions, predicted_directions, center_logits = model.forward_training(
-        images
-    )
+    logits, predictions, center_logits = model.forward_training(images)
     classification = F.nll_loss(logits, classes)
     occupied = classes != 0
     if occupied.any():
@@ -152,24 +148,7 @@ def calculate_loss(
     else:
         zero = logits.sum() * 0.0
         center = extent = angle = heatmap = zero
-    directed_mask = directed.bool()
-    if directed_mask.any():
-        direction = (
-            1.0
-            - (predicted_directions[directed_mask] * directions[directed_mask])
-            .sum(dim=1)
-            .mean()
-        )
-    else:
-        direction = logits.sum() * 0.0
-    total = (
-        classification
-        + 0.25 * center
-        + 0.1 * extent
-        + angle
-        + 0.1 * heatmap
-        + direction
-    )
+    total = classification + 0.25 * center + 0.1 * extent + angle + 0.1 * heatmap
     return total, {
         "total": float(total.detach()),
         "classification": float(classification.detach()),
@@ -177,7 +156,6 @@ def calculate_loss(
         "extent": float(extent.detach()),
         "angle": float(angle.detach()),
         "heatmap": float(heatmap.detach()),
-        "direction": float(direction.detach()),
     }
 
 
@@ -192,16 +170,13 @@ def epoch_loss(
     batches = 0
     context = torch.enable_grad() if optimizer is not None else torch.no_grad()
     with context:
-        for images, classes, targets, directions, directed, _ in loader:
-            values = [images, classes, targets, directions, directed]
-            images, classes, targets, directions, directed = [
-                value.to(device) for value in values
+        for images, classes, targets, _ in loader:
+            images, classes, targets = [
+                value.to(device) for value in (images, classes, targets)
             ]
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
-            loss, parts = calculate_loss(
-                model, images, classes, targets, directions, directed
-            )
+            loss, parts = calculate_loss(model, images, classes, targets)
             if optimizer is not None:
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -219,12 +194,11 @@ def export_onnx(model: HeldPartPoseModel, destination: Path, image_size: int) ->
         sample,
         destination,
         input_names=["image_pair"],
-        output_names=["state_log_probabilities", "pose", "directed_axis"],
+        output_names=["state_log_probabilities", "pose"],
         dynamic_axes={
             "image_pair": {0: "batch"},
             "state_log_probabilities": {0: "batch"},
             "pose": {0: "batch"},
-            "directed_axis": {0: "batch"},
         },
         opset_version=17,
         do_constant_folding=True,
@@ -422,12 +396,9 @@ def main() -> None:
                         "sin_2theta",
                     ],
                 },
-                "directed_axis": {
-                    "shape": ["batch", 2],
-                    "fields": ["cos_theta", "sin_theta"],
-                },
             },
-            "polarity_supported": True,
+            "angle_period_degrees": 180,
+            "polarity_supported": False,
         },
         "license": {
             "artifact": "Apache-2.0",
@@ -452,7 +423,7 @@ def main() -> None:
         "limitations": [
             "The four-sample evaluation split is too small for a production gate.",
             "The evaluation split has no on-edge held parts.",
-            "Only 12 reviewed images have visible directed-end labels.",
+            "Reviewed directed-end labels are retained but not used by v1.",
             "No multiple-component examples are available for this contract.",
             "The data comes from one machine and a small number of sessions.",
             "Model results must remain in shadow mode until independent validation.",

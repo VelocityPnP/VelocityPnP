@@ -207,45 +207,24 @@ def held_part_dataset_summary(root: Path) -> dict[str, Any]:
     }
 
 
-def _transform_point(
-    point: tuple[float, float], width: int, height: int, image_size: int
-) -> np.ndarray:
-    scale = min(image_size / width, image_size / height)
-    resized_width = max(1, math.floor(width * scale + 0.5))
-    resized_height = max(1, math.floor(height * scale + 0.5))
-    left = (image_size - resized_width) // 2
-    top = (image_size - resized_height) // 2
-    return np.asarray(
-        [
-            point[0] * resized_width / width + left,
-            point[1] * resized_height / height + top,
-        ],
-        np.float32,
-    )
-
-
 def _augment_pair(
     bare: Image.Image,
     observed: Image.Image,
     points: np.ndarray | None,
-    marker: np.ndarray | None,
     rng: random.Random,
-) -> tuple[Image.Image, Image.Image, np.ndarray | None, np.ndarray | None]:
+) -> tuple[Image.Image, Image.Image, np.ndarray | None]:
     size = bare.width
     scale = rng.uniform(0.94, 1.06)
     shift = np.asarray(
         [rng.uniform(-0.05, 0.05) * size, rng.uniform(-0.05, 0.05) * size],
         np.float32,
     )
-    candidates = []
     center = np.asarray([size / 2, size / 2], np.float32)
     if points is not None:
-        candidates.extend((points - center) * scale + center + shift)
-    if marker is not None:
-        candidates.append((marker - center) * scale + center + shift)
-    if candidates and (np.min(candidates) < 2 or np.max(candidates) > size - 2):
-        scale = 1.0
-        shift[:] = 0.0
+        candidate = (points - center) * scale + center + shift
+        if candidate.min() < 2 or candidate.max() > size - 2:
+            scale = 1.0
+            shift[:] = 0.0
     inverse = 1.0 / scale
     offset = center - (center + shift) * inverse
     affine = (inverse, 0.0, float(offset[0]), 0.0, inverse, float(offset[1]))
@@ -265,29 +244,23 @@ def _augment_pair(
     )
     if points is not None:
         points = (points - center) * scale + center + shift
-    if marker is not None:
-        marker = (marker - center) * scale + center + shift
     if rng.random() < 0.5:
         bare = bare.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         observed = observed.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         if points is not None:
             points[:, 0] = size - points[:, 0]
-        if marker is not None:
-            marker[0] = size - marker[0]
     if rng.random() < 0.5:
         bare = bare.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
         observed = observed.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
         if points is not None:
             points[:, 1] = size - points[:, 1]
-        if marker is not None:
-            marker[1] = size - marker[1]
     factor_brightness = rng.uniform(0.85, 1.15)
     factor_contrast = rng.uniform(0.85, 1.15)
     bare = ImageEnhance.Brightness(bare).enhance(factor_brightness)
     observed = ImageEnhance.Brightness(observed).enhance(factor_brightness)
     bare = ImageEnhance.Contrast(bare).enhance(factor_contrast)
     observed = ImageEnhance.Contrast(observed).enhance(factor_contrast)
-    return bare, observed, points, marker
+    return bare, observed, points
 
 
 class HeldPartDataset(Dataset):
@@ -314,9 +287,7 @@ class HeldPartDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(
-        self, index: int
-    ) -> tuple[torch.Tensor, int, torch.Tensor, torch.Tensor, float, str]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int, torch.Tensor, str]:
         sample = self.samples[index]
         with Image.open(sample.bare_image_path) as source:
             bare_source = source.convert("RGB")
@@ -324,20 +295,12 @@ class HeldPartDataset(Dataset):
             observed_source = source.convert("RGB")
         if bare_source.size != observed_source.size:
             raise ValueError(f"sample {sample.sample_id} image sizes do not match")
-        width, height = observed_source.size
         bare, _ = _letterbox(bare_source, None, self.image_size)
         observed, points = _letterbox(
             observed_source, sample.outline_px, self.image_size
         )
-        marker = (
-            _transform_point(sample.directed_end_px, width, height, self.image_size)
-            if sample.directed_end_px is not None
-            else None
-        )
         if self.augment:
-            bare, observed, points, marker = _augment_pair(
-                bare, observed, points, marker, self.rng
-            )
+            bare, observed, points = _augment_pair(bare, observed, points, self.rng)
 
         tensors = []
         for image in (bare, observed):
@@ -353,24 +316,7 @@ class HeldPartDataset(Dataset):
             if points is not None
             else np.zeros(6, np.float32)
         )
-        if marker is not None and points is not None:
-            direction = marker - points.mean(axis=0)
-            length = float(np.linalg.norm(direction))
-            if length <= 1e-6:
-                raise ValueError(f"sample {sample.sample_id} has no directed axis")
-            direction /= length
-            directed = 1.0
-        else:
-            direction = np.zeros(2, np.float32)
-            directed = 0.0
-        return (
-            image_pair,
-            sample.class_id,
-            torch.from_numpy(pose),
-            torch.from_numpy(direction.astype(np.float32)),
-            directed,
-            sample.sample_id,
-        )
+        return image_pair, sample.class_id, torch.from_numpy(pose), sample.sample_id
 
 
 @dataclass(frozen=True)
@@ -416,7 +362,7 @@ class _ResidualBlock(nn.Module):
 
 
 class HeldPartPoseModel(nn.Module):
-    """Predict held-part state, OBB, and optional directed package axis."""
+    """Predict held-part state and one 180-degree-symmetric OBB."""
 
     def __init__(self, config: HeldPartModelConfig | None = None) -> None:
         super().__init__()
@@ -445,7 +391,6 @@ class HeldPartPoseModel(nn.Module):
         self.local = nn.Sequential(_ConvBlock(64, 64, 1), _ResidualBlock(64))
         self.center_head = nn.Conv2d(64, 1, 1)
         self.pose_head = nn.Conv2d(64, 4, 1)
-        self.direction_head = nn.Conv2d(64, 2, 1)
         self.classifier = nn.Sequential(
             nn.Linear(self.config.feature_channels, 64),
             nn.SiLU(),
@@ -464,7 +409,7 @@ class HeldPartPoseModel(nn.Module):
 
     def _predict(
         self, inputs: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         inputs = (inputs - 0.5) / 0.25
         shallow = self.shallow(self.stem(inputs))
         deep = self.deep(shallow)
@@ -482,19 +427,13 @@ class HeldPartPoseModel(nn.Module):
         ).squeeze(2)
         size = torch.sigmoid(raw_pose[:, :2])
         angle = F.normalize(raw_pose[:, 2:], dim=1, eps=1e-6)
-        direction = torch.bmm(
-            self.direction_head(local).flatten(2), weights.unsqueeze(2)
-        ).squeeze(2)
-        direction = F.normalize(direction, dim=1, eps=1e-6)
-        return state, torch.cat((center, size, angle), dim=1), direction, center_logits
+        return state, torch.cat((center, size, angle), dim=1), center_logits
 
-    def forward(
-        self, inputs: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        state, pose, direction, _ = self._predict(inputs)
-        return state, pose, direction
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        state, pose, _ = self._predict(inputs)
+        return state, pose
 
     def forward_training(
         self, inputs: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self._predict(inputs)

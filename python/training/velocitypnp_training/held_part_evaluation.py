@@ -22,22 +22,20 @@ def evaluate_held_part(
     device: torch.device,
     batch_size: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Evaluate state, pose, and visible directed-end predictions."""
+    """Evaluate state and 180-degree-symmetric pose predictions."""
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     confusion = np.zeros((3, 3), np.int64)
     center_errors: list[float] = []
     angle_errors: list[float] = []
     overlaps: list[float] = []
-    direction_errors: list[float] = []
     records: list[dict[str, Any]] = []
     model.eval()
     with torch.inference_mode():
-        for images, classes, targets, directions, directed, sample_ids in loader:
-            logits, predictions, predicted_directions = model(images.to(device))
+        for images, classes, targets, sample_ids in loader:
+            logits, predictions = model(images.to(device))
             probabilities = logits.exp().cpu()
             predictions = predictions.cpu()
-            predicted_directions = predicted_directions.cpu()
             predicted_classes = probabilities.argmax(dim=1)
             for item, sample_id in enumerate(sample_ids):
                 actual = int(classes[item])
@@ -55,10 +53,6 @@ def evaluate_held_part(
                     },
                     "target_pose": target.tolist() if actual else None,
                     "predicted_pose": prediction.tolist(),
-                    "target_direction": (
-                        directions[item].tolist() if float(directed[item]) else None
-                    ),
-                    "predicted_direction": predicted_directions[item].tolist(),
                 }
                 if actual:
                     center_error = float(
@@ -82,20 +76,6 @@ def evaluate_held_part(
                             "oriented_iou": overlap,
                         }
                     )
-                if float(directed[item]):
-                    direction_dot = float(
-                        np.clip(
-                            np.dot(
-                                directions[item].numpy(),
-                                predicted_directions[item].numpy(),
-                            ),
-                            -1,
-                            1,
-                        )
-                    )
-                    direction_error = math.degrees(math.acos(direction_dot))
-                    direction_errors.append(direction_error)
-                    record["directed_axis_error_degrees"] = direction_error
                 records.append(record)
 
     correct = int(np.trace(confusion))
@@ -131,15 +111,6 @@ def evaluate_held_part(
             ),
             "mean_oriented_iou": float(np.mean(overlaps)) if overlaps else None,
         },
-        "directed_axis": {
-            "sample_count": len(direction_errors),
-            "mean_error_degrees": (
-                float(np.mean(direction_errors)) if direction_errors else None
-            ),
-            "maximum_error_degrees": (
-                max(direction_errors) if direction_errors else None
-            ),
-        },
     }, records
 
 
@@ -154,7 +125,7 @@ def render_held_part_evaluation(
     by_id = {record["sample_id"]: record for record in records}
     cells: list[Image.Image] = []
     for index, sample in enumerate(dataset.samples):
-        pair, _, target, direction, directed, _ = dataset[index]
+        pair, _, target, _ = dataset[index]
         observed = pair[3:6]
         image = Image.fromarray(
             np.rint(observed.permute(1, 2, 0).numpy() * 255)
@@ -174,20 +145,6 @@ def render_held_part_evaluation(
             draw.polygon(
                 [tuple(point) for point in predicted_polygon],
                 outline="cyan",
-                width=2,
-            )
-        center = target[:2].numpy() * dataset.image_size
-        if directed:
-            end = center + direction.numpy() * 30
-            draw.line([tuple(center), tuple(end)], fill="magenta", width=3)
-            predicted_direction = np.asarray(record["predicted_direction"], np.float32)
-            predicted_center = (
-                np.asarray(record["predicted_pose"][:2]) * dataset.image_size
-            )
-            predicted_end = predicted_center + predicted_direction * 30
-            draw.line(
-                [tuple(predicted_center), tuple(predicted_end)],
-                fill="yellow",
                 width=2,
             )
         label = f"GT {record['actual_class']}  P {record['predicted_class']}"

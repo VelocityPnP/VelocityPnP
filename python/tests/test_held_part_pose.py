@@ -80,32 +80,27 @@ class HeldPartPoseTests(unittest.TestCase):
             self.assertEqual(summary["directed_end_counts"]["train"], 1)
             self.assertEqual(summary["evaluation_limitations"], ["component_on_edge"])
 
-    def test_dataset_returns_pair_pose_and_directed_axis(self):
+    def test_dataset_returns_pair_and_undirected_pose(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_dataset(root)
             dataset = HeldPartDataset(root, "train", 64)
-            pair, class_id, pose, direction, directed, sample_id = dataset[0]
+            pair, class_id, pose, sample_id = dataset[0]
             self.assertEqual(tuple(pair.shape), (6, 64, 64))
             self.assertEqual(class_id, 1)
             self.assertEqual(sample_id, "train-flat")
-            self.assertEqual(directed, 1.0)
-            self.assertGreater(float(direction[0]), 0.99)
-            self.assertAlmostEqual(float(torch.linalg.norm(direction)), 1.0)
             self.assertAlmostEqual(float(torch.linalg.norm(pose[4:])), 1.0)
 
     def test_model_contract_shapes_and_ranges(self):
         model = HeldPartPoseModel(HeldPartModelConfig(image_size=64)).eval()
-        state, pose, direction = model(torch.zeros(2, 6, 64, 64))
+        state, pose = model(torch.zeros(2, 6, 64, 64))
         self.assertEqual(tuple(state.shape), (2, 3))
         self.assertEqual(tuple(pose.shape), (2, 6))
-        self.assertEqual(tuple(direction.shape), (2, 2))
         torch.testing.assert_close(
             state.exp().sum(dim=1), torch.ones(2), atol=1e-6, rtol=1e-6
         )
         self.assertTrue(torch.all((pose[:, :4] >= 0) & (pose[:, :4] <= 1)))
         torch.testing.assert_close(torch.linalg.norm(pose[:, 4:], dim=1), torch.ones(2))
-        torch.testing.assert_close(torch.linalg.norm(direction, dim=1), torch.ones(2))
 
 
 if __name__ == "__main__":
