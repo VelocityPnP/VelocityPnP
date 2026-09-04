@@ -110,6 +110,14 @@ def configure_determinism(seed: int) -> None:
         torch.backends.cudnn.benchmark = False
 
 
+def atomic_torch_save(value: Any, destination: Path) -> None:
+    """Write one recoverable training state without exposing a partial file."""
+
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    torch.save(value, temporary)
+    temporary.replace(destination)
+
+
 def balanced_sampler(dataset: HeldPartDataset, seed: int) -> WeightedRandomSampler:
     counts = Counter(sample.class_id for sample in dataset.samples)
     if set(counts) != set(range(len(HELD_PART_CLASS_NAMES))):
@@ -237,6 +245,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
 
@@ -248,9 +257,16 @@ def main() -> None:
     if args.validate_only:
         return
     output = (args.output or root / "training" / args.name).resolve()
-    if output.exists():
+    training_state_path = output / "training-state.pt"
+    if args.resume:
+        if (output / "model-manifest.json").exists():
+            raise ValueError(f"training output is already complete: {output}")
+        if not training_state_path.is_file():
+            raise ValueError(f"training state does not exist: {training_state_path}")
+    elif output.exists():
         raise ValueError(f"training output already exists: {output}")
-    output.mkdir(parents=True)
+    else:
+        output.mkdir(parents=True)
     configure_determinism(args.seed)
     device = torch.device(
         "cuda"
@@ -279,10 +295,11 @@ def main() -> None:
         ]
     )
     rotation_evaluation.image_size = args.image_size
+    train_sampler = balanced_sampler(train, args.seed)
     train_loader = DataLoader(
         train,
         batch_size=args.batch_size,
-        sampler=balanced_sampler(train, args.seed),
+        sampler=train_sampler,
         num_workers=args.workers,
     )
     eval_loader = DataLoader(
@@ -303,12 +320,58 @@ def main() -> None:
 
     started_at = datetime.now(UTC)
     start_time = time.monotonic()
+    elapsed_before_resume = 0.0
     history: list[dict[str, Any]] = []
     best_loss = math.inf
     best_epoch = 0
     best_state: dict[str, torch.Tensor] | None = None
     stale = 0
-    for epoch in range(1, args.epochs + 1):
+    start_epoch = 1
+    resume_contract = {
+        "dataset_content_sha256": summary["content_sha256"],
+        "training_source_sha256": source_sha256(),
+        "image_size": args.image_size,
+        "epochs": args.epochs,
+        "patience": args.patience,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "seed": args.seed,
+    }
+    if args.resume:
+        saved = torch.load(training_state_path, map_location=device, weights_only=False)
+        if saved.get("resume_contract") != resume_contract:
+            raise ValueError("training state does not match this dataset or run")
+        model.load_state_dict(saved["model_state"])
+        optimizer.load_state_dict(saved["optimizer_state"])
+        scheduler.load_state_dict(saved["scheduler_state"])
+        history = saved["history"]
+        started_at = datetime.fromisoformat(saved["started_at"])
+        elapsed_before_resume = saved["duration_seconds"]
+        best_loss = saved["best_loss"]
+        best_epoch = saved["best_epoch"]
+        best_state = saved["best_state"]
+        stale = saved["stale"]
+        random.setstate(saved["python_random_state"])
+        np.random.set_state(saved["numpy_random_state"])
+        torch.set_rng_state(saved["torch_random_state"].cpu())
+        if torch.cuda.is_available() and saved["cuda_random_states"] is not None:
+            torch.cuda.set_rng_state_all(
+                [state.cpu() for state in saved["cuda_random_states"]]
+            )
+        train.rng.setstate(saved["augmentation_random_state"])
+        train_sampler.generator.set_state(saved["sampler_random_state"].cpu())
+        start_epoch = saved["epoch"] + 1
+        print(
+            json.dumps(
+                {
+                    "resumed_after_epoch": saved["epoch"],
+                    "best_epoch": best_epoch,
+                    "best_selection_loss": best_loss,
+                }
+            ),
+            flush=True,
+        )
+    for epoch in range(start_epoch, args.epochs + 1):
         record = {
             "epoch": epoch,
             "learning_rate": optimizer.param_groups[0]["lr"],
@@ -340,6 +403,36 @@ def main() -> None:
         else:
             stale += 1
         scheduler.step()
+        atomic_torch_save(
+            {
+                "schema_version": 1,
+                "resume_contract": resume_contract,
+                "epoch": epoch,
+                "started_at": started_at.isoformat(),
+                "duration_seconds": elapsed_before_resume
+                + time.monotonic()
+                - start_time,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "history": history,
+                "best_loss": best_loss,
+                "best_epoch": best_epoch,
+                "best_state": best_state,
+                "stale": stale,
+                "python_random_state": random.getstate(),
+                "numpy_random_state": np.random.get_state(),
+                "torch_random_state": torch.get_rng_state(),
+                "cuda_random_states": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available()
+                    else None
+                ),
+                "augmentation_random_state": train.rng.getstate(),
+                "sampler_random_state": train_sampler.generator.get_state(),
+            },
+            training_state_path,
+        )
         if stale >= args.patience:
             break
     if best_state is None:
@@ -378,7 +471,7 @@ def main() -> None:
         "contract_version": CONTRACT_VERSION,
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(UTC).isoformat(),
-        "duration_seconds": time.monotonic() - start_time,
+        "duration_seconds": elapsed_before_resume + time.monotonic() - start_time,
         "dataset": summary,
         "source": {"git": git_revision(), "training_source_sha256": source_sha256()},
         "environment": {
@@ -469,7 +562,7 @@ def main() -> None:
         "rotation_stress_metrics": rotation_metrics,
         "training_metrics": train_metrics,
         "limitations": [
-            "The four-sample evaluation split is too small for a production gate.",
+            "The evaluation split is too small for a production gate.",
             "The evaluation split has no on-edge held parts.",
             "Reviewed directed-end labels are retained but not used by v1.",
             "No multiple-component examples are available for this contract.",
@@ -489,6 +582,7 @@ def main() -> None:
         json.dumps(train_records, indent=2) + "\n"
     )
     (output / "model-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
+    training_state_path.unlink()
     print(json.dumps(report, indent=2))
 
 

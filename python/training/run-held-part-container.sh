@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    echo "usage: $0 DATASET [RUN_NAME]" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+    echo "usage: $0 DATASET [RUN_NAME] [--resume]" >&2
     exit 2
 fi
 
@@ -10,6 +10,17 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 dataset=$1
 run_name=${2:-held-part-pose-v1}
+resume=${3:-}
+
+if [ -n "$resume" ] && [ "$resume" != "--resume" ]; then
+    echo "third argument must be --resume" >&2
+    exit 2
+fi
+if [ "$resume" = "--resume" ]; then
+    set -- --resume
+else
+    set --
+fi
 
 case "$dataset" in
     /*) dataset_path=$dataset ;;
@@ -37,4 +48,4 @@ docker run --rm --gpus all --ipc host \
     --workdir /workspace \
     velocitypnp-training:spark \
     python python/tools/train_held_part_pose.py \
-    "$dataset_in_container" --name "$run_name" --device cuda
+    "$dataset_in_container" --name "$run_name" --device cuda "$@"

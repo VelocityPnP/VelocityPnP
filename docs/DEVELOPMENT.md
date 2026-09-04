@@ -857,6 +857,18 @@ python/training/run-held-part-container.sh \
   datasets/held-parts-v1 held-part-pose-v1
 ```
 
+The trainer writes `training-state.pt` after each epoch with an atomic rename.
+If the host, container, or GPU stops before the model package is complete,
+resume the same run:
+
+```bash
+python/training/run-held-part-container.sh \
+  datasets/held-parts-v1 held-part-pose-v1 --resume
+```
+
+Resume checks the dataset digest, training source, and training parameters. A
+successful run removes the temporary state after it writes the model manifest.
+
 Training rotates only the reviewed component and its local shadow. The bare
 nozzle image and fixed camera features do not rotate. This prevents the model
 from learning an angle from the four bottom-camera mounting bolts. Inspect the
