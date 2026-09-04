@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VelocityPnP held-part review</title>
+<style>
+body { margin: 0; background: #111; color: #eee; font: 16px sans-serif; }
+main { max-width: 1500px; margin: auto; padding: 16px; }
+h1 { margin-bottom: 6px; }
+.warning { color: #ffcc66; }
+.views { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.view { min-width: 0; }
+.view h2 { margin: 4px 0; font-size: 16px; }
+.frame { position: relative; width: 100%; background: #000; }
+.frame img, .frame canvas { display: block; width: 100%; height: auto; }
+#observed-overlay { position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: none; }
+#box { fill: rgba(0, 255, 128, .12); stroke: #00ff80; stroke-width: 2;
+  cursor: move; }
+.handle { fill: #00d4ff; stroke: #111; stroke-width: 1; cursor: pointer; }
+#rotate-line { stroke: #00d4ff; stroke-width: 1; }
+#axis-x, #axis-y { stroke: #ffb000; stroke-width: 2; }
+#marker-line { stroke: #ff3cff; stroke-width: 2; }
+#marker { fill: #ff3cff; stroke: #111; stroke-width: 1; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin: 10px 0; }
+button, select { padding: 9px 12px; font: inherit; }
+button.selected { outline: 3px solid #00d4ff; }
+label { display: flex; gap: 6px; align-items: center; }
+#meta { white-space: pre-wrap; background: #222; padding: 12px; overflow-wrap: anywhere; }
+textarea { width: 100%; min-height: 48px; box-sizing: border-box; }
+@media (max-width: 900px) { .views { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+<h1>Held-part draft review</h1>
+<p class="warning">Compare the bare nozzle with the observed image. Green is
+the automatic box. Orange is the nozzle axis. Magenta marks a directed end.</p>
+<p id="progress"></p>
+<div class="views">
+  <section class="view"><h2>Bare reference</h2>
+    <div class="frame"><img id="bare"></div>
+  </section>
+  <section class="view"><h2>Observed</h2>
+    <div class="frame"><img id="observed"><svg id="observed-overlay">
+      <line id="axis-x"></line><line id="axis-y"></line>
+      <line id="rotate-line"></line><polygon id="box"></polygon>
+      <line id="marker-line"></line><circle id="marker" r="6"></circle>
+      <g id="handles"></g>
+    </svg></div>
+  </section>
+  <section class="view"><h2>Amplified absolute difference</h2>
+    <div class="frame"><canvas id="difference"></canvas></div>
+  </section>
+</div>
+<div class="controls">
+  <label>State <select id="class-name">
+    <option value="component_flat">Flat component</option>
+    <option value="component_on_edge">Component on edge</option>
+    <option value="multiple_components">Multiple components</option>
+  </select></label>
+  <label>Directed end <select id="marker-status">
+    <option value="not_applicable">Not applicable</option>
+    <option value="visible">Visible</option>
+    <option value="not_visible">Not visible</option>
+    <option value="uncertain">Uncertain</option>
+  </select></label>
+  <button id="mark-end">Mark end</button>
+  <button id="reset">Reset proposal</button>
+</div>
+<textarea id="note" placeholder="Optional review note"></textarea>
+<div class="controls">
+  <button data-decision="accept">A: Accept state and box</button>
+  <button data-decision="empty">E: Bare nozzle</button>
+  <button data-decision="reject">R: Reject image pair</button>
+  <button id="previous">Previous</button>
+  <button id="next">Next</button>
+  <button id="download">Download decisions</button>
+</div>
+<pre id="meta"></pre>
+</main>
+<script>
+const manifest = __MANIFEST__;
+const storageKey = __DATASET_TITLE__ + ":" + manifest.generated_at + ":review";
+const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+const requested = Number(new URLSearchParams(location.search).get("index") || 0);
+let index = Math.max(0, Math.min(manifest.samples.length - 1, requested));
+let drag = null, boxState = null, markerMode = false;
+const bare = document.querySelector("#bare");
+const observed = document.querySelector("#observed");
+const overlay = document.querySelector("#observed-overlay");
+const polygon = document.querySelector("#box");
+const handles = document.querySelector("#handles");
+const rotateLine = document.querySelector("#rotate-line");
+const markerLine = document.querySelector("#marker-line");
+const marker = document.querySelector("#marker");
+const note = document.querySelector("#note");
+const className = document.querySelector("#class-name");
+const markerStatus = document.querySelector("#marker-status");
+const difference = document.querySelector("#difference");
+
+function store() { localStorage.setItem(storageKey, JSON.stringify(saved)); }
+function fromOutline(points) {
+  const center = points.reduce((sum, point) =>
+    [sum[0] + point[0] / 4, sum[1] + point[1] / 4], [0, 0]);
+  return {cx: center[0], cy: center[1],
+    width: Math.hypot(points[1][0] - points[0][0],
+      points[1][1] - points[0][1]),
+    height: Math.hypot(points[2][0] - points[1][0],
+      points[2][1] - points[1][1]),
+    angle: Math.atan2(points[1][1] - points[0][1],
+      points[1][0] - points[0][0])};
+}
+function points(state = boxState) {
+  const u = [Math.cos(state.angle), Math.sin(state.angle)];
+  const v = [-u[1], u[0]], halfWidth = state.width / 2;
+  const halfHeight = state.height / 2;
+  return [[-halfWidth, -halfHeight], [halfWidth, -halfHeight],
+    [halfWidth, halfHeight], [-halfWidth, halfHeight]].map(offset =>
+      [state.cx + u[0] * offset[0] + v[0] * offset[1],
+        state.cy + u[1] * offset[0] + v[1] * offset[1]]);
+}
+function current() {
+  const sample = manifest.samples[index];
+  return saved[sample.id] || {decision: "unreviewed", note: "",
+    class_name: "component_flat",
+    outline_px: sample.draft_outline_px || sample.seed_outline_px,
+    marker_status: sample.draft_marker_status === "visible_draft" ?
+      "visible" : sample.draft_marker_status,
+    marker_end_px: sample.draft_marker_end_px};
+}
+function renderBox(result) {
+  const corners = points();
+  polygon.setAttribute("points", corners.map(point => point.join(",")).join(" "));
+  handles.innerHTML = "";
+  corners.forEach((point, corner) => {
+    const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    handle.setAttribute("class", "handle"); handle.setAttribute("r", 5);
+    handle.setAttribute("cx", point[0]); handle.setAttribute("cy", point[1]);
+    handle.dataset.corner = corner; handles.appendChild(handle);
+  });
+  const normal = [-Math.sin(boxState.angle), Math.cos(boxState.angle)];
+  const top = [boxState.cx - normal[0] * boxState.height / 2,
+    boxState.cy - normal[1] * boxState.height / 2];
+  const rotate = [top[0] - normal[0] * 24, top[1] - normal[1] * 24];
+  rotateLine.setAttribute("x1", top[0]); rotateLine.setAttribute("y1", top[1]);
+  rotateLine.setAttribute("x2", rotate[0]); rotateLine.setAttribute("y2", rotate[1]);
+  const rotateHandle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  rotateHandle.setAttribute("class", "handle"); rotateHandle.setAttribute("r", 6);
+  rotateHandle.setAttribute("cx", rotate[0]); rotateHandle.setAttribute("cy", rotate[1]);
+  rotateHandle.dataset.rotate = "true"; handles.appendChild(rotateHandle);
+  const end = result.marker_end_px;
+  marker.style.display = end ? "block" : "none";
+  markerLine.style.display = end ? "block" : "none";
+  if (end) {
+    marker.setAttribute("cx", end[0]); marker.setAttribute("cy", end[1]);
+    markerLine.setAttribute("x1", boxState.cx);
+    markerLine.setAttribute("y1", boxState.cy);
+    markerLine.setAttribute("x2", end[0]); markerLine.setAttribute("y2", end[1]);
+  }
+}
+function drawDifference(sample) {
+  const referenceImage = new Image(), observedImage = new Image();
+  let loaded = 0;
+  const render = () => {
+    if (++loaded !== 2) return;
+    difference.width = sample.width_px; difference.height = sample.height_px;
+    const context = difference.getContext("2d", {willReadFrequently: true});
+    const scratch = document.createElement("canvas");
+    scratch.width = sample.width_px; scratch.height = sample.height_px;
+    const scratchContext = scratch.getContext("2d", {willReadFrequently: true});
+    scratchContext.drawImage(referenceImage, 0, 0);
+    const first = scratchContext.getImageData(0, 0, scratch.width, scratch.height);
+    scratchContext.drawImage(observedImage, 0, 0);
+    const second = scratchContext.getImageData(0, 0, scratch.width, scratch.height);
+    const output = context.createImageData(scratch.width, scratch.height);
+    for (let offset = 0; offset < output.data.length; offset += 4) {
+      const value = Math.min(255,
+        Math.abs(first.data[offset] - second.data[offset]) * 4);
+      output.data[offset] = value; output.data[offset + 1] = value;
+      output.data[offset + 2] = value; output.data[offset + 3] = 255;
+    }
+    context.putImageData(output, 0, 0);
+  };
+  referenceImage.onload = render; observedImage.onload = render;
+  referenceImage.src = sample.bare_image_path;
+  observedImage.src = sample.observed_image_path;
+}
+function show() {
+  const sample = manifest.samples[index], result = current();
+  bare.src = sample.bare_image_path; observed.src = sample.observed_image_path;
+  overlay.setAttribute("viewBox", `0 0 ${sample.width_px} ${sample.height_px}`);
+  const center = sample.width_px / 2;
+  for (const [id, values] of [["axis-x", [center - 12, center, center + 12, center]],
+    ["axis-y", [center, center - 12, center, center + 12]]]) {
+    const line = document.querySelector("#" + id);
+    ["x1", "y1", "x2", "y2"].forEach((name, item) =>
+      line.setAttribute(name, values[item]));
+  }
+  boxState = fromOutline(result.outline_px || sample.seed_outline_px);
+  note.value = result.note || ""; className.value = result.class_name;
+  markerStatus.value = result.marker_status || "not_applicable";
+  markerMode = false; document.querySelector("#mark-end").classList.remove("selected");
+  renderBox(result); drawDifference(sample);
+  document.querySelectorAll("[data-decision]").forEach(button =>
+    button.classList.toggle("selected", button.dataset.decision === result.decision));
+  const reviewed = Object.values(saved).filter(value =>
+    value.decision !== "unreviewed").length;
+  document.querySelector("#progress").textContent =
+    `${index + 1} / ${manifest.samples.length}; ${reviewed} reviewed`;
+  document.querySelector("#meta").textContent = JSON.stringify({
+    id: sample.id, split: sample.split, group_id: sample.group_id,
+    source_kind: sample.source_kind, observation_kind: sample.observation_kind,
+    nozzle_id: sample.nozzle_id, part_key: sample.part_key,
+    orientation: sample.orientation, evidence: sample.evidence,
+    draft_state: sample.draft_state, deterministic: {
+      detected: sample.deterministic.detected,
+      passed: sample.deterministic.passed,
+      confidence: sample.deterministic.confidence,
+      width_mm: sample.deterministic.width_mm,
+      length_mm: sample.deterministic.length_mm,
+      findings: sample.deterministic.findings
+    }
+  }, null, 2);
+}
+function persist(decision = current().decision) {
+  const sample = manifest.samples[index];
+  const previous = current();
+  const status = markerStatus.value;
+  saved[sample.id] = {decision, note: note.value,
+    class_name: className.value, outline_px: points(), marker_status: status,
+    marker_end_px: status === "visible" ? previous.marker_end_px : null};
+  store();
+}
+function decide(value) {
+  const result = current();
+  if (value === "accept" && result.marker_status === "visible" &&
+      !result.marker_end_px) {
+    alert("Mark the visible directed end before accepting this sample."); return;
+  }
+  persist(value);
+  if (index + 1 < manifest.samples.length) index++;
+  show();
+}
+function eventPoint(event) {
+  const point = overlay.createSVGPoint(); point.x = event.clientX;
+  point.y = event.clientY;
+  const value = point.matrixTransform(overlay.getScreenCTM().inverse());
+  return [value.x, value.y];
+}
+overlay.onpointerdown = event => {
+  const point = eventPoint(event);
+  if (markerMode) {
+    const sample = manifest.samples[index], result = current();
+    saved[sample.id] = {...result, marker_status: "visible", marker_end_px: point,
+      outline_px: points(), note: note.value, class_name: className.value};
+    markerStatus.value = "visible"; markerMode = false; store(); show(); return;
+  }
+  const corner = event.target.dataset.corner;
+  drag = {start: point, initial: {...boxState},
+    mode: event.target.dataset.rotate ? "rotate" :
+      corner !== undefined ? "corner" : event.target === polygon ? "move" : "none",
+    corner: Number(corner)};
+  overlay.setPointerCapture(event.pointerId);
+};
+overlay.onpointermove = event => {
+  if (!drag || drag.mode === "none") return;
+  const point = eventPoint(event), dx = point[0] - drag.start[0];
+  const dy = point[1] - drag.start[1];
+  if (drag.mode === "move") {
+    boxState.cx = drag.initial.cx + dx; boxState.cy = drag.initial.cy + dy;
+  } else if (drag.mode === "rotate") {
+    boxState.angle = Math.atan2(point[1] - boxState.cy,
+      point[0] - boxState.cx) + Math.PI / 2;
+  } else {
+    const old = points(drag.initial), opposite = old[(drag.corner + 2) % 4];
+    const u = [Math.cos(drag.initial.angle), Math.sin(drag.initial.angle)];
+    const v = [-u[1], u[0]], delta = [point[0] - opposite[0],
+      point[1] - opposite[1]];
+    boxState.width = Math.max(4, Math.abs(delta[0] * u[0] + delta[1] * u[1]));
+    boxState.height = Math.max(4, Math.abs(delta[0] * v[0] + delta[1] * v[1]));
+    boxState.cx = (point[0] + opposite[0]) / 2;
+    boxState.cy = (point[1] + opposite[1]) / 2;
+  }
+  renderBox({...current(), outline_px: points()});
+};
+overlay.onpointerup = () => { if (drag) persist(); drag = null; };
+document.querySelectorAll("[data-decision]").forEach(button =>
+  button.onclick = () => decide(button.dataset.decision));
+document.querySelector("#mark-end").onclick = event => {
+  markerMode = !markerMode; event.target.classList.toggle("selected", markerMode);
+};
+document.querySelector("#reset").onclick = () => {
+  const sample = manifest.samples[index];
+  boxState = fromOutline(sample.draft_outline_px || sample.seed_outline_px);
+  saved[sample.id] = {...current(), outline_px: points(),
+    marker_status: sample.draft_marker_status === "visible_draft" ?
+      "visible" : sample.draft_marker_status,
+    marker_end_px: sample.draft_marker_end_px};
+  store(); show();
+};
+document.querySelector("#previous").onclick = () => {
+  persist(); index = Math.max(0, index - 1); show();
+};
+document.querySelector("#next").onclick = () => {
+  persist(); index = Math.min(manifest.samples.length - 1, index + 1); show();
+};
+note.onchange = () => persist();
+className.onchange = () => persist();
+markerStatus.onchange = () => persist();
+document.querySelector("#download").onclick = () => {
+  persist();
+  const result = {schema_version: 1, dataset: manifest.name,
+    source_manifest_generated_at: manifest.generated_at,
+    exported_at: new Date().toISOString(), decisions: saved};
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)],
+    {type: "application/json"}));
+  link.download = "review-decisions.json"; link.click();
+};
+document.addEventListener("keydown", event => {
+  if (event.target === note || event.target === className ||
+      event.target === markerStatus) return;
+  const action = {a: "accept", e: "empty", r: "reject"}[event.key.toLowerCase()];
+  if (action) decide(action);
+  if (event.key === "ArrowLeft") {
+    persist(); index = Math.max(0, index - 1); show();
+  }
+  if (event.key === "ArrowRight") {
+    persist(); index = Math.min(manifest.samples.length - 1, index + 1); show();
+  }
+});
+show();
+</script>
+</body>
+</html>

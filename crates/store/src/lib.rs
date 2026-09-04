@@ -272,6 +272,18 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Lists retained artifact names and media types without loading blobs.
+    pub fn list_placement_execution_artifacts(
+        &self,
+        execution_id: Uuid,
+    ) -> Result<Vec<(String, String)>> {
+        self.list_artifact_metadata(
+            "placement_execution_artifacts",
+            "execution_id",
+            execution_id,
+        )
+    }
+
     pub fn put_board_registration_artifact(
         &self,
         registration_id: Uuid,
@@ -1001,6 +1013,18 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Lists retained artifact names and media types without loading blobs.
+    pub fn list_strip_feeder_pickup_artifacts(
+        &self,
+        qualification_id: Uuid,
+    ) -> Result<Vec<(String, String)>> {
+        self.list_artifact_metadata(
+            "strip_feeder_pickup_artifacts",
+            "qualification_id",
+            qualification_id,
+        )
+    }
+
     pub fn put_job(&self, job: &Job) -> Result<()> {
         self.put("job", job.id, job)
     }
@@ -1101,6 +1125,32 @@ impl Store {
         let mut events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         events.reverse();
         Ok(events)
+    }
+
+    fn list_artifact_metadata(
+        &self,
+        table: &str,
+        id_column: &str,
+        id: Uuid,
+    ) -> Result<Vec<(String, String)>> {
+        let query = match (table, id_column) {
+            ("placement_execution_artifacts", "execution_id") => {
+                "SELECT name, media_type FROM placement_execution_artifacts \
+                 WHERE execution_id = ?1 ORDER BY name"
+            }
+            ("strip_feeder_pickup_artifacts", "qualification_id") => {
+                "SELECT name, media_type FROM strip_feeder_pickup_artifacts \
+                 WHERE qualification_id = ?1 ORDER BY name"
+            }
+            _ => unreachable!("artifact table and key are fixed by Store methods"),
+        };
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(query)?;
+        let rows = statement.query_map(params![id.to_string()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     fn put<T: Serialize>(&self, kind: &str, id: Uuid, value: &T) -> Result<()> {
@@ -1589,6 +1639,12 @@ mod tests {
                 .unwrap(),
             Some(("image/png".into(), data.to_vec()))
         );
+        assert_eq!(
+            store
+                .list_placement_execution_artifacts(execution_id)
+                .unwrap(),
+            vec![("held-part-inspection.png".into(), "image/png".into())]
+        );
     }
 
     #[test]
@@ -1688,6 +1744,12 @@ mod tests {
                 .get_strip_feeder_pickup_artifact(qualification_id, "held-part-inspection.png",)
                 .unwrap(),
             Some(("image/png".into(), data.to_vec()))
+        );
+        assert_eq!(
+            store
+                .list_strip_feeder_pickup_artifacts(qualification_id)
+                .unwrap(),
+            vec![("held-part-inspection.png".into(), "image/png".into())]
         );
     }
 

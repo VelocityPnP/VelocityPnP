@@ -756,6 +756,57 @@ requested pocket as a component sample. It also rejects captures without a
 three-hole sprocket lattice. An explicit pocket index can therefore collect
 occupied, empty, edge, and difficult examples without lowering a nozzle.
 
+### Held-part learning dataset
+
+Retained pickup and placement runs contain a bare-nozzle reference and one or
+more bottom-camera observations. Export these pairs without machine motion:
+
+```bash
+cargo run --release -p velocitypnpd \
+  --example export_held_part_dataset -- \
+  velocitypnp.db profiles/lumenpnp-v3.0.4.json \
+  datasets/held-parts-v1 EVAL_REGISTRATION_UUID
+```
+
+All observations from one feeder registration stay in one split. Older
+records without a live registration stay grouped by their retained feeder
+identity. Supply at least one registration for evaluation. The current-machine
+evaluation split is provisional. A production gate also needs independent
+machine sessions and more component families.
+
+The exporter stores 512-pixel bare and observed crops. It includes initial
+held views, corrected held views, and every retained post-release view. The
+current deterministic detector supplies a weak oriented-box proposal. Vacuum,
+release, and stored vision outcomes are review evidence only.
+
+Open `review.html`. It shows the bare reference, observed image, and an
+amplified absolute difference. For each pair, select one result:
+
+- `component_flat`
+- `component_on_edge`
+- `multiple_components`
+- bare nozzle
+- rejected image pair
+
+Drag the green box, corner handles, or rotation handle as needed. The
+multiple-component class uses one enclosing box. For a directed part, mark a
+visible polarity end with the magenta endpoint. Use `not visible` when the
+part is present but the image cannot resolve its end. Do not guess.
+
+Download `review-decisions.json`. The finalizer checks that every sample was
+reviewed, both image hashes still match, all boxes are rectangular and inside
+the image, and directed endpoints are valid:
+
+```bash
+cargo run -p velocitypnpd --example finalize_held_part_dataset -- \
+  datasets/held-parts-v1 /path/to/review-decisions.json
+```
+
+The result is `manifest.ground-truth.json`. Empty pairs remain included
+negative samples. Rejected pairs remain excluded provenance records. This
+dataset does not authorize motion or replace vacuum and deterministic safety
+evidence.
+
 Classification is not accepted job registration: this no-motion stage does not
 create a `BoardInstance`, move the camera, resolve a symmetric outline, or
 accept a design-to-machine transform. Use the local fiducial workflow below.

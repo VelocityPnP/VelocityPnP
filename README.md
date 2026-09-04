@@ -39,6 +39,8 @@ This repository contains the first working platform slice:
   qualification
 - hash-checked CPU ONNX source-component inference with non-authoritative
   detector comparison and retained review evidence
+- paired bottom-camera held-part dataset export with oriented-box, condition,
+  and directed-end review
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

@@ -11,6 +11,12 @@ const BARE_ALIGNMENT_STEP_PX: f64 = 0.5;
 pub struct HeldPartInspectionArtifacts {
     pub report: HeldPartInspectionReport,
     pub preview: RgbFrame,
+    /// Deterministic oriented component bounds in source-frame pixels.
+    ///
+    /// This is review evidence. The persisted inspection report keeps metric
+    /// measurements for motion policy and does not treat this outline as
+    /// ground truth.
+    pub outline_px: Option<[[f64; 2]; 4]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,7 +199,11 @@ pub fn inspect_held_part_difference_with_orientation(
     let Some((_, component, center)) = component else {
         findings.push("no stable held-part difference was found near the nozzle axis".into());
         report.findings = findings;
-        return Ok(HeldPartInspectionArtifacts { report, preview });
+        return Ok(HeldPartInspectionArtifacts {
+            report,
+            preview,
+            outline_px: None,
+        });
     };
     let component = trim_narrow_axis_protrusions(&component, &difference, bare.width, center);
     let center = component_center(&component, &difference, bare.width).unwrap_or(center);
@@ -348,7 +358,11 @@ pub fn inspect_held_part_difference_with_orientation(
             [255, 0, 255],
         );
     }
-    Ok(HeldPartInspectionArtifacts { report, preview })
+    Ok(HeldPartInspectionArtifacts {
+        report,
+        preview,
+        outline_px: Some(geometry.corners_px),
+    })
 }
 
 pub(crate) fn estimate_bare_alignment(
