@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset
@@ -254,6 +254,14 @@ def _augment_pair(
         observed = observed.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
         if points is not None:
             points[:, 1] = size - points[:, 1]
+    if points is not None:
+        angle_degrees = rng.uniform(-90.0, 90.0)
+        observed, points = _rotate_component_only(
+            bare,
+            observed,
+            points,
+            angle_degrees,
+        )
     factor_brightness = rng.uniform(0.85, 1.15)
     factor_contrast = rng.uniform(0.85, 1.15)
     bare = ImageEnhance.Brightness(bare).enhance(factor_brightness)
@@ -261,6 +269,65 @@ def _augment_pair(
     bare = ImageEnhance.Contrast(bare).enhance(factor_contrast)
     observed = ImageEnhance.Contrast(observed).enhance(factor_contrast)
     return bare, observed, points
+
+
+def _rotate_component_only(
+    bare: Image.Image,
+    observed: Image.Image,
+    points: np.ndarray,
+    angle_degrees: float,
+) -> tuple[Image.Image, np.ndarray]:
+    """Rotate held-part evidence while fixed camera features stay unchanged."""
+
+    if bare.size != observed.size or bare.mode != "RGB" or observed.mode != "RGB":
+        raise ValueError("component rotation needs equal RGB images")
+    points = np.asarray(points, dtype=np.float32)
+    if points.shape != (4, 2):
+        raise ValueError("component rotation needs a four-point outline")
+    width, height = bare.size
+    center = points.mean(axis=0)
+    radians = math.radians(angle_degrees)
+    cosine = math.cos(radians)
+    sine = math.sin(radians)
+    offsets = points - center
+    rotated_points = np.empty_like(points)
+    rotated_points[:, 0] = center[0] + cosine * offsets[:, 0] + sine * offsets[:, 1]
+    rotated_points[:, 1] = center[1] - sine * offsets[:, 0] + cosine * offsets[:, 1]
+    if (
+        rotated_points[:, 0].min() < 2.0
+        or rotated_points[:, 1].min() < 2.0
+        or rotated_points[:, 0].max() > width - 2.0
+        or rotated_points[:, 1].max() > height - 2.0
+    ):
+        return observed, points
+
+    edge_lengths = np.linalg.norm(np.roll(points, -1, axis=0) - points, axis=1)
+    minimum_edge = max(float(edge_lengths.min()), 1.0)
+    mask_scale = 1.0 + 8.0 / minimum_edge
+    mask_points = center + (points - center) * mask_scale
+    mask = Image.new("L", bare.size, 0)
+    ImageDraw.Draw(mask).polygon(
+        [tuple(float(axis) for axis in point) for point in mask_points],
+        fill=255,
+    )
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=1.25))
+    mask_array = np.asarray(mask, dtype=np.float32)[:, :, None] / 255.0
+    bare_array = np.asarray(bare, dtype=np.float32)
+    observed_array = np.asarray(observed, dtype=np.float32)
+    residual = (observed_array - bare_array) * mask_array
+    rotated_residual = np.empty_like(residual)
+    rotation_center = (float(center[0]), float(center[1]))
+    for channel in range(3):
+        image = Image.fromarray(residual[:, :, channel], mode="F")
+        image = image.rotate(
+            angle_degrees,
+            resample=Image.Resampling.BILINEAR,
+            center=rotation_center,
+            fillcolor=0.0,
+        )
+        rotated_residual[:, :, channel] = np.asarray(image, dtype=np.float32)
+    synthetic = np.rint(bare_array + rotated_residual).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(synthetic, mode="RGB"), rotated_points
 
 
 class HeldPartDataset(Dataset):
@@ -273,6 +340,7 @@ class HeldPartDataset(Dataset):
         image_size: int,
         augment: bool = False,
         seed: int = 0,
+        fixed_component_rotation_degrees: float | None = None,
     ) -> None:
         if image_size < 64 or image_size % 8:
             raise ValueError("image size must be at least 64 and divisible by 8")
@@ -283,6 +351,7 @@ class HeldPartDataset(Dataset):
         self.image_size = image_size
         self.augment = augment
         self.rng = random.Random(seed)
+        self.fixed_component_rotation_degrees = fixed_component_rotation_degrees
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -299,6 +368,13 @@ class HeldPartDataset(Dataset):
         observed, points = _letterbox(
             observed_source, sample.outline_px, self.image_size
         )
+        if self.fixed_component_rotation_degrees is not None and points is not None:
+            observed, points = _rotate_component_only(
+                bare,
+                observed,
+                points,
+                self.fixed_component_rotation_degrees,
+            )
         if self.augment:
             bare, observed, points = _augment_pair(bare, observed, points, self.rng)
 
@@ -316,7 +392,13 @@ class HeldPartDataset(Dataset):
             if points is not None
             else np.zeros(6, np.float32)
         )
-        return image_pair, sample.class_id, torch.from_numpy(pose), sample.sample_id
+        sample_id = sample.sample_id
+        if self.fixed_component_rotation_degrees is not None:
+            sample_id = (
+                f"{sample_id}@rotation-"
+                f"{self.fixed_component_rotation_degrees:+.0f}-degrees"
+            )
+        return image_pair, sample.class_id, torch.from_numpy(pose), sample_id
 
 
 @dataclass(frozen=True)

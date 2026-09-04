@@ -830,6 +830,23 @@ python/training/run-held-part-container.sh \
   datasets/held-parts-v1 held-part-pose-v1
 ```
 
+Training rotates only the reviewed component and its local shadow. The bare
+nozzle image and fixed camera features do not rotate. This prevents the model
+from learning an angle from the four bottom-camera mounting bolts. Inspect the
+synthetic samples before each training run:
+
+```bash
+python python/tools/render_held_part_rotation_augmentation.py \
+  datasets/held-parts-v1 \
+  /tmp/velocitypnp-held-part-component-rotation.png
+```
+
+Checkpoint selection also uses fixed synthetic angles at 15-degree steps from
+-75 through +90 degrees, with zero excluded. This check can find an
+angle-collapsed model, but it is not an independent machine evaluation. Real
+captures at commanded rotations are still required before the pose result can
+control placement.
+
 The run writes a checkpoint, ONNX export, metrics, provenance, and evaluation
 contact sheets below `datasets/held-parts-v1/training/held-part-pose-v1`.
 Keep the result in shadow mode. The current four-image evaluation split is not

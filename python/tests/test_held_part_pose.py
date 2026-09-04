@@ -5,9 +5,11 @@ import tempfile
 import unittest
 
 try:
+    import numpy as np
     import torch
     from PIL import Image
 except ModuleNotFoundError:
+    np = None
     torch = None
     Image = None
 
@@ -21,6 +23,7 @@ if torch is not None:
         HeldPartPoseModel,
         held_part_dataset_summary,
     )
+    from velocitypnp_training.held_part import _rotate_component_only
 
 
 @unittest.skipIf(torch is None, "training dependencies are not installed")
@@ -91,6 +94,30 @@ class HeldPartPoseTests(unittest.TestCase):
             self.assertEqual(sample_id, "train-flat")
             self.assertAlmostEqual(float(torch.linalg.norm(pose[4:])), 1.0)
 
+    def test_fixed_component_rotation_changes_only_the_pose_axis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_dataset(root)
+            original = HeldPartDataset(root, "train", 64)
+            rotated = HeldPartDataset(
+                root,
+                "train",
+                64,
+                fixed_component_rotation_degrees=90.0,
+            )
+
+            _, _, original_pose, _ = original[0]
+            _, _, rotated_pose, sample_id = rotated[0]
+
+            torch.testing.assert_close(rotated_pose[:4], original_pose[:4])
+            torch.testing.assert_close(
+                rotated_pose[4:],
+                -original_pose[4:],
+                atol=1e-5,
+                rtol=1e-5,
+            )
+            self.assertTrue(sample_id.endswith("@rotation-+90-degrees"))
+
     def test_model_contract_shapes_and_ranges(self):
         model = HeldPartPoseModel(HeldPartModelConfig(image_size=64)).eval()
         state, pose = model(torch.zeros(2, 6, 64, 64))
@@ -101,6 +128,34 @@ class HeldPartPoseTests(unittest.TestCase):
         )
         self.assertTrue(torch.all((pose[:, :4] >= 0) & (pose[:, :4] <= 1)))
         torch.testing.assert_close(torch.linalg.norm(pose[:, 4:], dim=1), torch.ones(2))
+
+    def test_component_rotation_keeps_fixed_camera_features(self):
+        bare = np.full((64, 64, 3), 32, np.uint8)
+        for left, top in [(5, 5), (54, 5), (5, 54), (54, 54)]:
+            bare[top : top + 5, left : left + 5] = 180
+        observed = bare.copy()
+        observed[28:36, 20:44] = 220
+        points = np.asarray(
+            [[20.0, 28.0], [44.0, 28.0], [44.0, 36.0], [20.0, 36.0]],
+            np.float32,
+        )
+
+        rotated, rotated_points = _rotate_component_only(
+            Image.fromarray(bare),
+            Image.fromarray(observed),
+            points,
+            90.0,
+        )
+        pixels = np.asarray(rotated)
+
+        np.testing.assert_array_equal(pixels[5:10, 5:10], bare[5:10, 5:10])
+        self.assertLess(int(pixels[32, 21, 0]), 80)
+        self.assertGreater(int(pixels[21, 32, 0]), 180)
+        np.testing.assert_allclose(
+            rotated_points,
+            [[28.0, 44.0], [28.0, 20.0], [36.0, 20.0], [36.0, 44.0]],
+            atol=1e-5,
+        )
 
 
 if __name__ == "__main__":

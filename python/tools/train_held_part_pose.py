@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 TRAINING_PACKAGE = REPOSITORY / "python" / "training"
@@ -40,6 +40,19 @@ from velocitypnp_training.held_part_evaluation import (  # noqa: E402
 )
 
 CONTRACT_VERSION = "velocitypnp.held-part-pose.v1"
+ROTATION_STRESS_ANGLES_DEGREES = (
+    -75.0,
+    -60.0,
+    -45.0,
+    -30.0,
+    -15.0,
+    15.0,
+    30.0,
+    45.0,
+    60.0,
+    75.0,
+    90.0,
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -254,6 +267,18 @@ def main() -> None:
     )
     train_exact = HeldPartDataset(root, "train", args.image_size)
     evaluation = HeldPartDataset(root, "eval", args.image_size)
+    rotation_evaluation = ConcatDataset(
+        [
+            HeldPartDataset(
+                root,
+                "eval",
+                args.image_size,
+                fixed_component_rotation_degrees=angle,
+            )
+            for angle in ROTATION_STRESS_ANGLES_DEGREES
+        ]
+    )
+    rotation_evaluation.image_size = args.image_size
     train_loader = DataLoader(
         train,
         batch_size=args.batch_size,
@@ -262,6 +287,12 @@ def main() -> None:
     )
     eval_loader = DataLoader(
         evaluation, batch_size=args.batch_size, shuffle=False, num_workers=args.workers
+    )
+    rotation_eval_loader = DataLoader(
+        rotation_evaluation,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=0.01
@@ -283,9 +314,17 @@ def main() -> None:
             "learning_rate": optimizer.param_groups[0]["lr"],
             "train": epoch_loss(model, train_loader, device, optimizer),
             "eval": epoch_loss(model, eval_loader, device, None),
+            "rotation_eval": epoch_loss(
+                model,
+                rotation_eval_loader,
+                device,
+                None,
+            ),
         }
         record["selection_loss"] = (
-            record["eval"]["total"] + 0.1 * record["train"]["total"]
+            record["eval"]["total"]
+            + record["rotation_eval"]["total"]
+            + 0.1 * record["train"]["total"]
         )
         history.append(record)
         print(json.dumps(record), flush=True)
@@ -312,6 +351,12 @@ def main() -> None:
         model, train_exact, device, args.batch_size
     )
     metrics, records = evaluate_held_part(model, evaluation, device, args.batch_size)
+    rotation_metrics, rotation_records = evaluate_held_part(
+        model,
+        rotation_evaluation,
+        device,
+        args.batch_size,
+    )
     render_held_part_evaluation(
         train_exact, train_records, output / "training-evaluation"
     )
@@ -355,6 +400,8 @@ def main() -> None:
             "best_epoch": best_epoch,
             "best_selection_loss": best_loss,
             "train_selection_weight": 0.1,
+            "rotation_stress_selection_weight": 1.0,
+            "rotation_stress_angles_degrees": ROTATION_STRESS_ANGLES_DEGREES,
             "early_stopping_patience": args.patience,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
@@ -419,6 +466,7 @@ def main() -> None:
             },
         },
         "metrics": metrics,
+        "rotation_stress_metrics": rotation_metrics,
         "training_metrics": train_metrics,
         "limitations": [
             "The four-sample evaluation split is too small for a production gate.",
@@ -427,11 +475,15 @@ def main() -> None:
             "No multiple-component examples are available for this contract.",
             "The data comes from one machine and a small number of sessions.",
             "Model results must remain in shadow mode until independent validation.",
+            "The rotation stress set is synthetic and is not an independent machine holdout.",
         ],
     }
     (output / "training-history.json").write_text(json.dumps(history, indent=2) + "\n")
     (output / "evaluation-records.json").write_text(
         json.dumps(records, indent=2) + "\n"
+    )
+    (output / "rotation-evaluation-records.json").write_text(
+        json.dumps(rotation_records, indent=2) + "\n"
     )
     (output / "training-evaluation-records.json").write_text(
         json.dumps(train_records, indent=2) + "\n"
