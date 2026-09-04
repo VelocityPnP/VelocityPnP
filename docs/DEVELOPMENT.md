@@ -790,8 +790,10 @@ amplified absolute difference. For each pair, select one result:
 
 Drag the green box, corner handles, or rotation handle as needed. The
 multiple-component class uses one enclosing box. For a directed part, mark a
-visible polarity end with the magenta endpoint. Use `not visible` when the
-part is present but the image cannot resolve its end. Do not guess.
+visible polarity end with the magenta endpoint. Use `Flip end` when the part
+faces opposite the draft direction, such as a part that was returned to its
+tape in reverse. Use `not visible` when the part is present but the image
+cannot resolve its end. Do not guess.
 
 Download `review-decisions.json`. The finalizer checks that every sample was
 reviewed, both image hashes still match, all boxes are rectangular and inside

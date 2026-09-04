@@ -68,6 +68,7 @@ the automatic box. Orange is the nozzle axis. Magenta marks a directed end.</p>
     <option value="uncertain">Uncertain</option>
   </select></label>
   <button id="mark-end">Mark end</button>
+  <button id="flip-end">Flip end</button>
   <button id="reset">Reset proposal</button>
 </div>
 <textarea id="note" placeholder="Optional review note"></textarea>
@@ -99,6 +100,7 @@ const marker = document.querySelector("#marker");
 const note = document.querySelector("#note");
 const className = document.querySelector("#class-name");
 const markerStatus = document.querySelector("#marker-status");
+const flipEnd = document.querySelector("#flip-end");
 const difference = document.querySelector("#difference");
 
 function store() { localStorage.setItem(storageKey, JSON.stringify(saved)); }
@@ -202,6 +204,7 @@ function show() {
   boxState = fromOutline(result.outline_px || sample.seed_outline_px);
   note.value = result.note || ""; className.value = result.class_name;
   markerStatus.value = result.marker_status || "not_applicable";
+  flipEnd.disabled = markerStatus.value !== "visible" || !result.marker_end_px;
   markerMode = false; document.querySelector("#mark-end").classList.remove("selected");
   renderBox(result); drawDifference(sample);
   document.querySelectorAll("[data-decision]").forEach(button =>
@@ -291,6 +294,15 @@ document.querySelectorAll("[data-decision]").forEach(button =>
   button.onclick = () => decide(button.dataset.decision));
 document.querySelector("#mark-end").onclick = event => {
   markerMode = !markerMode; event.target.classList.toggle("selected", markerMode);
+};
+flipEnd.onclick = () => {
+  const sample = manifest.samples[index], result = current();
+  if (result.marker_status !== "visible" || !result.marker_end_px) return;
+  saved[sample.id] = {...result, note: note.value,
+    class_name: className.value, outline_px: points(),
+    marker_end_px: [2 * boxState.cx - result.marker_end_px[0],
+      2 * boxState.cy - result.marker_end_px[1]]};
+  store(); show();
 };
 document.querySelector("#reset").onclick = () => {
   const sample = manifest.samples[index];
