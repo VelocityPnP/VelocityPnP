@@ -809,6 +809,31 @@ negative samples. Rejected pairs remain excluded provenance records. This
 dataset does not authorize motion or replace vacuum and deterministic safety
 evidence.
 
+Validate the reviewed dataset before training:
+
+```bash
+python python/tools/train_held_part_pose.py \
+  datasets/held-parts-v1 --validate-only
+```
+
+The held-part model takes the bare-nozzle and observed images as one six-channel
+input. It predicts bare, flat, or on-edge state, one oriented package box, and
+a directed package axis. The directed-axis loss applies only to reviewed images
+with a visible end. This first contract cannot detect multiple components
+because the current dataset has no examples.
+
+Train on an NVIDIA system with the pinned container:
+
+```bash
+python/training/run-held-part-container.sh \
+  datasets/held-parts-v1 held-part-pose-v1
+```
+
+The run writes a checkpoint, ONNX export, metrics, provenance, and evaluation
+contact sheets below `datasets/held-parts-v1/training/held-part-pose-v1`.
+Keep the result in shadow mode. The current four-image evaluation split is not
+a production gate.
+
 Classification is not accepted job registration: this no-motion stage does not
 create a `BoardInstance`, move the camera, resolve a symmetric outline, or
 accept a design-to-machine transform. Use the local fiducial workflow below.
