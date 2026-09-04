@@ -9271,7 +9271,7 @@ async fn execute_physical_strip_feeder_pickup(
         stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
     let camera_path =
         camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
-    let pocket_machine_mm = prepared.registration.selected_pocket_machine_mm.unwrap();
+    let nominal_pocket_machine_mm = prepared.registration.selected_pocket_machine_mm.unwrap();
     let contact_z_mm = prepared
         .reference_contact
         .contact_nozzle_z_mm
@@ -9336,7 +9336,7 @@ async fn execute_physical_strip_feeder_pickup(
     let (source_before, source_before_pose) = capture_top_pocket_mean(
         state,
         prepared,
-        pocket_machine_mm,
+        nominal_pocket_machine_mm,
         pickup_profile.inspection_sample_count,
     )
     .await?;
@@ -9347,6 +9347,50 @@ async fn execute_physical_strip_feeder_pickup(
         &source_before,
     )?;
     artifact_names.push(SOURCE_POCKET_BEFORE_ARTIFACT.into());
+    let source_inspection_frame = source_before.clone();
+    let source_registration = prepared.registration.clone();
+    let source_camera_model = prepared.top_camera_model.clone();
+    let source_inspection = tokio::task::spawn_blocking(move || {
+        inspect_strip_feeder_pocket_return(
+            &source_inspection_frame,
+            source_before_pose,
+            &source_inspection_frame,
+            source_before_pose,
+            &source_camera_model,
+            &source_registration,
+            nominal_pocket_machine_mm,
+            SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    persist_transfer_rgb_artifact(
+        state,
+        prepared,
+        SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
+        &source_inspection.preview,
+    )?;
+    artifact_names.push(SOURCE_POCKET_PICK_INSPECTION_ARTIFACT.into());
+    if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
+        return Err("top vision did not confirm a part in the qualification pocket".into());
+    }
+    let pocket_machine_mm = source_inspection
+        .report
+        .before_measured_center_machine_mm
+        .ok_or_else(|| "top vision did not locate the qualification-pocket part".to_string())?;
+    let source_center_correction_mm = (pocket_machine_mm[0] - nominal_pocket_machine_mm[0])
+        .hypot(pocket_machine_mm[1] - nominal_pocket_machine_mm[1]);
+    if source_center_correction_mm > pickup_profile.maximum_part_offset_mm {
+        return Err(format!(
+            "qualification-pocket part center correction \
+             {source_center_correction_mm:.3} mm exceeds the configured bound"
+        ));
+    }
+    findings.push(format!(
+        "top vision corrected the pickup center by \
+         {source_center_correction_mm:.3} mm from the nominal pocket center"
+    ));
 
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
     let height_correction = prepared
