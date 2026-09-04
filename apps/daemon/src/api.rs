@@ -32,40 +32,42 @@ use velocitypnp_domain::{
     CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
     CalibrationSnapshot, CalibrationStepId, CameraProfile, CameraProfileControlValue,
     CameraRayTransferReport, CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport,
-    HeldPartAlignmentObservation, HeldPartAlignmentReport, HeldPartInspectionReport,
-    InspectionReport, InspectionStatus, InstalledGeometryCalibrationReport,
-    InstalledPlateGeometryReport, InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job,
-    JobExecutionRun, JobExecutionStatus, JobExecutionStep, JobExecutionStepStatus, JogTarget,
-    LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate, LocalXyCompensationHoldout,
-    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, MachineProfile, MachineState,
-    NozzleHeightModel, NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport,
-    NozzleRunoutSample, Operation, OperationStatus, Part, PartOrientation,
-    PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
-    PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
-    PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
-    PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
-    Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
-    SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
-    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupDisposition,
-    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
-    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
-    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
-    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
-    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
-    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
-    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
-    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
-    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
-    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
-    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
-    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
-    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
-    WorkspaceSurfaceModel,
+    HeldPartAlignmentObservation, HeldPartAlignmentReport, HeldPartClass, HeldPartInspectionReport,
+    HeldPartModelPrediction, HeldPartShadowReport, InspectionReport, InspectionStatus,
+    InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
+    InstalledPlateRegistrationReport, Job, JobExecutionRun, JobExecutionStatus, JobExecutionStep,
+    JobExecutionStepStatus, JogTarget, LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate,
+    LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
+    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
+    NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample, Operation,
+    OperationStatus, Part, PartOrientation, PlacementExecutionReport, PlacementExecutionRun,
+    PlacementExecutionStage, PlacementExecutionStageReport, PlacementOutcomeDisposition,
+    PlacementOutcomeRecord, PlacementPickupAttemptReport, PlacementProcessEstimate,
+    PlacementReleaseAttemptReport, PlanarCameraCalibrationReport, PlanarCameraCalibrationSample,
+    PlanarCameraModel, Pose, Residuals, SensorReading, SourceComponentClass,
+    SourceComponentModelPrediction, SourceComponentShadowReport, StripFeederInventoryLane,
+    StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
+    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
+    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
+    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
+    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
+    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
+    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
+    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
+    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
+    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
+    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
+    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
+    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
+    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
-use velocitypnp_model::{SourceComponentModel, SourceComponentModelStatus};
+use velocitypnp_model::{
+    HeldPartModel, HeldPartModelStatus, SourceComponentModel, SourceComponentModelStatus,
+};
 use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::{
     plan_job, MotionCalibration, MotionMode, MotionPlanner, MotionState, PlanStep, PlannedMotion,
@@ -89,8 +91,8 @@ use velocitypnp_vision::{
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
     plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
     query_camera_controls, reanalyze_workspace_seam_health, register_two_terminal_placement_target,
-    render_board_fiducial_evidence, render_source_component_shadow_preview,
-    render_workspace_height_mosaic_with_consistency,
+    render_board_fiducial_evidence, render_held_part_shadow_preview,
+    render_source_component_shadow_preview, render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
     summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
@@ -155,6 +157,10 @@ const SOURCE_POCKET_POSE_INSPECTION_ARTIFACT: &str = "source-pocket-pose-inspect
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v2";
 const MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION: f64 = 0.04;
+const HELD_PART_SHADOW_ALGORITHM: &str = "held_part_shadow.v1";
+const HELD_PART_MODEL_CROP_SIZE_PX: u32 = 512;
+const MAXIMUM_HELD_PART_CENTER_DELTA_PX: f64 = 12.0;
+const MAXIMUM_HELD_PART_ROTATION_DELTA_DEG: f64 = 15.0;
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
 const BOARD_TARGET_REGISTRATION_ARTIFACT: &str = "board-target-registration.png";
@@ -243,6 +249,8 @@ pub struct AppState {
     workspace_scan_motion_lock: Arc<tokio::sync::Mutex<()>>,
     source_component_model: Option<Arc<SourceComponentModel>>,
     source_component_model_status: Arc<SourceComponentModelStatus>,
+    held_part_model: Option<Arc<HeldPartModel>>,
+    held_part_model_status: Arc<HeldPartModelStatus>,
 }
 
 impl AppState {
@@ -256,6 +264,8 @@ impl AppState {
             workspace_scan_motion_lock: Arc::new(tokio::sync::Mutex::new(())),
             source_component_model: None,
             source_component_model_status: Arc::new(SourceComponentModelStatus::disabled()),
+            held_part_model: None,
+            held_part_model_status: Arc::new(HeldPartModelStatus::disabled()),
         };
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
@@ -294,6 +304,35 @@ impl AppState {
                 self.source_component_model = None;
                 self.source_component_model_status =
                     Arc::new(SourceComponentModelStatus::invalid(error.to_string()));
+            }
+        }
+        self
+    }
+
+    pub fn with_held_part_model_package(mut self, package_dir: Option<&FilePath>) -> Self {
+        let Some(package_dir) = package_dir else {
+            return self;
+        };
+        match HeldPartModel::load(package_dir) {
+            Ok(model) => {
+                let status = model.status();
+                tracing::info!(
+                    path = %model.package_dir().display(),
+                    sha256 = status.artifact_sha256.as_deref().unwrap_or_default(),
+                    "loaded held-part shadow model"
+                );
+                self.held_part_model = Some(Arc::new(model));
+                self.held_part_model_status = Arc::new(status);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %package_dir.display(),
+                    %error,
+                    "held-part shadow model is disabled"
+                );
+                self.held_part_model = None;
+                self.held_part_model_status =
+                    Arc::new(HeldPartModelStatus::invalid(error.to_string()));
             }
         }
         self
@@ -1169,6 +1208,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "simulated": state.machine.status().simulated,
         "models": {
             "source_component_pose": state.source_component_model_status.as_ref(),
+            "held_part_pose": state.held_part_model_status.as_ref(),
         },
     }))
 }
@@ -6405,6 +6445,269 @@ struct SourceComponentShadowArtifacts {
     preview: RgbFrame,
 }
 
+struct HeldPartShadowArtifacts {
+    report: HeldPartShadowReport,
+    preview: RgbFrame,
+}
+
+fn centered_gray_crop(
+    frame: &GrayFrame,
+    center_px: [f64; 2],
+    size: u32,
+) -> Result<(GrayFrame, [u32; 2]), String> {
+    if frame.width < size || frame.height < size {
+        return Err(format!(
+            "held-part source frame {}x{} is smaller than the {size}-pixel crop",
+            frame.width, frame.height
+        ));
+    }
+    let half = f64::from(size) / 2.0;
+    let left = (center_px[0] - half)
+        .round()
+        .clamp(0.0, f64::from(frame.width - size)) as u32;
+    let top = (center_px[1] - half)
+        .round()
+        .clamp(0.0, f64::from(frame.height - size)) as u32;
+    let mut pixels = Vec::with_capacity((size * size) as usize);
+    for y in top..top + size {
+        let start = (y * frame.width + left) as usize;
+        pixels.extend_from_slice(&frame.pixels[start..start + size as usize]);
+    }
+    Ok((
+        GrayFrame {
+            width: size,
+            height: size,
+            pixels,
+        },
+        [left, top],
+    ))
+}
+
+fn shift_held_part_outline(
+    outline: Option<[[f64; 2]; 4]>,
+    origin: [u32; 2],
+) -> Option<[[f64; 2]; 4]> {
+    outline.map(|mut points| {
+        for point in &mut points {
+            point[0] -= f64::from(origin[0]);
+            point[1] -= f64::from(origin[1]);
+        }
+        points
+    })
+}
+
+fn outline_axis_rotation_deg(outline: [[f64; 2]; 4]) -> f64 {
+    let edges = [
+        [outline[1][0] - outline[0][0], outline[1][1] - outline[0][1]],
+        [outline[2][0] - outline[1][0], outline[2][1] - outline[1][1]],
+    ];
+    let axis = if edges[0][0].hypot(edges[0][1]) >= edges[1][0].hypot(edges[1][1]) {
+        edges[0]
+    } else {
+        edges[1]
+    };
+    axis[1].atan2(axis[0]).to_degrees().rem_euclid(180.0)
+}
+
+fn undirected_rotation_delta_deg(first: f64, second: f64) -> f64 {
+    ((first - second + 90.0).rem_euclid(180.0) - 90.0).abs()
+}
+
+fn build_held_part_shadow_report(
+    deterministic: &HeldPartInspectionArtifacts,
+    deterministic_outline_px: Option<[[f64; 2]; 4]>,
+    prediction: HeldPartModelPrediction,
+    artifact_stem: &str,
+) -> HeldPartShadowReport {
+    let learned_occupied = prediction.class.occupied();
+    let occupancy_agreement = deterministic.report.detected == learned_occupied;
+    let deterministic_center_px = deterministic
+        .report
+        .center_x_px
+        .zip(deterministic.report.center_y_px)
+        .map(|(x, y)| [x, y]);
+    let center_delta_px = deterministic_center_px
+        .filter(|_| deterministic.report.detected && learned_occupied)
+        .map(|center| {
+            (center[0] - prediction.pose.center_px[0])
+                .hypot(center[1] - prediction.pose.center_px[1])
+        });
+    let rotation_delta_deg_mod_180 = deterministic_outline_px
+        .filter(|_| learned_occupied && prediction.pose.valid)
+        .map(|outline| {
+            undirected_rotation_delta_deg(
+                outline_axis_rotation_deg(outline),
+                prediction.pose.rotation_deg_mod_180,
+            )
+        });
+    let deterministic_occupied_rejected =
+        deterministic.report.detected && !deterministic.report.passed;
+    let review_required = deterministic_occupied_rejected
+        || !prediction.confidence_gate_passed
+        || !occupancy_agreement
+        || prediction.class == HeldPartClass::ComponentOnEdge
+        || center_delta_px.is_some_and(|delta| delta > MAXIMUM_HELD_PART_CENTER_DELTA_PX)
+        || rotation_delta_deg_mod_180
+            .is_some_and(|delta| delta > MAXIMUM_HELD_PART_ROTATION_DELTA_DEG);
+    let mut findings = prediction.findings.clone();
+    findings.push("the learned result is shadow evidence and cannot control motion".into());
+    if deterministic_occupied_rejected {
+        findings.push("the deterministic held-part inspection did not pass".into());
+    }
+    if !occupancy_agreement {
+        findings.push("learned and deterministic occupancy disagree".into());
+    }
+    if prediction.class == HeldPartClass::ComponentOnEdge {
+        findings.push("the learned model marks the component as on edge".into());
+    }
+    if center_delta_px.is_some_and(|delta| delta > MAXIMUM_HELD_PART_CENTER_DELTA_PX) {
+        findings.push(format!(
+            "learned and deterministic centers differ by more than \
+             {MAXIMUM_HELD_PART_CENTER_DELTA_PX:.1} pixels"
+        ));
+    }
+    if rotation_delta_deg_mod_180.is_some_and(|delta| delta > MAXIMUM_HELD_PART_ROTATION_DELTA_DEG)
+    {
+        findings.push(format!(
+            "learned and deterministic axes differ by more than \
+             {MAXIMUM_HELD_PART_ROTATION_DELTA_DEG:.1} degrees"
+        ));
+    }
+    HeldPartShadowReport {
+        algorithm_version: HELD_PART_SHADOW_ALGORITHM.into(),
+        deterministic_algorithm_version: deterministic.report.algorithm_version.clone(),
+        deterministic_detected: deterministic.report.detected,
+        deterministic_passed: deterministic.report.passed,
+        deterministic_confidence: deterministic.report.confidence,
+        deterministic_center_px,
+        deterministic_outline_px,
+        prediction,
+        occupancy_agreement,
+        center_delta_px,
+        rotation_delta_deg_mod_180,
+        review_required,
+        control_authorized: false,
+        report_artifact_name: format!("{artifact_stem}-held-part-shadow.json"),
+        preview_artifact_name: format!("{artifact_stem}-held-part-shadow.png"),
+        findings,
+    }
+}
+
+fn analyze_held_part_shadow(
+    model: &HeldPartModel,
+    bare: &GrayFrame,
+    observed: &GrayFrame,
+    deterministic: &HeldPartInspectionArtifacts,
+    frame_center_px: [f64; 2],
+    artifact_stem: &str,
+) -> Result<HeldPartShadowArtifacts, String> {
+    let (bare_crop, origin) =
+        centered_gray_crop(bare, frame_center_px, HELD_PART_MODEL_CROP_SIZE_PX)?;
+    let (observed_crop, observed_origin) =
+        centered_gray_crop(observed, frame_center_px, HELD_PART_MODEL_CROP_SIZE_PX)?;
+    if origin != observed_origin {
+        return Err("held-part pair crop origins differ".into());
+    }
+    let deterministic_outline_px = shift_held_part_outline(deterministic.outline_px, origin);
+    let mut crop_deterministic = deterministic.clone();
+    if let Some(value) = crop_deterministic.report.center_x_px.as_mut() {
+        *value -= f64::from(origin[0]);
+    }
+    if let Some(value) = crop_deterministic.report.center_y_px.as_mut() {
+        *value -= f64::from(origin[1]);
+    }
+    let prediction = model
+        .predict_gray_pair(
+            observed_crop.width,
+            observed_crop.height,
+            &bare_crop.pixels,
+            &observed_crop.pixels,
+        )
+        .map_err(|error| error.to_string())?;
+    let report = build_held_part_shadow_report(
+        &crop_deterministic,
+        deterministic_outline_px,
+        prediction,
+        artifact_stem,
+    );
+    let preview = render_held_part_shadow_preview(
+        &observed_crop,
+        report.deterministic_outline_px,
+        &report.prediction,
+        report.review_required,
+    );
+    Ok(HeldPartShadowArtifacts { report, preview })
+}
+
+fn persist_held_part_shadow_artifacts(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    artifacts: &HeldPartShadowArtifacts,
+) -> Result<(), String> {
+    let report = serde_json::to_vec_pretty(&artifacts.report).map_err(|error| error.to_string())?;
+    let preview = encode_rgb_png(&artifacts.preview).map_err(|error| error.to_string())?;
+    persist_transfer_data_artifact(
+        state,
+        prepared,
+        &artifacts.report.report_artifact_name,
+        "application/json",
+        &report,
+    )?;
+    persist_transfer_data_artifact(
+        state,
+        prepared,
+        &artifacts.report.preview_artifact_name,
+        "image/png",
+        &preview,
+    )
+}
+
+async fn analyze_and_persist_held_part_shadow(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    bare: &GrayFrame,
+    observed: &GrayFrame,
+    deterministic: &HeldPartInspectionArtifacts,
+    frame_center_px: [f64; 2],
+    artifact_name: &str,
+) -> Option<HeldPartShadowReport> {
+    let model = state.held_part_model.clone()?;
+    let bare = bare.clone();
+    let observed = observed.clone();
+    let deterministic = deterministic.clone();
+    let artifact_stem = artifact_name
+        .strip_suffix(".png")
+        .unwrap_or(artifact_name)
+        .to_string();
+    let analysis = match tokio::task::spawn_blocking(move || {
+        analyze_held_part_shadow(
+            &model,
+            &bare,
+            &observed,
+            &deterministic,
+            frame_center_px,
+            &artifact_stem,
+        )
+    })
+    .await
+    {
+        Ok(Ok(analysis)) => analysis,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "held-part shadow inference failed");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "held-part shadow task failed");
+            return None;
+        }
+    };
+    if let Err(error) = persist_held_part_shadow_artifacts(state, prepared, &analysis) {
+        tracing::warn!(%error, "held-part shadow persistence failed");
+        return None;
+    }
+    Some(analysis.report)
+}
+
 #[derive(Clone, Copy)]
 struct SourceComponentShadowContext {
     camera_pose: Pose,
@@ -8905,6 +9208,19 @@ async fn execute_physical_strip_feeder_pickup(
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
             &initial_inspection.preview,
         )?;
+        if let Some(shadow) = analyze_and_persist_held_part_shadow(
+            state,
+            prepared,
+            &bare,
+            &held,
+            &initial_inspection,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+        )
+        .await
+        {
+            artifact_names.extend([shadow.report_artifact_name, shadow.preview_artifact_name]);
+        }
         let motion_permitted = vacuum_held_after_transfer && initial_inspection.report.passed;
         let rotation_reference_captured = if motion_permitted {
             state
@@ -9216,6 +9532,19 @@ async fn release_and_verify_nozzle_clear(
         )
         .map_err(|error| error.to_string())?;
         persist_transfer_rgb_artifact(state, prepared, &inspection_artifact, &inspection.preview)?;
+        if let Some(shadow) = analyze_and_persist_held_part_shadow(
+            state,
+            prepared,
+            bare,
+            &post_release,
+            &inspection,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            &inspection_artifact,
+        )
+        .await
+        {
+            artifact_names.extend([shadow.report_artifact_name, shadow.preview_artifact_name]);
+        }
         artifact_names.push(raw_artifact);
         artifact_names.push(inspection_artifact);
         let part_detected = post_release_matches_held_part(held_part, &inspection.report);
@@ -9882,6 +10211,23 @@ async fn align_held_part(
         .map_err(|error| error.to_string())?;
         apply_rotated_retained_part_size_gate(&mut current.report, initial_size_mm);
         persist_transfer_rgb_artifact(state, prepared, &inspection_artifact, &current.preview)?;
+        if let Some(shadow) = analyze_and_persist_held_part_shadow(
+            state,
+            prepared,
+            bare,
+            &held,
+            &current,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            &inspection_artifact,
+        )
+        .await
+        {
+            for name in [shadow.report_artifact_name, shadow.preview_artifact_name] {
+                if !artifact_names.contains(&name) {
+                    artifact_names.push(name);
+                }
+            }
+        }
     }
     Err("held-part alignment ended without a report".into())
 }
@@ -10472,6 +10818,24 @@ fn persist_transfer_rgb_artifact(
             persist_placement_rgb_artifact(state, id, name, frame)
         }
     }
+}
+
+fn persist_transfer_data_artifact(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    name: &str,
+    media_type: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    match prepared.artifact_target {
+        TransferArtifactTarget::PickupQualification(id) => state
+            .store
+            .put_strip_feeder_pickup_artifact(id, name, media_type, data),
+        TransferArtifactTarget::PlacementExecution(id) => state
+            .store
+            .put_placement_execution_artifact(id, name, media_type, data),
+    }
+    .map_err(|error| error.to_string())
 }
 
 fn mean_gray_frames(frames: &[GrayFrame]) -> Result<GrayFrame, String> {
@@ -24495,6 +24859,21 @@ async fn execute_physical_retained_part_recovery(
         HELD_PART_INITIAL_INSPECTION_ARTIFACT,
         &initial.preview,
     )?;
+    if let Some(shadow) = analyze_and_persist_held_part_shadow(
+        state,
+        prepared,
+        bare,
+        &held,
+        &initial,
+        [bottom.frame_center_x_px, bottom.frame_center_y_px],
+        HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+    )
+    .await
+    {
+        report
+            .artifact_names
+            .extend([shadow.report_artifact_name, shadow.preview_artifact_name]);
+    }
     if !initial.report.passed {
         return Err("bottom vision did not confirm the retained resistor".into());
     }
@@ -25912,6 +26291,16 @@ async fn release_part_at_board_and_verify(
             &inspection_artifact,
             &inspection.preview,
         )?;
+        let release_shadow = analyze_and_persist_held_part_shadow(
+            state,
+            prepared,
+            &acquired.bare,
+            &post_release,
+            &inspection,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            &inspection_artifact,
+        )
+        .await;
         let retained_part = post_release_matches_held_part(
             release_reference_inspection(&acquired.alignment, &acquired.inspection),
             &inspection.report,
@@ -25920,6 +26309,17 @@ async fn release_part_at_board_and_verify(
         retained_part_secured = false;
         observations.push(inspection.report.clone());
         artifact_names.extend([raw_artifact.clone(), inspection_artifact.clone()]);
+        if let Some(shadow) = release_shadow.as_ref() {
+            artifact_names.extend([
+                shadow.report_artifact_name.clone(),
+                shadow.preview_artifact_name.clone(),
+            ]);
+        }
+        let mut attempt_artifact_names = vec![raw_artifact, inspection_artifact];
+        if let Some(shadow) = release_shadow {
+            attempt_artifact_names
+                .extend([shadow.report_artifact_name, shadow.preview_artifact_name]);
+        }
         let mut attempt_report = PlacementReleaseAttemptReport {
             attempt_index: attempt,
             seating_offset_mm,
@@ -25932,7 +26332,7 @@ async fn release_part_at_board_and_verify(
             vacuum_reacquired: None,
             hold_raw_values: Vec::new(),
             realignment: None,
-            artifact_names: vec![raw_artifact, inspection_artifact],
+            artifact_names: attempt_artifact_names,
         };
         if nozzle_clear {
             successful_seating_offset_mm = Some(seating_offset_mm);
@@ -26550,6 +26950,16 @@ async fn acquire_physical_placement_part(
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
             &initial.preview,
         )?;
+        let initial_shadow = analyze_and_persist_held_part_shadow(
+            state,
+            prepared,
+            &bare,
+            &held,
+            &initial,
+            [bottom.frame_center_x_px, bottom.frame_center_y_px],
+            HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+        )
+        .await;
         for artifact in [HELD_PART_ARTIFACT, HELD_PART_INITIAL_INSPECTION_ARTIFACT] {
             if !report.artifact_names.iter().any(|name| name == artifact) {
                 report.artifact_names.push(artifact.into());
@@ -26557,10 +26967,23 @@ async fn acquire_physical_placement_part(
         }
         if let Some(attempt) = report.pickup_attempts.last_mut() {
             attempt.held_part_inspection = Some(initial.report.clone());
-            attempt.artifact_names = vec![
+            let mut attempt_artifacts = vec![
                 HELD_PART_ARTIFACT.into(),
                 HELD_PART_INITIAL_INSPECTION_ARTIFACT.into(),
             ];
+            if let Some(shadow) = initial_shadow.as_ref() {
+                attempt_artifacts.extend([
+                    shadow.report_artifact_name.clone(),
+                    shadow.preview_artifact_name.clone(),
+                ]);
+            }
+            attempt.artifact_names = attempt_artifacts;
+        }
+        if let Some(shadow) = initial_shadow {
+            report.artifact_names.extend([
+                shadow.report_artifact_name,
+                shadow.preview_artifact_name,
+            ]);
         }
         let transfer_hold_accepted = vacuum_held_after_transfer
             || (initial.report.passed
@@ -27673,6 +28096,62 @@ mod tests {
         apply_expected_held_part_size_gate(&mut report, Some([1.6989, 0.8997]), "feeder survey");
 
         assert!(report.passed);
+    }
+
+    #[test]
+    fn held_part_shadow_keeps_agreement_non_authoritative() {
+        let mut report = held_part_report(0.82, 1.78);
+        report.center_x_px = Some(256.0);
+        report.center_y_px = Some(256.0);
+        let outline = [
+            [236.0, 246.0],
+            [276.0, 246.0],
+            [276.0, 266.0],
+            [236.0, 266.0],
+        ];
+        let deterministic = HeldPartInspectionArtifacts {
+            report,
+            preview: RgbFrame {
+                width: 1,
+                height: 1,
+                pixels: vec![0, 0, 0],
+            },
+            outline_px: Some(outline),
+        };
+        let prediction = HeldPartModelPrediction {
+            contract_version: "velocitypnp.held-part-pose.v1".into(),
+            model_artifact_sha256: "fixture".into(),
+            runtime: "fixture".into(),
+            class: HeldPartClass::ComponentFlat,
+            probabilities: velocitypnp_domain::HeldPartClassProbabilities {
+                bare_nozzle: 0.01,
+                component_flat: 0.98,
+                component_on_edge: 0.01,
+            },
+            class_confidence: 0.98,
+            class_margin: 0.97,
+            confidence_gate_passed: true,
+            pose: velocitypnp_domain::HeldPartPosePrediction {
+                center_px: [258.0, 255.0],
+                size_px: [40.0, 20.0],
+                rotation_deg_mod_180: 0.0,
+                outline_px: outline,
+                valid: true,
+            },
+            findings: Vec::new(),
+        };
+
+        let shadow = build_held_part_shadow_report(
+            &deterministic,
+            deterministic.outline_px,
+            prediction,
+            "fixture",
+        );
+
+        assert!(shadow.occupancy_agreement);
+        assert!(!shadow.review_required);
+        assert!(!shadow.control_authorized);
+        assert_eq!(shadow.center_delta_px, Some(5_f64.sqrt()));
     }
 
     #[test]
@@ -29196,6 +29675,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["models"]["source_component_pose"]["state"], "disabled");
+        assert_eq!(body["models"]["held_part_pose"]["state"], "disabled");
     }
 
     #[tokio::test]

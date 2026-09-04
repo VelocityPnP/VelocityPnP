@@ -835,6 +835,44 @@ contact sheets below `datasets/held-parts-v1/training/held-part-pose-v1`.
 Keep the result in shadow mode. The current four-image evaluation split is not
 a production gate.
 
+### Held-part model runtime
+
+The daemon can load one held-part model package in shadow mode:
+
+```bash
+cargo run -p velocitypnpd -- \
+  --held-part-model-dir \
+  datasets/held-parts-v1/training/held-part-pose-v1
+```
+
+The `VELOCITYPNP_HELD_PART_MODEL_DIR` environment variable sets the same
+path. The package must contain `model-manifest.json` and its declared ONNX
+file. Startup checks the v1 contract, class order, six-channel input, portable
+resize rule, undirected angle, Apache-2.0 artifact terms, file size, and
+SHA-256 digest. `/api/v1/health` reports the load state and model digest.
+
+The model runs beside each deterministic bottom-camera held-part inspection.
+It compares bare-nozzle and observed 512-pixel crops. Each run stores the
+prediction, both detector results, confidence, model digest, disagreements,
+and an annotated preview. Green is deterministic, cyan is learned, and a
+magenta border requires review. These artifacts cannot authorize motion.
+
+Run the Rust runtime against all reviewed pairs and make one comparison sheet:
+
+```bash
+cargo run --release -p velocitypnpd \
+  --example evaluate_held_part_shadow -- \
+  datasets/held-parts-v1 \
+  datasets/held-parts-v1/training/held-part-pose-v1 \
+  /tmp/velocitypnp-held-part-cv-vs-ml.png \
+  /tmp/velocitypnp-held-part-cv-vs-ml.json
+```
+
+Each sample has a deterministic panel on the left and a learned panel on the
+right. Magenta is reviewed ground truth. Green is deterministic. Cyan is
+learned. A red border marks an incorrect panel. The JSON file maps every sheet
+index to its source ID and keeps all decoded values.
+
 Classification is not accepted job registration: this no-motion stage does not
 create a `BoardInstance`, move the camera, resolve a symmetric outline, or
 accept a design-to-machine transform. Use the local fiducial workflow below.

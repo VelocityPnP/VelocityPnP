@@ -41,6 +41,8 @@ This repository contains the first working platform slice:
   detector comparison and retained review evidence
 - paired bottom-camera held-part dataset export with oriented-box, condition,
   and directed-end review
+- hash-checked CPU ONNX held-part inference with retained deterministic and
+  learned comparison evidence; learned output remains shadow-only
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 

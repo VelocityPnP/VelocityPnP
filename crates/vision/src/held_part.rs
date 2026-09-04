@@ -1,7 +1,7 @@
 use crate::{GrayFrame, RgbFrame};
 use anyhow::{ensure, Result};
 use std::collections::VecDeque;
-use velocitypnp_domain::{HeldPartInspectionReport, PartOrientation};
+use velocitypnp_domain::{HeldPartInspectionReport, HeldPartModelPrediction, PartOrientation};
 
 pub const HELD_PART_INSPECTION_ALGORITHM: &str = "held_part_difference.v4";
 const MAX_BARE_ALIGNMENT_SHIFT_PX: f64 = 8.0;
@@ -872,6 +872,51 @@ pub(crate) fn grayscale_preview(frame: &GrayFrame) -> RgbFrame {
         height: frame.height,
         pixels,
     }
+}
+
+/// Render deterministic and learned held-part evidence on one crop.
+///
+/// Green is the deterministic outline. Cyan is the learned outline and
+/// center. A red center means that the model predicts a bare nozzle. A
+/// magenta border means that a person must review the disagreement.
+pub fn render_held_part_shadow_preview(
+    frame: &GrayFrame,
+    deterministic_outline_px: Option<[[f64; 2]; 4]>,
+    prediction: &HeldPartModelPrediction,
+    review_required: bool,
+) -> RgbFrame {
+    let mut preview = grayscale_preview(frame);
+    if let Some(outline) = deterministic_outline_px {
+        draw_polygon(&mut preview, &outline, [32, 255, 64]);
+    }
+    if prediction.class.occupied() && prediction.pose.valid {
+        draw_polygon(&mut preview, &prediction.pose.outline_px, [0, 240, 255]);
+        draw_cross(
+            &mut preview,
+            prediction.pose.center_px[0].round() as i32,
+            prediction.pose.center_px[1].round() as i32,
+            [0, 240, 255],
+            8,
+        );
+    } else {
+        draw_cross(
+            &mut preview,
+            (frame.width / 2) as i32,
+            (frame.height / 2) as i32,
+            [255, 48, 32],
+            8,
+        );
+    }
+    if review_required {
+        let width = f64::from(frame.width.saturating_sub(1));
+        let height = f64::from(frame.height.saturating_sub(1));
+        draw_polygon(
+            &mut preview,
+            &[[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]],
+            [255, 0, 255],
+        );
+    }
+    preview
 }
 
 pub(crate) fn draw_cross(frame: &mut RgbFrame, x: i32, y: i32, color: [u8; 3], radius: i32) {

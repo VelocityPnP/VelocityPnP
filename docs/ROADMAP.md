@@ -172,7 +172,7 @@ The project is organized by measurable gates rather than calendar estimates.
   component families before model output can affect feeder or motion decisions
 - [x] Add paired bare/observed held-part dataset export with deterministic
   drafts, grouped splits, editable condition boxes, and directed-end review
-- [ ] Train, export, and integrate a held-part condition and pose model in
+- [x] Train, export, and integrate a held-part condition and pose model in
   shadow mode against retained pickup and release evidence
 - [x] Add package-template pose comparison after live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets

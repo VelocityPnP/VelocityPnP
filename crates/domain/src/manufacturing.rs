@@ -615,6 +615,82 @@ pub struct SourceComponentShadowReport {
     pub findings: Vec<String>,
 }
 
+/// Class order exported by the held-part pose model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldPartClass {
+    BareNozzle,
+    ComponentFlat,
+    ComponentOnEdge,
+}
+
+impl HeldPartClass {
+    pub fn occupied(self) -> bool {
+        !matches!(self, Self::BareNozzle)
+    }
+}
+
+/// Normalized class probabilities for one bare/observed nozzle pair.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartClassProbabilities {
+    pub bare_nozzle: f64,
+    pub component_flat: f64,
+    pub component_on_edge: f64,
+}
+
+/// Undirected package pose decoded into the reviewed crop coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartPosePrediction {
+    pub center_px: [f64; 2],
+    pub size_px: [f64; 2],
+    pub rotation_deg_mod_180: f64,
+    pub outline_px: [[f64; 2]; 4],
+    pub valid: bool,
+}
+
+/// One learned held-part prediction. It cannot authorize motion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartModelPrediction {
+    pub contract_version: String,
+    pub model_artifact_sha256: String,
+    pub runtime: String,
+    pub class: HeldPartClass,
+    pub probabilities: HeldPartClassProbabilities,
+    pub class_confidence: f64,
+    pub class_margin: f64,
+    pub confidence_gate_passed: bool,
+    pub pose: HeldPartPosePrediction,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Shadow comparison with the active deterministic held-part detector.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartShadowReport {
+    pub algorithm_version: String,
+    pub deterministic_algorithm_version: String,
+    pub deterministic_detected: bool,
+    pub deterministic_passed: bool,
+    pub deterministic_confidence: f64,
+    #[serde(default)]
+    pub deterministic_center_px: Option<[f64; 2]>,
+    #[serde(default)]
+    pub deterministic_outline_px: Option<[[f64; 2]; 4]>,
+    pub prediction: HeldPartModelPrediction,
+    pub occupancy_agreement: bool,
+    #[serde(default)]
+    pub center_delta_px: Option<f64>,
+    #[serde(default)]
+    pub rotation_delta_deg_mod_180: Option<f64>,
+    pub review_required: bool,
+    /// This stays false until independent data and promotion gates pass.
+    pub control_authorized: bool,
+    pub report_artifact_name: String,
+    pub preview_artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// One centered top-camera source image selected from a persisted feeder
 /// inventory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

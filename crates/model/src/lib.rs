@@ -1,5 +1,9 @@
 //! Versioned learned-model loading and inference.
 
+mod held_part;
+
+pub use held_part::*;
+
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -478,7 +482,7 @@ fn softmax_three(values: [f32; 3]) -> [f32; 3] {
 
 fn decode_pose(values: [f32; 6], letterbox: &Letterbox) -> Result<SourceComponentPosePrediction> {
     let angle_norm = values[4].hypot(values[5]);
-    ensure!(angle_norm > 1e-6, "source-component angle has no direction");
+    ensure!(angle_norm > 1e-6, "model angle has no direction");
     let rotation = 0.5 * f64::from(values[5]).atan2(f64::from(values[4]));
     let center_model = [
         f64::from(values[0]) * EXPECTED_IMAGE_SIZE as f64,
