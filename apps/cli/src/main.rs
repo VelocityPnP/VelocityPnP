@@ -181,6 +181,13 @@ enum Command {
         /// Fallback surface Y. Supply this with --drop-x.
         #[arg(long, requires = "drop_x")]
         drop_y: Option<f64>,
+        /// Capture same-angle bare and held bottom-camera pairs.
+        #[arg(
+            long = "rotation-capture-offset",
+            num_args = 1..=12,
+            allow_hyphen_values = true
+        )]
+        rotation_capture_offsets: Vec<f64>,
         /// Confirm uncovered fixed tape, level nozzles, a clear envelope and
         /// fallback target, and reachable power isolation.
         #[arg(long)]
@@ -814,6 +821,7 @@ async fn main() -> Result<()> {
             pocket,
             drop_x,
             drop_y,
+            rotation_capture_offsets,
             confirm_safety_checks,
         } => {
             post(
@@ -824,6 +832,7 @@ async fn main() -> Result<()> {
                     "nozzle_id": nozzle,
                     "pocket_index": pocket,
                     "fallback_drop_surface_machine_mm": drop_x.zip(drop_y).map(|(x, y)| [x, y]),
+                    "rotation_capture_offsets_deg": rotation_capture_offsets,
                     "confirmed_external_safety_checks": confirm_safety_checks,
                 })),
             )

@@ -494,6 +494,7 @@ class Client:
         nozzle_id: str = "N1",
         pocket_index: int | None = None,
         fallback_drop_surface_machine_mm: tuple[float, float] | None = None,
+        rotation_capture_offsets_deg: tuple[float, ...] | list[float] = (),
         safety_checks_confirmed: bool = False,
     ) -> dict[str, Any]:
         """Pick, inspect, and return one component from a validated strip."""
@@ -508,6 +509,13 @@ class Client:
             raise ValueError("nozzle_id must not be empty")
         if pocket_index is not None and pocket_index < 0:
             raise ValueError("pocket_index must not be negative")
+        rotation_offsets = [float(value) for value in rotation_capture_offsets_deg]
+        if len(rotation_offsets) > 12:
+            raise ValueError("rotation capture permits at most 12 angles")
+        if any(not math.isfinite(value) or abs(value) < 1e-6 for value in rotation_offsets):
+            raise ValueError("rotation capture angles must be finite and nonzero")
+        if len({round(value, 6) for value in rotation_offsets}) != len(rotation_offsets):
+            raise ValueError("rotation capture angles must not repeat")
         fallback = None
         if fallback_drop_surface_machine_mm is not None:
             fallback = list(fallback_drop_surface_machine_mm)
@@ -522,6 +530,7 @@ class Client:
                 "nozzle_id": nozzle_id,
                 "pocket_index": pocket_index,
                 "fallback_drop_surface_machine_mm": fallback,
+                "rotation_capture_offsets_deg": rotation_offsets,
                 "confirmed_external_safety_checks": True,
             },
         )

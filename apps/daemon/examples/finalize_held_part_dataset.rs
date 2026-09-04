@@ -44,6 +44,10 @@ struct DraftSample {
     nozzle_id: String,
     part_key: Option<String>,
     orientation: PartOrientation,
+    #[serde(default)]
+    requested_nozzle_rotation_offset_deg: Option<f64>,
+    #[serde(default)]
+    actual_nozzle_rotation_offset_deg: Option<f64>,
     evidence: Vec<String>,
     draft_state: String,
     deterministic: HeldPartInspectionReport,
@@ -117,6 +121,10 @@ struct GroundTruthSample {
     nozzle_id: String,
     part_key: Option<String>,
     orientation: PartOrientation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_nozzle_rotation_offset_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual_nozzle_rotation_offset_deg: Option<f64>,
     evidence: Vec<String>,
     draft_state: String,
     deterministic: HeldPartInspectionReport,
@@ -177,6 +185,8 @@ fn main() -> Result<()> {
             nozzle_id: sample.nozzle_id,
             part_key: sample.part_key,
             orientation: sample.orientation,
+            requested_nozzle_rotation_offset_deg: sample.requested_nozzle_rotation_offset_deg,
+            actual_nozzle_rotation_offset_deg: sample.actual_nozzle_rotation_offset_deg,
             evidence: sample.evidence,
             draft_state: sample.draft_state,
             deterministic: sample.deterministic,

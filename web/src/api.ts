@@ -246,7 +246,7 @@ export const api = {
   startStripFeederPickupQualification: (
     registrationId: string, leaseId: string,
     nozzleId = "N1", fallbackDropSurfaceMachineMm?: [number, number],
-    pocketIndex?: number,
+    pocketIndex?: number, rotationCaptureOffsetsDeg: number[] = [],
   ) => jsonPost<{
     qualification: StripFeederPickupQualificationRun;
     operation: Operation;
@@ -257,6 +257,7 @@ export const api = {
       nozzle_id: nozzleId,
       pocket_index: pocketIndex ?? null,
       fallback_drop_surface_machine_mm: fallbackDropSurfaceMachineMm ?? null,
+      rotation_capture_offsets_deg: rotationCaptureOffsetsDeg,
       confirmed_external_safety_checks: true,
     },
   ),

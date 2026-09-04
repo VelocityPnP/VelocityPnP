@@ -1029,6 +1029,21 @@ export interface HeldPartAlignmentReport {
   findings: string[];
 }
 
+export interface HeldPartRotationCapture {
+  capture_index: number;
+  requested_rotation_offset_deg: number;
+  bare_rotation_offset_deg: number;
+  held_rotation_offset_deg: number;
+  bare_artifact_name: string;
+  held_artifact_name: string;
+  inspection_artifact_name: string;
+  vacuum_raw_values: number[];
+  vacuum_median_raw_value: number | null;
+  vacuum_held: boolean;
+  inspection: HeldPartInspectionReport;
+  shadow: unknown | null;
+}
+
 export interface StripFeederPickupQualificationReport {
   algorithm_version: string;
   nozzle_id: string;
@@ -1045,6 +1060,7 @@ export interface StripFeederPickupQualificationReport {
   vacuum_held_after_transfer: boolean;
   inspection: HeldPartInspectionReport | null;
   alignment: HeldPartAlignmentReport | null;
+  rotation_captures: HeldPartRotationCapture[];
   disposition: "returned_to_pocket" | "dropped_at_fallback"
     | "placed_on_board" | "not_released";
   release_surface_machine_mm: [number, number] | null;
@@ -1104,6 +1120,7 @@ export interface StripFeederPickupQualificationRun {
   nozzle_id: string;
   pocket_index: number;
   fallback_drop_surface_machine_mm: [number, number] | null;
+  rotation_capture_offsets_deg: number[];
   report: StripFeederPickupQualificationReport | null;
   message: string | null;
 }

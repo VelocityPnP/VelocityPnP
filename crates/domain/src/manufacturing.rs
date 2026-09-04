@@ -987,6 +987,24 @@ pub struct StripFeederSourcePoseReport {
     pub findings: Vec<String>,
 }
 
+/// One same-angle bare-nozzle and held-part bottom-camera pair.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldPartRotationCapture {
+    pub capture_index: u32,
+    pub requested_rotation_offset_deg: f64,
+    pub bare_rotation_offset_deg: f64,
+    pub held_rotation_offset_deg: f64,
+    pub bare_artifact_name: String,
+    pub held_artifact_name: String,
+    pub inspection_artifact_name: String,
+    pub vacuum_raw_values: Vec<i64>,
+    pub vacuum_median_raw_value: Option<f64>,
+    pub vacuum_held: bool,
+    pub inspection: HeldPartInspectionReport,
+    #[serde(default)]
+    pub shadow: Option<HeldPartShadowReport>,
+}
+
 /// Evidence from one bounded pickup, bottom inspection, and release cycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederPickupQualificationReport {
@@ -1006,6 +1024,8 @@ pub struct StripFeederPickupQualificationReport {
     pub inspection: Option<HeldPartInspectionReport>,
     #[serde(default)]
     pub alignment: Option<HeldPartAlignmentReport>,
+    #[serde(default)]
+    pub rotation_captures: Vec<HeldPartRotationCapture>,
     pub disposition: StripFeederPickupDisposition,
     pub release_surface_machine_mm: Option<[f64; 2]>,
     pub release_raw_values: Vec<i64>,
@@ -1036,6 +1056,8 @@ pub struct StripFeederPickupQualificationRun {
     pub pocket_index: u32,
     #[serde(default)]
     pub fallback_drop_surface_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    pub rotation_capture_offsets_deg: Vec<f64>,
     #[serde(default)]
     pub report: Option<StripFeederPickupQualificationReport>,
     #[serde(default)]

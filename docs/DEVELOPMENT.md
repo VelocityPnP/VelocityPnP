@@ -1047,6 +1047,28 @@ cargo run --release -p velocitypnp -- qualify-strip-feeder-pickup \
   --drop-x FALLBACK_X --drop-y FALLBACK_Y --confirm-safety-checks
 ```
 
+Add a bounded real-angle dataset sweep to the same safe pickup and return:
+
+```bash
+cargo run --release -p velocitypnp -- qualify-strip-feeder-pickup \
+  DRAFT_UUID --lease LEASE_UUID --nozzle N1 \
+  --rotation-capture-offset -75 -45 -15 15 45 75 \
+  --confirm-safety-checks
+```
+
+The runner first captures the bare nozzle at every requested angle. After
+pickup, it rotates the held part through the same angles and captures each
+matching view. Fixed camera features therefore stay fixed, while every model
+input uses a bare-nozzle reference at the correct nozzle angle. The runner
+checks vacuum before each held capture, permits no more than 12 unique angles,
+restores the original nozzle angle, and uses the normal verified pocket-return
+path. A lost vacuum hold stops the sweep and starts recovery.
+
+The report records requested and actual angles, vacuum samples, deterministic
+inspection, optional learned shadow output, and artifact names. The held-part
+dataset exporter pairs each rotation view with its matching bare image and
+keeps the angle metadata through final review.
+
 The API route is
 `POST /strip-feeder-registrations/DRAFT_UUID/pickup-qualifications`. The
 Python client uses `start_strip_feeder_pickup_qualification()`. The machine

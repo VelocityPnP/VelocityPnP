@@ -174,6 +174,8 @@ The project is organized by measurable gates rather than calendar estimates.
   drafts, grouped splits, editable condition boxes, and directed-end review
 - [x] Train, export, and integrate a held-part condition and pose model in
   shadow mode against retained pickup and release evidence
+- [x] Add paired same-angle bare and held bottom-camera rotation sweeps to the
+  guarded pickup-return operation and held-part dataset exporter
 - [x] Add package-template pose comparison after live fiducial verification
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures

@@ -33,35 +33,36 @@ use velocitypnp_domain::{
     CalibrationSnapshot, CalibrationStepId, CameraProfile, CameraProfileControlValue,
     CameraRayTransferReport, CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport,
     HeldPartAlignmentObservation, HeldPartAlignmentReport, HeldPartClass, HeldPartInspectionReport,
-    HeldPartModelPrediction, HeldPartShadowReport, InspectionReport, InspectionStatus,
-    InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
-    InstalledPlateRegistrationReport, Job, JobExecutionRun, JobExecutionStatus, JobExecutionStep,
-    JobExecutionStepStatus, JogTarget, LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate,
-    LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
-    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
-    NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample, Operation,
-    OperationStatus, Part, PartOrientation, PlacementExecutionReport, PlacementExecutionRun,
-    PlacementExecutionStage, PlacementExecutionStageReport, PlacementOutcomeDisposition,
-    PlacementOutcomeRecord, PlacementPickupAttemptReport, PlacementProcessEstimate,
-    PlacementReleaseAttemptReport, PlanarCameraCalibrationReport, PlanarCameraCalibrationSample,
-    PlanarCameraModel, Pose, Residuals, SensorReading, SourceComponentClass,
-    SourceComponentModelPrediction, SourceComponentShadowReport, StripFeederInventoryLane,
-    StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
-    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
-    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
-    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
-    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
-    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
-    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
-    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
-    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
-    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
-    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
-    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
-    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
-    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
-    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
-    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
+    HeldPartModelPrediction, HeldPartRotationCapture, HeldPartShadowReport, InspectionReport,
+    InspectionStatus, InstalledGeometryCalibrationReport, InstalledPlateGeometryReport,
+    InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job, JobExecutionRun,
+    JobExecutionStatus, JobExecutionStep, JobExecutionStepStatus, JogTarget, LinearAxis,
+    LocalXyAxisDirectionReport, LocalXyAxisEstimate, LocalXyCompensationHoldout,
+    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, MachineProfile, MachineState,
+    NozzleHeightModel, NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport,
+    NozzleRunoutSample, Operation, OperationStatus, Part, PartOrientation,
+    PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
+    PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
+    PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
+    PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
+    Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
+    SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
+    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupDisposition,
+    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
+    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
+    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
+    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
+    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
+    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
+    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
+    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
+    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
+    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
+    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
+    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
+    WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -121,7 +122,7 @@ const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
-const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v5";
+const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v6";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v3";
 const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v5";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
@@ -161,6 +162,7 @@ const HELD_PART_SHADOW_ALGORITHM: &str = "held_part_shadow.v1";
 const HELD_PART_MODEL_CROP_SIZE_PX: u32 = 512;
 const MAXIMUM_HELD_PART_CENTER_DELTA_PX: f64 = 12.0;
 const MAXIMUM_HELD_PART_ROTATION_DELTA_DEG: f64 = 15.0;
+const MAXIMUM_HELD_PART_ROTATION_CAPTURES: usize = 12;
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
 const BOARD_TARGET_REGISTRATION_ARTIFACT: &str = "board-target-registration.png";
@@ -8064,6 +8066,8 @@ struct StartStripFeederPickupQualificationRequest {
     pocket_index: Option<u32>,
     #[serde(default)]
     fallback_drop_surface_machine_mm: Option<[f64; 2]>,
+    #[serde(default)]
+    rotation_capture_offsets_deg: Vec<f64>,
     confirmed_external_safety_checks: bool,
 }
 
@@ -8088,6 +8092,7 @@ struct PreparedStripFeederPickup {
     top_camera_path: String,
     part_orientation: PartOrientation,
     source_rotation_deg: f64,
+    rotation_capture_offsets_deg: Vec<f64>,
     artifact_target: TransferArtifactTarget,
 }
 
@@ -8254,6 +8259,44 @@ fn registration_part_orientation(
     Ok((orientation, source_rotation_deg))
 }
 
+fn validate_held_part_rotation_capture_offsets(
+    offsets_deg: &[f64],
+    profile: &MachineProfile,
+) -> Result<(), String> {
+    if offsets_deg.len() > MAXIMUM_HELD_PART_ROTATION_CAPTURES {
+        return Err(format!(
+            "held-part rotation capture permits at most \
+             {MAXIMUM_HELD_PART_ROTATION_CAPTURES} angles"
+        ));
+    }
+    let maximum_deg = profile
+        .bottom_vision
+        .as_ref()
+        .ok_or_else(|| "active profile does not define bottom vision".to_string())?
+        .head_geometry
+        .rotation_angle_offsets_deg
+        .iter()
+        .map(|offset| offset.abs())
+        .fold(0.0_f64, f64::max);
+    for (index, offset) in offsets_deg.iter().copied().enumerate() {
+        if !offset.is_finite() || offset.abs() < 1e-6 || offset.abs() > maximum_deg + 1e-6 {
+            return Err(format!(
+                "rotation capture angle {index} must be finite, nonzero, and within \
+                 +/-{maximum_deg:.1} degrees"
+            ));
+        }
+        if offsets_deg[..index]
+            .iter()
+            .any(|prior| (prior - offset).abs() < 1e-6)
+        {
+            return Err(format!(
+                "rotation capture angle {offset:.3} degrees is repeated"
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn start_strip_feeder_pickup_qualification(
     State(state): State<AppState>,
     Path(registration_id): Path<Uuid>,
@@ -8272,6 +8315,8 @@ async fn start_strip_feeder_pickup_qualification(
             "pickup qualification needs a nozzle ID",
         ));
     }
+    validate_held_part_rotation_capture_offsets(&body.rotation_capture_offsets_deg, &state.profile)
+        .map_err(ApiError::bad_request)?;
     if body
         .fallback_drop_surface_machine_mm
         .is_some_and(|point| point.into_iter().any(|value| !value.is_finite()))
@@ -8508,6 +8553,7 @@ async fn start_strip_feeder_pickup_qualification(
         nozzle_id: body.nozzle_id,
         pocket_index: selected_pocket.pocket_index,
         fallback_drop_surface_machine_mm: body.fallback_drop_surface_machine_mm,
+        rotation_capture_offsets_deg: body.rotation_capture_offsets_deg.clone(),
         report: None,
         message: None,
     };
@@ -8553,6 +8599,7 @@ async fn start_strip_feeder_pickup_qualification(
         top_camera_path,
         part_orientation,
         source_rotation_deg,
+        rotation_capture_offsets_deg: body.rotation_capture_offsets_deg,
         artifact_target,
     };
     spawn_prepared_operation(
@@ -8713,6 +8760,35 @@ fn settle_registration_after_pickup(
         .map_err(|error| error.to_string())
 }
 
+fn simulated_held_part_frame(
+    bare: &GrayFrame,
+    rotation_offset_deg: f64,
+    orientation: PartOrientation,
+) -> GrayFrame {
+    let mut held = bare.clone();
+    let center = [f64::from(bare.width) * 0.5, f64::from(bare.height) * 0.5];
+    let radians = rotation_offset_deg.to_radians();
+    let cosine = radians.cos();
+    let sine = radians.sin();
+    for y in 0..bare.height {
+        for x in 0..bare.width {
+            let dx = f64::from(x) + 0.5 - center[0];
+            let dy = f64::from(y) + 0.5 - center[1];
+            let local_x = cosine * dx + sine * dy;
+            let local_y = -sine * dx + cosine * dy;
+            if local_x.abs() <= 30.0 && local_y.abs() <= 15.0 {
+                let luma = match orientation {
+                    PartOrientation::BrighterEnd { .. } if local_x >= 10.0 => 240,
+                    PartOrientation::DarkerEnd { .. } if local_x >= 10.0 => 105,
+                    _ => 190,
+                };
+                held.pixels[(y * bare.width + x) as usize] = luma;
+            }
+        }
+    }
+    held
+}
+
 async fn execute_simulated_strip_feeder_pickup(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
@@ -8737,29 +8813,7 @@ async fn execute_simulated_strip_feeder_pickup(
         height,
         pixels: vec![80; (width * height) as usize],
     };
-    let mut held = bare.clone();
-    for y in 105..135 {
-        for x in 130..190 {
-            held.pixels[(y * width + x) as usize] = 190;
-        }
-    }
-    match prepared.part_orientation {
-        PartOrientation::BrighterEnd { .. } => {
-            for y in 105..135 {
-                for x in 170..190 {
-                    held.pixels[(y * width + x) as usize] = 240;
-                }
-            }
-        }
-        PartOrientation::DarkerEnd { .. } => {
-            for y in 105..135 {
-                for x in 170..190 {
-                    held.pixels[(y * width + x) as usize] = 105;
-                }
-            }
-        }
-        PartOrientation::AxisSymmetric | PartOrientation::FeederReferenced => {}
-    }
+    let held = simulated_held_part_frame(&bare, 0.0, prepared.part_orientation);
     let inspection = inspect_held_part_difference_with_orientation(
         &bare,
         &held,
@@ -8810,6 +8864,58 @@ async fn execute_simulated_strip_feeder_pickup(
     };
     let vacuum_held = held_median
         .is_some_and(|value| vacuum_value_is_acquired(&prepared.vacuum_characterization, value));
+    let mut rotation_captures = Vec::new();
+    let mut rotation_artifact_names = Vec::new();
+    for (index, offset_deg) in prepared
+        .rotation_capture_offsets_deg
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let bare_artifact_name = format!("rotation-capture-{index:03}-bare-nozzle.png");
+        let held_artifact_name = format!("rotation-capture-{index:03}-held-part.png");
+        let inspection_artifact_name = format!("rotation-capture-{index:03}-inspection.png");
+        let rotated = simulated_held_part_frame(&bare, offset_deg, prepared.part_orientation);
+        let rotated_inspection = inspect_held_part_difference_with_orientation(
+            &bare,
+            &rotated,
+            [160.0, 120.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            pickup.maximum_part_offset_mm,
+            pickup.minimum_part_size_mm,
+            pickup.maximum_part_size_mm,
+            prepared.part_orientation,
+            &inspection_artifact_name,
+        )
+        .map_err(|error| error.to_string())?;
+        persist_pickup_gray_artifact(state, prepared.run.id, &bare_artifact_name, &bare)?;
+        persist_pickup_gray_artifact(state, prepared.run.id, &held_artifact_name, &rotated)?;
+        persist_pickup_rgb_artifact(
+            state,
+            prepared.run.id,
+            &inspection_artifact_name,
+            &rotated_inspection.preview,
+        )?;
+        rotation_artifact_names.extend([
+            bare_artifact_name.clone(),
+            held_artifact_name.clone(),
+            inspection_artifact_name.clone(),
+        ]);
+        rotation_captures.push(HeldPartRotationCapture {
+            capture_index: index as u32,
+            requested_rotation_offset_deg: offset_deg,
+            bare_rotation_offset_deg: offset_deg,
+            held_rotation_offset_deg: offset_deg,
+            bare_artifact_name,
+            held_artifact_name,
+            inspection_artifact_name,
+            vacuum_raw_values: held_values.clone(),
+            vacuum_median_raw_value: held_median,
+            vacuum_held,
+            inspection: rotated_inspection.report,
+            shadow: None,
+        });
+    }
     let released = true;
     let inspection_report = inspection.report;
     let resolved_rotation_deg = resolved_held_part_rotation_deg(
@@ -8883,6 +8989,7 @@ async fn execute_simulated_strip_feeder_pickup(
         vacuum_held_after_transfer: vacuum_held,
         inspection: Some(inspection_report),
         alignment: Some(alignment),
+        rotation_captures,
         disposition: StripFeederPickupDisposition::ReturnedToPocket,
         release_surface_machine_mm: prepared.registration.selected_pocket_machine_mm,
         release_raw_values: prepared.vacuum_characterization.pump_off.raw_values.clone(),
@@ -8920,20 +9027,234 @@ async fn execute_simulated_strip_feeder_pickup(
             findings: vec!["simulator retained the source-pocket return state".into()],
         }),
         passed,
-        artifact_names: vec![
-            BARE_NOZZLE_ARTIFACT.into(),
-            HELD_PART_ARTIFACT.into(),
-            HELD_PART_INSPECTION_ARTIFACT.into(),
-            POST_RELEASE_NOZZLE_ARTIFACT.into(),
-            POST_RELEASE_NOZZLE_INSPECTION_ARTIFACT.into(),
-            SOURCE_POCKET_BEFORE_ARTIFACT.into(),
-            SOURCE_POCKET_AFTER_ARTIFACT.into(),
-            POCKET_RETURN_INSPECTION_ARTIFACT.into(),
-        ],
+        artifact_names: [
+            vec![
+                BARE_NOZZLE_ARTIFACT.into(),
+                HELD_PART_ARTIFACT.into(),
+                HELD_PART_INSPECTION_ARTIFACT.into(),
+                POST_RELEASE_NOZZLE_ARTIFACT.into(),
+                POST_RELEASE_NOZZLE_INSPECTION_ARTIFACT.into(),
+                SOURCE_POCKET_BEFORE_ARTIFACT.into(),
+                SOURCE_POCKET_AFTER_ARTIFACT.into(),
+                POCKET_RETURN_INSPECTION_ARTIFACT.into(),
+            ],
+            rotation_artifact_names,
+        ]
+        .concat(),
         findings: vec![
             "simulator exercised pickup persistence, inspection, and release policy".into(),
         ],
     })
+}
+
+struct BareNozzleRotationCapture {
+    capture_index: u32,
+    requested_offset_deg: f64,
+    actual_offset_deg: f64,
+    artifact_name: String,
+    frame: GrayFrame,
+}
+
+fn signed_rotation_offset_deg(actual_deg: f64, reference_deg: f64) -> f64 {
+    (actual_deg - reference_deg + 180.0).rem_euclid(360.0) - 180.0
+}
+
+async fn capture_bare_nozzle_rotation_sweep(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    sample_count: u32,
+) -> Result<Vec<BareNozzleRotationCapture>, String> {
+    if prepared.rotation_capture_offsets_deg.is_empty() {
+        return Ok(Vec::new());
+    }
+    let reference_deg = state
+        .machine
+        .calibration_rotation_reference(prepared.lease_id, prepared.run.nozzle_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = async {
+        let mut captures = Vec::with_capacity(prepared.rotation_capture_offsets_deg.len());
+        for (index, requested_offset_deg) in prepared
+            .rotation_capture_offsets_deg
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let actual_deg = state
+                .machine
+                .calibration_rotate_nozzle(
+                    prepared.lease_id,
+                    prepared.run.nozzle_id.clone(),
+                    requested_offset_deg,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let frame = capture_bottom_mean_with_lights(
+                state,
+                prepared.lease_id,
+                camera_profile,
+                camera_path,
+                sample_count,
+            )
+            .await?;
+            let artifact_name = format!("rotation-capture-{index:03}-bare-nozzle.png");
+            persist_transfer_gray_artifact(state, prepared, &artifact_name, &frame)?;
+            captures.push(BareNozzleRotationCapture {
+                capture_index: index as u32,
+                requested_offset_deg,
+                actual_offset_deg: signed_rotation_offset_deg(actual_deg, reference_deg),
+                artifact_name,
+                frame,
+            });
+        }
+        Ok::<_, String>(captures)
+    }
+    .await;
+    let restore = state
+        .machine
+        .calibration_rotate_nozzle(prepared.lease_id, prepared.run.nozzle_id.clone(), 0.0)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    match (result, restore) {
+        (Ok(captures), Ok(())) => Ok(captures),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(format!(
+            "failed to restore rotation after bare-nozzle capture: {error}"
+        )),
+        (Err(error), Err(restore_error)) => Err(format!(
+            "{error}; bare-nozzle rotation restore also failed: {restore_error}"
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_held_part_rotation_sweep(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    bare_captures: &[BareNozzleRotationCapture],
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    sensor_id: &str,
+    expected_size_mm: Option<[f64; 2]>,
+) -> Result<Vec<HeldPartRotationCapture>, String> {
+    if bare_captures.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pickup = state.profile.strip_feeder_pickup.as_ref().unwrap();
+    let bottom = state.profile.bottom_vision.as_ref().unwrap();
+    let reference_deg = state
+        .machine
+        .calibration_rotation_reference(prepared.lease_id, prepared.run.nozzle_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = async {
+        let mut captures = Vec::with_capacity(bare_captures.len());
+        for bare in bare_captures {
+            let actual_deg = state
+                .machine
+                .calibration_rotate_nozzle(
+                    prepared.lease_id,
+                    prepared.run.nozzle_id.clone(),
+                    bare.requested_offset_deg,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let vacuum_raw_values = collect_sensor_values(
+                state,
+                prepared.lease_id,
+                sensor_id,
+                pickup.held_sample_count,
+            )
+            .await?;
+            let vacuum_median_raw_value = median_raw(&vacuum_raw_values);
+            let vacuum_held = vacuum_median_raw_value.is_some_and(|value| {
+                vacuum_value_is_acquired(&prepared.vacuum_characterization, value)
+            });
+            if !vacuum_held {
+                return Err(format!(
+                    "vacuum hold was lost at rotation capture offset {:.1} degrees",
+                    bare.requested_offset_deg
+                ));
+            }
+            let held = capture_bottom_mean_with_lights(
+                state,
+                prepared.lease_id,
+                camera_profile,
+                camera_path,
+                pickup.inspection_sample_count,
+            )
+            .await?;
+            let held_artifact_name =
+                format!("rotation-capture-{:03}-held-part.png", bare.capture_index);
+            let inspection_artifact_name =
+                format!("rotation-capture-{:03}-inspection.png", bare.capture_index);
+            persist_transfer_gray_artifact(state, prepared, &held_artifact_name, &held)?;
+            let mut inspection = inspect_held_part_difference_with_orientation(
+                &bare.frame,
+                &held,
+                [bottom.frame_center_x_px, bottom.frame_center_y_px],
+                prepared.head_reference.bottom_camera_mapping,
+                pickup.maximum_part_offset_mm,
+                pickup.minimum_part_size_mm,
+                pickup.maximum_part_size_mm,
+                prepared.part_orientation,
+                &inspection_artifact_name,
+            )
+            .map_err(|error| error.to_string())?;
+            apply_rotated_retained_part_size_gate(&mut inspection.report, expected_size_mm);
+            persist_transfer_rgb_artifact(
+                state,
+                prepared,
+                &inspection_artifact_name,
+                &inspection.preview,
+            )?;
+            let shadow = analyze_and_persist_held_part_shadow(
+                state,
+                prepared,
+                &bare.frame,
+                &held,
+                &inspection,
+                [bottom.frame_center_x_px, bottom.frame_center_y_px],
+                &inspection_artifact_name,
+            )
+            .await;
+            captures.push(HeldPartRotationCapture {
+                capture_index: bare.capture_index,
+                requested_rotation_offset_deg: bare.requested_offset_deg,
+                bare_rotation_offset_deg: bare.actual_offset_deg,
+                held_rotation_offset_deg: signed_rotation_offset_deg(actual_deg, reference_deg),
+                bare_artifact_name: bare.artifact_name.clone(),
+                held_artifact_name,
+                inspection_artifact_name,
+                vacuum_raw_values,
+                vacuum_median_raw_value,
+                vacuum_held,
+                inspection: inspection.report,
+                shadow,
+            });
+        }
+        Ok::<_, String>(captures)
+    }
+    .await;
+    let restore = state
+        .machine
+        .calibration_rotate_nozzle(prepared.lease_id, prepared.run.nozzle_id.clone(), 0.0)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    match (result, restore) {
+        (Ok(captures), Ok(())) => Ok(captures),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(format!(
+            "failed to restore rotation after held-part capture: {error}"
+        )),
+        (Err(error), Err(restore_error)) => Err(format!(
+            "{error}; held-part rotation restore also failed: {restore_error}"
+        )),
+    }
 }
 
 async fn execute_physical_strip_feeder_pickup(
@@ -8999,6 +9320,19 @@ async fn execute_physical_strip_feeder_pickup(
     .await?;
     persist_transfer_gray_artifact(state, prepared, BARE_NOZZLE_ARTIFACT, &bare)?;
     artifact_names.push(BARE_NOZZLE_ARTIFACT.into());
+    let bare_rotation_captures = capture_bare_nozzle_rotation_sweep(
+        state,
+        prepared,
+        &camera_profile,
+        &camera_path,
+        pickup_profile.inspection_sample_count,
+    )
+    .await?;
+    artifact_names.extend(
+        bare_rotation_captures
+            .iter()
+            .map(|capture| capture.artifact_name.clone()),
+    );
     let (source_before, source_before_pose) = capture_top_pocket_mean(
         state,
         prepared,
@@ -9115,6 +9449,7 @@ async fn execute_physical_strip_feeder_pickup(
             vacuum_held_after_transfer: false,
             inspection: None,
             alignment: None,
+            rotation_captures: Vec::new(),
             disposition: StripFeederPickupDisposition::NotReleased,
             release_surface_machine_mm: None,
             release_raw_values: Vec::new(),
@@ -9232,6 +9567,36 @@ async fn execute_physical_strip_feeder_pickup(
         } else {
             false
         };
+        let rotation_captures = if motion_permitted {
+            capture_held_part_rotation_sweep(
+                state,
+                prepared,
+                &bare_rotation_captures,
+                &camera_profile,
+                &camera_path,
+                sensor_id,
+                initial_inspection
+                    .report
+                    .width_mm
+                    .zip(initial_inspection.report.length_mm)
+                    .map(|(width, length)| [width, length]),
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        for capture in &rotation_captures {
+            artifact_names.extend([
+                capture.held_artifact_name.clone(),
+                capture.inspection_artifact_name.clone(),
+            ]);
+            if let Some(shadow) = &capture.shadow {
+                artifact_names.extend([
+                    shadow.report_artifact_name.clone(),
+                    shadow.preview_artifact_name.clone(),
+                ]);
+            }
+        }
         let target_rotation_deg = prepared.registration.part_rotation_deg.unwrap_or(0.0);
         let alignment_result = align_held_part(
             state,
@@ -9274,32 +9639,39 @@ async fn execute_physical_strip_feeder_pickup(
             vacuum_held_after_transfer,
             inspection,
             alignment,
+            rotation_captures,
         ))
     }
     .await;
-    let (held_raw_values, held_median_raw_value, vacuum_held_after_transfer, inspection, alignment) =
-        match inspection_phase {
-            Ok(result) => result,
-            Err(error) => {
-                let release_cleanup = release_pickup_part(
-                    state,
-                    prepared,
-                    sensor_id,
-                    [pickup_head_x_mm, pickup_head_y_mm],
-                    current_tip_offset,
-                    contact.controller_z_mm,
-                )
-                .await;
-                let restore_cleanup = lift_and_restore_after_pickup(state, prepared.lease_id).await;
-                let cleanup = release_cleanup.map(|_| ()).and(restore_cleanup);
-                return Err(match cleanup {
-                    Ok(()) => format!("{error}; the part was returned to its pocket"),
-                    Err(cleanup_error) => {
-                        format!("{error}; pickup cleanup also failed: {cleanup_error}")
-                    }
-                });
-            }
-        };
+    let (
+        held_raw_values,
+        held_median_raw_value,
+        vacuum_held_after_transfer,
+        inspection,
+        alignment,
+        rotation_captures,
+    ) = match inspection_phase {
+        Ok(result) => result,
+        Err(error) => {
+            let release_cleanup = release_pickup_part(
+                state,
+                prepared,
+                sensor_id,
+                [pickup_head_x_mm, pickup_head_y_mm],
+                current_tip_offset,
+                contact.controller_z_mm,
+            )
+            .await;
+            let restore_cleanup = lift_and_restore_after_pickup(state, prepared.lease_id).await;
+            let cleanup = release_cleanup.map(|_| ()).and(restore_cleanup);
+            return Err(match cleanup {
+                Ok(()) => format!("{error}; the part was returned to its pocket"),
+                Err(cleanup_error) => {
+                    format!("{error}; pickup cleanup also failed: {cleanup_error}")
+                }
+            });
+        }
+    };
     artifact_names.push(HELD_PART_ARTIFACT.into());
     for artifact_name in &alignment.artifact_names {
         if !artifact_names.contains(artifact_name) {
@@ -9308,6 +9680,12 @@ async fn execute_physical_strip_feeder_pickup(
     }
     if !vacuum_held_after_transfer {
         findings.push("vacuum did not remain above the calibrated hold threshold".into());
+    }
+    if !rotation_captures.is_empty() {
+        findings.push(format!(
+            "captured {} same-angle bare-nozzle and held-part rotation pairs",
+            rotation_captures.len()
+        ));
     }
     findings.extend(inspection.report.findings.clone());
     findings.extend(alignment.findings.clone());
@@ -9429,6 +9807,7 @@ async fn execute_physical_strip_feeder_pickup(
         vacuum_held_after_transfer,
         inspection: Some(inspection.report),
         alignment: Some(alignment),
+        rotation_captures,
         disposition: verified_release.disposition,
         release_surface_machine_mm: verified_release.release_surface_machine_mm,
         release_raw_values: verified_release.release_raw_values,
@@ -23846,6 +24225,7 @@ fn prepare_retained_part_physical_context(
         nozzle_id: step.nozzle_id.clone(),
         pocket_index,
         fallback_drop_surface_machine_mm: None,
+        rotation_capture_offsets_deg: Vec::new(),
         report: None,
         message: None,
     };
@@ -23864,6 +24244,7 @@ fn prepare_retained_part_physical_context(
         top_camera_path,
         part_orientation: step.part_orientation,
         source_rotation_deg: step.feeder_part_rotation_deg,
+        rotation_capture_offsets_deg: Vec::new(),
         artifact_target: TransferArtifactTarget::PlacementExecution(placement_run.id),
     })
 }
@@ -24243,6 +24624,7 @@ fn prepare_physical_placement_pickup(
         nozzle_id: step.nozzle_id.clone(),
         pocket_index: selected_pocket_index,
         fallback_drop_surface_machine_mm: None,
+        rotation_capture_offsets_deg: Vec::new(),
         report: None,
         message: None,
     };
@@ -24279,6 +24661,7 @@ fn prepare_physical_placement_pickup(
         top_camera_path,
         part_orientation: step.part_orientation,
         source_rotation_deg: step.feeder_part_rotation_deg,
+        rotation_capture_offsets_deg: Vec::new(),
         artifact_target: TransferArtifactTarget::PlacementExecution(placement_run.id),
     })
 }
@@ -27191,6 +27574,7 @@ fn build_placement_pickup_report(
         vacuum_held_after_transfer: true,
         inspection: Some(acquired.inspection.clone()),
         alignment: Some(acquired.alignment.clone()),
+        rotation_captures: Vec::new(),
         disposition: if released {
             StripFeederPickupDisposition::PlacedOnBoard
         } else {
@@ -28857,6 +29241,7 @@ mod tests {
             nozzle_id: "N1".into(),
             pocket_index,
             fallback_drop_surface_machine_mm: None,
+            rotation_capture_offsets_deg: Vec::new(),
             report: Some(StripFeederPickupQualificationReport {
                 algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
                 nozzle_id: "N1".into(),
@@ -28873,6 +29258,7 @@ mod tests {
                 vacuum_held_after_transfer: passed,
                 inspection: None,
                 alignment: None,
+                rotation_captures: Vec::new(),
                 disposition: StripFeederPickupDisposition::ReturnedToPocket,
                 release_surface_machine_mm: Some([10.0, f64::from(pocket_index) * 4.0]),
                 release_raw_values: Vec::new(),
@@ -29159,6 +29545,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rotation_capture_angles_are_bounded_and_unique() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+        assert!(validate_held_part_rotation_capture_offsets(
+            &[-165.0, -45.0, 45.0, 165.0],
+            &profile,
+        )
+        .is_ok());
+        assert!(
+            validate_held_part_rotation_capture_offsets(&[45.0, 45.0], &profile,)
+                .unwrap_err()
+                .contains("repeated")
+        );
+        assert!(
+            validate_held_part_rotation_capture_offsets(&[0.0], &profile)
+                .unwrap_err()
+                .contains("nonzero")
+        );
+        assert!(
+            validate_held_part_rotation_capture_offsets(&[166.0], &profile)
+                .unwrap_err()
+                .contains("within")
+        );
+    }
+
+    #[test]
+    fn simulated_rotation_capture_changes_the_component_axis() {
+        let bare = GrayFrame {
+            width: 120,
+            height: 120,
+            pixels: vec![80; 120 * 120],
+        };
+        let changed_extent = |frame: &GrayFrame| {
+            let points = frame
+                .pixels
+                .iter()
+                .enumerate()
+                .filter(|(_, luma)| **luma != 80)
+                .map(|(index, _)| [(index as u32) % frame.width, (index as u32) / frame.width])
+                .collect::<Vec<_>>();
+            let x_min = points.iter().map(|point| point[0]).min().unwrap();
+            let x_max = points.iter().map(|point| point[0]).max().unwrap();
+            let y_min = points.iter().map(|point| point[1]).min().unwrap();
+            let y_max = points.iter().map(|point| point[1]).max().unwrap();
+            [x_max - x_min + 1, y_max - y_min + 1]
+        };
+
+        let horizontal = simulated_held_part_frame(&bare, 0.0, PartOrientation::AxisSymmetric);
+        let vertical = simulated_held_part_frame(&bare, 90.0, PartOrientation::AxisSymmetric);
+
+        let horizontal_extent = changed_extent(&horizontal);
+        let vertical_extent = changed_extent(&vertical);
+        assert!(horizontal_extent[0] > horizontal_extent[1]);
+        assert!(vertical_extent[1] > vertical_extent[0]);
     }
 
     fn test_state() -> AppState {
@@ -31390,6 +31833,7 @@ mod tests {
             nozzle_id: "N1".into(),
             pocket_index: 0,
             fallback_drop_surface_machine_mm: None,
+            rotation_capture_offsets_deg: Vec::new(),
             report: None,
             message: None,
         };

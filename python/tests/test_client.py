@@ -530,6 +530,7 @@ class ClientTests(unittest.TestCase):
                 client.start_strip_feeder_pickup_qualification(
                     "draft", "lease", nozzle_id="N1",
                     fallback_drop_surface_machine_mm=(220.0, 68.0),
+                    rotation_capture_offsets_deg=(-45.0, 45.0),
                     safety_checks_confirmed=True,
                 ),
                 started_pickup,
@@ -542,6 +543,7 @@ class ClientTests(unittest.TestCase):
                 "nozzle_id": "N1",
                 "pocket_index": None,
                 "fallback_drop_surface_machine_mm": [220.0, 68.0],
+                "rotation_capture_offsets_deg": [-45.0, 45.0],
                 "confirmed_external_safety_checks": True,
             },
         )
@@ -555,6 +557,11 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.start_strip_feeder_pickup_qualification(
                 "draft", "lease", pocket_index=-1,
+                safety_checks_confirmed=True,
+            )
+        with self.assertRaises(ValueError):
+            client.start_strip_feeder_pickup_qualification(
+                "draft", "lease", rotation_capture_offsets_deg=(45.0, 45.0),
                 safety_checks_confirmed=True,
             )
 

@@ -1210,6 +1210,15 @@ paths:
                   oneOf:
                     - { $ref: "#/components/schemas/Point2d" }
                     - type: "null"
+                rotation_capture_offsets_deg:
+                  type: array
+                  maxItems: 12
+                  uniqueItems: true
+                  items: { type: number }
+                  description: >-
+                    Optional nonzero nozzle offsets for paired same-angle bare
+                    and held bottom-camera captures. The active profile bounds
+                    the absolute values.
                 confirmed_external_safety_checks: { type: boolean }
       responses:
         "202":
@@ -3332,6 +3341,36 @@ components:
         passed: { type: boolean }
         artifact_name: { type: string }
         findings: { type: array, items: { type: string } }
+    HeldPartRotationCapture:
+      type: object
+      required:
+        - capture_index
+        - requested_rotation_offset_deg
+        - bare_rotation_offset_deg
+        - held_rotation_offset_deg
+        - bare_artifact_name
+        - held_artifact_name
+        - inspection_artifact_name
+        - vacuum_raw_values
+        - vacuum_median_raw_value
+        - vacuum_held
+        - inspection
+        - shadow
+      properties:
+        capture_index: { type: integer, minimum: 0 }
+        requested_rotation_offset_deg: { type: number }
+        bare_rotation_offset_deg: { type: number }
+        held_rotation_offset_deg: { type: number }
+        bare_artifact_name: { type: string }
+        held_artifact_name: { type: string }
+        inspection_artifact_name: { type: string }
+        vacuum_raw_values: { type: array, items: { type: integer } }
+        vacuum_median_raw_value: { type: [number, "null"] }
+        vacuum_held: { type: boolean }
+        inspection: { $ref: "#/components/schemas/HeldPartInspectionReport" }
+        shadow:
+          description: Optional learned-model shadow comparison.
+          type: [object, "null"]
     StripFeederPickupQualificationReport:
       type: object
       required:
@@ -3350,6 +3389,7 @@ components:
         - vacuum_held_after_transfer
         - inspection
         - alignment
+        - rotation_captures
         - disposition
         - release_surface_machine_mm
         - release_raw_values
@@ -3383,6 +3423,9 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/HeldPartAlignmentReport" }
             - type: "null"
+        rotation_captures:
+          type: array
+          items: { $ref: "#/components/schemas/HeldPartRotationCapture" }
         disposition:
           type: string
           enum: [returned_to_pocket, dropped_at_fallback, not_released]
@@ -3417,6 +3460,7 @@ components:
         - nozzle_id
         - pocket_index
         - fallback_drop_surface_machine_mm
+        - rotation_capture_offsets_deg
         - report
         - message
       properties:
@@ -3434,6 +3478,11 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/Point2d" }
             - type: "null"
+        rotation_capture_offsets_deg:
+          type: array
+          maxItems: 12
+          uniqueItems: true
+          items: { type: number }
         report:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }

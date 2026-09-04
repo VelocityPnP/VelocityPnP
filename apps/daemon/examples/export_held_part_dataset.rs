@@ -56,6 +56,10 @@ struct DatasetSample {
     nozzle_id: String,
     part_key: Option<String>,
     orientation: PartOrientation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_nozzle_rotation_offset_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual_nozzle_rotation_offset_deg: Option<f64>,
     evidence: Vec<String>,
     draft_state: String,
     draft_outline_px: Option<[[f64; 2]; 4]>,
@@ -84,6 +88,8 @@ struct Observation<'a> {
     observation_kind: &'static str,
     nozzle_id: &'a str,
     part_key: Option<&'a str>,
+    requested_nozzle_rotation_offset_deg: Option<f64>,
+    actual_nozzle_rotation_offset_deg: Option<f64>,
     evidence: Vec<String>,
 }
 
@@ -290,6 +296,27 @@ fn export_pickup_qualifications(
                 continue;
             };
             ensure!(media_type == "image/png", "observed artifact is not a PNG");
+            let rotation_capture = report
+                .rotation_captures
+                .iter()
+                .find(|capture| capture.held_artifact_name == name);
+            let paired_bare = if let Some(capture) = rotation_capture {
+                let (media_type, data) = store
+                    .get_strip_feeder_pickup_artifact(run.id, &capture.bare_artifact_name)?
+                    .with_context(|| {
+                        format!(
+                            "pickup {} is missing artifact {}",
+                            run.id, capture.bare_artifact_name
+                        )
+                    })?;
+                ensure!(
+                    media_type == "image/png",
+                    "rotation bare artifact is not a PNG"
+                );
+                Some(data)
+            } else {
+                None
+            };
             let (_, observed_bytes) = store
                 .get_strip_feeder_pickup_artifact(run.id, &name)?
                 .with_context(|| format!("pickup {} is missing artifact {name}", run.id))?;
@@ -297,7 +324,7 @@ fn export_pickup_qualifications(
             export_observation(
                 store,
                 context,
-                &bare_bytes,
+                paired_bare.as_deref().unwrap_or(&bare_bytes),
                 &observed_bytes,
                 Observation {
                     source_kind: "pickup_qualification",
@@ -308,6 +335,10 @@ fn export_pickup_qualifications(
                     observation_kind,
                     nozzle_id: &report.nozzle_id,
                     part_key: registration.part_key.as_deref(),
+                    requested_nozzle_rotation_offset_deg: rotation_capture
+                        .map(|capture| capture.requested_rotation_offset_deg),
+                    actual_nozzle_rotation_offset_deg: rotation_capture
+                        .map(|capture| capture.held_rotation_offset_deg),
                     evidence,
                 },
             )?;
@@ -360,6 +391,8 @@ fn export_placement_executions(
                     observation_kind,
                     nozzle_id: &report.nozzle_id,
                     part_key: Some(&report.part_key),
+                    requested_nozzle_rotation_offset_deg: None,
+                    actual_nozzle_rotation_offset_deg: None,
                     evidence,
                 },
             )?;
@@ -483,6 +516,8 @@ fn export_observation(
         nozzle_id: observation.nozzle_id.into(),
         part_key: observation.part_key.map(str::to_string),
         orientation,
+        requested_nozzle_rotation_offset_deg: observation.requested_nozzle_rotation_offset_deg,
+        actual_nozzle_rotation_offset_deg: observation.actual_nozzle_rotation_offset_deg,
         evidence: observation.evidence,
         draft_state: draft_state.into(),
         draft_outline_px: draft_outline,
@@ -499,6 +534,8 @@ fn observation_kind(name: &str) -> Option<&'static str> {
         Some("held_initial")
     } else if name.starts_with("held-part-aligned") && name.ends_with(".png") {
         Some("held_aligned")
+    } else if name.starts_with("rotation-capture-") && name.ends_with("-held-part.png") {
+        Some("rotation_capture")
     } else if name.starts_with("post-release-nozzle")
         && !name.contains("inspection")
         && name.ends_with(".png")
@@ -515,7 +552,22 @@ fn pickup_evidence(
     artifact_name: &str,
 ) -> Vec<String> {
     let mut evidence = Vec::new();
-    if observation_kind.starts_with("held") {
+    if observation_kind == "rotation_capture" {
+        if let Some(capture) = report
+            .rotation_captures
+            .iter()
+            .find(|capture| capture.held_artifact_name == artifact_name)
+        {
+            evidence.push(if capture.vacuum_held {
+                "vacuum_reported_held"
+            } else {
+                "vacuum_reported_not_held"
+            });
+            if capture.inspection.detected {
+                evidence.push("stored_vision_reported_component");
+            }
+        }
+    } else if observation_kind.starts_with("held") {
         evidence.push(if report.vacuum_held_after_transfer {
             "vacuum_reported_held"
         } else {
