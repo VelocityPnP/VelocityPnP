@@ -9,8 +9,14 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import onnxruntime as ort
 import torch
+
+try:
+    import onnxruntime as ort
+except ModuleNotFoundError:
+    ort = None
+    import onnx
+    from onnx.reference import ReferenceEvaluator
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -29,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("onnx", type=Path)
     parser.add_argument("--split", default="eval", choices=("train", "eval"))
+    parser.add_argument("--sample-id")
     parser.add_argument("--absolute-tolerance", type=float, default=1e-4)
     parser.add_argument("--report", type=Path)
     return parser.parse_args()
@@ -47,7 +54,18 @@ def main() -> None:
     dataset = SourceComponentDataset(
         args.dataset.resolve(), args.split, config.image_size, augment=False
     )
-    images = np.stack([dataset[index][0].numpy() for index in range(len(dataset))])
+    indices = list(range(len(dataset)))
+    if args.sample_id:
+        indices = [
+            index
+            for index, sample in enumerate(dataset.samples)
+            if sample.sample_id == args.sample_id
+        ]
+        if not indices:
+            raise ValueError(
+                f"sample {args.sample_id!r} is not in the {args.split} split"
+            )
+    images = np.stack([dataset[index][0].numpy() for index in indices])
     with torch.inference_mode():
         torch_logits, torch_pose = model(torch.from_numpy(images))
     torch_outputs = {
@@ -55,11 +73,20 @@ def main() -> None:
         "pose": torch_pose.numpy(),
     }
 
-    session = ort.InferenceSession(
-        str(args.onnx.resolve()), providers=["CPUExecutionProvider"]
-    )
-    onnx_values = session.run(None, {"images": images})
-    onnx_outputs = dict(zip((output.name for output in session.get_outputs()), onnx_values))
+    if ort is not None:
+        session = ort.InferenceSession(
+            str(args.onnx.resolve()), providers=["CPUExecutionProvider"]
+        )
+        onnx_values = session.run(None, {"images": images})
+        output_names = [output.name for output in session.get_outputs()]
+        onnx_runtime = "onnxruntime"
+    else:
+        artifact = onnx.load(args.onnx.resolve())
+        session = ReferenceEvaluator(artifact)
+        onnx_values = session.run(None, {"images": images})
+        output_names = [output.name for output in artifact.graph.output]
+        onnx_runtime = "onnx.reference"
+    onnx_outputs = dict(zip(output_names, onnx_values, strict=True))
 
     differences = {
         name: float(np.max(np.abs(torch_outputs[name] - onnx_outputs[name])))
@@ -68,6 +95,27 @@ def main() -> None:
     torch_classes = torch_outputs["occupancy_logits"].argmax(axis=1)
     onnx_classes = onnx_outputs["occupancy_logits"].argmax(axis=1)
     class_mismatches = int(np.count_nonzero(torch_classes != onnx_classes))
+    sample_records = []
+    if args.sample_id or class_mismatches:
+        for offset, index in enumerate(indices):
+            _, expected_class, _, sample_id = dataset[index]
+            if args.sample_id or torch_classes[offset] != onnx_classes[offset]:
+                sample_records.append(
+                    {
+                        "sample_id": sample_id,
+                        "expected_class": int(expected_class),
+                        "pytorch_class": int(torch_classes[offset]),
+                        "onnx_class": int(onnx_classes[offset]),
+                        "pytorch_occupancy_logits": torch_outputs[
+                            "occupancy_logits"
+                        ][offset].tolist(),
+                        "onnx_occupancy_logits": onnx_outputs[
+                            "occupancy_logits"
+                        ][offset].tolist(),
+                        "pytorch_pose": torch_outputs["pose"][offset].tolist(),
+                        "onnx_pose": onnx_outputs["pose"][offset].tolist(),
+                    }
+                )
     passed = (
         all(value <= args.absolute_tolerance for value in differences.values())
         and class_mismatches == 0
@@ -75,11 +123,13 @@ def main() -> None:
     report = {
         "schema_version": 1,
         "contract_version": checkpoint["contract_version"],
+        "onnx_runtime": onnx_runtime,
         "split": args.split,
-        "sample_count": len(dataset),
+        "sample_count": len(indices),
         "absolute_tolerance": args.absolute_tolerance,
         "maximum_absolute_difference": differences,
         "class_mismatches": class_mismatches,
+        "sample_records": sample_records,
         "passed": passed,
     }
     if args.report:

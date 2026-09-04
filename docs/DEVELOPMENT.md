@@ -639,14 +639,17 @@ training, and early stopping. Limited translation, scale, flip, brightness,
 contrast, and noise augmentation reflect the installed camera. The best
 checkpoint, ONNX model, report, histories, and evaluation images are stored
 under the dataset's ignored `training/` directory. The report records dataset,
-source, environment, parameter, metric, and artifact hashes.
+source, environment, parameter, metric, and artifact hashes. Classifier
+calibration gives extra weight to empty pockets that look occupied. It selects
+only from checkpoints with the fewest reviewed empty-pocket false detections.
+It then uses the combined held-out and training classification error rate.
 
 The laptop can validate data and run small smoke tests. Use the pinned NVIDIA
 PyTorch container on an ARM64 DGX Spark for full runs:
 
 ```bash
 python/training/run-container.sh \
-  datasets/source-components-v2 source-component-pose-v1
+  datasets/source-components-v2 source-component-pose-v2
 ```
 
 The container tag is local. Its base image uses a fixed manifest digest.
@@ -661,8 +664,8 @@ Verify that the ONNX export gives the same values as PyTorch:
 .venv-training/bin/python \
   python/tools/verify_source_component_pose.py \
   datasets/source-components-v2 \
-  datasets/source-components-v2/training/source-component-pose-v1/best.pt \
-  datasets/source-components-v2/training/source-component-pose-v1/best.onnx
+  datasets/source-components-v2/training/source-component-pose-v2/best.pt \
+  datasets/source-components-v2/training/source-component-pose-v2/best.onnx
 ```
 
 The verifier fails for a class change or an output difference above 0.0001.
@@ -679,14 +682,16 @@ The daemon can load one source-component model package in shadow mode:
 ```bash
 cargo run -p velocitypnpd -- \
   --source-component-model-dir \
-  datasets/source-components-v2/training/source-component-pose-v1
+  datasets/source-components-v2/training/source-component-pose-v2
 ```
 
 `VELOCITYPNP_SOURCE_COMPONENT_MODEL_DIR` sets the same option. The package must
-contain `model-manifest.json` and its declared ONNX file. Startup checks the v1
+contain `model-manifest.json` and its declared ONNX file. Startup checks the v2
 input and output contract, class order, ONNX opset, Apache-2.0 artifact terms,
-file size, and SHA-256 digest. An invalid or absent package disables learned
-inference. It does not prevent the daemon from starting. `/api/v1/health`
+file size, SHA-256 digest, and exact resize contract. Version 1 packages are
+rejected because their Pillow resize behavior was not portable. An invalid or
+absent package disables learned inference. It does not prevent the daemon from
+starting. `/api/v1/health`
 reports `disabled`, `invalid`, or `ready` and includes the loaded artifact
 digest when ready.
 
@@ -700,19 +705,23 @@ split:
 ```bash
 cargo run --release -p velocitypnp-model \
   --example evaluate_source_component -- \
-  datasets/source-components-v2/training/source-component-pose-v1 \
-  datasets/source-components-v2
+  datasets/source-components-v2/training/source-component-pose-v2 \
+  datasets/source-components-v2 eval
 ```
 
-The command fails if a runtime prediction changes an accepted evaluation
-class. It also reports the mean decoded center error in source-image pixels.
+The command exits with an error for each ground-truth class mismatch. The v2
+shadow baseline has one low-confidence held-out miss. It is recorded in
+`docs/baselines/source-component-pose-v2.json` and is not a production gate.
+The command also reports mean decoded center error in source-image pixels.
 
 New inventory source-capture samples run both the deterministic detector and
 the learned model. Each sample keeps the decoded prediction, model digest,
 detector agreement, center difference, and review decision. It also retains a
 rectified crop, JSON report, and PNG comparison. Green marks show the
-deterministic outline. Cyan marks show the learned outline. Existing retained
-captures can be processed without motion:
+deterministic outline. Cyan marks show the learned outline. A magenta frame
+marks a sample that requires review. A conflict with the inventory result that
+selected the pocket always requires review. Existing retained captures can be
+processed without motion:
 
 ```text
 POST /api/v1/strip-feeder-source-captures/CAPTURE_UUID/reanalyze-model

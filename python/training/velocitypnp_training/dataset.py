@@ -233,11 +233,11 @@ def _letterbox(
 ) -> tuple[Image.Image, np.ndarray | None]:
     width, height = image.size
     scale = min(image_size / width, image_size / height)
-    resized_width = max(1, round(width * scale))
-    resized_height = max(1, round(height * scale))
+    resized_width = max(1, math.floor(width * scale + 0.5))
+    resized_height = max(1, math.floor(height * scale + 0.5))
     left = (image_size - resized_width) // 2
     top = (image_size - resized_height) // 2
-    resized = image.resize((resized_width, resized_height), Image.Resampling.BILINEAR)
+    resized = _resize_half_pixel_bilinear_u8(image, resized_width, resized_height)
     output = Image.new("RGB", (image_size, image_size), (127, 127, 127))
     output.paste(resized, (left, top))
     if points is None:
@@ -246,6 +246,47 @@ def _letterbox(
     transformed[:, 0] = transformed[:, 0] * (resized_width / width) + left
     transformed[:, 1] = transformed[:, 1] * (resized_height / height) + top
     return output, transformed
+
+
+def _resize_half_pixel_bilinear_u8(
+    image: Image.Image, width: int, height: int
+) -> Image.Image:
+    """Resize RGB bytes with the model contract's portable interpolation."""
+
+    source = np.asarray(image, dtype=np.uint8)
+    source_height, source_width, channels = source.shape
+    if channels != 3 or min(width, height, source_width, source_height) < 1:
+        raise ValueError("model resize requires a non-empty RGB image")
+    target_x = np.arange(width, dtype=np.float64)
+    target_y = np.arange(height, dtype=np.float64)
+    source_x = np.clip(
+        (target_x + 0.5) * source_width / width - 0.5,
+        0.0,
+        source_width - 1,
+    )
+    source_y = np.clip(
+        (target_y + 0.5) * source_height / height - 0.5,
+        0.0,
+        source_height - 1,
+    )
+    x0 = np.floor(source_x).astype(np.intp)
+    y0 = np.floor(source_y).astype(np.intp)
+    x1 = np.minimum(x0 + 1, source_width - 1)
+    y1 = np.minimum(y0 + 1, source_height - 1)
+    x_fraction = (source_x - x0)[None, :, None]
+    y_fraction = (source_y - y0)[:, None, None]
+    top = (
+        source[y0[:, None], x0[None, :]].astype(np.float64)
+        * (1.0 - x_fraction)
+        + source[y0[:, None], x1[None, :]].astype(np.float64) * x_fraction
+    )
+    bottom = (
+        source[y1[:, None], x0[None, :]].astype(np.float64)
+        * (1.0 - x_fraction)
+        + source[y1[:, None], x1[None, :]].astype(np.float64) * x_fraction
+    )
+    resized = np.floor(top * (1.0 - y_fraction) + bottom * y_fraction + 0.5)
+    return Image.fromarray(np.clip(resized, 0, 255).astype(np.uint8))
 
 
 def _augment_geometry(

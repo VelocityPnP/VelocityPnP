@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -40,7 +40,7 @@ from velocitypnp_training import (  # noqa: E402
 from velocitypnp_training.evaluation import evaluate, render_evaluation  # noqa: E402
 
 
-CONTRACT_VERSION = "velocitypnp.source-component-pose.v1"
+CONTRACT_VERSION = "velocitypnp.source-component-pose.v2"
 
 
 def sha256_file(path: Path) -> str:
@@ -99,12 +99,21 @@ def configure_determinism(seed: int) -> None:
 
 
 def classification_balance(
-    dataset: SourceComponentDataset, device: torch.device
+    dataset: SourceComponentDataset,
+    device: torch.device,
+    sample_weights: list[float] | None = None,
 ) -> torch.Tensor:
-    counts = Counter(sample.class_id for sample in dataset.samples)
+    weights = sample_weights or [1.0] * len(dataset.samples)
+    if len(weights) != len(dataset.samples):
+        raise ValueError("classification weights do not match the dataset")
+    counts: Counter[int] = Counter()
+    for sample, weight in zip(dataset.samples, weights, strict=True):
+        counts[sample.class_id] += weight
     empty = counts[0]
     flat = counts[1]
     on_edge = counts[2]
+    if min(empty, flat, on_edge) <= 0:
+        raise ValueError("classification balance requires all three classes")
     return torch.tensor(
         [empty / (flat + on_edge), flat / on_edge],
         dtype=torch.float32,
@@ -216,7 +225,7 @@ def classifier_epoch(
     device: torch.device,
     balance: torch.Tensor,
     optimizer: torch.optim.Optimizer | None,
-) -> float:
+) -> dict[str, float | int]:
     """Fit only the occupancy head while the learned pose features stay fixed."""
 
     model.eval()
@@ -225,6 +234,9 @@ def classifier_epoch(
         model.classifier.train()
     total = 0.0
     batches = 0
+    errors = 0
+    false_positives = 0
+    false_negatives = 0
     context = torch.enable_grad() if optimizer is not None else torch.no_grad()
     with context:
         for images, classes, _, _ in loader:
@@ -242,8 +254,21 @@ def classifier_epoch(
                 loss.backward()
                 optimizer.step()
             total += float(loss.detach())
+            predicted_classes = logits.argmax(dim=1)
+            errors += int((predicted_classes != classes).sum().detach())
+            false_positives += int(
+                ((classes == 0) & (predicted_classes != 0)).sum().detach()
+            )
+            false_negatives += int(
+                ((classes != 0) & (predicted_classes == 0)).sum().detach()
+            )
             batches += 1
-    return total / batches
+    return {
+        "loss": total / batches,
+        "errors": errors,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+    }
 
 
 def export_onnx(
@@ -278,7 +303,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--name", default="source-component-pose-v1")
+    parser.add_argument("--name", default="source-component-pose-v2")
     parser.add_argument("--image-size", type=int, default=192)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=40)
@@ -287,7 +312,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=0.002)
     parser.add_argument("--classifier-epochs", type=int, default=100)
     parser.add_argument("--classifier-patience", type=int, default=25)
-    parser.add_argument("--classifier-learning-rate", type=float, default=0.005)
+    parser.add_argument("--classifier-learning-rate", type=float, default=0.001)
+    parser.add_argument("--hard-negative-occupied-probability", type=float, default=0.2)
+    parser.add_argument("--hard-negative-weight", type=float, default=8.0)
+    parser.add_argument("--classifier-train-selection-weight", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--validate-only", action="store_true")
@@ -296,6 +324,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not 0.0 <= args.hard_negative_occupied_probability <= 1.0:
+        raise ValueError("hard-negative occupied probability must be from 0 to 1")
+    if args.hard_negative_weight < 1.0:
+        raise ValueError("hard-negative weight must be at least 1")
+    if args.classifier_train_selection_weight < 0.0:
+        raise ValueError("classifier train selection weight must not be negative")
     dataset_root = args.dataset.resolve()
     summary = dataset_summary(dataset_root)
     print(json.dumps(summary, indent=2))
@@ -379,6 +413,55 @@ def main() -> None:
     model.load_state_dict(best_state)
     model.to(device)
 
+    train_evaluation_dataset = SourceComponentDataset(
+        dataset_root, "train", args.image_size, augment=False, seed=args.seed
+    )
+    pre_calibration_metrics, pre_calibration_records = evaluate(
+        model,
+        train_evaluation_dataset,
+        device,
+        batch_size=args.batch_size,
+    )
+    hard_negative_ids = {
+        record["sample_id"]
+        for record in pre_calibration_records
+        if record["actual_class"] == "empty"
+        and 1.0 - record["probabilities"]["empty"]
+        >= args.hard_negative_occupied_probability
+    }
+    classifier_sample_weights = [
+        args.hard_negative_weight if sample.sample_id in hard_negative_ids else 1.0
+        for sample in train_dataset.samples
+    ]
+    classifier_sampler = WeightedRandomSampler(
+        classifier_sample_weights,
+        num_samples=round(sum(classifier_sample_weights)),
+        replacement=True,
+        generator=torch.Generator().manual_seed(args.seed + 1),
+    )
+    classifier_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        sampler=classifier_sampler,
+        num_workers=args.workers,
+    )
+    train_evaluation_loader = DataLoader(
+        train_evaluation_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.workers,
+        generator=torch.Generator().manual_seed(args.seed + 2),
+    )
+    train_evaluation_check_loader = DataLoader(
+        train_evaluation_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+    )
+    classifier_balance = classification_balance(
+        train_dataset, device, classifier_sample_weights
+    )
+
     for parameter in model.parameters():
         parameter.requires_grad = False
     for parameter in model.occupancy_features.parameters():
@@ -394,26 +477,60 @@ def main() -> None:
         weight_decay=0.01,
     )
     classifier_history: list[dict[str, Any]] = []
-    best_classifier_loss = math.inf
+    best_classifier_score = (math.inf, math.inf, math.inf)
     best_classifier_epoch = 0
     best_classifier_state: dict[str, torch.Tensor] | None = None
     stale_classifier_epochs = 0
     for epoch in range(1, args.classifier_epochs + 1):
-        train_classifier_loss = classifier_epoch(
-            model, train_loader, device, balance, classifier_optimizer
+        train_augmented = classifier_epoch(
+            model,
+            classifier_loader,
+            device,
+            classifier_balance,
+            classifier_optimizer,
         )
-        eval_classifier_loss = classifier_epoch(
+        train_exact = classifier_epoch(
+            model,
+            train_evaluation_loader,
+            device,
+            balance,
+            classifier_optimizer,
+        )
+        train_unaugmented = classifier_epoch(
+            model, train_evaluation_check_loader, device, balance, None
+        )
+        eval_classifier = classifier_epoch(
             model, eval_loader, device, balance, None
+        )
+        selection_loss = (
+            float(eval_classifier["loss"])
+            + args.classifier_train_selection_weight
+            * float(train_unaugmented["loss"])
+        )
+        combined_error_rate = (
+            float(eval_classifier["errors"]) / len(eval_dataset)
+            + float(train_unaugmented["errors"]) / len(train_evaluation_dataset)
+        )
+        selection_score = (
+            int(eval_classifier["false_positives"])
+            + int(train_unaugmented["false_positives"]),
+            combined_error_rate,
+            selection_loss,
         )
         classifier_history.append(
             {
                 "epoch": epoch,
-                "train_classification": train_classifier_loss,
-                "eval_classification": eval_classifier_loss,
+                "train_augmented_classification": train_augmented,
+                "train_exact_classification": train_exact,
+                "train_unaugmented_classification": train_unaugmented,
+                "eval_classification": eval_classifier,
+                "selection_loss": selection_loss,
+                "combined_error_rate": combined_error_rate,
+                "selection_score": list(selection_score),
             }
         )
-        if eval_classifier_loss < best_classifier_loss - 1e-5:
-            best_classifier_loss = eval_classifier_loss
+        if selection_score < best_classifier_score:
+            best_classifier_score = selection_score
             best_classifier_epoch = epoch
             best_classifier_state = {
                 key: value.detach().cpu().clone()
@@ -433,10 +550,27 @@ def main() -> None:
         key: value.detach().cpu().clone() for key, value in model.state_dict().items()
     }
 
+    training_metrics, training_records = evaluate(
+        model,
+        train_evaluation_dataset,
+        device,
+        batch_size=args.batch_size,
+    )
     metrics, records = evaluate(
         model, eval_dataset, device, batch_size=args.batch_size
     )
+    render_evaluation(
+        train_evaluation_dataset,
+        training_records,
+        output / "training-evaluation",
+    )
     render_evaluation(eval_dataset, records, output / "evaluation")
+    remaining_hard_negative_false_positives = [
+        record["sample_id"]
+        for record in training_records
+        if record["sample_id"] in hard_negative_ids
+        and record["predicted_class"] != "empty"
+    ]
     checkpoint = output / "best.pt"
     torch.save(
         {
@@ -491,6 +625,33 @@ def main() -> None:
                 "best_epoch": best_classifier_epoch,
                 "early_stopping_patience": args.classifier_patience,
                 "learning_rate": args.classifier_learning_rate,
+                "train_selection_weight": args.classifier_train_selection_weight,
+                "selection_false_positives": best_classifier_score[0],
+                "selection_combined_error_rate": best_classifier_score[1],
+                "selection_errors": {
+                    "eval": int(
+                        classifier_history[best_classifier_epoch - 1][
+                            "eval_classification"
+                        ]["errors"]
+                    ),
+                    "train": int(
+                        classifier_history[best_classifier_epoch - 1][
+                            "train_unaugmented_classification"
+                        ]["errors"]
+                    ),
+                },
+                "selection_loss": best_classifier_score[2],
+            },
+            "hard_negative_mining": {
+                "occupied_probability": args.hard_negative_occupied_probability,
+                "sample_weight": args.hard_negative_weight,
+                "sample_count": len(hard_negative_ids),
+                "sample_ids": sorted(hard_negative_ids),
+                "pre_calibration_metrics": pre_calibration_metrics,
+                "remaining_false_positive_count": len(
+                    remaining_hard_negative_false_positives
+                ),
+                "remaining_false_positive_ids": remaining_hard_negative_false_positives,
             },
         },
         "model": {
@@ -501,6 +662,7 @@ def main() -> None:
                 "shape": ["batch", 3, args.image_size, args.image_size],
                 "type": "float32",
                 "range": [0.0, 1.0],
+                "resize": "velocitypnp.half-pixel-bilinear-u8.v1",
                 "letterbox_value": 127,
             },
             "outputs": {
@@ -539,6 +701,7 @@ def main() -> None:
             },
         },
         "metrics": metrics,
+        "training_metrics": training_metrics,
         "limitations": [
             "The evaluation split is too small for a production gate.",
             *(
@@ -551,7 +714,7 @@ def main() -> None:
                 else []
             ),
             "The data comes from one machine and a small number of sessions.",
-            "The v1 contract does not predict component polarity.",
+            "The v2 contract does not predict component polarity.",
         ],
     }
     (output / "training-history.json").write_text(json.dumps(history, indent=2) + "\n")
@@ -560,6 +723,9 @@ def main() -> None:
     )
     (output / "evaluation-records.json").write_text(
         json.dumps(records, indent=2) + "\n"
+    )
+    (output / "training-evaluation-records.json").write_text(
+        json.dumps(training_records, indent=2) + "\n"
     )
     (output / "model-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))

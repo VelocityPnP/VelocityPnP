@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velocitypnp.org/model-contracts/source-component-pose-v2.json",
+  "title": "VelocityPnP source-component pose model v2",
+  "description": "One occupancy and undirected pose prediction per rectified pocket image.",
+  "type": "object",
+  "required": ["occupancy_logits", "pose"],
+  "properties": {
+    "occupancy_logits": {
+      "description": "Log probabilities in empty, component_flat, component_on_edge order.",
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number"}
+    },
+    "pose": {
+      "description": "Normalized center and size followed by the doubled-angle unit vector.",
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": -1, "maximum": 1},
+        {"type": "number", "minimum": -1, "maximum": 1}
+      ],
+      "minItems": 6,
+      "maxItems": 6
+    }
+  },
+  "additionalProperties": false,
+  "x-velocitypnp": {
+    "contract_version": "velocitypnp.source-component-pose.v2",
+    "input": {
+      "name": "images",
+      "layout": "NCHW",
+      "shape": ["batch", 3, 192, 192],
+      "type": "float32",
+      "range": [0, 1],
+      "resize": "velocitypnp.half-pixel-bilinear-u8.v1",
+      "resize_coordinates": "half-pixel centers with clamped source edges",
+      "resize_rounding": "round non-negative interpolated values down from x+0.5",
+      "dimension_rounding": "round positive scaled dimensions down from x+0.5",
+      "letterbox_rgb": [127, 127, 127]
+    },
+    "angle_period_degrees": 180,
+    "polarity_supported": false
+  }
+}

@@ -584,6 +584,11 @@ pub struct SourceComponentModelPrediction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceComponentShadowReport {
     pub algorithm_version: String,
+    /// Prior inventory classification used to select this capture target.
+    #[serde(default)]
+    pub prior_inventory_occupancy: Option<StripPocketOccupancy>,
+    #[serde(default)]
+    pub prior_inventory_confidence: Option<f64>,
     pub deterministic_algorithm_version: String,
     pub deterministic_occupancy: StripPocketOccupancy,
     pub deterministic_confidence: f64,
@@ -592,7 +597,12 @@ pub struct SourceComponentShadowReport {
     #[serde(default)]
     pub deterministic_outline_px: Option<[[f64; 2]; 4]>,
     pub prediction: SourceComponentModelPrediction,
+    /// Agreement between the learned and deterministic results.
     pub occupancy_agreement: bool,
+    #[serde(default)]
+    pub learned_prior_inventory_agreement: Option<bool>,
+    #[serde(default)]
+    pub deterministic_prior_inventory_agreement: Option<bool>,
     #[serde(default)]
     pub center_delta_px: Option<f64>,
     pub review_required: bool,

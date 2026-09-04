@@ -231,6 +231,7 @@ pub fn render_source_component_shadow_preview(
     crop: &GrayFrame,
     deterministic_outline_px: Option<[[f64; 2]; 4]>,
     prediction: &SourceComponentModelPrediction,
+    review_required: bool,
 ) -> RgbFrame {
     let mut pixels = Vec::with_capacity(crop.pixels.len() * 3);
     for luma in &crop.pixels {
@@ -249,6 +250,18 @@ pub fn render_source_component_shadow_preview(
         draw_cross(&mut preview, prediction.pose.center_px, 5.0, [30, 220, 245]);
     } else {
         draw_cross(&mut preview, prediction.pose.center_px, 5.0, [245, 80, 70]);
+    }
+    if review_required && crop.width > 2 && crop.height > 2 {
+        draw_closed_polyline(
+            &mut preview,
+            &[
+                [1.0, 1.0],
+                [f64::from(crop.width - 2), 1.0],
+                [f64::from(crop.width - 2), f64::from(crop.height - 2)],
+                [1.0, f64::from(crop.height - 2)],
+            ],
+            [245, 40, 210],
+        );
     }
     preview
 }

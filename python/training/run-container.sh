@@ -9,7 +9,7 @@ fi
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 dataset=$1
-run_name=${2:-source-component-pose-v1}
+run_name=${2:-source-component-pose-v2}
 
 case "$dataset" in
     /*) dataset_path=$dataset ;;

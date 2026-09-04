@@ -11,13 +11,14 @@ use velocitypnp_domain::{
     SourceComponentPosePrediction,
 };
 
-pub const SOURCE_COMPONENT_POSE_CONTRACT: &str = "velocitypnp.source-component-pose.v1";
+pub const SOURCE_COMPONENT_POSE_CONTRACT: &str = "velocitypnp.source-component-pose.v2";
 pub const SOURCE_COMPONENT_RUNTIME: &str = "tract-onnx-0.22";
 pub const SOURCE_COMPONENT_CLASS_PROBABILITY_GATE: f64 = 0.75;
 pub const SOURCE_COMPONENT_CLASS_MARGIN_GATE: f64 = 0.25;
 
 const EXPECTED_IMAGE_SIZE: usize = 192;
 const EXPECTED_CLASSES: [&str; 3] = ["empty", "component_flat", "component_on_edge"];
+const EXPECTED_RESIZE: &str = "velocitypnp.half-pixel-bilinear-u8.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +94,7 @@ struct ManifestInput {
     #[serde(rename = "type")]
     datum_type: String,
     range: [f64; 2],
+    resize: String,
     letterbox_value: u8,
 }
 
@@ -361,6 +363,10 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<()> {
         "model input range changed"
     );
     ensure!(
+        manifest.model.input.resize == EXPECTED_RESIZE,
+        "model input resize changed"
+    );
+    ensure!(
         manifest.model.input.letterbox_value == 127,
         "model letterbox value changed"
     );
@@ -550,6 +556,7 @@ mod tests {
                     "shape": ["batch", 3, 192, 192],
                     "type": "float32",
                     "range": [0.0, 1.0],
+                    "resize": EXPECTED_RESIZE,
                     "letterbox_value": 127
                 },
                 "angle_period_degrees": 180,
@@ -578,6 +585,22 @@ mod tests {
         assert_eq!(input[0], 127.0 / 255.0);
         assert_eq!(input[13 * 192], 1.0);
         assert_eq!(&input[..192 * 192], &input[192 * 192..2 * 192 * 192]);
+    }
+
+    #[test]
+    fn letterbox_matches_the_cross_runtime_contract_fixture() {
+        let pixels = (0_u8..35).map(|value| value * 7).collect::<Vec<_>>();
+        let (input, box_) = letterbox_gray(7, 5, &pixels, 8).unwrap();
+        let bytes = input
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(box_.resized_width, 8);
+        assert_eq!(box_.resized_height, 6);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(bytes)),
+            "2102e1393effcfabe9254138412eee6a1dd39a10764f25fbe66454d9d6e4a909"
+        );
     }
 
     #[test]

@@ -153,7 +153,7 @@ const SOURCE_POCKET_BEFORE_ARTIFACT: &str = "source-pocket-before.png";
 const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspection.png";
 const SOURCE_POCKET_POSE_INSPECTION_ARTIFACT: &str = "source-pocket-pose-inspection.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
-const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v1";
+const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v2";
 const MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION: f64 = 0.04;
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
@@ -6405,16 +6405,31 @@ struct SourceComponentShadowArtifacts {
     preview: RgbFrame,
 }
 
+#[derive(Clone, Copy)]
+struct SourceComponentShadowContext {
+    camera_pose: Pose,
+    pocket_machine_mm: [f64; 2],
+    prior_inventory_occupancy: StripPocketOccupancy,
+    prior_inventory_confidence: f64,
+}
+
 fn build_source_component_shadow_report(
     deterministic: &StripFeederSourceComponentDraft,
     prediction: SourceComponentModelPrediction,
+    prior_inventory_occupancy: StripPocketOccupancy,
+    prior_inventory_confidence: f64,
     crop: &GrayFrame,
     artifact_stem: &str,
 ) -> SourceComponentShadowReport {
     let learned_occupied = prediction.class.occupied();
-    let occupancy_agreement = match deterministic.occupancy {
-        StripPocketOccupancy::Occupied => learned_occupied,
-        StripPocketOccupancy::Empty => !learned_occupied,
+    let occupancy_agreement = occupancy_matches(deterministic.occupancy, learned_occupied);
+    let learned_prior_inventory_agreement =
+        occupancy_matches(prior_inventory_occupancy, learned_occupied);
+    let deterministic_prior_inventory_agreement = match deterministic.occupancy {
+        StripPocketOccupancy::Occupied => {
+            prior_inventory_occupancy == StripPocketOccupancy::Occupied
+        }
+        StripPocketOccupancy::Empty => prior_inventory_occupancy == StripPocketOccupancy::Empty,
         StripPocketOccupancy::Uncertain => false,
     };
     let center_delta_px = deterministic
@@ -6437,6 +6452,8 @@ fn build_source_component_shadow_report(
     let review_required = deterministic.review_required
         || !prediction.confidence_gate_passed
         || !occupancy_agreement
+        || !learned_prior_inventory_agreement
+        || !deterministic_prior_inventory_agreement
         || !center_agreement
         || on_edge;
     let mut findings = prediction.findings.clone();
@@ -6449,6 +6466,12 @@ fn build_source_component_shadow_report(
     } else if !occupancy_agreement {
         findings.push("learned and deterministic occupancy disagree".into());
     }
+    if !learned_prior_inventory_agreement {
+        findings.push("learned occupancy disagrees with the prior inventory".into());
+    }
+    if !deterministic_prior_inventory_agreement {
+        findings.push("deterministic occupancy disagrees with the prior inventory".into());
+    }
     if !center_agreement {
         findings.push(format!(
             "learned and deterministic centers differ by more than {maximum_center_delta_px:.1} pixels"
@@ -6459,6 +6482,8 @@ fn build_source_component_shadow_report(
     }
     SourceComponentShadowReport {
         algorithm_version: SOURCE_COMPONENT_SHADOW_ALGORITHM.into(),
+        prior_inventory_occupancy: Some(prior_inventory_occupancy),
+        prior_inventory_confidence: Some(prior_inventory_confidence),
         deterministic_algorithm_version: deterministic.algorithm_version.clone(),
         deterministic_occupancy: deterministic.occupancy,
         deterministic_confidence: deterministic.occupancy_confidence,
@@ -6466,6 +6491,8 @@ fn build_source_component_shadow_report(
         deterministic_outline_px: deterministic.outline_px,
         prediction,
         occupancy_agreement,
+        learned_prior_inventory_agreement: Some(learned_prior_inventory_agreement),
+        deterministic_prior_inventory_agreement: Some(deterministic_prior_inventory_agreement),
         center_delta_px,
         review_required,
         control_authorized: false,
@@ -6476,19 +6503,25 @@ fn build_source_component_shadow_report(
     }
 }
 
+fn occupancy_matches(expected: StripPocketOccupancy, occupied: bool) -> bool {
+    matches!(
+        (expected, occupied),
+        (StripPocketOccupancy::Occupied, true) | (StripPocketOccupancy::Empty, false)
+    )
+}
+
 fn analyze_source_component_shadow(
     model: &SourceComponentModel,
     frame: &GrayFrame,
-    camera_pose: Pose,
-    pocket_machine_mm: [f64; 2],
     camera_model: &PlanarCameraModel,
     registration: &StripFeederRegistration,
+    context: SourceComponentShadowContext,
     artifact_stem: &str,
 ) -> Result<SourceComponentShadowArtifacts, String> {
     let deterministic = draft_strip_feeder_source_component(
         frame,
-        camera_pose,
-        pocket_machine_mm,
+        context.camera_pose,
+        context.pocket_machine_mm,
         camera_model,
         registration,
     )
@@ -6503,6 +6536,8 @@ fn analyze_source_component_shadow(
     let report = build_source_component_shadow_report(
         &deterministic.report,
         prediction,
+        context.prior_inventory_occupancy,
+        context.prior_inventory_confidence,
         &deterministic.crop,
         artifact_stem,
     );
@@ -6510,6 +6545,7 @@ fn analyze_source_component_shadow(
         &deterministic.crop,
         deterministic.report.outline_px,
         &report.prediction,
+        report.review_required,
     );
     Ok(SourceComponentShadowArtifacts {
         report,
@@ -6555,9 +6591,8 @@ async fn analyze_and_persist_source_component_shadow(
     state: &AppState,
     capture_id: Uuid,
     frame: GrayFrame,
-    camera_pose: Pose,
-    pocket_machine_mm: [f64; 2],
     registration: StripFeederRegistration,
+    context: SourceComponentShadowContext,
     artifact_name: &str,
 ) -> Option<SourceComponentShadowReport> {
     let model = state.source_component_model.clone()?;
@@ -6576,10 +6611,9 @@ async fn analyze_and_persist_source_component_shadow(
         analyze_source_component_shadow(
             &model,
             &frame,
-            camera_pose,
-            pocket_machine_mm,
             &camera_model,
             &registration,
+            context,
             &artifact_stem,
         )
     })
@@ -6771,9 +6805,13 @@ async fn capture_inventory_source_targets(
                         state,
                         run.id,
                         frame.clone(),
-                        camera_pose,
-                        target.observation.center_machine_mm,
                         registration,
+                        SourceComponentShadowContext {
+                            camera_pose,
+                            pocket_machine_mm: target.observation.center_machine_mm,
+                            prior_inventory_occupancy: target.observation.occupancy,
+                            prior_inventory_confidence: target.observation.confidence,
+                        },
                         &artifact_name,
                     )
                     .await
@@ -6876,16 +6914,19 @@ async fn reanalyze_strip_feeder_source_capture_model(
             .to_string();
         let sample_camera_model = camera_model.clone();
         let sample_model = model.clone();
-        let camera_pose = sample.camera_pose;
-        let pocket_machine_mm = sample.pocket_machine_mm;
+        let context = SourceComponentShadowContext {
+            camera_pose: sample.camera_pose,
+            pocket_machine_mm: sample.pocket_machine_mm,
+            prior_inventory_occupancy: sample.expected_occupancy,
+            prior_inventory_confidence: sample.expected_occupancy_confidence,
+        };
         let artifacts = tokio::task::spawn_blocking(move || {
             analyze_source_component_shadow(
                 &sample_model,
                 &frame,
-                camera_pose,
-                pocket_machine_mm,
                 &sample_camera_model,
                 &registration,
+                context,
                 &artifact_stem,
             )
         })
@@ -29188,7 +29229,7 @@ mod tests {
             findings: Vec::new(),
         };
         let prediction = SourceComponentModelPrediction {
-            contract_version: "velocitypnp.source-component-pose.v1".into(),
+            contract_version: "velocitypnp.source-component-pose.v2".into(),
             model_artifact_sha256: "0".repeat(64),
             runtime: "fixture".into(),
             class: SourceComponentClass::Empty,
@@ -29218,6 +29259,8 @@ mod tests {
         let report = build_source_component_shadow_report(
             &deterministic,
             prediction.clone(),
+            StripPocketOccupancy::Occupied,
+            0.9,
             &crop,
             "sample",
         );
@@ -29230,20 +29273,44 @@ mod tests {
             .iter()
             .any(|finding| finding.contains("disagree")));
 
-        let mut missing_center = deterministic;
+        let mut missing_center = deterministic.clone();
         missing_center.center_px = None;
         missing_center.outline_px = None;
-        let mut occupied_prediction = prediction;
+        let mut occupied_prediction = prediction.clone();
         occupied_prediction.class = SourceComponentClass::ComponentFlat;
         let report = build_source_component_shadow_report(
             &missing_center,
             occupied_prediction,
+            StripPocketOccupancy::Occupied,
+            0.9,
             &crop,
             "sample",
         );
         assert!(report.occupancy_agreement);
         assert!(report.center_delta_px.is_none());
         assert!(report.review_required);
+
+        let mut occupied_prediction = prediction;
+        occupied_prediction.class = SourceComponentClass::ComponentFlat;
+        let report = build_source_component_shadow_report(
+            &deterministic,
+            occupied_prediction,
+            StripPocketOccupancy::Empty,
+            0.8,
+            &crop,
+            "covered-empty-pocket",
+        );
+        assert!(report.occupancy_agreement);
+        assert_eq!(report.learned_prior_inventory_agreement, Some(false));
+        assert_eq!(report.deterministic_prior_inventory_agreement, Some(false));
+        assert!(report.review_required);
+        let preview = render_source_component_shadow_preview(
+            &crop,
+            report.deterministic_outline_px,
+            &report.prediction,
+            report.review_required,
+        );
+        assert_eq!(&preview.pixels[303..306], &[245, 40, 210]);
     }
 
     #[tokio::test]

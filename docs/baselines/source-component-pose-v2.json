@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "run": "source-component-pose-v2-spark-reviewed-selection",
+  "completed_at": "2026-09-04T03:47:21.333398+00:00",
+  "contract_version": "velocitypnp.source-component-pose.v2",
+  "dataset": {
+    "manifest_sha256": "ac9b085fba9c62fb7a23f23a3186cafefb12e41c4c0b2830d3cb2cd955bb5671",
+    "content_sha256": "b375d59af60d81b4468dc13dae48c5e2f7fc19d4116ed2bbd64fd168dd6a5001",
+    "train_samples": 78,
+    "evaluation_samples": 11,
+    "train_empty_samples": 16,
+    "evaluation_empty_samples": 3,
+    "evaluation_on_edge_samples": 0
+  },
+  "training": {
+    "device": "NVIDIA GB10",
+    "torch": "2.14.0a0+4fdf77b940.nv26.08",
+    "duration_seconds": 155.91774288285524,
+    "parameter_count": 970911,
+    "pretrained_weights": false,
+    "completed_epochs": 190,
+    "best_epoch": 150,
+    "classifier_calibration": {
+      "completed_epochs": 46,
+      "best_epoch": 21,
+      "hard_negative_count": 6,
+      "remaining_hard_negative_false_positives": 0,
+      "selection_false_positives": 0
+    }
+  },
+  "evaluation_metrics": {
+    "occupancy": {
+      "true_positives": 7,
+      "false_positives": 0,
+      "false_negatives": 1,
+      "precision": 1.0,
+      "recall": 0.875
+    },
+    "pose": {
+      "mean_center_error_input_px": 1.75212462246418,
+      "maximum_center_error_input_px": 2.9679417610168457,
+      "mean_size_error_input_px": 0.6027017086744308,
+      "mean_angle_error_degrees_mod_180": 0.47511043539425435,
+      "mean_oriented_iou": 0.7692025496185988
+    }
+  },
+  "training_metrics": {
+    "occupancy": {
+      "true_positives": 57,
+      "false_positives": 0,
+      "false_negatives": 5,
+      "precision": 1.0,
+      "recall": 0.9193548387096774
+    },
+    "component_on_edge_correct": 12,
+    "component_on_edge_total": 16
+  },
+  "covered_empty_pocket_regression": {
+    "sample_id": "inventory_source_capture-2f186c29-d6c5-4086-b623-7ac8b4284422-lane-005-pocket-005",
+    "expected_class": "empty",
+    "pytorch_class": "empty",
+    "pytorch_empty_probability": 0.9851102828979492,
+    "onnx_runtime_class": "empty",
+    "tract_class": "empty",
+    "onnx_runtime_empty_probability": 0.9851548075675964,
+    "tract_empty_probability": 0.9851548075675964
+  },
+  "artifacts": {
+    "checkpoint_sha256": "2668d35050b511ff171417e4eabd81fd61b0fd1cc49d5db6b6278fc813e5116a",
+    "onnx_sha256": "4a89e8abb0a2c5a513ef43ddddb9a936ee5b6656f34047b671530c155a94d204"
+  },
+  "pytorch_onnx_parity": {
+    "runtime": "onnx.reference",
+    "sample_count": 11,
+    "absolute_tolerance": 0.0001,
+    "maximum_log_probability_difference": 0.000003814697265625,
+    "maximum_pose_difference": 0.0000012665987014770508,
+    "class_mismatches": 0,
+    "passed": true
+  },
+  "tract_replay": {
+    "sample_count": 11,
+    "ground_truth_mismatches": 1,
+    "missed_sample_id": "placement_execution-6525da6d-50c1-47ed-80a4-1c109a08ca1a",
+    "missed_sample_confidence": 0.47321775555610657
+  },
+  "license": {
+    "artifact": "Apache-2.0",
+    "training_code": "Apache-2.0",
+    "training_framework": "BSD-3-Clause"
+  },
+  "limitations": [
+    "The evaluation split is too small for a production gate.",
+    "The evaluation split has no component_on_edge examples.",
+    "The data comes from one machine and a small number of sessions.",
+    "The v2 contract does not predict component polarity.",
+    "The model is shadow-only and cannot authorize motion."
+  ]
+}

@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -26,6 +27,7 @@ if torch is not None:
         dataset_summary,
         polygon_to_pose,
     )
+    from velocitypnp_training.dataset import _letterbox
     from velocitypnp_training.evaluation import polygon_iou
 
 
@@ -111,6 +113,17 @@ class SourceComponentPoseTests(unittest.TestCase):
         self.assertTrue(torch.all((pose[:, :4] >= 0) & (pose[:, :4] <= 1)))
         torch.testing.assert_close(
             torch.linalg.norm(pose[:, 4:], dim=1), torch.ones(2)
+        )
+
+    def test_letterbox_matches_the_cross_runtime_contract_fixture(self):
+        pixels = (np.arange(35, dtype=np.uint8).reshape(5, 7) * 7) % 251
+        image = Image.fromarray(pixels).convert("RGB")
+        letterboxed, _ = _letterbox(image, None, 8)
+        array = np.asarray(letterboxed, dtype=np.float32).copy() / 255.0
+        tensor = np.transpose(array, (2, 0, 1)).copy()
+        self.assertEqual(
+            hashlib.sha256(tensor.tobytes()).hexdigest(),
+            "2102e1393effcfabe9254138412eee6a1dd39a10764f25fbe66454d9d6e4a909",
         )
 
     def test_polygon_iou(self):

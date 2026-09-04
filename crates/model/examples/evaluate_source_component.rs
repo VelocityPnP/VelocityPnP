@@ -26,8 +26,13 @@ struct GroundTruthSample {
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     ensure!(
-        arguments.len() == 2,
-        "usage: evaluate_source_component MODEL_PACKAGE DATASET"
+        matches!(arguments.len(), 2 | 3),
+        "usage: evaluate_source_component MODEL_PACKAGE DATASET [train|eval|all]"
+    );
+    let split = arguments.get(2).map(String::as_str).unwrap_or("eval");
+    ensure!(
+        matches!(split, "train" | "eval" | "all"),
+        "split must be train, eval, or all"
     );
     let model = SourceComponentModel::load(Path::new(&arguments[0]))?;
     let dataset = Path::new(&arguments[1]).canonicalize()?;
@@ -42,7 +47,7 @@ fn main() -> Result<()> {
     for sample in manifest
         .samples
         .iter()
-        .filter(|sample| sample.included && sample.split == "eval")
+        .filter(|sample| sample.included && (split == "all" || sample.split == split))
     {
         let expected = parse_class(sample.class_name.as_deref())?;
         let image_path = dataset.join(&sample.image_path);
@@ -72,7 +77,7 @@ fn main() -> Result<()> {
     }
     ensure!(
         sample_count > 0,
-        "dataset has no included evaluation samples"
+        "dataset has no included samples for {split}"
     );
     let mean_center_error_px = if center_errors.is_empty() {
         None
@@ -85,7 +90,7 @@ fn main() -> Result<()> {
         serde_json::to_string_pretty(&json!({
             "contract_version": velocitypnp_model::SOURCE_COMPONENT_POSE_CONTRACT,
             "runtime": velocitypnp_model::SOURCE_COMPONENT_RUNTIME,
-            "split": "eval",
+            "split": split,
             "sample_count": sample_count,
             "class_mismatch_count": class_mismatches.len(),
             "class_mismatches": class_mismatches,
@@ -93,10 +98,7 @@ fn main() -> Result<()> {
             "passed": passed,
         }))?
     );
-    ensure!(
-        passed,
-        "source-component runtime changed an evaluation class"
-    );
+    ensure!(passed, "source-component runtime changed a {split} class");
     Ok(())
 }
 
