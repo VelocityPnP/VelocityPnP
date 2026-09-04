@@ -168,8 +168,10 @@ The project is organized by measurable gates rather than calendar estimates.
   source-component detector for daemon integration
 - [x] Load hash-checked source-component model packages in the Rust daemon and
   persist shadow predictions, deterministic comparisons, and review artifacts
+- [x] Use a high-confidence flat source-component model center for guarded
+  pickup, with occupied-pocket, machine-offset, and CV-disagreement bounds
 - [ ] Calibrate learned-model confidence gates on independent machines and
-  component families before model output can affect feeder or motion decisions
+  component families before model output can make broader feeder decisions
 - [x] Add paired bare/observed held-part dataset export with deterministic
   drafts, grouped splits, editable condition boxes, and directed-end review
 - [x] Train, export, and integrate a held-part condition and pose model in

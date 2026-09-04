@@ -606,7 +606,7 @@ pub struct SourceComponentShadowReport {
     #[serde(default)]
     pub center_delta_px: Option<f64>,
     pub review_required: bool,
-    /// This stays false until a separate promotion gate is complete.
+    /// True only when the active pickup policy authorized the learned result.
     pub control_authorized: bool,
     pub report_artifact_name: String,
     pub preview_artifact_name: String,

@@ -95,10 +95,10 @@ use velocitypnp_vision::{
     render_board_fiducial_evidence, render_held_part_shadow_preview,
     render_source_component_shadow_preview, render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
-    resize_gray_frame, summarize_camera_reproducibility, summarize_head_camera_feature,
-    summarize_nozzle_height_feature, summarize_nozzle_tooling, summarize_opposed_camera_feature,
-    summarize_residuals, workspace_camera_reachable_region, BottomCameraCorrection,
-    CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
+    resize_gray_frame, source_component_crop_pixel_to_machine, summarize_camera_reproducibility,
+    summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
+    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
+    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
     DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
     HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame,
     StripFeederInventoryBuild, StripFeederInventorySourceMosaic, StripFeederSourceComponentDraft,
@@ -157,6 +157,7 @@ const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspect
 const SOURCE_POCKET_POSE_INSPECTION_ARTIFACT: &str = "source-pocket-pose-inspection.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v2";
+const SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM: &str = "source_component_pick_control.v1";
 const MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION: f64 = 0.04;
 const HELD_PART_SHADOW_ALGORITHM: &str = "held_part_shadow.v1";
 const HELD_PART_MODEL_CROP_SIZE_PX: u32 = 512;
@@ -8096,6 +8097,199 @@ struct PreparedStripFeederPickup {
     artifact_target: TransferArtifactTarget,
 }
 
+struct SourceComponentPickControl {
+    center_machine_mm: [f64; 2],
+    artifact_names: Vec<String>,
+    findings: Vec<String>,
+}
+
+async fn select_source_component_pick_center(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    frame: &GrayFrame,
+    camera_pose: Pose,
+    nominal_pocket_machine_mm: [f64; 2],
+    deterministic_center_machine_mm: [f64; 2],
+) -> Result<SourceComponentPickControl, String> {
+    let Some(model) = state.source_component_model.clone() else {
+        return Ok(SourceComponentPickControl {
+            center_machine_mm: deterministic_center_machine_mm,
+            artifact_names: Vec::new(),
+            findings: vec![
+                "the source-component model is unavailable; top-camera CV supplied the bounded pickup center"
+                    .into(),
+            ],
+        });
+    };
+    let pocket = prepared
+        .registration
+        .pockets
+        .iter()
+        .find(|pocket| pocket.pocket_index == prepared.run.pocket_index);
+    let context = SourceComponentShadowContext {
+        camera_pose,
+        pocket_machine_mm: nominal_pocket_machine_mm,
+        prior_inventory_occupancy: pocket
+            .map_or(StripPocketOccupancy::Uncertain, |pocket| pocket.occupancy),
+        prior_inventory_confidence: pocket.map_or(0.0, |pocket| pocket.occupancy_confidence),
+    };
+    let frame = frame.clone();
+    let camera_model = prepared.top_camera_model.clone();
+    let registration = prepared.registration.clone();
+    let mut analysis = match tokio::task::spawn_blocking(move || {
+        analyze_source_component_shadow(
+            &model,
+            &frame,
+            &camera_model,
+            &registration,
+            context,
+            "source-pocket-pick",
+        )
+    })
+    .await
+    {
+        Ok(Ok(analysis)) => analysis,
+        Ok(Err(error)) => {
+            return Ok(SourceComponentPickControl {
+                center_machine_mm: deterministic_center_machine_mm,
+                artifact_names: Vec::new(),
+                findings: vec![format!(
+                    "source-component inference failed; top-camera CV supplied the bounded pickup center: {error}"
+                )],
+            });
+        }
+        Err(error) => {
+            return Ok(SourceComponentPickControl {
+                center_machine_mm: deterministic_center_machine_mm,
+                artifact_names: Vec::new(),
+                findings: vec![format!(
+                    "source-component inference task failed; top-camera CV supplied the bounded pickup center: {error}"
+                )],
+            });
+        }
+    };
+    let prediction = &analysis.report.prediction;
+    let maximum_offset_mm = state
+        .profile
+        .strip_feeder_pickup
+        .as_ref()
+        .unwrap()
+        .maximum_part_offset_mm;
+    let learned_flat = prediction.class == SourceComponentClass::ComponentFlat;
+    let learned_control_ready =
+        learned_flat && prediction.confidence_gate_passed && prediction.pose.valid;
+    if prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty {
+        return Err("the source-component model reports an empty qualification pocket".into());
+    }
+    if prediction.confidence_gate_passed
+        && prediction.class == SourceComponentClass::ComponentOnEdge
+    {
+        return Err("the source-component model reports a component on edge".into());
+    }
+    let learned_measurement = if learned_control_ready {
+        let center_machine_mm = source_component_crop_pixel_to_machine(
+            &analysis.crop,
+            prediction.pose.center_px,
+            nominal_pocket_machine_mm,
+            &prepared.registration,
+        )
+        .map_err(|error| error.to_string())?;
+        let nominal_offset_mm = (center_machine_mm[0] - nominal_pocket_machine_mm[0])
+            .hypot(center_machine_mm[1] - nominal_pocket_machine_mm[1]);
+        let cv_delta_mm = (center_machine_mm[0] - deterministic_center_machine_mm[0])
+            .hypot(center_machine_mm[1] - deterministic_center_machine_mm[1]);
+        if nominal_offset_mm > maximum_offset_mm {
+            return Err(format!(
+                "learned source-component center correction {nominal_offset_mm:.3} mm exceeds the configured bound"
+            ));
+        }
+        if cv_delta_mm > maximum_offset_mm {
+            return Err(format!(
+                "learned and CV source-component centers differ by {cv_delta_mm:.3} mm, beyond the configured bound"
+            ));
+        }
+        Some((center_machine_mm, nominal_offset_mm, cv_delta_mm))
+    } else {
+        None
+    };
+
+    let (center_machine_mm, method_finding) = if let Some((
+        learned_center_machine_mm,
+        learned_nominal_offset_mm,
+        learned_cv_delta_mm,
+    )) = learned_measurement
+    {
+        analysis.report.algorithm_version = SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM.into();
+        analysis.report.control_authorized = true;
+        analysis.report.review_required = false;
+        analysis
+            .report
+            .findings
+            .retain(|finding| !finding.contains("shadow evidence"));
+        analysis.report.findings.push(format!(
+            "the learned flat-component center is authorized for this pickup; it is {learned_nominal_offset_mm:.3} mm from nominal and {learned_cv_delta_mm:.3} mm from CV"
+        ));
+        (
+            learned_center_machine_mm,
+            format!(
+                "the source-component model supplied the pickup center with {:.1}% class confidence",
+                100.0 * prediction.class_confidence
+            ),
+        )
+    } else {
+        analysis.report.findings.push(
+            "the learned result did not pass the pickup-control gate; bounded top-camera CV supplied the pickup center"
+                .into(),
+        );
+        (
+            deterministic_center_machine_mm,
+            "the source-component model was inconclusive; bounded top-camera CV supplied the pickup center"
+                .into(),
+        )
+    };
+    analysis.report.report_artifact_name =
+        "source-pocket-pick-source-component-control.json".into();
+    analysis.report.preview_artifact_name =
+        "source-pocket-pick-source-component-control.png".into();
+    analysis.report.crop_artifact_name = "source-pocket-pick-source-component-crop.png".into();
+    analysis.preview = render_source_component_shadow_preview(
+        &analysis.crop,
+        analysis.report.deterministic_outline_px,
+        &analysis.report.prediction,
+        analysis.report.review_required,
+    );
+    let report_data =
+        serde_json::to_vec_pretty(&analysis.report).map_err(|error| error.to_string())?;
+    persist_transfer_data_artifact(
+        state,
+        prepared,
+        &analysis.report.report_artifact_name,
+        "application/json",
+        &report_data,
+    )?;
+    persist_transfer_gray_artifact(
+        state,
+        prepared,
+        &analysis.report.crop_artifact_name,
+        &analysis.crop,
+    )?;
+    persist_transfer_rgb_artifact(
+        state,
+        prepared,
+        &analysis.report.preview_artifact_name,
+        &analysis.preview,
+    )?;
+    Ok(SourceComponentPickControl {
+        center_machine_mm,
+        artifact_names: vec![
+            analysis.report.report_artifact_name,
+            analysis.report.crop_artifact_name,
+            analysis.report.preview_artifact_name,
+        ],
+        findings: vec![method_finding],
+    })
+}
+
 struct SourcePoseReference {
     qualification_id: Uuid,
     frame: GrayFrame,
@@ -9375,12 +9569,13 @@ async fn execute_physical_strip_feeder_pickup(
     if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
         return Err("top vision did not confirm a part in the qualification pocket".into());
     }
-    let pocket_machine_mm = source_inspection
+    let deterministic_center_machine_mm = source_inspection
         .report
         .before_measured_center_machine_mm
         .ok_or_else(|| "top vision did not locate the qualification-pocket part".to_string())?;
-    let source_center_correction_mm = (pocket_machine_mm[0] - nominal_pocket_machine_mm[0])
-        .hypot(pocket_machine_mm[1] - nominal_pocket_machine_mm[1]);
+    let source_center_correction_mm = (deterministic_center_machine_mm[0]
+        - nominal_pocket_machine_mm[0])
+        .hypot(deterministic_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
     if source_center_correction_mm > pickup_profile.maximum_part_offset_mm {
         return Err(format!(
             "qualification-pocket part center correction \
@@ -9388,9 +9583,21 @@ async fn execute_physical_strip_feeder_pickup(
         ));
     }
     findings.push(format!(
-        "top vision corrected the pickup center by \
+        "top-camera CV measured a pickup-center correction of \
          {source_center_correction_mm:.3} mm from the nominal pocket center"
     ));
+    let source_control = select_source_component_pick_center(
+        state,
+        prepared,
+        &source_before,
+        source_before_pose,
+        nominal_pocket_machine_mm,
+        deterministic_center_machine_mm,
+    )
+    .await?;
+    artifact_names.extend(source_control.artifact_names);
+    findings.extend(source_control.findings);
+    let pocket_machine_mm = source_control.center_machine_mm;
 
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
     let height_correction = prepared
@@ -27037,6 +27244,7 @@ async fn acquire_physical_placement_part(
         SOURCE_POCKET_BEFORE_ARTIFACT,
         &source_before,
     )?;
+    let source_control_frame = source_before.clone();
     let source_after = source_before.clone();
     let source_inspection_frame = source_before.clone();
     let registration = prepared.registration.clone();
@@ -27109,17 +27317,35 @@ async fn acquire_physical_placement_part(
     if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
         return Err("top vision did not confirm a part in the reserved pocket".into());
     }
-    let pocket_machine_mm = source_pose_inspection
+    let deterministic_center_machine_mm = source_pose_inspection
         .report
         .candidate_measured_center_machine_mm
         .ok_or_else(|| "top vision did not locate the reserved-pocket part".to_string())?;
-    let pocket_center_correction_mm = (pocket_machine_mm[0] - nominal_pocket_machine_mm[0])
-        .hypot(pocket_machine_mm[1] - nominal_pocket_machine_mm[1]);
+    let pocket_center_correction_mm = (deterministic_center_machine_mm[0]
+        - nominal_pocket_machine_mm[0])
+        .hypot(deterministic_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
     if pocket_center_correction_mm > pickup.maximum_part_offset_mm {
         return Err(format!(
             "reserved-pocket part center correction {pocket_center_correction_mm:.3} mm exceeds the configured bound"
         ));
     }
+    let source_control = select_source_component_pick_center(
+        state,
+        prepared,
+        &source_control_frame,
+        source_before_pose,
+        nominal_pocket_machine_mm,
+        deterministic_center_machine_mm,
+    )
+    .await?;
+    for artifact_name in source_control.artifact_names {
+        if !report.artifact_names.contains(&artifact_name) {
+            report.artifact_names.push(artifact_name);
+        }
+    }
+    report.findings.extend(source_control.findings);
+    let pocket_machine_mm = source_control.center_machine_mm;
+    persist_placement_progress(state, run, report)?;
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
     let height_correction = prepared
         .height_model

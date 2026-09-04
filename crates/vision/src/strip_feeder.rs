@@ -226,6 +226,40 @@ pub fn draft_strip_feeder_source_component(
     })
 }
 
+/// Maps one point in a rectified source-component crop to machine XY.
+pub fn source_component_crop_pixel_to_machine(
+    crop: &GrayFrame,
+    point_px: [f64; 2],
+    pocket_machine_mm: [f64; 2],
+    registration: &StripFeederRegistration,
+) -> Result<[f64; 2]> {
+    ensure!(
+        crop.width > 0 && crop.height > 0,
+        "source component crop is empty"
+    );
+    ensure!(
+        point_px.iter().all(|value| value.is_finite())
+            && (0.0..=f64::from(crop.width)).contains(&point_px[0])
+            && (0.0..=f64::from(crop.height)).contains(&point_px[1]),
+        "source component point is outside its rectified crop"
+    );
+    let along = normalized(subtract(
+        registration.pick_centerline_machine_mm[1],
+        registration.pick_centerline_machine_mm[0],
+    ))
+    .ok_or_else(|| anyhow::anyhow!("source component centerline has no direction"))?;
+    let cross = [-along[1], along[0]];
+    let cross_span_mm = registration.tape_width_mm + 2.0 * LIVE_HOLDOUT_CROSS_MARGIN_MM;
+    let along_span_mm = (registration.tape_pitch_mm * 3.0).max(12.0);
+    let cross_offset_mm = point_px[0] / f64::from(crop.width) * cross_span_mm - 0.5 * cross_span_mm;
+    let along_offset_mm =
+        point_px[1] / f64::from(crop.height) * along_span_mm - 0.5 * along_span_mm;
+    Ok(add(
+        pocket_machine_mm,
+        add(scale(cross, cross_offset_mm), scale(along, along_offset_mm)),
+    ))
+}
+
 /// Draw deterministic and learned outlines on the exact model input crop.
 pub fn render_source_component_shadow_preview(
     crop: &GrayFrame,
@@ -4820,6 +4854,24 @@ mod tests {
         assert_eq!(draft.report.occupancy, StripPocketOccupancy::Occupied);
         assert!(draft.report.outline_px.is_some());
         assert!(!draft.report.review_required);
+        let mapped_center = source_component_crop_pixel_to_machine(
+            &draft.crop,
+            [175.0, 150.0],
+            [112.0, 72.0],
+            &registration,
+        )
+        .unwrap();
+        assert!((mapped_center[0] - 112.0).abs() < 1e-9);
+        assert!((mapped_center[1] - 72.0).abs() < 1e-9);
+        let mapped_offset = source_component_crop_pixel_to_machine(
+            &draft.crop,
+            [200.0, 175.0],
+            [112.0, 72.0],
+            &registration,
+        )
+        .unwrap();
+        assert!((mapped_offset[0] - 113.0).abs() < 1e-9);
+        assert!((mapped_offset[1] - 71.0).abs() < 1e-9);
 
         let mut returned_frame = frame.clone();
         paint_disc(&mut returned_frame.pixels, width, height, 285, 250, 11, 105);

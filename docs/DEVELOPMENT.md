@@ -677,7 +677,7 @@ with the ignored dataset and are not source artifacts.
 
 ### Source-component model runtime
 
-The daemon can load one source-component model package in shadow mode:
+The daemon can load one source-component model package:
 
 ```bash
 cargo run -p velocitypnpd -- \
@@ -728,10 +728,19 @@ POST /api/v1/strip-feeder-source-captures/CAPTURE_UUID/reanalyze-model
 ```
 
 The Python client method is
-`reanalyze_strip_feeder_source_capture_model()`. The initial probability,
-margin, and detector-agreement limits are diagnostic gates. They are not
-production-qualified. Every report sets `control_authorized` to false. Model
-output cannot select a pocket, approve a pick, or command motion.
+`reanalyze_strip_feeder_source_capture_model()`. Inventory analysis remains in
+shadow mode and sets `control_authorized` to false. Model output cannot select
+a pocket or change inventory.
+
+The guarded pickup path can authorize one narrower result: the center of a
+freshly observed, high-confidence `component_flat` prediction in a pocket that
+the live holdout already marked occupied. The daemon maps the rectified crop
+center to calibrated machine XY and bounds both its nominal-pocket offset and
+its difference from the deterministic center. A high-confidence `empty` or
+`component_on_edge` result stops before nozzle descent. An inconclusive model
+uses the bounded deterministic center. The retained JSON report records
+whether the learned center controlled that pickup. Held-part model results
+remain shadow-only.
 
 For a later capture session, carry reviewed labels into a new dataset without
 showing them again:
