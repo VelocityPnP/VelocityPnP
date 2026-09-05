@@ -7,11 +7,14 @@ vision session. Verify live state again before each new session.
 
 - The release physical daemon listens on `127.0.0.1:4080` and uses
   `velocitypnp.db`.
-- At 22:23 UTC, the API reported the machine ready, homed, fault-free, and at
+- It contains the physically tested pickup-return changes. It was started
+  before the final job-level camera scope and PCB split-Z changes. Restart it
+  before a physical production test.
+- After the last pickup-return run, the API reported the machine ready, homed,
+  fault-free, and at
   X220.131, Y190.271, Z31.500. Its calibration revision was
   `3b837434-a961-4e60-945a-18335b42d21f`.
-- Control lease `fdc48cb3-f3b5-4c1a-be80-6def86ca898b` expires at 23:22 UTC.
-  Verify that it is still active before more motion.
+- The last control lease expired. Acquire a new lease before more motion.
 - Do not infer that the machine is safe from this document. Get a new operator
   confirmation before motion.
 - The daemon reports all three learned models as ready.
@@ -63,8 +66,6 @@ It stops speed escalation when a return differs from the baseline by more than
 0.05 mm. The attached machine passed all levels. Its worst return error was
 0.02076 mm.
 
-Continue the performance work with measurement:
-
 The 2026-09-05 measured pass completed these items:
 
 1. X and Y response from both directions passed at 300, 1,200, 3,000, 6,000,
@@ -83,27 +84,42 @@ The 2026-09-05 measured pass completed these items:
    Four of nine overlap registrations passed; calibrated placement supplied
    the other five.
 
-The pickup-return operation took 180.5 seconds. Its six fast moves covered
-839.6 mm in 6.02 seconds. Precision moves at 300 mm/min took 87.33 seconds.
-Camera, vacuum, light, and analysis work used about 85 seconds. More transit
-speed is not the first target for this qualification path.
+The first pickup-return operation took 180.5 seconds. The optimized operation,
+qualification `9e38a0d3-3255-42bb-a09f-1fba1e11484a`, took 44.80 seconds. This
+is a 75.2 percent reduction. It passed vacuum hold, bottom vision, release, and
+top-camera return verification. The 1206 part is in pocket 10, which is
+occupied and available.
+
+Safe-level XY uses 12,000 mm/min. Clear and carried Z use 1,200 mm/min. Pickup
+contact stays at 60 mm/min, and the last 2 mm of each release approach stays
+at 300 mm/min. The 300 mm/min time decreased from 87.34 to 3.84 seconds. Total
+motion now uses 20.31 seconds.
+
+One camera session per role stays open for a full physical operation. The
+first capture on each camera keeps its 60-frame warm-up. Later captures only
+wait for a fresh frame. Camera open and capture use 18.38 seconds. Other work
+uses about 6.11 seconds. A continuous job also shares the camera sessions
+across its placement steps, so the two long warm-ups occur once per job run.
+The PCB placement and recovery paths use the same split Z approach. These
+production-path changes have automated test coverage but no physical
+multi-part test.
 
 The scan used 5.46 seconds for tile motion and 11.06 seconds for its final
 300 mm/min park. The first capture waited 7.51 seconds after motion. Later
 tile cycles used about 0.30 seconds outside motion. The camera profile discards
 60 frames for its first capture and four frames after each later move.
 
-New source instrumentation writes one `operation.workspace_scan_timing` event
+Source instrumentation writes one `operation.workspace_scan_timing` event
 per scan. It separates camera open, first and later captures, tile motion,
 artifact storage, mosaic work, progress storage, finalization, parking, and
-light control. Actuator and sensor events now include elapsed time. The active
-physical daemon does not contain this uncommitted build and must not be treated
-as proof of the new timing event.
+light control. Actuator and sensor events include elapsed time. Pickup runs add
+`operation.strip_feeder_pickup_timing`. Physical continuous job runs add
+`operation.job_execution_timing` with aggregate camera timing.
 
 Defer a normal guarded placement until a board-compatible component is
-available. Next, use the new timing event in simulation or after a controlled
-daemon restart. Then validate a controlled stop and reconnect. Use emergency
-stop only for an actual emergency.
+available. Next, measure a multi-part job to confirm that camera warm-up is
+amortized. Then run a separate camera stability test before any reduction of
+the first 60-frame warm-up. Use emergency stop only for an actual emergency.
 
 The main code locations are:
 

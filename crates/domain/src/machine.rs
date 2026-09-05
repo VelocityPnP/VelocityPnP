@@ -191,11 +191,25 @@ pub struct MachineProfile {
     pub capabilities: BTreeMap<String, bool>,
 }
 
-/// Qualified lateral travel feeds at level Z.
+/// Qualified lateral and vertical travel feeds outside precision approaches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransitMotionProfile {
     pub clear_xy_feed_mm_per_min: f64,
     pub carried_xy_feed_mm_per_min: f64,
+    #[serde(default = "default_z_transit_feed_mm_per_min")]
+    pub clear_z_feed_mm_per_min: f64,
+    #[serde(default = "default_z_transit_feed_mm_per_min")]
+    pub carried_z_feed_mm_per_min: f64,
+    #[serde(default = "default_precision_z_approach_mm")]
+    pub precision_z_approach_mm: f64,
+}
+
+fn default_z_transit_feed_mm_per_min() -> f64 {
+    300.0
+}
+
+fn default_precision_z_approach_mm() -> f64 {
+    2.0
 }
 
 impl TransitMotionProfile {
@@ -204,10 +218,18 @@ impl TransitMotionProfile {
             || maximum_feed_mm_per_min <= 0.0
             || !self.clear_xy_feed_mm_per_min.is_finite()
             || !self.carried_xy_feed_mm_per_min.is_finite()
+            || !self.clear_z_feed_mm_per_min.is_finite()
+            || !self.carried_z_feed_mm_per_min.is_finite()
+            || !self.precision_z_approach_mm.is_finite()
             || self.clear_xy_feed_mm_per_min <= 0.0
             || self.carried_xy_feed_mm_per_min <= 0.0
+            || self.clear_z_feed_mm_per_min <= 0.0
+            || self.carried_z_feed_mm_per_min <= 0.0
+            || !(0.5..=5.0).contains(&self.precision_z_approach_mm)
             || self.clear_xy_feed_mm_per_min > maximum_feed_mm_per_min
             || self.carried_xy_feed_mm_per_min > maximum_feed_mm_per_min
+            || self.clear_z_feed_mm_per_min > maximum_feed_mm_per_min
+            || self.carried_z_feed_mm_per_min > maximum_feed_mm_per_min
         {
             return Err("transit motion profile is invalid");
         }

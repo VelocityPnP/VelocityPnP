@@ -18,7 +18,10 @@
   "maximum_feed_mm_per_min": 12000.0,
   "transit_motion": {
     "clear_xy_feed_mm_per_min": 12000.0,
-    "carried_xy_feed_mm_per_min": 12000.0
+    "carried_xy_feed_mm_per_min": 12000.0,
+    "clear_z_feed_mm_per_min": 1200.0,
+    "carried_z_feed_mm_per_min": 1200.0,
+    "precision_z_approach_mm": 2.0
   },
   "homing": {
     "method": "sensorless",

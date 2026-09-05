@@ -3401,6 +3401,11 @@ components:
         - findings
       properties:
         algorithm_version: { type: string }
+        clear_xy_feed_mm_per_min: { type: number, minimum: 0 }
+        carried_xy_feed_mm_per_min: { type: number, minimum: 0 }
+        clear_z_feed_mm_per_min: { type: number, minimum: 0 }
+        carried_z_feed_mm_per_min: { type: number, minimum: 0 }
+        precision_z_approach_mm: { type: number, minimum: 0 }
         nozzle_id: { type: string }
         tip_id: { type: string }
         sensor_id: { type: string }

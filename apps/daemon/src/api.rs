@@ -125,9 +125,10 @@ const MAX_VISUAL_HOME_CORRECTIONS: usize = 3;
 const MAX_VISUAL_HOME_RETURN_REFINEMENTS: u32 = 2;
 const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
+const PROFILED_CAMERA_MAX_FRESH_CAPTURE_FRAMES: u32 = 32;
 const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
-const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v7";
+const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v9";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v3";
 const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v6";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
@@ -250,6 +251,7 @@ const BOARD_REGISTRATION_MAX_ROTATION_ERROR_DEG: f64 = 5.0;
 const BOARD_REGISTRATION_MAX_RESIDUAL_MM: f64 = 0.15;
 const BOARD_REGISTRATION_APPROACH_MM: f64 = 1.0;
 const FINE_HOME_MAX_Z_CORRECTION_MM: f64 = 0.5;
+const STRIP_FEEDER_PICKUP_TIMING_ALGORITHM: &str = "strip_feeder_pickup_timing.v1";
 
 #[derive(Default)]
 struct WorkspaceScanTiming {
@@ -290,6 +292,68 @@ fn workspace_timing_distribution(samples: &[f64]) -> Value {
         "p95_ms": ordered[p95_index],
         "maximum_ms": ordered[ordered.len() - 1],
     })
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ProfiledCameraSessionKey {
+    device: PathBuf,
+    width: u32,
+    height: u32,
+    frames_per_second: u32,
+    timeout: Duration,
+    controls: Vec<CameraControlUpdate>,
+}
+
+struct ScopedProfiledCamera {
+    key: ProfiledCameraSessionKey,
+    capture: Arc<PersistentGrayCapture>,
+}
+
+#[derive(Default)]
+struct ProfiledCameraTiming {
+    open_count: u32,
+    open_failure_count: u32,
+    capture_count: u32,
+    capture_failure_count: u32,
+    captured_frames: u32,
+    discarded_frames: u32,
+    open_ms: f64,
+    capture_ms: f64,
+}
+
+#[derive(Default)]
+struct ProfiledCaptureContext {
+    sessions: HashMap<PathBuf, ScopedProfiledCamera>,
+    timing: BTreeMap<String, ProfiledCameraTiming>,
+}
+
+impl ProfiledCaptureContext {
+    fn timing_json(&self) -> Value {
+        Value::Object(
+            self.timing
+                .iter()
+                .map(|(role, timing)| {
+                    (
+                        role.clone(),
+                        json!({
+                            "open_count": timing.open_count,
+                            "open_failure_count": timing.open_failure_count,
+                            "capture_count": timing.capture_count,
+                            "capture_failure_count": timing.capture_failure_count,
+                            "captured_frames": timing.captured_frames,
+                            "discarded_frames": timing.discarded_frames,
+                            "open_ms": timing.open_ms,
+                            "capture_ms": timing.capture_ms,
+                        }),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+tokio::task_local! {
+    static PROFILED_CAPTURE_CONTEXT: Arc<tokio::sync::Mutex<ProfiledCaptureContext>>;
 }
 
 struct WorkspaceHeightArtifacts {
@@ -3088,9 +3152,15 @@ async fn execute_workspace_scan_locked(
     .await;
 
     let park_started = Instant::now();
+    let park_feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        state.machine.status().pose,
+        visual.seed_pose,
+        visual.feed_mm_per_min,
+    );
     let park = state
         .machine
-        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
+        .jog(lease_id, visual.seed_pose, park_feed_mm_per_min)
         .await;
     timing.park_ms = elapsed_ms(park_started);
     let lights_disable_started = Instant::now();
@@ -8679,6 +8749,9 @@ struct PreparedStripFeederPickup {
     motion_planner: MotionPlanner,
     clear_xy_feed_mm_per_min: f64,
     carried_xy_feed_mm_per_min: f64,
+    clear_z_feed_mm_per_min: f64,
+    carried_z_feed_mm_per_min: f64,
+    precision_z_approach_mm: f64,
 }
 
 struct SourceComponentPickControl {
@@ -9446,6 +9519,9 @@ async fn start_strip_feeder_pickup_qualification(
         motion_planner: MotionPlanner::new(state.profile.bounds, Some(motion_calibration)),
         clear_xy_feed_mm_per_min: state.profile.transit_motion.clear_xy_feed_mm_per_min,
         carried_xy_feed_mm_per_min: state.profile.transit_motion.carried_xy_feed_mm_per_min,
+        clear_z_feed_mm_per_min: state.profile.transit_motion.clear_z_feed_mm_per_min,
+        carried_z_feed_mm_per_min: state.profile.transit_motion.carried_z_feed_mm_per_min,
+        precision_z_approach_mm: state.profile.transit_motion.precision_z_approach_mm,
     };
     spawn_prepared_operation(
         state,
@@ -9459,6 +9535,7 @@ async fn execute_strip_feeder_pickup_task(
     state: AppState,
     mut prepared: PreparedStripFeederPickup,
 ) -> Result<Option<String>, String> {
+    let task_started = Instant::now();
     let _motion_guard = state.workspace_scan_motion_lock.lock().await;
     prepared.run.status = OperationStatus::Running;
     prepared.run.updated_at = Utc::now();
@@ -9466,12 +9543,23 @@ async fn execute_strip_feeder_pickup_task(
         .store
         .put_strip_feeder_pickup_qualification(&prepared.run)
         .map_err(|error| error.to_string())?;
-    let result = if state.machine.status().simulated {
-        execute_simulated_strip_feeder_pickup(&state, &prepared).await
+    let simulated = state.machine.status().simulated;
+    let (result, camera_timing, physical_execution_ms) = if simulated {
+        (
+            execute_simulated_strip_feeder_pickup(&state, &prepared).await,
+            json!({}),
+            None,
+        )
     } else {
-        execute_physical_strip_feeder_pickup(&state, &prepared).await
+        let physical_started = Instant::now();
+        let (result, camera_timing) = with_profiled_camera_reuse(
+            &state,
+            execute_physical_strip_feeder_pickup(&state, &prepared),
+        )
+        .await;
+        (result, camera_timing, Some(elapsed_ms(physical_started)))
     };
-    match result {
+    let outcome = match result {
         Ok(report) => {
             let passed = report.passed;
             let message = if passed {
@@ -9551,7 +9639,37 @@ async fn execute_strip_feeder_pickup_task(
             }
             Err(error)
         }
+    };
+    let timing_payload = json!({
+        "algorithm_version": STRIP_FEEDER_PICKUP_TIMING_ALGORITHM,
+        "operation_id": prepared.run.operation_id,
+        "qualification_id": prepared.run.id,
+        "simulated": simulated,
+        "succeeded": outcome.is_ok(),
+        "clear_xy_feed_mm_per_min": prepared.clear_xy_feed_mm_per_min,
+        "carried_xy_feed_mm_per_min": prepared.carried_xy_feed_mm_per_min,
+        "clear_z_feed_mm_per_min": prepared.clear_z_feed_mm_per_min,
+        "carried_z_feed_mm_per_min": prepared.carried_z_feed_mm_per_min,
+        "precision_z_approach_mm": prepared.precision_z_approach_mm,
+        "total_elapsed_ms": elapsed_ms(task_started),
+        "physical_execution_ms": physical_execution_ms,
+        "cameras": camera_timing,
+    });
+    if let Err(error) = state
+        .machine
+        .record_operation_event(
+            "operation.strip_feeder_pickup_timing".into(),
+            timing_payload,
+        )
+        .await
+    {
+        tracing::warn!(
+            %error,
+            qualification_id = %prepared.run.id,
+            "failed to record pickup timing",
+        );
     }
+    outcome
 }
 
 fn settle_registration_after_pickup(
@@ -9822,6 +9940,9 @@ async fn execute_simulated_strip_feeder_pickup(
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
         clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
         carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
+        clear_z_feed_mm_per_min: prepared.clear_z_feed_mm_per_min,
+        carried_z_feed_mm_per_min: prepared.carried_z_feed_mm_per_min,
+        precision_z_approach_mm: prepared.precision_z_approach_mm,
         nozzle_id: prepared.run.nozzle_id.clone(),
         tip_id: prepared.geometry.tip_id.clone(),
         sensor_id: prepared.vacuum_characterization.sensor_id.clone(),
@@ -10275,10 +10396,6 @@ async fn execute_physical_strip_feeder_pickup(
         z_mm: z_kinematics.level_controller_z_mm,
         rotation_deg: None,
     };
-    let approach_target = JogTarget {
-        z_mm: approach_controller_z_mm,
-        ..level_target
-    };
     execute_pickup_xy_transit(
         state,
         prepared,
@@ -10286,15 +10403,13 @@ async fn execute_physical_strip_feeder_pickup(
         prepared.clear_xy_feed_mm_per_min,
     )
     .await?;
-    state
-        .machine
-        .jog(
-            prepared.lease_id,
-            approach_target,
-            vacuum_profile.z_approach_feed_mm_per_min,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    move_vertical_at_current_xy(
+        state,
+        prepared.lease_id,
+        approach_controller_z_mm,
+        prepared.clear_z_feed_mm_per_min,
+    )
+    .await?;
     let setup = async {
         state
             .machine
@@ -10344,6 +10459,9 @@ async fn execute_physical_strip_feeder_pickup(
             algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
             clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
             carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
+            clear_z_feed_mm_per_min: prepared.clear_z_feed_mm_per_min,
+            carried_z_feed_mm_per_min: prepared.carried_z_feed_mm_per_min,
+            precision_z_approach_mm: prepared.precision_z_approach_mm,
             nozzle_id: nozzle_id.clone(),
             tip_id: prepared.geometry.tip_id.clone(),
             sensor_id: sensor_id.clone(),
@@ -10379,15 +10497,13 @@ async fn execute_physical_strip_feeder_pickup(
         );
     }
     let inspection_phase = async {
-        state
-            .machine
-            .jog(
-                prepared.lease_id,
-                level_target,
-                vacuum_profile.z_approach_feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        move_vertical_at_current_xy(
+            state,
+            prepared.lease_id,
+            level_target.z_mm,
+            prepared.carried_z_feed_mm_per_min,
+        )
+        .await?;
         execute_pickup_xy_transit(
             state,
             prepared,
@@ -10703,6 +10819,9 @@ async fn execute_physical_strip_feeder_pickup(
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
         clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
         carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
+        clear_z_feed_mm_per_min: prepared.clear_z_feed_mm_per_min,
+        carried_z_feed_mm_per_min: prepared.carried_z_feed_mm_per_min,
+        precision_z_approach_mm: prepared.precision_z_approach_mm,
         nozzle_id: nozzle_id.clone(),
         tip_id: prepared.geometry.tip_id.clone(),
         sensor_id: sensor_id.clone(),
@@ -11201,20 +11320,13 @@ async fn release_pickup_part(
 
     let release_result = async {
         if (pose.z_mm - z_kinematics.level_controller_z_mm).abs() > 1e-9 {
-            state
-                .machine
-                .jog(
-                    prepared.lease_id,
-                    JogTarget {
-                        x_mm: pose.x_mm,
-                        y_mm: pose.y_mm,
-                        z_mm: z_kinematics.level_controller_z_mm,
-                        rotation_deg: None,
-                    },
-                    vacuum_profile.z_approach_feed_mm_per_min,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            move_vertical_at_current_xy(
+                state,
+                prepared.lease_id,
+                z_kinematics.level_controller_z_mm,
+                prepared.carried_z_feed_mm_per_min,
+            )
+            .await?;
         }
         execute_pickup_xy_transit(
             state,
@@ -11224,18 +11336,15 @@ async fn release_pickup_part(
         )
         .await?;
         if release_at_pickup_z {
-            state
-                .machine
-                .jog(
-                    prepared.lease_id,
-                    JogTarget {
-                        z_mm: pickup_controller_z_mm,
-                        ..release_level
-                    },
-                    vacuum_profile.z_approach_feed_mm_per_min,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            approach_z_with_slow_finish(
+                state,
+                prepared.lease_id,
+                pickup_controller_z_mm,
+                prepared.carried_z_feed_mm_per_min,
+                vacuum_profile.z_approach_feed_mm_per_min,
+                prepared.precision_z_approach_mm,
+            )
+            .await?;
         }
         state
             .machine
@@ -11254,15 +11363,13 @@ async fn release_pickup_part(
             vacuum_value_is_released(&prepared.vacuum_characterization, value)
         });
         if release_at_pickup_z {
-            state
-                .machine
-                .jog(
-                    prepared.lease_id,
-                    release_level,
-                    vacuum_profile.z_approach_feed_mm_per_min,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            move_vertical_at_current_xy(
+                state,
+                prepared.lease_id,
+                release_level.z_mm,
+                prepared.clear_z_feed_mm_per_min,
+            )
+            .await?;
         }
         Ok::<_, String>((
             if released {
@@ -11719,22 +11826,14 @@ async fn lift_and_restore_after_pickup(state: &AppState, lease_id: Uuid) -> Resu
         .pose
         .ok_or_else(|| "pickup cleanup has no trusted pose".to_string())?;
     let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
-    let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
     if (pose.z_mm - z_kinematics.level_controller_z_mm).abs() > 1e-9 {
-        state
-            .machine
-            .jog(
-                lease_id,
-                JogTarget {
-                    x_mm: pose.x_mm,
-                    y_mm: pose.y_mm,
-                    z_mm: z_kinematics.level_controller_z_mm,
-                    rotation_deg: None,
-                },
-                vacuum.z_approach_feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        move_vertical_at_current_xy(
+            state,
+            lease_id,
+            z_kinematics.level_controller_z_mm,
+            state.profile.transit_motion.carried_z_feed_mm_per_min,
+        )
+        .await?;
     }
     restore_level_visual_home(state, lease_id).await
 }
@@ -11952,6 +12051,13 @@ fn pickup_report_uses_current_transit(
     (report.clear_xy_feed_mm_per_min - profile.transit_motion.clear_xy_feed_mm_per_min).abs() < 1e-6
         && (report.carried_xy_feed_mm_per_min - profile.transit_motion.carried_xy_feed_mm_per_min)
             .abs()
+            < 1e-6
+        && (report.clear_z_feed_mm_per_min - profile.transit_motion.clear_z_feed_mm_per_min).abs()
+            < 1e-6
+        && (report.carried_z_feed_mm_per_min - profile.transit_motion.carried_z_feed_mm_per_min)
+            .abs()
+            < 1e-6
+        && (report.precision_z_approach_mm - profile.transit_motion.precision_z_approach_mm).abs()
             < 1e-6
 }
 
@@ -14566,9 +14672,15 @@ async fn execute_visual_home_with_limit(
     let camera_profile = stored_camera_profile(state, visual.camera_role)?;
     let device_path = camera_path_for_role(visual.camera_role)?;
     let seed_pose = if body.move_to_seed {
+        let feed_mm_per_min = safe_level_xy_feed(
+            &state.profile,
+            status.pose,
+            visual.seed_pose,
+            visual.feed_mm_per_min,
+        );
         state
             .machine
-            .jog(body.lease_id, visual.seed_pose, visual.feed_mm_per_min)
+            .jog(body.lease_id, visual.seed_pose, feed_mm_per_min)
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?
     } else {
@@ -14606,6 +14718,87 @@ async fn execute_visual_home_with_limit(
         return Err(ApiError::internal(error));
     }
     result
+}
+
+fn safe_level_xy_feed(
+    profile: &MachineProfile,
+    current: Option<Pose>,
+    target: JogTarget,
+    fallback_feed_mm_per_min: f64,
+) -> f64 {
+    let Some(current) = current else {
+        return fallback_feed_mm_per_min;
+    };
+    let Some(target) = target.resolve(current) else {
+        return fallback_feed_mm_per_min;
+    };
+    let safe_z = (current.z_mm - profile.safe_z_mm).abs() <= 1e-9
+        && (target.z_mm - profile.safe_z_mm).abs() <= 1e-9;
+    let fixed_z = (target.z_mm - current.z_mm).abs() <= 1e-9;
+    let fixed_rotation = (target.rotation_deg - current.rotation_deg).abs() <= 1e-9;
+    if safe_z && fixed_z && fixed_rotation {
+        profile.transit_motion.clear_xy_feed_mm_per_min
+    } else {
+        fallback_feed_mm_per_min
+    }
+}
+
+async fn move_vertical_at_current_xy(
+    state: &AppState,
+    lease_id: Uuid,
+    target_z_mm: f64,
+    feed_mm_per_min: f64,
+) -> Result<Pose, String> {
+    let current = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "vertical move has no trusted machine pose".to_string())?;
+    state
+        .machine
+        .jog(
+            lease_id,
+            JogTarget {
+                x_mm: current.x_mm,
+                y_mm: current.y_mm,
+                z_mm: target_z_mm,
+                rotation_deg: None,
+            },
+            feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn approach_z_with_slow_finish(
+    state: &AppState,
+    lease_id: Uuid,
+    target_z_mm: f64,
+    transit_feed_mm_per_min: f64,
+    approach_feed_mm_per_min: f64,
+    approach_distance_mm: f64,
+) -> Result<Pose, String> {
+    let current = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "Z approach has no trusted machine pose".to_string())?;
+    if let Some(waypoint_z_mm) =
+        z_approach_waypoint(current.z_mm, target_z_mm, approach_distance_mm)
+    {
+        move_vertical_at_current_xy(state, lease_id, waypoint_z_mm, transit_feed_mm_per_min)
+            .await?;
+    }
+    move_vertical_at_current_xy(state, lease_id, target_z_mm, approach_feed_mm_per_min).await
+}
+
+fn z_approach_waypoint(
+    current_z_mm: f64,
+    target_z_mm: f64,
+    approach_distance_mm: f64,
+) -> Option<f64> {
+    (current_z_mm > target_z_mm + approach_distance_mm)
+        .then_some(target_z_mm + approach_distance_mm)
 }
 
 async fn run_visual_homing(
@@ -14798,6 +14991,9 @@ async fn capture_profiled_frames(
     device_path: &str,
     sample_count: u32,
 ) -> ApiResult<Vec<GrayFrame>> {
+    if let Ok(context) = PROFILED_CAPTURE_CONTEXT.try_with(Arc::clone) {
+        return capture_scoped_profiled_frames(context, profile, device_path, sample_count).await;
+    }
     let updates = profile_control_updates(profile);
     let config = camera_capture_config(profile, device_path.to_owned());
     let _capture_guard = state.camera_capture_lock.lock().await;
@@ -14819,6 +15015,155 @@ async fn capture_profiled_frames(
     .await
     .map_err(ApiError::internal)?
     .map_err(ApiError::internal)
+}
+
+async fn with_profiled_camera_reuse<T>(
+    state: &AppState,
+    operation: impl Future<Output = T>,
+) -> (T, Value) {
+    if let Ok(context) = PROFILED_CAPTURE_CONTEXT.try_with(Arc::clone) {
+        let result = operation.await;
+        let timing = context.lock().await.timing_json();
+        return (result, timing);
+    }
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    let context = Arc::new(tokio::sync::Mutex::new(ProfiledCaptureContext::default()));
+    let result = PROFILED_CAPTURE_CONTEXT
+        .scope(Arc::clone(&context), operation)
+        .await;
+    let timing = context.lock().await.timing_json();
+    (result, timing)
+}
+
+async fn capture_scoped_profiled_frames(
+    context: Arc<tokio::sync::Mutex<ProfiledCaptureContext>>,
+    profile: &CameraProfile,
+    device_path: &str,
+    sample_count: u32,
+) -> ApiResult<Vec<GrayFrame>> {
+    if sample_count == 0 {
+        return Err(ApiError::internal(
+            "profiled camera sample count must be non-zero",
+        ));
+    }
+    let role = profile.role.as_str().to_owned();
+    let config = camera_capture_config(profile, device_path.to_owned());
+    let controls = profile_control_updates(profile);
+    let key = ProfiledCameraSessionKey {
+        device: config.device.clone(),
+        width: config.width,
+        height: config.height,
+        frames_per_second: config.frames_per_second,
+        timeout: config.timeout,
+        controls: controls.clone(),
+    };
+    let mut last_error = None;
+    for attempt in 1..=MAX_CAMERA_CAPTURE_ATTEMPTS {
+        let existing = {
+            let context = context.lock().await;
+            context
+                .sessions
+                .get(&config.device)
+                .filter(|session| session.key == key)
+                .map(|session| Arc::clone(&session.capture))
+        };
+        let (capture, newly_opened) = if let Some(capture) = existing {
+            (capture, false)
+        } else {
+            let started = Instant::now();
+            let opened = open_persistent_workspace_camera(&config, &controls).await;
+            let open_ms = elapsed_ms(started);
+            let mut context = context.lock().await;
+            let timing = context.timing.entry(role.clone()).or_default();
+            timing.open_ms += open_ms;
+            match opened {
+                Ok(capture) => {
+                    timing.open_count += 1;
+                    context.sessions.insert(
+                        config.device.clone(),
+                        ScopedProfiledCamera {
+                            key: key.clone(),
+                            capture: Arc::clone(&capture),
+                        },
+                    );
+                    (capture, true)
+                }
+                Err(error) => {
+                    timing.open_failure_count += 1;
+                    last_error = Some(error);
+                    drop(context);
+                    if attempt < MAX_CAMERA_CAPTURE_ATTEMPTS {
+                        tokio::time::sleep(CAMERA_CAPTURE_RETRY_DELAY).await;
+                    }
+                    continue;
+                }
+            }
+        };
+        let fresh_after = monotonic_timestamp().map_err(ApiError::internal)?;
+        let settle_frames = profile.settle_frames;
+        let started = Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            capture_scoped_frames(
+                capture,
+                sample_count,
+                newly_opened,
+                settle_frames,
+                fresh_after,
+            )
+        })
+        .await;
+        let capture_ms = elapsed_ms(started);
+        let mut scoped = context.lock().await;
+        let timing = scoped.timing.entry(role.clone()).or_default();
+        timing.capture_ms += capture_ms;
+        match result {
+            Ok(Ok((frames, discarded_frames))) => {
+                timing.capture_count += 1;
+                timing.captured_frames += frames.len() as u32;
+                timing.discarded_frames += discarded_frames;
+                return Ok(frames);
+            }
+            Ok(Err(error)) => last_error = Some(error.to_string()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+        timing.capture_failure_count += 1;
+        scoped.sessions.remove(&config.device);
+        drop(scoped);
+        if attempt < MAX_CAMERA_CAPTURE_ATTEMPTS {
+            tokio::time::sleep(CAMERA_CAPTURE_RETRY_DELAY).await;
+        }
+    }
+    Err(ApiError::internal(format!(
+        "camera capture failed after {MAX_CAMERA_CAPTURE_ATTEMPTS} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown camera error".into()),
+    )))
+}
+
+fn capture_scoped_frames(
+    capture: Arc<PersistentGrayCapture>,
+    sample_count: u32,
+    newly_opened: bool,
+    settle_frames: u32,
+    fresh_after: Duration,
+) -> anyhow::Result<(Vec<GrayFrame>, u32)> {
+    let first = if newly_opened {
+        capture.capture(settle_frames)?
+    } else {
+        capture.capture_fresh_after(
+            fresh_after,
+            WORKSPACE_SURVEY_SETTLE_FRAMES,
+            PROFILED_CAMERA_MAX_FRESH_CAPTURE_FRAMES,
+        )?
+    };
+    let mut discarded_frames = first.metadata.settle_frames;
+    let mut frames = Vec::with_capacity(sample_count as usize);
+    frames.push(first.frame);
+    for _ in 1..sample_count {
+        let next = capture.capture(0)?;
+        discarded_frames = discarded_frames.saturating_add(next.metadata.settle_frames);
+        frames.push(next.frame);
+    }
+    Ok((frames, discarded_frames))
 }
 
 fn retry_camera_capture<T>(
@@ -15718,7 +16063,17 @@ async fn start_vacuum_operation(
         VacuumOperationMode::FineHome => "machine.fine_home",
     };
     spawn_operation(state, operation_kind, async move {
-        execute_vacuum_probe(task_state, prepared).await
+        if task_state.machine.status().simulated {
+            execute_vacuum_probe(task_state, prepared).await
+        } else {
+            let operation_state = task_state.clone();
+            let (result, _camera_timing) = with_profiled_camera_reuse(
+                &task_state,
+                execute_vacuum_probe(operation_state, prepared),
+            )
+            .await;
+            result
+        }
     })
 }
 
@@ -16286,13 +16641,16 @@ async fn measure_current_tip_offset(
         stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
     let camera_path =
         camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
+    let seed_target = bottom.nozzle_target(nozzle);
+    let seed_feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        state.machine.status().pose,
+        seed_target,
+        bottom.feed_mm_per_min,
+    );
     let seed_pose = state
         .machine
-        .jog(
-            lease_id,
-            bottom.nozzle_target(nozzle),
-            bottom.feed_mm_per_min,
-        )
+        .jog(lease_id, seed_target, seed_feed_mm_per_min)
         .await
         .map_err(|error| error.to_string())?;
     if camera_profile.lighting_enabled {
@@ -16348,18 +16706,21 @@ async fn restore_level_visual_home(state: &AppState, lease_id: Uuid) -> Result<(
         .as_ref()
         .unwrap()
         .level_controller_z_mm;
+    let target = JogTarget {
+        x_mm: visual.fiducial_x_mm,
+        y_mm: visual.fiducial_y_mm,
+        z_mm: level_controller_z_mm,
+        rotation_deg: None,
+    };
+    let feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        state.machine.status().pose,
+        target,
+        visual.feed_mm_per_min,
+    );
     state
         .machine
-        .jog(
-            lease_id,
-            JogTarget {
-                x_mm: visual.fiducial_x_mm,
-                y_mm: visual.fiducial_y_mm,
-                z_mm: level_controller_z_mm,
-                rotation_deg: None,
-            },
-            visual.feed_mm_per_min,
-        )
+        .jog(lease_id, target, feed_mm_per_min)
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -24440,6 +24801,49 @@ async fn execute_job_execution_task(
     job_execution_id: Uuid,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
+    let run = state
+        .store
+        .get_job_execution(job_execution_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "job execution disappeared".to_string())?;
+    if run.simulated {
+        return execute_job_execution_loop(state, job_execution_id, lease_id).await;
+    }
+
+    let task_started = Instant::now();
+    let task_state = state.clone();
+    let (result, camera_timing) = with_profiled_camera_reuse(
+        &state,
+        execute_job_execution_loop(task_state, job_execution_id, lease_id),
+    )
+    .await;
+    if let Err(error) = state
+        .machine
+        .record_operation_event(
+            "operation.job_execution_timing".into(),
+            json!({
+                "job_execution_id": job_execution_id,
+                "task_result_ok": result.is_ok(),
+                "total_elapsed_ms": elapsed_ms(task_started),
+                "cameras": camera_timing,
+            }),
+        )
+        .await
+    {
+        tracing::warn!(
+            %error,
+            %job_execution_id,
+            "failed to record job execution timing",
+        );
+    }
+    result
+}
+
+async fn execute_job_execution_loop(
+    state: AppState,
+    job_execution_id: Uuid,
+    lease_id: Uuid,
+) -> Result<Option<String>, String> {
     loop {
         let mut run = state
             .store
@@ -25386,6 +25790,9 @@ fn prepare_retained_part_physical_context(
         motion_planner: MotionPlanner::new(state.profile.bounds, Some(motion_calibration)),
         clear_xy_feed_mm_per_min: state.profile.transit_motion.clear_xy_feed_mm_per_min,
         carried_xy_feed_mm_per_min: state.profile.transit_motion.carried_xy_feed_mm_per_min,
+        clear_z_feed_mm_per_min: state.profile.transit_motion.clear_z_feed_mm_per_min,
+        carried_z_feed_mm_per_min: state.profile.transit_motion.carried_z_feed_mm_per_min,
+        precision_z_approach_mm: state.profile.transit_motion.precision_z_approach_mm,
     })
 }
 
@@ -25812,6 +26219,9 @@ fn prepare_physical_placement_pickup(
         motion_planner: MotionPlanner::new(state.profile.bounds, Some(motion_calibration)),
         clear_xy_feed_mm_per_min: state.profile.transit_motion.clear_xy_feed_mm_per_min,
         carried_xy_feed_mm_per_min: state.profile.transit_motion.carried_xy_feed_mm_per_min,
+        clear_z_feed_mm_per_min: state.profile.transit_motion.clear_z_feed_mm_per_min,
+        carried_z_feed_mm_per_min: state.profile.transit_motion.carried_z_feed_mm_per_min,
+        precision_z_approach_mm: state.profile.transit_motion.precision_z_approach_mm,
     })
 }
 
@@ -26152,16 +26562,19 @@ async fn execute_retained_part_recovery_task(
         .store
         .put_placement_execution(&run)
         .map_err(|error| error.to_string())?;
-    let result = execute_physical_retained_part_recovery(
+    let (result, _camera_timing) = with_profiled_camera_reuse(
         &state,
-        &run,
-        &step,
-        lease_id,
-        &motion_planner,
-        &physical,
-        &bare,
-        &source_report,
-        &mut report,
+        execute_physical_retained_part_recovery(
+            &state,
+            &run,
+            &step,
+            lease_id,
+            &motion_planner,
+            &physical,
+            &bare,
+            &source_report,
+            &mut report,
+        ),
     )
     .await;
     match result {
@@ -26543,22 +26956,26 @@ async fn execute_physical_retained_part_recovery(
         z_mm: place_controller_z_mm,
         ..place_level
     };
-    for (target, feed) in [
-        (place_level, prepared.carried_xy_feed_mm_per_min),
-        (place_contact, vacuum.z_approach_feed_mm_per_min),
-    ] {
-        let planned = execute_job_motion(
-            &state.machine,
-            lease_id,
-            planner,
-            &mut motion_state,
-            target,
-            feed,
-            MotionMode::Calibrated,
-        )
-        .await?;
-        report.corrected_move_count += u32::from(planned.correction.applied());
-    }
+    let planned = execute_job_motion(
+        &state.machine,
+        lease_id,
+        planner,
+        &mut motion_state,
+        place_level,
+        prepared.carried_xy_feed_mm_per_min,
+        MotionMode::Calibrated,
+    )
+    .await?;
+    report.corrected_move_count += u32::from(planned.correction.applied());
+    approach_z_with_slow_finish(
+        state,
+        lease_id,
+        place_contact.z_mm,
+        prepared.carried_z_feed_mm_per_min,
+        vacuum.z_approach_feed_mm_per_min,
+        prepared.precision_z_approach_mm,
+    )
+    .await?;
     report.stages.push(PlacementExecutionStageReport {
         stage: PlacementExecutionStage::PlaceApproach,
         passed: true,
@@ -26858,16 +27275,20 @@ async fn execute_guarded_placement_task(
         .put_placement_execution(&run)
         .map_err(|error| error.to_string())?;
     let result = if let Some(prepared) = physical.as_ref() {
-        execute_physical_guarded_placement(
+        let (result, _camera_timing) = with_profiled_camera_reuse(
             &state,
-            &run,
-            &step,
-            lease_id,
-            &motion_planner,
-            prepared,
-            &mut report,
+            execute_physical_guarded_placement(
+                &state,
+                &run,
+                &step,
+                lease_id,
+                &motion_planner,
+                prepared,
+                &mut report,
+            ),
         )
-        .await
+        .await;
+        result
     } else {
         execute_guarded_placement_motion(
             &state,
@@ -27406,17 +27827,15 @@ async fn execute_physical_guarded_placement(
                 local_target_correction_mm[0], local_target_correction_mm[1],
             ),
         });
-        let planned = execute_job_motion(
-            &state.machine,
+        approach_z_with_slow_finish(
+            state,
             lease_id,
-            planner,
-            &mut motion_state,
-            place_contact,
+            place_contact.z_mm,
+            prepared.carried_z_feed_mm_per_min,
             vacuum.z_approach_feed_mm_per_min,
-            MotionMode::Calibrated,
+            prepared.precision_z_approach_mm,
         )
         .await?;
-        report.corrected_move_count += u32::from(planned.correction.applied());
         report.stages.push(PlacementExecutionStageReport {
             stage: PlacementExecutionStage::Placement,
             passed: true,
@@ -27767,22 +28186,26 @@ async fn release_part_at_board_and_verify(
             let mut motion_state = planner
                 .initial_state(current_pose)
                 .map_err(|error| error.to_string())?;
-            for (target, feed) in [
-                (attempt_level, prepared.carried_xy_feed_mm_per_min),
-                (attempt_contact, vacuum.z_approach_feed_mm_per_min),
-            ] {
-                let planned = execute_job_motion(
-                    &state.machine,
-                    lease_id,
-                    planner,
-                    &mut motion_state,
-                    target,
-                    feed,
-                    MotionMode::Calibrated,
-                )
-                .await?;
-                corrected_move_count += u32::from(planned.correction.applied());
-            }
+            let planned = execute_job_motion(
+                &state.machine,
+                lease_id,
+                planner,
+                &mut motion_state,
+                attempt_level,
+                prepared.carried_xy_feed_mm_per_min,
+                MotionMode::Calibrated,
+            )
+            .await?;
+            corrected_move_count += u32::from(planned.correction.applied());
+            approach_z_with_slow_finish(
+                state,
+                lease_id,
+                attempt_contact.z_mm,
+                prepared.carried_z_feed_mm_per_min,
+                vacuum.z_approach_feed_mm_per_min,
+                prepared.precision_z_approach_mm,
+            )
+            .await?;
             findings.push(format!(
                 "release attempt {attempt} used seating offset {seating_offset_mm:+.3} mm at nozzle Z{nozzle_z_mm:.3}"
             ));
@@ -27808,25 +28231,13 @@ async fn release_part_at_board_and_verify(
             step.nozzle_id,
         ));
         tokio::time::sleep(Duration::from_millis(pickup.release_settle_ms)).await;
-        let current_pose = state
-            .machine
-            .status()
-            .pose
-            .ok_or_else(|| "placement release lost the controller pose".to_string())?;
-        let mut motion_state = planner
-            .initial_state(current_pose)
-            .map_err(|error| error.to_string())?;
-        let planned = execute_job_motion(
-            &state.machine,
+        move_vertical_at_current_xy(
+            state,
             lease_id,
-            planner,
-            &mut motion_state,
-            attempt_level,
-            vacuum.z_approach_feed_mm_per_min,
-            MotionMode::Calibrated,
+            attempt_level.z_mm,
+            prepared.clear_z_feed_mm_per_min,
         )
         .await?;
-        corrected_move_count += u32::from(planned.correction.applied());
         let raw_values =
             collect_sensor_values(state, lease_id, sensor_id, pickup.release_sample_count).await?;
         let sensor_released = median_raw(&raw_values).is_some_and(|value| {
@@ -28413,18 +28824,13 @@ async fn acquire_physical_placement_part(
             prepared.clear_xy_feed_mm_per_min,
         )
         .await?;
-        state
-            .machine
-            .jog(
-                prepared.lease_id,
-                JogTarget {
-                    z_mm: approach_controller_z_mm,
-                    ..level_target
-                },
-                vacuum.z_approach_feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        move_vertical_at_current_xy(
+            state,
+            prepared.lease_id,
+            approach_controller_z_mm,
+            prepared.clear_z_feed_mm_per_min,
+        )
+        .await?;
         state
             .machine
             .actuate(prepared.lease_id, sensor_id.clone(), true)
@@ -28490,15 +28896,13 @@ async fn acquire_physical_placement_part(
             break;
         }
         if attempt_index + 1 < center_corrections.len() {
-            state
-                .machine
-                .jog(
-                    prepared.lease_id,
-                    level_target,
-                    vacuum.z_approach_feed_mm_per_min,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            move_vertical_at_current_xy(
+                state,
+                prepared.lease_id,
+                level_target.z_mm,
+                prepared.clear_z_feed_mm_per_min,
+            )
+            .await?;
             state
                 .machine
                 .disable_actuator(sensor_id.clone())
@@ -28527,15 +28931,13 @@ async fn acquire_physical_placement_part(
     };
     let pickup_controller_z_mm = contact.controller_z_mm;
     let result: Result<AcquiredPlacementPart, String> = async {
-        state
-            .machine
-            .jog(
-                prepared.lease_id,
-                level_target,
-                vacuum.z_approach_feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        move_vertical_at_current_xy(
+            state,
+            prepared.lease_id,
+            level_target.z_mm,
+            prepared.carried_z_feed_mm_per_min,
+        )
+        .await?;
         execute_pickup_xy_transit(
             state,
             prepared,
@@ -28833,6 +29235,9 @@ fn build_placement_pickup_report(
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
         clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
         carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
+        clear_z_feed_mm_per_min: prepared.clear_z_feed_mm_per_min,
+        carried_z_feed_mm_per_min: prepared.carried_z_feed_mm_per_min,
+        precision_z_approach_mm: prepared.precision_z_approach_mm,
         nozzle_id: prepared.run.nozzle_id.clone(),
         tip_id: prepared.geometry.tip_id.clone(),
         sensor_id: prepared.vacuum_characterization.sensor_id.clone(),
@@ -29761,6 +30166,108 @@ mod tests {
         assert!(summary["mean_ms"].is_null());
         assert!(summary["p95_ms"].is_null());
         assert!(summary["maximum_ms"].is_null());
+    }
+
+    #[test]
+    fn safe_level_xy_motion_uses_clear_transit_feed() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let current = Pose {
+            x_mm: 80.0,
+            y_mm: 160.0,
+            z_mm: profile.safe_z_mm,
+            rotation_deg: 890.88,
+        };
+        let target = JogTarget {
+            x_mm: 220.0,
+            y_mm: 190.0,
+            z_mm: profile.safe_z_mm,
+            rotation_deg: None,
+        };
+
+        assert_eq!(
+            safe_level_xy_feed(&profile, Some(current), target, 300.0),
+            profile.transit_motion.clear_xy_feed_mm_per_min,
+        );
+    }
+
+    #[test]
+    fn unsafe_or_combined_motion_keeps_the_fallback_feed() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let current = Pose {
+            x_mm: 80.0,
+            y_mm: 160.0,
+            z_mm: 4.1,
+            rotation_deg: 0.0,
+        };
+        let target = JogTarget {
+            x_mm: 220.0,
+            y_mm: 190.0,
+            z_mm: profile.safe_z_mm,
+            rotation_deg: None,
+        };
+
+        assert_eq!(
+            safe_level_xy_feed(&profile, Some(current), target, 300.0),
+            300.0,
+        );
+        assert_eq!(safe_level_xy_feed(&profile, None, target, 300.0), 300.0);
+    }
+
+    #[test]
+    fn long_z_approach_keeps_a_slow_final_segment() {
+        assert_eq!(z_approach_waypoint(31.5, 4.0, 2.0), Some(6.0));
+        assert_eq!(z_approach_waypoint(5.5, 4.0, 2.0), None);
+        assert_eq!(z_approach_waypoint(4.0, 31.5, 2.0), None);
+    }
+
+    #[test]
+    fn profiled_camera_timing_reports_reuse_evidence() {
+        let mut context = ProfiledCaptureContext::default();
+        context.timing.insert(
+            "top_camera".into(),
+            ProfiledCameraTiming {
+                open_count: 1,
+                capture_count: 3,
+                captured_frames: 7,
+                discarded_frames: 64,
+                open_ms: 25.0,
+                capture_ms: 7_200.0,
+                ..ProfiledCameraTiming::default()
+            },
+        );
+
+        let timing = context.timing_json();
+
+        assert_eq!(timing["top_camera"]["open_count"], 1);
+        assert_eq!(timing["top_camera"]["capture_count"], 3);
+        assert_eq!(timing["top_camera"]["captured_frames"], 7);
+        assert_eq!(timing["top_camera"]["discarded_frames"], 64);
+    }
+
+    #[tokio::test]
+    async fn profiled_camera_reuse_joins_an_existing_scope() {
+        let state = test_state();
+        let mut seeded = ProfiledCaptureContext::default();
+        seeded.timing.insert(
+            "top_camera".into(),
+            ProfiledCameraTiming {
+                open_count: 1,
+                ..ProfiledCameraTiming::default()
+            },
+        );
+        let context = Arc::new(tokio::sync::Mutex::new(seeded));
+
+        let (value, timing) = PROFILED_CAPTURE_CONTEXT
+            .scope(
+                context,
+                with_profiled_camera_reuse(&state, async { 42_u32 }),
+            )
+            .await;
+
+        assert_eq!(value, 42);
+        assert_eq!(timing["top_camera"]["open_count"], 1);
     }
 
     fn held_part_report(width_mm: f64, length_mm: f64) -> HeldPartInspectionReport {
@@ -30848,6 +31355,9 @@ mod tests {
                 algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
                 clear_xy_feed_mm_per_min: 12_000.0,
                 carried_xy_feed_mm_per_min: 12_000.0,
+                clear_z_feed_mm_per_min: 1_200.0,
+                carried_z_feed_mm_per_min: 1_200.0,
+                precision_z_approach_mm: 2.0,
                 nozzle_id: "N1".into(),
                 tip_id: "N045".into(),
                 sensor_id: "vacuum_1".into(),

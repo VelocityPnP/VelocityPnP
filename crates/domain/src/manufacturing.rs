@@ -1092,6 +1092,12 @@ pub struct StripFeederPickupQualificationReport {
     pub clear_xy_feed_mm_per_min: f64,
     #[serde(default)]
     pub carried_xy_feed_mm_per_min: f64,
+    #[serde(default)]
+    pub clear_z_feed_mm_per_min: f64,
+    #[serde(default)]
+    pub carried_z_feed_mm_per_min: f64,
+    #[serde(default)]
+    pub precision_z_approach_mm: f64,
     pub nozzle_id: String,
     pub tip_id: String,
     pub sensor_id: String,

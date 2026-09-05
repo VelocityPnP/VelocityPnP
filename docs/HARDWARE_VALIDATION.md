@@ -3145,6 +3145,53 @@ and analysis used about 85 seconds of the operation. This trace makes the next
 work clear: reduce safe precision, camera-settle, and actuator delays with
 separate evidence.
 
+### Pickup-return latency reduction
+
+Two guarded N1 pickup-return runs used the same 1206 part in feeder 1 pocket
+10. Both runs passed vacuum hold, bottom vision, release, and top-camera return
+verification. The part was returned to pocket 10 after each run.
+
+Qualification `171c2fb6-3420-4509-a361-4c17be680a81` first reduced the cycle
+to 60.10 seconds. Safe-level, fixed-Z XY moves used 12,000 mm/min. Camera
+sessions stayed open for the full operation. The first capture on each camera
+kept the 60-frame warm-up. Later captures required fresh frames without a new
+warm-up. Camera capture and open time was 18.21 seconds. The 300 mm/min moves
+used 25.45 seconds.
+
+Qualification `9e38a0d3-3255-42bb-a09f-1fba1e11484a` then reduced the cycle
+to 44.80 seconds with `strip_feeder_pickup.v9`. Clear and carried Z travel used
+1,200 mm/min. Pickup contact stayed at 60 mm/min. The last 2 mm of the release
+approach stayed at 300 mm/min. The run acquired vacuum at nozzle Z4.000 and
+held a median raw value of 228. Bottom vision ended with a 0.05035 mm center
+residual. Top vision found the returned part with a 0.07918 mm center shift.
+Both vision results passed their configured gates.
+
+The final measured time was:
+
+| Feed (mm/min) | Moves | Distance (mm) | Actual (s) | Ideal (s) |
+| ---: | ---: | ---: | ---: | ---: |
+| 60 | 15 | 1.513 | 2.261 | 1.513 |
+| 300 | 5 | 16.531 | 3.843 | 3.306 |
+| 1,200 | 4 | 106.500 | 5.780 | 5.325 |
+| 12,000 | 9 | 1,147.541 | 8.423 | 5.738 |
+
+All motion used 20.31 seconds. Camera open and capture used 18.38 seconds.
+The remaining work used about 6.11 seconds. Thus, the full cycle decreased by
+75.2 percent, from 180.5 to 44.8 seconds. The 300 mm/min portion decreased by
+95.6 percent, from 87.34 to 3.84 seconds.
+
+The two initial 60-frame camera warm-ups now use about 16 seconds. Later
+captures use about 2 seconds in total. The source also keeps camera sessions
+open across all placements in one continuous job run. This job-level reuse has
+automated test coverage, but it has no physical multi-placement evidence.
+The PCB placement and recovery paths use the same split Z approach. These
+production changes have automated coverage but no physical placement evidence.
+Do not reduce the first-camera warm-up until a separate stability test passes.
+
+Fine-home operation `756bb45f-ae15-484f-a456-756561e25543` also used one
+camera scope. It passed in 75.8 seconds, compared with 106.3 seconds before
+the reuse change. Its contact and datum correction rules did not change.
+
 One-row survey `c8277770-ca0f-4f45-a291-420371e224a7`, operation
 `ebd0feb4-65ce-4ae4-adde-6c6bdf995086`, then measured the scan path. It
 covered X200 through X280 mm and Y180 through Y181 mm. It captured all 10
@@ -3161,14 +3208,14 @@ first accepted frame and four after each of the other nine moves. At the
 configured 10 FPS, the first-settle policy alone has a nominal six-second
 cost.
 
-Source instrumentation now adds one ordered
+Source instrumentation adds one ordered
 `operation.workspace_scan_timing` event per scan. It records camera open,
 first and later tile capture distributions, tile motion, artifact storage,
 mosaic work, progress storage, finalization, parking, light control, and total
-time. Machine actuator and sensor events also record elapsed time. These new
-fields passed automated tests but were not deployed for the physical row. Its
-measurements came from operation timestamps, motion events, and capture frame
-counts.
+time. Machine actuator and sensor events also record elapsed time. Pickup
+qualification adds `operation.strip_feeder_pickup_timing`, and a physical job
+run adds `operation.job_execution_timing`. The latter records the aggregate
+camera use for the complete continuous job run.
 
 A real guarded PCB placement remains deferred until a board-compatible part
 is available. Do not use a 1206 pickup-return test as proof of PCB approach,
@@ -3176,7 +3223,8 @@ contact, release, or post-placement timing.
 
 The machine ended ready, homed, fault-free, at X220.131, Y190.271, and
 Z31.500. Calibration revision
-`3b837434-a961-4e60-945a-18335b42d21f` remained active.
+`3b837434-a961-4e60-945a-18335b42d21f` remained active. The last control lease
+expired after the run.
 
 ### Session closeout
 
