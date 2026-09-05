@@ -893,7 +893,7 @@ a production gate.
 
 ### Held-part model runtime
 
-The daemon can load one held-part model package in shadow mode:
+The daemon can load one held-part model package:
 
 ```bash
 cargo run -p velocitypnpd -- \
@@ -911,7 +911,13 @@ The model runs beside each deterministic bottom-camera held-part inspection.
 It compares bare-nozzle and observed 512-pixel crops. Each run stores the
 prediction, both detector results, confidence, model digest, disagreements,
 and an annotated preview. Green is deterministic, cyan is learned, and a
-magenta border requires review. These artifacts cannot authorize motion.
+magenta border requires review.
+
+Normal held-part detection and pose results stay in shadow mode. Release
+verification has one narrow exception. A learned `bare_nozzle` result can
+confirm a clear nozzle when its class probability is at least 0.98, its class
+margin is at least 0.95, and the vacuum sensor also confirms release. The
+report keeps any disagreement with deterministic CV for later review.
 
 Run the Rust runtime against all reviewed pairs and make one comparison sheet:
 

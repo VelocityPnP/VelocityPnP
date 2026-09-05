@@ -648,7 +648,7 @@ pub struct HeldPartPosePrediction {
     pub valid: bool,
 }
 
-/// One learned held-part prediction. It cannot authorize motion.
+/// One learned held-part prediction and its runtime confidence gates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeldPartModelPrediction {
     pub contract_version: String,
@@ -664,7 +664,7 @@ pub struct HeldPartModelPrediction {
     pub findings: Vec<String>,
 }
 
-/// Shadow comparison with the active deterministic held-part detector.
+/// Comparison between the learned and deterministic held-part detectors.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeldPartShadowReport {
     pub algorithm_version: String,
@@ -683,7 +683,7 @@ pub struct HeldPartShadowReport {
     #[serde(default)]
     pub rotation_delta_deg_mod_180: Option<f64>,
     pub review_required: bool,
-    /// This stays false until independent data and promotion gates pass.
+    /// True when a narrow runtime policy authorizes this learned result.
     pub control_authorized: bool,
     pub report_artifact_name: String,
     pub preview_artifact_name: String,

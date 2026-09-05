@@ -129,7 +129,7 @@ const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
 const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v6";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v3";
-const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v5";
+const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v6";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
 const MINIMUM_RETAINED_PART_DIMENSION_RATIO: f64 = 0.75;
 const MINIMUM_RETAINED_PART_PIXEL_RATIO: f64 = 0.40;
@@ -139,7 +139,7 @@ const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
 const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v10";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v11";
 const MINIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 2;
 const MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 3;
 const MAXIMUM_PICKUP_FEEDBACK_SPREAD_MM: f64 = 0.20;
@@ -164,10 +164,12 @@ const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v2";
 const SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM: &str = "source_component_pick_control.v1";
 const MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION: f64 = 0.04;
-const HELD_PART_SHADOW_ALGORITHM: &str = "held_part_shadow.v1";
+const HELD_PART_SHADOW_ALGORITHM: &str = "held_part_shadow.v2";
 const HELD_PART_MODEL_CROP_SIZE_PX: u32 = 512;
 const MAXIMUM_HELD_PART_CENTER_DELTA_PX: f64 = 12.0;
 const MAXIMUM_HELD_PART_ROTATION_DELTA_DEG: f64 = 15.0;
+const HELD_PART_RELEASE_BARE_PROBABILITY_GATE: f64 = 0.98;
+const HELD_PART_RELEASE_BARE_MARGIN_GATE: f64 = 0.95;
 const MAXIMUM_HELD_PART_ROTATION_CAPTURES: usize = 12;
 const POCKET_RETURN_INSPECTION_ARTIFACT: &str = "pocket-return-inspection.png";
 const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
@@ -6568,11 +6570,18 @@ fn undirected_rotation_delta_deg(first: f64, second: f64) -> f64 {
     ((first - second + 90.0).rem_euclid(180.0) - 90.0).abs()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeldPartControlPolicy {
+    ShadowOnly,
+    ReleaseNozzleClear,
+}
+
 fn build_held_part_shadow_report(
     deterministic: &HeldPartInspectionArtifacts,
     deterministic_outline_px: Option<[[f64; 2]; 4]>,
     prediction: HeldPartModelPrediction,
     artifact_stem: &str,
+    control_policy: HeldPartControlPolicy,
 ) -> HeldPartShadowReport {
     let learned_occupied = prediction.class.occupied();
     let occupancy_agreement = deterministic.report.detected == learned_occupied;
@@ -6597,6 +6606,11 @@ fn build_held_part_shadow_report(
         });
     let deterministic_occupied_rejected =
         deterministic.report.detected && !deterministic.report.passed;
+    let release_clear_authorized = control_policy == HeldPartControlPolicy::ReleaseNozzleClear
+        && prediction.class == HeldPartClass::BareNozzle
+        && prediction.confidence_gate_passed
+        && prediction.class_confidence >= HELD_PART_RELEASE_BARE_PROBABILITY_GATE
+        && prediction.class_margin >= HELD_PART_RELEASE_BARE_MARGIN_GATE;
     let review_required = deterministic_occupied_rejected
         || !prediction.confidence_gate_passed
         || !occupancy_agreement
@@ -6605,7 +6619,13 @@ fn build_held_part_shadow_report(
         || rotation_delta_deg_mod_180
             .is_some_and(|delta| delta > MAXIMUM_HELD_PART_ROTATION_DELTA_DEG);
     let mut findings = prediction.findings.clone();
-    findings.push("the learned result is shadow evidence and cannot control motion".into());
+    if release_clear_authorized {
+        findings.push(
+            "the high-confidence bare-nozzle result is authorized for release verification".into(),
+        );
+    } else {
+        findings.push("the learned result is shadow evidence and cannot control motion".into());
+    }
     if deterministic_occupied_rejected {
         findings.push("the deterministic held-part inspection did not pass".into());
     }
@@ -6641,7 +6661,7 @@ fn build_held_part_shadow_report(
         center_delta_px,
         rotation_delta_deg_mod_180,
         review_required,
-        control_authorized: false,
+        control_authorized: release_clear_authorized,
         report_artifact_name: format!("{artifact_stem}-held-part-shadow.json"),
         preview_artifact_name: format!("{artifact_stem}-held-part-shadow.png"),
         findings,
@@ -6655,6 +6675,7 @@ fn analyze_held_part_shadow(
     deterministic: &HeldPartInspectionArtifacts,
     frame_center_px: [f64; 2],
     artifact_stem: &str,
+    control_policy: HeldPartControlPolicy,
 ) -> Result<HeldPartShadowArtifacts, String> {
     let (bare_crop, origin) =
         centered_gray_crop(bare, frame_center_px, HELD_PART_MODEL_CROP_SIZE_PX)?;
@@ -6684,6 +6705,7 @@ fn analyze_held_part_shadow(
         deterministic_outline_px,
         prediction,
         artifact_stem,
+        control_policy,
     );
     let preview = render_held_part_shadow_preview(
         &observed_crop,
@@ -6717,6 +6739,7 @@ fn persist_held_part_shadow_artifacts(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn analyze_and_persist_held_part_shadow(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
@@ -6725,6 +6748,7 @@ async fn analyze_and_persist_held_part_shadow(
     deterministic: &HeldPartInspectionArtifacts,
     frame_center_px: [f64; 2],
     artifact_name: &str,
+    control_policy: HeldPartControlPolicy,
 ) -> Option<HeldPartShadowReport> {
     let model = state.held_part_model.clone()?;
     let bare = bare.clone();
@@ -6742,6 +6766,7 @@ async fn analyze_and_persist_held_part_shadow(
             &deterministic,
             frame_center_px,
             &artifact_stem,
+            control_policy,
         )
     })
     .await
@@ -9794,6 +9819,7 @@ async fn capture_held_part_rotation_sweep(
                 &inspection,
                 [bottom.frame_center_x_px, bottom.frame_center_y_px],
                 &inspection_artifact_name,
+                HeldPartControlPolicy::ShadowOnly,
             )
             .await;
             captures.push(HeldPartRotationCapture {
@@ -10184,6 +10210,7 @@ async fn execute_physical_strip_feeder_pickup(
             &initial_inspection,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+            HeldPartControlPolicy::ShadowOnly,
         )
         .await
         {
@@ -10544,7 +10571,7 @@ async fn release_and_verify_nozzle_clear(
         )
         .map_err(|error| error.to_string())?;
         persist_transfer_rgb_artifact(state, prepared, &inspection_artifact, &inspection.preview)?;
-        if let Some(shadow) = analyze_and_persist_held_part_shadow(
+        let release_shadow = analyze_and_persist_held_part_shadow(
             state,
             prepared,
             bare,
@@ -10552,14 +10579,27 @@ async fn release_and_verify_nozzle_clear(
             &inspection,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
             &inspection_artifact,
+            HeldPartControlPolicy::ReleaseNozzleClear,
         )
-        .await
-        {
-            artifact_names.extend([shadow.report_artifact_name, shadow.preview_artifact_name]);
+        .await;
+        if let Some(shadow) = release_shadow.as_ref() {
+            artifact_names.extend([
+                shadow.report_artifact_name.clone(),
+                shadow.preview_artifact_name.clone(),
+            ]);
         }
         artifact_names.push(raw_artifact);
         artifact_names.push(inspection_artifact);
-        let part_detected = post_release_matches_held_part(held_part, &inspection.report);
+        let model_confirmed_clear = release_shadow
+            .as_ref()
+            .is_some_and(|shadow| shadow.control_authorized);
+        let part_detected =
+            !model_confirmed_clear && post_release_matches_held_part(held_part, &inspection.report);
+        if model_confirmed_clear && inspection.report.detected {
+            findings.push(format!(
+                "the held-part model overrode a deterministic false-positive release detection on attempt {attempt}"
+            ));
+        }
         if inspection.report.detected && !part_detected {
             findings.push(format!(
                 "post-release difference from attempt {attempt} did not match the held component size and contrast"
@@ -11231,6 +11271,7 @@ async fn align_held_part(
             &current,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
             &inspection_artifact,
+            HeldPartControlPolicy::ShadowOnly,
         )
         .await
         {
@@ -25884,6 +25925,7 @@ async fn execute_physical_retained_part_recovery(
         &initial,
         [bottom.frame_center_x_px, bottom.frame_center_y_px],
         HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+        HeldPartControlPolicy::ShadowOnly,
     )
     .await
     {
@@ -27366,12 +27408,22 @@ async fn release_part_at_board_and_verify(
             &inspection,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
             &inspection_artifact,
+            HeldPartControlPolicy::ReleaseNozzleClear,
         )
         .await;
-        let retained_part = post_release_matches_held_part(
-            release_reference_inspection(&acquired.alignment, &acquired.inspection),
-            &inspection.report,
-        );
+        let model_confirmed_clear = release_shadow
+            .as_ref()
+            .is_some_and(|shadow| shadow.control_authorized);
+        let retained_part = !model_confirmed_clear
+            && post_release_matches_held_part(
+                release_reference_inspection(&acquired.alignment, &acquired.inspection),
+                &inspection.report,
+            );
+        if model_confirmed_clear && inspection.report.detected {
+            findings.push(format!(
+                "the held-part model overrode a deterministic false-positive release detection on attempt {attempt}"
+            ));
+        }
         nozzle_clear = nozzle_release_attempt_passed(sensor_released, retained_part);
         retained_part_secured = false;
         observations.push(inspection.report.clone());
@@ -28044,6 +28096,7 @@ async fn acquire_physical_placement_part(
             &initial,
             [bottom.frame_center_x_px, bottom.frame_center_y_px],
             HELD_PART_INITIAL_INSPECTION_ARTIFACT,
+            HeldPartControlPolicy::ShadowOnly,
         )
         .await;
         for artifact in [HELD_PART_ARTIFACT, HELD_PART_INITIAL_INSPECTION_ARTIFACT] {
@@ -29393,12 +29446,64 @@ mod tests {
             deterministic.outline_px,
             prediction,
             "fixture",
+            HeldPartControlPolicy::ShadowOnly,
         );
 
         assert!(shadow.occupancy_agreement);
         assert!(!shadow.review_required);
         assert!(!shadow.control_authorized);
         assert_eq!(shadow.center_delta_px, Some(5_f64.sqrt()));
+    }
+
+    #[test]
+    fn held_part_model_can_confirm_a_clear_nozzle_after_release() {
+        let deterministic = HeldPartInspectionArtifacts {
+            report: held_part_report(0.82, 1.78),
+            preview: RgbFrame {
+                width: 1,
+                height: 1,
+                pixels: vec![0, 0, 0],
+            },
+            outline_px: None,
+        };
+        let prediction = HeldPartModelPrediction {
+            contract_version: "velocitypnp.held-part-pose.v1".into(),
+            model_artifact_sha256: "fixture".into(),
+            runtime: "fixture".into(),
+            class: HeldPartClass::BareNozzle,
+            probabilities: velocitypnp_domain::HeldPartClassProbabilities {
+                bare_nozzle: 0.999,
+                component_flat: 0.0005,
+                component_on_edge: 0.0005,
+            },
+            class_confidence: 0.999,
+            class_margin: 0.9985,
+            confidence_gate_passed: true,
+            pose: velocitypnp_domain::HeldPartPosePrediction {
+                center_px: [256.0, 256.0],
+                size_px: [0.0, 0.0],
+                rotation_deg_mod_180: 0.0,
+                outline_px: [[0.0; 2]; 4],
+                valid: false,
+            },
+            findings: Vec::new(),
+        };
+
+        let shadow = build_held_part_shadow_report(
+            &deterministic,
+            None,
+            prediction,
+            "fixture",
+            HeldPartControlPolicy::ReleaseNozzleClear,
+        );
+
+        assert!(!shadow.occupancy_agreement);
+        assert!(shadow.review_required);
+        assert!(shadow.control_authorized);
+        assert!(shadow
+            .findings
+            .iter()
+            .any(|finding| finding.contains("authorized for release")));
     }
 
     #[test]

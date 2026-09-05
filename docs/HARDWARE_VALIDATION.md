@@ -2899,6 +2899,49 @@ center, component outline, component center, and nozzle target. No machine
 motion was used for this replay. A later pickup must validate the corrected
 center.
 
+### Live placement-model and release-gate check
+
+On 2026-09-04, coarse home `db7f28f4-1523-4528-8025-fb319b8654a0`
+and fine XYZ home `e61833ad-4061-47ea-bb2f-ef9333bf29f5` passed. The
+fine-home operation reset the measured N2 datum contact from Z59.200 to
+Z59.100. The machine used calibration
+`3b837434-a961-4e60-945a-18335b42d21f`.
+
+Placement `d53a5171-bc1a-4c65-8a3d-a3c2def45682` picked a feeder 5
+resistor and placed it at R6. Local pad registration applied X+0.057 and
+Y+0.091 mm. Bottom vision aligned the held part with a 0.031 mm center
+residual. Vacuum confirmed release at the first -0.200 mm seating offset.
+Deterministic bottom CV then marked a small nozzle reflection as a retained
+part and caused a false release failure. The held-part model classified the
+same image as `bare_nozzle` with 0.99999 probability and a 0.99999 margin.
+
+Top CV found the R6 component at X+0.200 and Y+0.020 mm from target, with a
+-4.59 degree rotation error. The placement model incorrectly classified its
+correct, centered crop as empty with 0.811 probability. The conservative
+CV/model disagreement gate kept CV active and marked the result for review.
+
+Held-part release control now permits only a high-confidence `bare_nozzle`
+result to override a deterministic false-positive retained-part result. The
+minimum class probability is 0.98 and the minimum margin is 0.95. Vacuum must
+also confirm release. Other learned held-part results remain non-controlling,
+and detector disagreement remains in the retained report.
+
+Placement `22373813-e20d-4770-a2ec-4a62c4aa610e` then tried R7. Its source
+image showed a flat resistor, but the vacuum signal stayed at the open-nozzle
+value through the bounded Z search. The runner stopped before board motion.
+A later source image showed that the resistor was no longer in its pocket,
+while a new bottom-camera bare-nozzle image showed a clear N045 tip. The part
+was therefore displaced and released during failure recovery without a
+detected vacuum hold.
+
+Live holdouts `cb2f408c-dbc4-4d91-a8ad-2f41d55a942f` and
+`1908e9e1-2674-4744-845f-bec0b11bb738` accepted two adjacent covered empty
+pockets as occupied. The source-component model correctly rejected both
+fresh placement images as empty before pickup. No additional board contact
+occurred. This exposes a follow-up gap: a high-confidence source-model empty
+result must invalidate the stale live-holdout pocket state. The machine ended
+ready, homed, fault-free, and at safe Z.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

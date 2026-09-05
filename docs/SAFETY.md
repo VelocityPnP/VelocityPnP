@@ -57,6 +57,12 @@ reference. It retries the same release once if the sensor is not off or a
 component remains visible. A clear nozzle with no part in the source pocket is
 a lost-part failure. The pocket becomes uncertain and needs review.
 
+When the held-part model is loaded, a high-confidence `bare_nozzle` result can
+override a deterministic false-positive component detection after release.
+This path needs a class probability of at least 0.98, a class margin of at
+least 0.95, and independent vacuum-off confirmation. Other learned held-part
+results cannot control release motion.
+
 Held-part alignment moves only after vacuum hold and initial bottom-camera
 evidence pass. The profile limits it to two X/Y and angle corrections. The
 runner restores the nozzle angle before it returns to the exact pickup pose.
