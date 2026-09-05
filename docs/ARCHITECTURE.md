@@ -148,13 +148,15 @@ they apply a correction. This prevents an isolated match on a repetitive plate
 grid from moving one tile away from its calibrated pose.
 
 The model crate owns learned-model package validation and CPU ONNX inference.
-The daemon accepts only the declared source-component v2 and held-part v1
-contracts, class orders, portable resize rule, Apache-2.0 artifact terms, file
-size, and SHA-256 digest. Learned pocket and held-part results run beside the
-deterministic detectors and are stored as review evidence. A result that
-conflicts with deterministic or prior inventory evidence requires review. The
-model path does not cross the motion-authority boundary until separate
-dataset, confidence, and hardware gates are complete.
+The daemon accepts only the declared source-component v2, held-part v1, and
+placement-verification v1 contracts, class orders, portable resize rules,
+Apache-2.0 artifact terms, file sizes, and SHA-256 digests. Learned results run
+beside deterministic detectors and are stored as review evidence. A guarded
+source-component result can refine a pickup center or invalidate a stale empty
+pocket. A high-confidence bare-nozzle result can confirm release only when
+vacuum also confirms release. Placement verification can control supported
+axis-symmetric results only with confidence, target registration, package-size,
+and deterministic occupancy agreement. Other conflicts require review.
 
 Strip-feeder registrations retain per-pocket occupancy and operational state.
 The store reserves one occupied pocket in a SQLite transaction. Pickup evidence

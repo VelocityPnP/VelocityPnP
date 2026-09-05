@@ -2994,6 +2994,53 @@ The recovered inventory records pockets 9, 12, 13, and 14 as occupied. Pockets
 showed that an explicit pocket request must not accept a visible neighbor as
 its result.
 
+### Retained placement evidence and augmented model
+
+On 2026-09-05, 32 retained before/after placement images received operator
+review. The merged dataset has 72 images in source- and board-target-grouped
+splits: 53 training images and 19 evaluation images. Both splits contain empty,
+flat, and multiple-component examples. Neither split contains an on-edge
+placement example.
+
+The placement training pipeline added bounded gamma and mild focus changes to
+the existing crop, brightness, contrast, flip, and sensor-noise augmentation.
+It did not rotate complete crops because that would also rotate pads, text, and
+other board context. The clean Spark run stopped after 181 epochs and selected
+epoch 131. Training took 79.5 seconds on the NVIDIA GB10.
+
+The new model classified 17 of 19 evaluation images correctly. Occupancy had
+10 true positives, one false positive, no false negatives, 0.909 precision,
+and 1.0 recall. Mean component-center error was 0.037 mm, mean undirected angle
+error was 3.99 degrees, and mean oriented IoU was 0.863. It detected the one
+reviewed stacked placement. The old model had the same aggregate evaluation
+accuracy but treated that stack as one flat part. The new model also corrected
+the R17, R19, and R22 live false negatives.
+
+The new model produced more empty-to-flat errors on the training split. It is
+therefore promoted only behind the existing confidence, class-margin, local
+target-registration, package-size, and deterministic occupancy-agreement
+gates. Both evaluation mismatches failed the model confidence gate. Python and
+ONNX output parity passed. The Rust tract replay matched the expected model
+behavior, and a simulated daemon loaded the hash-checked package successfully.
+
+The physical daemon was restarted with placement-verification ONNX SHA-256
+`10e07560dfc78c53a86d9da4b98e59fc663af58adebde83ddc45875a2247670e`.
+No machine motion occurred. After restart, the API reported the machine as
+disconnected, not homed, with no lease and no active calibration revision.
+See `docs/baselines/placement-verification-v2.json` for the complete baseline.
+
+### Session closeout
+
+The web test, TypeScript check, and production build passed with Node 22.23.2
+and npm 10.9.8. The model packages remain below the Git-ignored `datasets/`
+tree. The source-component model lacks Git provenance in its manifest, and the
+held-part model records a dirty training worktree. Reproduce these two models
+from clean commits before publishing them in a model-zoo repository.
+
+The next planned work is a measured motion-performance pass and an independent
+web-interface audit. `docs/HANDOFF.md` records the entry state, commands, code
+locations, and safety boundaries for both sessions.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

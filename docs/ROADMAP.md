@@ -185,10 +185,37 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add package-template pose comparison after live fiducial verification
 - [x] Train, export, and integrate a top-camera placement condition and pose
   model with guarded CV agreement from registration-normalized reviews
+- [x] Merge retained placement-execution evidence without target leakage,
+  retrain with bounded camera augmentation, and validate the package in the
+  Python, ONNX, Rust, and daemon runtimes
 - [ ] Meet labeled-dataset recall and false-flag targets
+- [ ] Reproduce the source-component and held-part release models from clean,
+  commit-identified source trees
+- [ ] Publish versioned Apache-2.0 runtime packages in a separate model-zoo
+  repository with model cards, checksums, and evaluation records
+- [ ] Add application-managed model download, cache, checksum, and selection
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles
 
 The physical job runner uses the guarded single-placement executor for each
 step. Each run keeps persistent progress and stops for operator recovery after
 a failed placement.
+
+## Gate 6 — Motion performance and operator interface
+
+- [ ] Measure command, travel, camera-settle, actuator, and inspection time for
+  a guarded placement and a workspace scan row
+- [ ] Separate profile-scoped safe-Z transit, vision correction, Z approach,
+  Z contact, and rotation speed limits
+- [ ] Validate faster motion one class at a time against bounds, controller
+  limits, controlled stop, and calibration residuals
+- [ ] Audit the complete current web interface in simulation and record the
+  normal operator workflow and recovery paths
+- [ ] Split the monolithic React application into feature-focused components
+  and give Workspace and Feeders clear navigation
+- [ ] Add model health, artifact evidence, operation progress, inspection, and
+  recovery views
+- [ ] Add browser-level tests for the main simulated operator workflows
+
+See `docs/HANDOFF.md` for the measured starting values and session entry
+commands.

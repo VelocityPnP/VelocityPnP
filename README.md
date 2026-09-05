@@ -37,12 +37,15 @@ This repository contains the first working platform slice:
   fiducials, with persisted visual evidence and residual-gated transforms
 - strip-feeder drafts, center-refined live holdouts, and closed-loop pickup
   qualification
-- hash-checked CPU ONNX source-component inference with non-authoritative
-  detector comparison and retained review evidence
+- hash-checked CPU ONNX source-component inference with guarded pickup-center
+  and empty-pocket decisions, detector comparison, and retained evidence
 - paired bottom-camera held-part dataset export with oriented-box, condition,
   and directed-end review
 - hash-checked CPU ONNX held-part inference with retained deterministic and
-  learned comparison evidence; learned output remains shadow-only
+  learned comparison evidence and a guarded bare-nozzle release decision
+- hash-checked top-camera placement verification with guarded deterministic
+  agreement and persistent before/after evidence
+- persistent guarded job execution with pause, recovery, and restart-safe state
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - V3.0.4 profile, calibration workflow definitions and test fixtures
 
@@ -75,3 +78,10 @@ python3 -m pip install -e python
 ```
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for prerequisites and commands.
+See [docs/HANDOFF.md](docs/HANDOFF.md) for the current local runtime state and
+the next motion-performance, web-interface, and model-distribution work.
+
+Model weights are not stored in this repository. Local training data and model
+packages are below the ignored `datasets/` tree. The daemon accepts explicit
+model package directories and verifies each manifest, contract, license, file
+size, and checksum before inference.
