@@ -10,7 +10,7 @@ use velocitypnp_domain::{
 };
 
 pub const PLACED_PART_INSPECTION_ALGORITHM: &str = "placed_package_geometry.v3";
-pub const PLACEMENT_TARGET_REGISTRATION_ALGORITHM: &str = "local_two_terminal_target.v1";
+pub const PLACEMENT_TARGET_REGISTRATION_ALGORITHM: &str = "local_two_terminal_target.v2";
 pub const PLACEMENT_VERIFICATION_CROP_SIZE_PX: u32 = 256;
 pub const PLACEMENT_VERIFICATION_CROP_SPAN_MM: f64 = 4.0;
 
@@ -995,7 +995,185 @@ fn locate_two_terminal_target(
             }
         }
     }
+    if best.is_none() {
+        best = locate_expected_pad_windows(
+            frame,
+            nominal_center_px,
+            pixel_error_to_machine_mm,
+            body_width_mm,
+            body_length_mm,
+            rotation_deg,
+            mean_scale_mm_per_px,
+        )?
+        .map(|registration| (registration.confidence, registration));
+    }
     Ok(best.map(|(_, registration)| registration))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn locate_expected_pad_windows(
+    frame: &GrayFrame,
+    nominal_center_px: [f64; 2],
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    body_width_mm: f64,
+    body_length_mm: f64,
+    rotation_deg: f64,
+    mean_scale_mm_per_px: f64,
+) -> Result<Option<TargetRegistration>> {
+    let radians = rotation_deg.to_radians();
+    let length_axis = [radians.cos(), radians.sin()];
+    let width_axis = [-length_axis[1], length_axis[0]];
+    let expected_pad_offset_mm = 0.56 * body_length_mm;
+    let mut pads = Vec::with_capacity(2);
+    for sign in [-1.0, 1.0] {
+        let expected_center_px = pixel_at_machine_offset(
+            nominal_center_px,
+            pixel_error_to_machine_mm,
+            [
+                sign * expected_pad_offset_mm * length_axis[0],
+                sign * expected_pad_offset_mm * length_axis[1],
+            ],
+        )?;
+        let Some(pad) = locate_bright_pad_in_window(
+            frame,
+            expected_center_px,
+            pixel_error_to_machine_mm,
+            length_axis,
+            width_axis,
+            0.38 * body_length_mm,
+            0.70 * body_width_mm,
+            mean_scale_mm_per_px,
+        ) else {
+            return Ok(None);
+        };
+        pads.push(pad);
+    }
+    let first = pads[0];
+    let second = pads[1];
+    let pair_pixel = [
+        second.center_px[0] - first.center_px[0],
+        second.center_px[1] - first.center_px[1],
+    ];
+    let pair_machine = map_vector(pixel_error_to_machine_mm, pair_pixel);
+    let along = (pair_machine[0] * length_axis[0] + pair_machine[1] * length_axis[1]).abs();
+    let across = (pair_machine[0] * width_axis[0] + pair_machine[1] * width_axis[1]).abs();
+    if !(0.70 * body_length_mm..=1.55 * body_length_mm).contains(&along)
+        || across > 0.55 * body_width_mm
+    {
+        return Ok(None);
+    }
+    let center_px = [
+        0.5 * (first.center_px[0] + second.center_px[0]),
+        0.5 * (first.center_px[1] + second.center_px[1]),
+    ];
+    let correction_mm = map_vector(
+        pixel_error_to_machine_mm,
+        [
+            center_px[0] - nominal_center_px[0],
+            center_px[1] - nominal_center_px[1],
+        ],
+    );
+    let correction = correction_mm[0].hypot(correction_mm[1]);
+    if correction > MAXIMUM_TARGET_CORRECTION_MM {
+        return Ok(None);
+    }
+    let expected_separation_mm = 1.12 * body_length_mm;
+    let separation_score =
+        (1.0 - (along - expected_separation_mm).abs() / (0.42 * body_length_mm)).clamp(0.0, 1.0);
+    let across_score = (1.0 - across / (0.55 * body_width_mm)).clamp(0.0, 1.0);
+    let contrast_score = (0.5 * (first.contrast + second.contrast) / 80.0).clamp(0.0, 1.0);
+    let balance_score = first.bright_fraction.min(second.bright_fraction)
+        / first.bright_fraction.max(second.bright_fraction).max(1e-6);
+    let center_score = (1.0 - correction / MAXIMUM_TARGET_CORRECTION_MM).clamp(0.0, 1.0);
+    let confidence = 0.25 * separation_score
+        + 0.20 * across_score
+        + 0.25 * contrast_score
+        + 0.20 * balance_score
+        + 0.10 * center_score;
+    Ok((confidence >= 0.55).then_some(TargetRegistration {
+        center_px,
+        confidence,
+    }))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BrightPadWindow {
+    center_px: [f64; 2],
+    contrast: f64,
+    bright_fraction: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn locate_bright_pad_in_window(
+    frame: &GrayFrame,
+    expected_center_px: [f64; 2],
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    length_axis: [f64; 2],
+    width_axis: [f64; 2],
+    half_length_mm: f64,
+    half_width_mm: f64,
+    mean_scale_mm_per_px: f64,
+) -> Option<BrightPadWindow> {
+    let radius_px = (half_length_mm.hypot(half_width_mm) / mean_scale_mm_per_px).ceil() as i32;
+    let left = (expected_center_px[0].floor() as i32 - radius_px).max(0);
+    let right =
+        (expected_center_px[0].ceil() as i32 + radius_px).min(frame.width.saturating_sub(1) as i32);
+    let top = (expected_center_px[1].floor() as i32 - radius_px).max(0);
+    let bottom = (expected_center_px[1].ceil() as i32 + radius_px)
+        .min(frame.height.saturating_sub(1) as i32);
+    let mut samples = Vec::new();
+    for y in top..=bottom {
+        for x in left..=right {
+            let pixel_error = [
+                f64::from(x) + 0.5 - expected_center_px[0],
+                f64::from(y) + 0.5 - expected_center_px[1],
+            ];
+            let machine = map_vector(pixel_error_to_machine_mm, pixel_error);
+            let along = machine[0] * length_axis[0] + machine[1] * length_axis[1];
+            let across = machine[0] * width_axis[0] + machine[1] * width_axis[1];
+            if along.abs() <= half_length_mm && across.abs() <= half_width_mm {
+                samples.push((
+                    f64::from(x) + 0.5,
+                    f64::from(y) + 0.5,
+                    frame.pixels[(y as u32 * frame.width + x as u32) as usize],
+                ));
+            }
+        }
+    }
+    if samples.len() < 32 {
+        return None;
+    }
+    let mut luma = samples.iter().map(|sample| sample.2).collect::<Vec<_>>();
+    luma.sort_unstable();
+    let dark = f64::from(luma[luma.len() / 5]);
+    let bright = f64::from(luma[4 * luma.len() / 5]);
+    let contrast = bright - dark;
+    if contrast < 18.0 {
+        return None;
+    }
+    let threshold = dark + 0.45 * contrast;
+    let mut weight = 0.0;
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    let mut bright_count = 0_usize;
+    for (x, y, value) in &samples {
+        let sample_weight = (f64::from(*value) - threshold).max(0.0);
+        if sample_weight > 0.0 {
+            weight += sample_weight;
+            weighted_x += sample_weight * x;
+            weighted_y += sample_weight * y;
+            bright_count += 1;
+        }
+    }
+    let bright_fraction = bright_count as f64 / samples.len() as f64;
+    if weight <= 0.0 || !(0.08..=0.80).contains(&bright_fraction) {
+        return None;
+    }
+    Some(BrightPadWindow {
+        center_px: [weighted_x / weight, weighted_y / weight],
+        contrast,
+        bright_fraction,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1752,6 +1930,40 @@ mod tests {
         assert!((result.report.correction_x_mm.unwrap() - target_offset[0]).abs() <= 0.05);
         assert!((result.report.correction_y_mm.unwrap() - target_offset[1]).abs() <= 0.05);
         assert_eq!(result.report.artifact_name, "target.png");
+    }
+
+    #[test]
+    fn registers_pad_windows_when_glare_connects_the_target() {
+        let mut before = frame(80);
+        let center = [160.0, 120.0];
+        let matrix = [[0.02, 0.0], [0.0, -0.02]];
+        let target_offset = [0.08, -0.12];
+        draw_pad_pair(&mut before, center, matrix, target_offset, 0.8, 1.6, 30.0);
+        draw_package(
+            &mut before,
+            center,
+            matrix,
+            target_offset,
+            0.24,
+            2.4,
+            30.0,
+            220,
+        );
+
+        let result = register_two_terminal_placement_target(
+            &before,
+            center,
+            matrix,
+            0.8,
+            1.6,
+            30.0,
+            "target.png",
+        )
+        .unwrap();
+
+        assert!(result.report.passed, "{:?}", result.report.findings);
+        assert!((result.report.correction_x_mm.unwrap() - target_offset[0]).abs() <= 0.08);
+        assert!((result.report.correction_y_mm.unwrap() - target_offset[1]).abs() <= 0.08);
     }
 
     #[test]

@@ -451,6 +451,7 @@ pub enum StripFeederPocketStatus {
 pub enum StripFeederPocketOutcome {
     Returned,
     Consumed,
+    ObservedEmpty,
     RetryableFailure,
     ReleaseUncertain,
     Interrupted,

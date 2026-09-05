@@ -162,7 +162,7 @@ const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspect
 const SOURCE_POCKET_POSE_INSPECTION_ARTIFACT: &str = "source-pocket-pose-inspection.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v2";
-const SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM: &str = "source_component_pick_control.v1";
+const SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM: &str = "source_component_pick_control.v2";
 const MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION: f64 = 0.04;
 const HELD_PART_SHADOW_ALGORITHM: &str = "held_part_shadow.v2";
 const HELD_PART_MODEL_CROP_SIZE_PX: u32 = 512;
@@ -8174,9 +8174,7 @@ async fn execute_strip_feeder_live_holdout_task(
                     }
                     .into(),
                 );
-                if let Some(center) = report.measured_pocket_machine_mm {
-                    refresh_active_strip_feeder_pick(&state, &registration, center)?;
-                }
+                sync_active_strip_feeder(&state, &registration)?;
                 if registration.part_key.is_some()
                     && registration.part_rotation_deg.is_some()
                     && matches!(
@@ -8211,10 +8209,9 @@ async fn execute_strip_feeder_live_holdout_task(
     }
 }
 
-fn refresh_active_strip_feeder_pick(
+fn sync_active_strip_feeder(
     state: &AppState,
     registration: &StripFeederRegistration,
-    measured_center_machine_mm: [f64; 2],
 ) -> Result<(), String> {
     let (Some(feeder_id), Some(pickup_z_mm), Some(part_rotation_deg)) = (
         registration.active_feeder_id,
@@ -8234,33 +8231,64 @@ fn refresh_active_strip_feeder_pick(
         id,
         name,
         part_key,
+        first_pick,
         tape_pitch_mm,
         tape_width_mm,
         tape_rotation_deg,
-        remaining,
         ..
     } = feeder
     else {
         return Err("active feeder is not a strip feeder".into());
     };
+    let first_pick = registration
+        .selected_pocket_machine_mm
+        .map_or(first_pick, |center| Pose {
+            x_mm: center[0],
+            y_mm: center[1],
+            z_mm: pickup_z_mm,
+            rotation_deg: part_rotation_deg,
+        });
+    let remaining = registration
+        .pockets
+        .iter()
+        .filter(|pocket| {
+            pocket.status == StripFeederPocketStatus::Available
+                && pocket.occupancy == StripPocketOccupancy::Occupied
+        })
+        .count()
+        .try_into()
+        .ok();
     state
         .store
         .put_feeder(&Feeder::Strip {
             id,
             name,
             part_key,
-            first_pick: Pose {
-                x_mm: measured_center_machine_mm[0],
-                y_mm: measured_center_machine_mm[1],
-                z_mm: pickup_z_mm,
-                rotation_deg: part_rotation_deg,
-            },
+            first_pick,
             tape_pitch_mm,
             tape_width_mm,
             tape_rotation_deg,
             remaining,
         })
         .map_err(|error| error.to_string())
+}
+
+fn settle_source_component_empty(
+    state: &AppState,
+    registration_id: Uuid,
+    reservation_id: Uuid,
+) -> Result<StripFeederRegistration, String> {
+    let registration = state
+        .store
+        .settle_strip_feeder_pocket(
+            registration_id,
+            reservation_id,
+            StripFeederPocketOutcome::ObservedEmpty,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+    sync_active_strip_feeder(state, &registration)?;
+    Ok(registration)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8483,6 +8511,13 @@ struct SourceComponentPickControl {
     center_machine_mm: [f64; 2],
     artifact_names: Vec<String>,
     findings: Vec<String>,
+    rejection: Option<SourceComponentPickRejection>,
+    learned_control_authorized: bool,
+}
+
+struct SourceComponentPickRejection {
+    message: String,
+    observed_empty: bool,
 }
 
 async fn select_source_component_pick_center(
@@ -8501,6 +8536,8 @@ async fn select_source_component_pick_center(
                 "the source-component model is unavailable; top-camera CV supplied the bounded pickup center"
                     .into(),
             ],
+            rejection: None,
+            learned_control_authorized: false,
         });
     };
     let pocket = prepared
@@ -8538,6 +8575,8 @@ async fn select_source_component_pick_center(
                 findings: vec![format!(
                     "source-component inference failed; top-camera CV supplied the bounded pickup center: {error}"
                 )],
+                rejection: None,
+                learned_control_authorized: false,
             });
         }
         Err(error) => {
@@ -8547,6 +8586,8 @@ async fn select_source_component_pick_center(
                 findings: vec![format!(
                     "source-component inference task failed; top-camera CV supplied the bounded pickup center: {error}"
                 )],
+                rejection: None,
+                learned_control_authorized: false,
             });
         }
     };
@@ -8560,16 +8601,17 @@ async fn select_source_component_pick_center(
     let learned_flat = prediction.class == SourceComponentClass::ComponentFlat;
     let learned_control_ready =
         learned_flat && prediction.confidence_gate_passed && prediction.pose.valid;
-    let mut rejection =
-        if prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty {
-            Some("the source-component model reports an empty qualification pocket".into())
-        } else if prediction.confidence_gate_passed
-            && prediction.class == SourceComponentClass::ComponentOnEdge
-        {
-            Some("the source-component model reports a component on edge".into())
-        } else {
-            None
-        };
+    let model_reported_empty =
+        prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty;
+    let mut rejection = if model_reported_empty {
+        Some("the source-component model reports an empty qualification pocket".into())
+    } else if prediction.confidence_gate_passed
+        && prediction.class == SourceComponentClass::ComponentOnEdge
+    {
+        Some("the source-component model reports a component on edge".into())
+    } else {
+        None
+    };
     let learned_measurement = if learned_control_ready && rejection.is_none() {
         match source_component_crop_pixel_to_machine(
             &analysis.crop,
@@ -8610,6 +8652,7 @@ async fn select_source_component_pick_center(
         .report
         .findings
         .retain(|finding| !finding.contains("shadow evidence"));
+    let learned_control_authorized = learned_measurement.is_some();
     let (center_machine_mm, method_finding) = if let Some((
         learned_center_machine_mm,
         learned_nominal_offset_mm,
@@ -8682,9 +8725,6 @@ async fn select_source_component_pick_center(
         &analysis.report.preview_artifact_name,
         &analysis.preview,
     )?;
-    if let Some(error) = rejection {
-        return Err(error);
-    }
     Ok(SourceComponentPickControl {
         center_machine_mm,
         artifact_names: vec![
@@ -8693,6 +8733,11 @@ async fn select_source_component_pick_center(
             analysis.report.preview_artifact_name,
         ],
         findings: vec![method_finding],
+        rejection: rejection.map(|message| SourceComponentPickRejection {
+            message,
+            observed_empty: model_reported_empty,
+        }),
+        learned_control_authorized,
     })
 }
 
@@ -9959,6 +10004,9 @@ async fn execute_physical_strip_feeder_pickup(
     .await?;
     artifact_names.extend(source_control.artifact_names);
     findings.extend(source_control.findings);
+    if let Some(rejection) = source_control.rejection {
+        return Err(rejection.message);
+    }
     let pocket_machine_mm = source_control.center_machine_mm;
 
     execute_visual_home(
@@ -27755,6 +27803,47 @@ async fn acquire_physical_placement_part(
         SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
         &source_inspection.preview,
     )?;
+    for artifact in [
+        SOURCE_POCKET_BEFORE_ARTIFACT,
+        SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
+    ] {
+        if !report.artifact_names.iter().any(|name| name == artifact) {
+            report.artifact_names.push(artifact.into());
+        }
+    }
+    let deterministic_center_machine_mm = source_inspection
+        .report
+        .before_measured_center_machine_mm
+        .unwrap_or(nominal_pocket_machine_mm);
+    let source_control = select_source_component_pick_center(
+        state,
+        prepared,
+        &source_control_frame,
+        source_before_pose,
+        nominal_pocket_machine_mm,
+        deterministic_center_machine_mm,
+    )
+    .await?;
+    for artifact_name in &source_control.artifact_names {
+        if !report.artifact_names.contains(artifact_name) {
+            report.artifact_names.push(artifact_name.clone());
+        }
+    }
+    report
+        .findings
+        .extend(source_control.findings.iter().cloned());
+    if let Some(rejection) = &source_control.rejection {
+        if rejection.observed_empty {
+            settle_source_component_empty(state, prepared.registration.id, run.id)?;
+            report.findings.push(format!(
+                "marked feeder pocket {} empty from the confident source-model result",
+                prepared.run.pocket_index,
+            ));
+            persist_placement_progress(state, run, report)?;
+        }
+        return Err(rejection.message.clone());
+    }
+    let mut pocket_machine_mm = source_control.center_machine_mm;
     let references = load_source_pose_references(state, &prepared.registration)?;
     let candidate_pose = source_before_pose;
     let candidate_pocket = nominal_pocket_machine_mm;
@@ -27782,54 +27871,50 @@ async fn acquire_physical_placement_part(
         SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
         &source_pose_inspection.preview,
     )?;
-    for artifact in [
-        SOURCE_POCKET_BEFORE_ARTIFACT,
-        SOURCE_POCKET_PICK_INSPECTION_ARTIFACT,
-        SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
-    ] {
-        if !report.artifact_names.iter().any(|name| name == artifact) {
-            report.artifact_names.push(artifact.into());
-        }
+    if !report
+        .artifact_names
+        .iter()
+        .any(|name| name == SOURCE_POCKET_POSE_INSPECTION_ARTIFACT)
+    {
+        report
+            .artifact_names
+            .push(SOURCE_POCKET_POSE_INSPECTION_ARTIFACT.into());
     }
     report
         .findings
         .extend(source_pose_inspection.report.findings.iter().cloned());
     report.source_pose_inspection = Some(source_pose_inspection.report.clone());
     persist_placement_progress(state, run, report)?;
-    if !source_pose_inspection.report.passed {
-        return Err("top vision rejected the source package pose before nozzle descent".into());
-    }
-    if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
-        return Err("top vision did not confirm a part in the reserved pocket".into());
-    }
-    let deterministic_center_machine_mm = source_pose_inspection
-        .report
-        .candidate_measured_center_machine_mm
-        .ok_or_else(|| "top vision did not locate the reserved-pocket part".to_string())?;
-    let pocket_center_correction_mm = (deterministic_center_machine_mm[0]
-        - nominal_pocket_machine_mm[0])
-        .hypot(deterministic_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-    if pocket_center_correction_mm > pickup.maximum_part_offset_mm {
-        return Err(format!(
-            "reserved-pocket part center correction {pocket_center_correction_mm:.3} mm exceeds the configured bound"
-        ));
-    }
-    let source_control = select_source_component_pick_center(
-        state,
-        prepared,
-        &source_control_frame,
-        source_before_pose,
-        nominal_pocket_machine_mm,
-        deterministic_center_machine_mm,
-    )
-    .await?;
-    for artifact_name in source_control.artifact_names {
-        if !report.artifact_names.contains(&artifact_name) {
-            report.artifact_names.push(artifact_name);
+    if source_control.learned_control_authorized {
+        if !source_pose_inspection.report.passed
+            || source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied
+        {
+            report.findings.push(
+                "the confident flat-part model controlled pickup while deterministic source vision remained audit-only"
+                    .into(),
+            );
         }
+    } else {
+        if !source_pose_inspection.report.passed {
+            return Err("top vision rejected the source package pose before nozzle descent".into());
+        }
+        if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
+            return Err("top vision did not confirm a part in the reserved pocket".into());
+        }
+        let deterministic_center_machine_mm = source_pose_inspection
+            .report
+            .candidate_measured_center_machine_mm
+            .ok_or_else(|| "top vision did not locate the reserved-pocket part".to_string())?;
+        let pocket_center_correction_mm = (deterministic_center_machine_mm[0]
+            - nominal_pocket_machine_mm[0])
+            .hypot(deterministic_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
+        if pocket_center_correction_mm > pickup.maximum_part_offset_mm {
+            return Err(format!(
+                "reserved-pocket part center correction {pocket_center_correction_mm:.3} mm exceeds the configured bound"
+            ));
+        }
+        pocket_machine_mm = deterministic_center_machine_mm;
     }
-    report.findings.extend(source_control.findings);
-    let pocket_machine_mm = source_control.center_machine_mm;
     persist_placement_progress(state, run, report)?;
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
     let height_correction = prepared
@@ -29862,7 +29947,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_holdout_updates_the_active_feeder_pick_pose() {
+    async fn live_holdout_syncs_the_active_feeder_state() {
         let state = test_state();
         let now = Utc::now();
         let mut registration = test_pickup_registration(now);
@@ -29883,7 +29968,14 @@ mod tests {
             })
             .unwrap();
 
-        refresh_active_strip_feeder_pick(&state, &registration, [152.65, 171.39]).unwrap();
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        registration.selected_pocket_index = Some(0);
+        registration.selected_pocket_machine_mm = Some([152.65, 171.39]);
+        sync_active_strip_feeder(&state, &registration).unwrap();
 
         let feeder = state
             .store
@@ -29904,6 +29996,68 @@ mod tests {
         assert_eq!(first_pick.y_mm, 171.39);
         assert_eq!(first_pick.z_mm, 4.2);
         assert_eq!(remaining, Some(4));
+    }
+
+    #[tokio::test]
+    async fn source_model_empty_settles_the_reserved_pocket_and_feeder_count() {
+        let state = test_state();
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        let feeder_id = Uuid::new_v4();
+        registration.active_feeder_id = Some(feeder_id);
+        registration.pickup_z_mm = Some(4.2);
+        state
+            .store
+            .put_strip_feeder_registration(&registration)
+            .unwrap();
+        state
+            .store
+            .put_feeder(&Feeder::Strip {
+                id: feeder_id,
+                name: registration.name.clone(),
+                part_key: registration.part_key.clone().unwrap(),
+                first_pick: Pose::ORIGIN,
+                tape_pitch_mm: registration.tape_pitch_mm,
+                tape_width_mm: registration.tape_width_mm,
+                tape_rotation_deg: registration.tape_rotation_deg,
+                remaining: Some(4),
+            })
+            .unwrap();
+        let reservation_id = Uuid::new_v4();
+        state
+            .store
+            .reserve_strip_feeder_pocket(registration.id, reservation_id, Some(0))
+            .unwrap();
+
+        let settled =
+            settle_source_component_empty(&state, registration.id, reservation_id).unwrap();
+
+        assert_eq!(settled.pockets[0].occupancy, StripPocketOccupancy::Empty);
+        assert_eq!(settled.pockets[0].status, StripFeederPocketStatus::Empty);
+        assert_eq!(settled.selected_pocket_index, Some(1));
+        let feeder = state
+            .store
+            .list_feeders()
+            .unwrap()
+            .into_iter()
+            .find(|feeder| feeder.id() == feeder_id)
+            .unwrap();
+        let Feeder::Strip {
+            first_pick,
+            remaining,
+            ..
+        } = feeder
+        else {
+            panic!("expected strip feeder");
+        };
+        assert_eq!(first_pick.x_mm, 10.0);
+        assert_eq!(first_pick.y_mm, 4.0);
+        assert_eq!(remaining, Some(3));
     }
 
     #[test]

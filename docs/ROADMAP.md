@@ -110,6 +110,8 @@ The project is organized by measurable gates rather than calendar estimates.
   without enabling compensation for calibration or manual jog
 - [x] Apply local two-terminal pad registration before pickup and place only
   from a bottom-camera pose that follows the final alignment command
+- [x] Register adhesive-covered pad pairs with a bounded expected-axis glare
+  fallback when connected-component segmentation cannot separate both pads
 - [x] Retry one missed pickup with a bounded correction learned from recent,
   agreeing placement residuals for the same job, nozzle, and part
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
@@ -170,6 +172,8 @@ The project is organized by measurable gates rather than calendar estimates.
   persist shadow predictions, deterministic comparisons, and review artifacts
 - [x] Use a high-confidence flat source-component model center for guarded
   pickup, with occupied-pocket, machine-offset, and CV-disagreement bounds
+- [x] Invalidate stale occupied-pocket state when fresh source-model evidence
+  confidently reports an empty pocket before nozzle descent
 - [ ] Calibrate learned-model confidence gates on independent machines and
   component families before model output can make broader feeder decisions
 - [x] Add paired bare/observed held-part dataset export with deterministic

@@ -2942,6 +2942,37 @@ occurred. This exposes a follow-up gap: a high-confidence source-model empty
 result must invalidate the stale live-holdout pocket state. The machine ended
 ready, homed, fault-free, and at safe Z.
 
+### Source-state and adhesive-target validation
+
+On 2026-09-04, coarse home `cd69c0bc-760c-48fa-ad72-7812aa3b42f1`
+and fine XYZ home `af9266c3-7042-40c2-b065-d7332f02e848` passed. Placement
+`fda9b288-3d9c-4cd5-a8f4-25d477652707` checked feeder 5 pocket 10. The
+source model reported `empty` with 0.742 probability, below its 0.750 control
+gate. One bounded pickup attempt found no vacuum transition. The pocket moved
+to `needs_review`, so it was not reused. Placement
+`1ef437e1-13b1-4f62-a645-986fe7b5a470` then classified pocket 11 as empty
+above the control gate. It stopped before descent, persisted the pocket as
+`empty`, and reduced the active feeder count to zero.
+
+The first D1 and D2 attempts exposed local pad-registration failures under
+the clear adhesive glare. The nominal fiducial transform was visibly centered
+on both pad pairs. Target registration v2 adds a fallback that searches two
+bounded bright windows at the known package axis. Retained-image replay found
+D1 at X-0.038/Y-0.003 mm and D2 at X+0.030/Y+0.105 mm from nominal.
+
+After deployment, coarse home `eb32967a-2dd1-4b3d-91a9-360d4f7633d4`
+and fine XYZ home `f4c08577-67ba-45ef-814a-53812cac21fc` passed. Placement
+`32b7b55c-6192-464a-a668-96102ff328bb` registered D2 with a 0.074 mm
+correction and 0.936 confidence. It then classified feeder 7 pocket 6 as
+empty, stopped before descent, and persisted the empty state.
+
+Live holdouts at feeder 7 pockets 13, 16, and 20 found no carrier-tape
+sprocket lattice. Their retained images show the open feeder slot. Two loose
+LEDs are visible near pocket 16, but they are not in pickable carrier pockets.
+Feeder 5 has no available parts, feeder 8 was previously exhausted, and no
+further board-compatible placement source is available without operator
+loading.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

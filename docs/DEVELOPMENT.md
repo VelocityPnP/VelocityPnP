@@ -739,8 +739,12 @@ center to calibrated machine XY and bounds both its nominal-pocket offset and
 its difference from the deterministic center. A high-confidence `empty` or
 `component_on_edge` result stops before nozzle descent. An inconclusive model
 uses the bounded deterministic center. The retained JSON report records
-whether the learned center controlled that pickup. Held-part model results
-remain shadow-only.
+whether the learned center controlled that pickup. The model runs before the
+legacy source-pose comparison. A confident flat-part result controls the
+pickup while the legacy result remains audit evidence. A confident `empty`
+result settles the reserved pocket as empty, selects the next available
+pocket, and synchronizes the active feeder count. Held-part pose results
+remain in shadow mode outside the strict post-release bare-nozzle gate.
 
 For a later capture session, carry reviewed labels into a new dataset without
 showing them again:
@@ -1300,12 +1304,14 @@ The preview uses a cyan cross for the nominal pocket center, a green rectangle
 for the component outline, a magenta circle for the component center, and a
 yellow cross for the nozzle target. It also compares
 the source package with all retained source images from the feeder's successful
-pickup sequence. The best match must pass occupancy, center, and appearance
-checks. This rejects an edge-standing package before nozzle descent without a
-fixed package-luma rule. The report and
+pickup sequence. This legacy comparison remains audit evidence when a
+confident flat-part model result controls pickup. Otherwise, its best match
+must pass occupancy, center, and appearance checks. This rejects an
+edge-standing package before nozzle descent without a fixed package-luma rule.
+The report and
 `source-pocket-pose-inspection.png` identify the selected successful reference.
-A missing part, a bad source pose, or a center correction larger than the
-configured part-offset bound stops the operation before the nozzle descends.
+A model-reported missing or edge-standing part, a rejected fallback source
+pose, or an excessive center correction stops before nozzle descent.
 Use
 `POST /placement-executions/EXECUTION_UUID/reanalyze-source-pose` to apply the
 current source-pose check to a retained attempt without machine motion. The
@@ -1316,11 +1322,14 @@ run reached its placement pose.
 This prevents a failed release or inspection from causing a second component
 to be stacked on the same target. Rework needs a separate explicit workflow.
 
-Before pickup, guarded placement version 10 also registers the bare local
-two-terminal pad pair. It stores `board-target-registration.png` and applies
-the bounded local XY correction to the placement pose. A missing or ambiguous
-pad pair stops the operation before pickup. The retained report keeps the
-nominal board pose and records the local correction separately.
+Before pickup, guarded placement also registers the bare local two-terminal
+pad pair. It stores `board-target-registration.png` and applies the bounded
+local XY correction to the placement pose. Connected-component detection is
+the primary path. If adhesive glare connects the pads to nearby artwork, a
+fallback requires two bright, balanced windows with the expected package
+axis, spacing, and local contrast. A missing or ambiguous pad pair stops the
+operation before pickup. The retained report keeps the nominal board pose and
+records the local correction separately.
 
 If the nominal pickup center produces no vacuum transition, version 10 can make
 one bounded XY retry. It requires at least two recent, passed top inspections

@@ -697,6 +697,11 @@ impl Store {
                 pocket.occupancy = StripPocketOccupancy::Empty;
                 pocket.status = StripFeederPocketStatus::Consumed;
             }
+            StripFeederPocketOutcome::ObservedEmpty => {
+                pocket.consecutive_failure_count = 0;
+                pocket.occupancy = StripPocketOccupancy::Empty;
+                pocket.status = StripFeederPocketStatus::Empty;
+            }
             StripFeederPocketOutcome::RetryableFailure
             | StripFeederPocketOutcome::ReleaseUncertain
             | StripFeederPocketOutcome::Interrupted => {
@@ -789,6 +794,11 @@ impl Store {
                 pocket.consecutive_failure_count = 0;
                 pocket.occupancy = StripPocketOccupancy::Empty;
                 pocket.status = StripFeederPocketStatus::Consumed;
+            }
+            StripFeederPocketOutcome::ObservedEmpty => {
+                pocket.consecutive_failure_count = 0;
+                pocket.occupancy = StripPocketOccupancy::Empty;
+                pocket.status = StripFeederPocketStatus::Empty;
             }
             StripFeederPocketOutcome::RetryableFailure
             | StripFeederPocketOutcome::ReleaseUncertain
@@ -1488,6 +1498,28 @@ mod tests {
             reconciled.pockets[3].occupancy,
             StripPocketOccupancy::Occupied
         );
+
+        let empty_reservation = Uuid::new_v4();
+        store
+            .reserve_strip_feeder_pocket(registration_id, empty_reservation, Some(3))
+            .unwrap();
+        let observed_empty = store
+            .settle_strip_feeder_pocket(
+                registration_id,
+                empty_reservation,
+                StripFeederPocketOutcome::ObservedEmpty,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            observed_empty.pockets[3].status,
+            StripFeederPocketStatus::Empty
+        );
+        assert_eq!(
+            observed_empty.pockets[3].occupancy,
+            StripPocketOccupancy::Empty
+        );
+        assert_eq!(observed_empty.selected_pocket_index, None);
     }
 
     #[test]
