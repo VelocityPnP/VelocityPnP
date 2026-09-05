@@ -1616,8 +1616,9 @@ python python/tools/verify_placement_verification.py \
 ```
 
 The first reviewed run is recorded in
-`docs/baselines/placement-verification-v1.json`. Its small, single-session
-evaluation set is not an acceptance threshold.
+`docs/baselines/placement-verification-v1.json`. The retained-execution retrain
+is recorded in `docs/baselines/placement-verification-v2.json`. These small,
+single-machine evaluation sets are not acceptance thresholds.
 
 Load the exported package in the daemon with:
 

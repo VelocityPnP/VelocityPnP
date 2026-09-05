@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "run": "placement-verification-v2-augmented-final",
+  "completed_at": "2026-09-05T17:53:59.500315+00:00",
+  "contract_version": "velocitypnp.placement-verification.v1",
+  "dataset": {
+    "content_sha256": "ee4772263ceaa16dc61b7bf8dd39b0572bd261f9df96ec2514440b12f23e7487",
+    "samples": 72,
+    "train_samples": 53,
+    "evaluation_samples": 19,
+    "train_capture_groups": 17,
+    "evaluation_capture_groups": 4,
+    "train_empty_samples": 37,
+    "train_flat_samples": 15,
+    "train_multiple_component_samples": 1,
+    "evaluation_empty_samples": 9,
+    "evaluation_flat_samples": 9,
+    "evaluation_multiple_component_samples": 1,
+    "on_edge_samples": 0,
+    "split_rule": "Group source captures and each physical board target."
+  },
+  "augmentation": {
+    "crop_scale": [
+      0.94,
+      1.06
+    ],
+    "translation_fraction": 0.05,
+    "horizontal_flip": true,
+    "vertical_flip": true,
+    "brightness_and_contrast": true,
+    "gamma": [
+      0.88,
+      1.12
+    ],
+    "gaussian_noise": true,
+    "mild_focus_blur_probability": 0.35,
+    "mild_focus_blur_radius": [
+      0.1,
+      0.7
+    ],
+    "excluded": [
+      "Full-crop rotation because the crop includes board geometry.",
+      "Component-only rotation without reviewed masks and edge transitions."
+    ]
+  },
+  "training": {
+    "device": "NVIDIA GB10",
+    "torch": "2.14.0a0+4fdf77b940.nv26.08",
+    "duration_seconds": 79.54428743990138,
+    "parameter_count": 596833,
+    "pretrained_weights": false,
+    "requested_epochs": 240,
+    "completed_epochs": 181,
+    "best_epoch": 131,
+    "early_stopping_patience": 50,
+    "batch_size": 16,
+    "learning_rate": 0.002,
+    "seed": 0,
+    "source_commit": "344b07fd279fa8548a3821f6a0c9ca6ca42a7b25",
+    "source_dirty": false
+  },
+  "evaluation_metrics": {
+    "classification_accuracy": 0.8947368421052632,
+    "occupancy": {
+      "true_positives": 10,
+      "false_positives": 1,
+      "false_negatives": 0,
+      "precision": 0.9090909090909091,
+      "recall": 1.0
+    },
+    "pose": {
+      "mean_center_error_mm": 0.03725359172870715,
+      "maximum_center_error_mm": 0.07183867692947388,
+      "mean_angle_error_degrees_mod_180": 3.986578013843902,
+      "mean_oriented_iou": 0.8634310334922555
+    },
+    "mismatches": [
+      "R9 survey empty was called flat but failed the runtime gates.",
+      "R13 before-placement flat was called multiple but failed the gates."
+    ]
+  },
+  "previous_model_same_evaluation_split": {
+    "classification_accuracy": 0.8947368421052632,
+    "occupancy_precision": 0.9090909090909091,
+    "occupancy_recall": 1.0,
+    "mean_center_error_mm": 0.034878234441081686,
+    "mean_angle_error_degrees_mod_180": 3.715206498736317,
+    "mean_oriented_iou": 0.8809713978683286,
+    "multiple_component_recall": 0.0
+  },
+  "previous_model_same_training_split": {
+    "classification_accuracy": 0.8679245283018868,
+    "occupancy_precision": 0.8571428571428571,
+    "occupancy_recall": 0.75,
+    "mean_center_error_mm": 0.13086030069583407,
+    "maximum_center_error_mm": 0.5416720708211263
+  },
+  "candidate_same_training_split": {
+    "classification_accuracy": 0.7924528301886793,
+    "occupancy_precision": 0.6153846153846154,
+    "occupancy_recall": 1.0,
+    "mean_center_error_mm": 0.03891903235732267,
+    "maximum_center_error_mm": 0.08067987362543742
+  },
+  "promotion_basis": {
+    "fixed_live_false_negatives": [
+      "R17",
+      "R19",
+      "R22"
+    ],
+    "stacked_component_detection": true,
+    "policy_change": false,
+    "reason": "Use higher recall only behind the existing hybrid gates."
+  },
+  "artifacts": {
+    "checkpoint_sha256": "c4679cd9d0c1897f7c4ede6873e6d580c4cf0a11965bf9432fd5f3e20489df8b",
+    "onnx_sha256": "10e07560dfc78c53a86d9da4b98e59fc663af58adebde83ddc45875a2247670e"
+  },
+  "pytorch_onnx_parity": {
+    "runtime": "onnx.reference",
+    "sample_count": 19,
+    "absolute_tolerance": 0.0001,
+    "maximum_state_log_probability_difference": 3.814697265625e-06,
+    "maximum_pose_difference": 6.258487701416016e-07,
+    "class_mismatches": 0,
+    "passed": true
+  },
+  "rust_runtime": {
+    "runtime": "tract-onnx-0.22",
+    "sample_count": 19,
+    "class_mismatches": 2,
+    "confidence_gate_pass_count": 15,
+    "mean_center_error_mm": 0.0378703,
+    "maximum_center_error_mm": 0.0718368,
+    "mean_angle_error_degrees_mod_180": 4.0672,
+    "mismatches_passed_confidence_gate": 0
+  },
+  "daemon_smoke_test": {
+    "simulated": true,
+    "state": "ready",
+    "artifact_sha256": "10e07560dfc78c53a86d9da4b98e59fc663af58adebde83ddc45875a2247670e"
+  },
+  "promotion_policy": {
+    "mode": "guarded_hybrid",
+    "supported_orientation": "axis_symmetric",
+    "supported_classes": [
+      "empty",
+      "component_flat"
+    ],
+    "minimum_class_probability": 0.6,
+    "minimum_class_margin": 0.25,
+    "requires_cv_occupancy_agreement": true,
+    "requires_cv_target_registration": true,
+    "minimum_size_ratio": 0.6,
+    "maximum_size_ratio": 1.5
+  },
+  "license": {
+    "artifact": "Apache-2.0",
+    "training_code": "Apache-2.0",
+    "training_framework": "BSD-3-Clause"
+  },
+  "limitations": [
+    "The data comes from one machine and one PCB design.",
+    "The evaluation split is too small for a production gate.",
+    "The data has no reviewed component-on-edge examples.",
+    "The model has more empty-to-flat errors on the training split.",
+    "The guarded hybrid policy is required for promotion.",
+    "The model cannot verify directed component polarity."
+  ]
+}
