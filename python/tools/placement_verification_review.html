@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VelocityPnP placement verification review</title>
+<style>
+body { margin: 0; background: #111; color: #eee; font: 16px sans-serif; }
+main { max-width: 980px; margin: auto; padding: 16px; }
+h1 { margin-bottom: 6px; }
+.warning { color: #ffcc66; }
+.frame { position: relative; width: min(80vw, 720px); margin: auto;
+  background: #000; image-rendering: auto; }
+.frame img, .frame svg { display: block; width: 100%; height: auto; }
+#overlay { position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: none; }
+#box { fill: rgba(0, 255, 128, .12); stroke: #00ff80; stroke-width: 2;
+  cursor: move; }
+.handle { fill: #00d4ff; stroke: #111; stroke-width: 1; cursor: pointer; }
+#rotate-line { stroke: #00d4ff; stroke-width: 1; }
+#target-x, #target-y { stroke: #ffb000; stroke-width: 2; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin: 12px 0; }
+button, select { padding: 9px 12px; font: inherit; }
+button.selected { outline: 3px solid #00d4ff; }
+label { display: flex; gap: 6px; align-items: center; }
+textarea { width: 100%; min-height: 52px; box-sizing: border-box; }
+#meta { white-space: pre-wrap; background: #222; padding: 12px;
+  overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+<h1>Placement verification draft review</h1>
+<p class="warning">The image is normalized to a 4 mm square. Orange is the
+KiCad target. Green is the component proposal. Move, resize, and rotate the
+box to match the visible component body.</p>
+<p id="progress"></p>
+<div class="frame">
+  <img id="image">
+  <svg id="overlay">
+    <line id="target-x"></line><line id="target-y"></line>
+    <line id="rotate-line"></line><polygon id="box"></polygon>
+    <g id="handles"></g>
+  </svg>
+</div>
+<div class="controls">
+  <label>State <select id="class-name">
+    <option value="empty">Empty target</option>
+    <option value="component_flat">Flat component</option>
+    <option value="component_on_edge">Component on edge</option>
+    <option value="multiple_components">Multiple components</option>
+  </select></label>
+  <button id="reset">Reset proposal</button>
+</div>
+<textarea id="note" placeholder="Optional review note"></textarea>
+<div class="controls">
+  <button data-decision="accept">A: Accept state and box</button>
+  <button id="mark-empty">E: Accept empty</button>
+  <button data-decision="reject">R: Reject image</button>
+  <button id="previous">Previous</button>
+  <button id="next">Next</button>
+  <button id="download">Download decisions</button>
+</div>
+<pre id="meta"></pre>
+</main>
+<script>
+const manifest = __MANIFEST__;
+const storageKey = __DATASET_TITLE__ + ":" + manifest.generated_at + ":review";
+const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+const requested = Number(new URLSearchParams(location.search).get("index") || 0);
+let index = Math.max(0, Math.min(manifest.samples.length - 1, requested));
+let drag = null, boxState = null;
+const image = document.querySelector("#image");
+const overlay = document.querySelector("#overlay");
+const polygon = document.querySelector("#box");
+const handles = document.querySelector("#handles");
+const rotateLine = document.querySelector("#rotate-line");
+const note = document.querySelector("#note");
+const className = document.querySelector("#class-name");
+
+function store() { localStorage.setItem(storageKey, JSON.stringify(saved)); }
+function fromOutline(points) {
+  const center = points.reduce((sum, point) =>
+    [sum[0] + point[0] / 4, sum[1] + point[1] / 4], [0, 0]);
+  return {cx: center[0], cy: center[1],
+    width: Math.hypot(points[1][0] - points[0][0],
+      points[1][1] - points[0][1]),
+    height: Math.hypot(points[2][0] - points[1][0],
+      points[2][1] - points[1][1]),
+    angle: Math.atan2(points[1][1] - points[0][1],
+      points[1][0] - points[0][0])};
+}
+function points(state = boxState) {
+  if (!state) return null;
+  const u = [Math.cos(state.angle), Math.sin(state.angle)];
+  const v = [-u[1], u[0]], halfWidth = state.width / 2;
+  const halfHeight = state.height / 2;
+  return [[-halfWidth, -halfHeight], [halfWidth, -halfHeight],
+    [halfWidth, halfHeight], [-halfWidth, halfHeight]].map(offset =>
+      [state.cx + u[0] * offset[0] + v[0] * offset[1],
+        state.cy + u[1] * offset[0] + v[1] * offset[1]]);
+}
+function current() {
+  const sample = manifest.samples[index];
+  return saved[sample.id] || {decision: "unreviewed", note: "",
+    class_name: sample.draft_state,
+    outline_px: sample.draft_outline_px};
+}
+function renderBox() {
+  const visible = className.value !== "empty" && boxState;
+  polygon.style.display = visible ? "block" : "none";
+  rotateLine.style.display = visible ? "block" : "none";
+  handles.style.display = visible ? "block" : "none";
+  if (!visible) return;
+  const corners = points();
+  polygon.setAttribute("points", corners.map(point => point.join(",")).join(" "));
+  handles.innerHTML = "";
+  corners.forEach((point, corner) => {
+    const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    handle.setAttribute("class", "handle"); handle.setAttribute("r", 5);
+    handle.setAttribute("cx", point[0]); handle.setAttribute("cy", point[1]);
+    handle.dataset.corner = corner; handles.appendChild(handle);
+  });
+  const normal = [-Math.sin(boxState.angle), Math.cos(boxState.angle)];
+  const top = [boxState.cx - normal[0] * boxState.height / 2,
+    boxState.cy - normal[1] * boxState.height / 2];
+  const rotate = [top[0] - normal[0] * 24, top[1] - normal[1] * 24];
+  rotateLine.setAttribute("x1", top[0]); rotateLine.setAttribute("y1", top[1]);
+  rotateLine.setAttribute("x2", rotate[0]); rotateLine.setAttribute("y2", rotate[1]);
+  const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  handle.setAttribute("class", "handle"); handle.setAttribute("r", 6);
+  handle.setAttribute("cx", rotate[0]); handle.setAttribute("cy", rotate[1]);
+  handle.dataset.rotate = "true"; handles.appendChild(handle);
+}
+function show() {
+  const sample = manifest.samples[index], result = current();
+  image.src = sample.image_path;
+  overlay.setAttribute("viewBox", `0 0 ${sample.width_px} ${sample.height_px}`);
+  const center = sample.width_px / 2;
+  for (const [id, values] of [
+    ["target-x", [center - 12, center, center + 12, center]],
+    ["target-y", [center, center - 12, center, center + 12]]]) {
+    const line = document.querySelector("#" + id);
+    ["x1", "y1", "x2", "y2"].forEach((name, item) =>
+      line.setAttribute(name, values[item]));
+  }
+  className.value = result.class_name;
+  const outline = result.outline_px || sample.draft_outline_px;
+  boxState = outline ? fromOutline(outline) : fromOutline([
+    [76.8, 102.4], [179.2, 102.4], [179.2, 153.6], [76.8, 153.6]]);
+  note.value = result.note || "";
+  renderBox();
+  document.querySelectorAll("[data-decision]").forEach(button =>
+    button.classList.toggle("selected", button.dataset.decision === result.decision));
+  const reviewed = Object.values(saved).filter(value =>
+    value.decision !== "unreviewed").length;
+  document.querySelector("#progress").textContent =
+    `${index + 1} / ${manifest.samples.length}; ${reviewed} reviewed`;
+  document.querySelector("#meta").textContent = JSON.stringify({
+    id: sample.id, reference: sample.reference, package: sample.package,
+    source_capture: sample.source_capture,
+    target_machine_mm: sample.target_machine_mm,
+    target_rotation_deg: sample.target_rotation_deg,
+    draft_state: sample.draft_state
+  }, null, 2);
+}
+function persist(decision = current().decision) {
+  const sample = manifest.samples[index];
+  saved[sample.id] = {decision, note: note.value,
+    class_name: className.value,
+    outline_px: className.value === "empty" ? null : points()};
+  store();
+}
+function decide(value) {
+  persist(value);
+  if (index + 1 < manifest.samples.length) index++;
+  show();
+}
+function eventPoint(event) {
+  const point = overlay.createSVGPoint(); point.x = event.clientX;
+  point.y = event.clientY;
+  const value = point.matrixTransform(overlay.getScreenCTM().inverse());
+  return [value.x, value.y];
+}
+overlay.onpointerdown = event => {
+  if (className.value === "empty") return;
+  const point = eventPoint(event), corner = event.target.dataset.corner;
+  drag = {start: point, initial: {...boxState},
+    mode: event.target.dataset.rotate ? "rotate" :
+      corner !== undefined ? "corner" : event.target === polygon ? "move" : "none",
+    corner: Number(corner)};
+  overlay.setPointerCapture(event.pointerId);
+};
+overlay.onpointermove = event => {
+  if (!drag || drag.mode === "none") return;
+  const point = eventPoint(event), dx = point[0] - drag.start[0];
+  const dy = point[1] - drag.start[1];
+  if (drag.mode === "move") {
+    boxState.cx = drag.initial.cx + dx; boxState.cy = drag.initial.cy + dy;
+  } else if (drag.mode === "rotate") {
+    boxState.angle = Math.atan2(point[1] - boxState.cy,
+      point[0] - boxState.cx) + Math.PI / 2;
+  } else {
+    const old = points(drag.initial), opposite = old[(drag.corner + 2) % 4];
+    const u = [Math.cos(drag.initial.angle), Math.sin(drag.initial.angle)];
+    const v = [-u[1], u[0]], delta = [point[0] - opposite[0],
+      point[1] - opposite[1]];
+    boxState.width = Math.max(4, Math.abs(delta[0] * u[0] + delta[1] * u[1]));
+    boxState.height = Math.max(4, Math.abs(delta[0] * v[0] + delta[1] * v[1]));
+    boxState.cx = (point[0] + opposite[0]) / 2;
+    boxState.cy = (point[1] + opposite[1]) / 2;
+  }
+  renderBox();
+};
+overlay.onpointerup = () => { if (drag) persist(); drag = null; };
+document.querySelectorAll("[data-decision]").forEach(button =>
+  button.onclick = () => decide(button.dataset.decision));
+document.querySelector("#mark-empty").onclick = () => {
+  className.value = "empty"; decide("accept");
+};
+document.querySelector("#reset").onclick = () => {
+  const sample = manifest.samples[index];
+  className.value = sample.draft_state;
+  boxState = sample.draft_outline_px ? fromOutline(sample.draft_outline_px) : null;
+  persist("unreviewed"); show();
+};
+document.querySelector("#previous").onclick = () => {
+  persist(); index = Math.max(0, index - 1); show();
+};
+document.querySelector("#next").onclick = () => {
+  persist(); index = Math.min(manifest.samples.length - 1, index + 1); show();
+};
+note.onchange = () => persist();
+className.onchange = () => { persist(); renderBox(); };
+document.querySelector("#download").onclick = () => {
+  persist();
+  const result = {schema_version: 1, dataset: manifest.name,
+    source_manifest_generated_at: manifest.generated_at,
+    exported_at: new Date().toISOString(), decisions: saved};
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)],
+    {type: "application/json"}));
+  link.download = "review-decisions.json"; link.click();
+};
+document.addEventListener("keydown", event => {
+  if (event.target === note || event.target === className) return;
+  const action = {a: "accept", r: "reject"}[event.key.toLowerCase()];
+  if (action) decide(action);
+  if (event.key.toLowerCase() === "e") {
+    className.value = "empty"; decide("accept");
+  }
+  if (event.key === "ArrowLeft") {
+    persist(); index = Math.max(0, index - 1); show();
+  }
+  if (event.key === "ArrowRight") {
+    persist(); index = Math.min(manifest.samples.length - 1, index + 1); show();
+  }
+});
+show();
+</script>
+</body>
+</html>

@@ -1462,6 +1462,39 @@ face texture. Axis-symmetric parts can also pass from a package rectangle that
 matches the registered part size. This permits a passive part with its unmarked
 face up, but rejects the narrow geometry of a part that stands on its edge.
 
+### Placement-verification learning dataset
+
+Export a review snapshot from retained top-camera captures after the board is
+registered. The capture manifest names the active board registration, known
+placed references, camera machine poses, and source frames. The exporter treats
+all other selected board placements as empty. Optional `references` or
+`reference_prefixes` fields limit a capture to fully covered targets:
+
+```bash
+CAPTURE=datasets/placement-verification-v1/captures/REGISTRATION_UUID
+python python/tools/export_placement_verification_snapshot.py \
+  velocitypnp.db \
+  "$CAPTURE/capture-manifest.json" \
+  datasets/placement-verification-v1/review-current
+```
+
+The exporter uses the registered KiCad transform, calibrated top-camera map,
+and configured part dimensions. It averages repeated source frames. Each
+output crop covers a 4 mm square, centers the KiCad target, and puts the
+expected package long axis on the image X axis. This makes board rotation and
+camera pose independent of the training label.
+
+`manifest.draft.json` contains operator-supplied presence as a draft only. It
+does not make this data ground truth. Open `index.html` and accept, correct, or
+reject every sample. A flat-component outline must cover the complete physical
+package, including its end terminals. Use `component_on_edge` for a package
+that is not flat and `multiple_components` when one target has a stack.
+Download the result as `review-decisions.json`.
+
+Raw captures and normalized samples are below `datasets/`, which Git ignores.
+Keep them across restarts. Their image hashes and registration IDs provide the
+source identity needed for later grouped train and evaluation splits.
+
 ### Automatic board registration
 
 Register a visually matched board after the machine is coarse-homed and the
