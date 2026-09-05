@@ -27,6 +27,9 @@ from velocitypnp_training import (  # noqa: E402
     PlacementModelConfig,
     PlacementVerificationModel,
 )
+from velocitypnp_training.placement_evaluation import (  # noqa: E402
+    evaluate_placements,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +55,7 @@ def main() -> None:
     dataset = PlacementDataset(
         args.dataset.resolve(), args.split, config.image_size, augment=False
     )
+    metrics, _ = evaluate_placements(model, dataset, torch.device("cpu"), 16)
     tensors = [dataset[index][0].numpy() for index in range(len(dataset))]
     images = np.stack(tensors)
     with torch.inference_mode():
@@ -95,6 +99,7 @@ def main() -> None:
         "absolute_tolerance": args.absolute_tolerance,
         "maximum_absolute_difference": differences,
         "class_mismatches": class_mismatches,
+        "ground_truth_metrics": metrics,
         "passed": passed,
     }
     if args.report:
