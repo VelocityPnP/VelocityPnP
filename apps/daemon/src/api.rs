@@ -15,7 +15,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
@@ -221,6 +221,7 @@ const MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 const WORKSPACE_THUMBNAIL_WIDTH: u32 = 192;
 const WORKSPACE_THUMBNAIL_HEIGHT: u32 = 108;
 const WORKSPACE_PROGRESS_TILE_INTERVAL: u32 = 25;
+const WORKSPACE_SCAN_TIMING_ALGORITHM: &str = "workspace_scan_timing.v1";
 const WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS: u32 = 512;
 const WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS: u32 = 2;
 const ESTIMATED_REGISTRATION_SECONDS: f64 = 0.12;
@@ -249,6 +250,47 @@ const BOARD_REGISTRATION_MAX_ROTATION_ERROR_DEG: f64 = 5.0;
 const BOARD_REGISTRATION_MAX_RESIDUAL_MM: f64 = 0.15;
 const BOARD_REGISTRATION_APPROACH_MM: f64 = 1.0;
 const FINE_HOME_MAX_Z_CORRECTION_MM: f64 = 0.5;
+
+#[derive(Default)]
+struct WorkspaceScanTiming {
+    lights_enable_ms: f64,
+    camera_open_ms: f64,
+    tile_motion_ms: Vec<f64>,
+    tile_capture_ms: Vec<f64>,
+    tile_artifact_ms: Vec<f64>,
+    tile_mosaic_ms: Vec<f64>,
+    progress_store_ms: Vec<f64>,
+    mosaic_finalize_ms: f64,
+    park_ms: f64,
+    lights_disable_ms: f64,
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn workspace_timing_distribution(samples: &[f64]) -> Value {
+    if samples.is_empty() {
+        return json!({
+            "count": 0,
+            "total_ms": 0.0,
+            "mean_ms": null,
+            "p95_ms": null,
+            "maximum_ms": null,
+        });
+    }
+    let total_ms = samples.iter().sum::<f64>();
+    let mut ordered = samples.to_vec();
+    ordered.sort_by(f64::total_cmp);
+    let p95_index = ((ordered.len() * 95).div_ceil(100)).saturating_sub(1);
+    json!({
+        "count": samples.len(),
+        "total_ms": total_ms,
+        "mean_ms": total_ms / samples.len() as f64,
+        "p95_ms": ordered[p95_index],
+        "maximum_ms": ordered[ordered.len() - 1],
+    })
+}
 
 struct WorkspaceHeightArtifacts {
     map: WorkspaceHeightMap,
@@ -3015,6 +3057,8 @@ async fn execute_workspace_scan_locked(
     top_path: String,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
+    let operation_started = Instant::now();
+    let mut timing = WorkspaceScanTiming::default();
     scan.status = WorkspaceScanStatus::Running;
     scan.updated_at = Utc::now();
     state
@@ -3039,18 +3083,23 @@ async fn execute_workspace_scan_locked(
         &top_path,
         lease_id,
         use_lights,
+        &mut timing,
     )
     .await;
 
+    let park_started = Instant::now();
     let park = state
         .machine
         .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
         .await;
+    timing.park_ms = elapsed_ms(park_started);
+    let lights_disable_started = Instant::now();
     let lights_off = if use_lights {
         state.machine.disable_actuator("lights".into()).await
     } else {
         Ok(())
     };
+    timing.lights_disable_ms = elapsed_ms(lights_disable_started);
     let mut result = match (result, park, lights_off) {
         (Err(error), park, lights_off) => {
             let mut failures = vec![error];
@@ -3090,6 +3139,42 @@ async fn execute_workspace_scan_locked(
                 "{error}; also failed to persist scan failure: {store_error}"
             ));
         }
+    }
+    let timing_payload = json!({
+        "algorithm_version": WORKSPACE_SCAN_TIMING_ALGORITHM,
+        "operation_id": scan.operation_id,
+        "scan_id": scan.id,
+        "succeeded": result.is_ok(),
+        "mode": scan.mode,
+        "rows": scan.rows,
+        "columns": scan.columns,
+        "planned_tiles": scan.planned_tiles,
+        "captured_tiles": scan.captured_tiles,
+        "feed_mm_per_min": scan.feed_mm_per_min,
+        "configured_settle_frames": scan.capture_settle_frames,
+        "discarded_capture_frames": scan.discarded_capture_frames,
+        "total_elapsed_ms": elapsed_ms(operation_started),
+        "lights_enable_ms": timing.lights_enable_ms,
+        "camera_open_ms": timing.camera_open_ms,
+        "tile_motion": workspace_timing_distribution(&timing.tile_motion_ms),
+        "tile_capture": workspace_timing_distribution(&timing.tile_capture_ms),
+        "first_tile_capture_ms": timing.tile_capture_ms.first(),
+        "later_tile_capture": workspace_timing_distribution(
+            timing.tile_capture_ms.get(1..).unwrap_or_default(),
+        ),
+        "tile_artifact": workspace_timing_distribution(&timing.tile_artifact_ms),
+        "tile_mosaic": workspace_timing_distribution(&timing.tile_mosaic_ms),
+        "progress_store": workspace_timing_distribution(&timing.progress_store_ms),
+        "mosaic_finalize_ms": timing.mosaic_finalize_ms,
+        "park_ms": timing.park_ms,
+        "lights_disable_ms": timing.lights_disable_ms,
+    });
+    if let Err(error) = state
+        .machine
+        .record_operation_event("operation.workspace_scan_timing".into(), timing_payload)
+        .await
+    {
+        tracing::warn!(%error, scan_id = %scan.id, "failed to record workspace timing");
     }
     result.map(Some)
 }
@@ -3291,6 +3376,7 @@ async fn capture_and_build_workspace_scan(
     top_path: &str,
     lease_id: Uuid,
     use_lights: bool,
+    timing: &mut WorkspaceScanTiming,
 ) -> Result<String, String> {
     if scan.mode != WorkspaceScanMode::Precision {
         return capture_and_build_workspace_survey(
@@ -3303,6 +3389,7 @@ async fn capture_and_build_workspace_scan(
             top_path,
             lease_id,
             use_lights,
+            timing,
         )
         .await;
     }
@@ -3316,6 +3403,7 @@ async fn capture_and_build_workspace_scan(
         top_path,
         lease_id,
         use_lights,
+        timing,
     )
     .await
 }
@@ -3331,43 +3419,51 @@ async fn capture_and_build_precision_workspace_scan(
     top_path: &str,
     lease_id: Uuid,
     use_lights: bool,
+    timing: &mut WorkspaceScanTiming,
 ) -> Result<String, String> {
     if use_lights {
-        state
-            .machine
-            .actuate(lease_id, "lights".into(), true)
-            .await
-            .map_err(|error| error.to_string())?;
+        let started = Instant::now();
+        let result = state.machine.actuate(lease_id, "lights".into(), true).await;
+        timing.lights_enable_ms += elapsed_ms(started);
+        result.map_err(|error| error.to_string())?;
     }
     let mut frames = vec![None; plan.tiles.len()];
     let feed_mm_per_min = scan.feed_mm_per_min;
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     for (capture_index, tile) in capture_sequence.into_iter().enumerate() {
-        state
+        let motion_started = Instant::now();
+        let motion_result = state
             .machine
             .jog(lease_id, tile.nominal_pose.into(), feed_mm_per_min)
-            .await
-            .map_err(|error| error.to_string())?;
+            .await;
+        timing.tile_motion_ms.push(elapsed_ms(motion_started));
+        motion_result.map_err(|error| error.to_string())?;
         let mut capture_profile = top_profile.clone();
         if capture_index > 0 {
             capture_profile.settle_frames = capture_profile
                 .settle_frames
                 .min(WORKSPACE_PRECISION_SETTLE_FRAMES);
         }
-        let frame = capture_profiled_frames(state, &capture_profile, top_path, 1)
-            .await
+        let capture_started = Instant::now();
+        let capture_result = capture_profiled_frames(state, &capture_profile, top_path, 1).await;
+        timing.tile_capture_ms.push(elapsed_ms(capture_started));
+        let frame = capture_result
             .map_err(|error| error.message)?
             .pop()
             .ok_or_else(|| "top camera returned no workspace frame".to_string())?;
+        let artifact_started = Instant::now();
         persist_workspace_tile_artifact(state, scan, tile, &frame, None)?;
+        timing.tile_artifact_ms.push(elapsed_ms(artifact_started));
         frames[tile.index as usize] = Some(frame);
         scan.captured_tiles += 1;
         scan.updated_at = Utc::now();
+        let progress_started = Instant::now();
         state
             .store
             .put_workspace_scan(scan)
             .map_err(|error| error.to_string())?;
+        timing.progress_store_ms.push(elapsed_ms(progress_started));
     }
     let frames = frames
         .into_iter()
@@ -3386,6 +3482,7 @@ async fn capture_and_build_precision_workspace_scan(
             installed_camera_model.clone(),
         ));
     }
+    let finalize_started = Instant::now();
     let (mosaics, parallax) = tokio::task::spawn_blocking(move || {
         let parallax = parallax_installed_model
             .as_ref()
@@ -3419,7 +3516,9 @@ async fn capture_and_build_precision_workspace_scan(
         parallax.as_ref(),
     )
     .await?;
-    complete_workspace_mosaics(state, scan, mosaics, parallax, height_artifacts)
+    let result = complete_workspace_mosaics(state, scan, mosaics, parallax, height_artifacts);
+    timing.mosaic_finalize_ms += elapsed_ms(finalize_started);
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3433,13 +3532,13 @@ async fn capture_and_build_workspace_survey(
     top_path: &str,
     lease_id: Uuid,
     use_lights: bool,
+    timing: &mut WorkspaceScanTiming,
 ) -> Result<String, String> {
     if use_lights {
-        state
-            .machine
-            .actuate(lease_id, "lights".into(), true)
-            .await
-            .map_err(|error| error.to_string())?;
+        let started = Instant::now();
+        let result = state.machine.actuate(lease_id, "lights".into(), true).await;
+        timing.lights_enable_ms += elapsed_ms(started);
+        result.map_err(|error| error.to_string())?;
     }
     let transient_sources =
         if scan.artifact_retention == WorkspaceArtifactRetention::TransientSources {
@@ -3450,7 +3549,10 @@ async fn capture_and_build_workspace_survey(
     let _capture_guard = state.camera_capture_lock.lock().await;
     let updates = profile_control_updates(top_profile);
     let config = camera_capture_config(top_profile, top_path.to_owned());
-    let mut session = Some(open_persistent_workspace_camera_with_retry(&config, &updates).await?);
+    let camera_open_started = Instant::now();
+    let camera_open = open_persistent_workspace_camera_with_retry(&config, &updates).await;
+    timing.camera_open_ms += elapsed_ms(camera_open_started);
+    let mut session = Some(camera_open?);
     let primary_stream = if scan.mode == WorkspaceScanMode::Reconnaissance {
         WorkspaceMosaicStream::new_with_seam_diagnostics(plan.clone(), camera_model.clone())
     } else {
@@ -3491,11 +3593,13 @@ async fn capture_and_build_workspace_survey(
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        state
+        let motion_started = Instant::now();
+        let motion_result = state
             .machine
             .jog(lease_id, tile.nominal_pose.into(), feed_mm_per_min)
-            .await
-            .map_err(|error| error.to_string())?;
+            .await;
+        timing.tile_motion_ms.push(elapsed_ms(motion_started));
+        motion_result.map_err(|error| error.to_string())?;
         let fresh_after = if scan.mode == WorkspaceScanMode::Reconnaissance && capture_index > 0 {
             let guard = Duration::from_secs_f64(
                 f64::from(RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES)
@@ -3517,7 +3621,8 @@ async fn capture_and_build_workspace_survey(
                 .settle_frames
                 .min(WORKSPACE_SURVEY_SETTLE_FRAMES)
         };
-        let capture = capture_persistent_workspace_frame(
+        let capture_started = Instant::now();
+        let capture_result = capture_persistent_workspace_frame(
             &mut session,
             &config,
             &updates,
@@ -3525,7 +3630,9 @@ async fn capture_and_build_workspace_survey(
             top_profile.settle_frames,
             fresh_after,
         )
-        .await?;
+        .await;
+        timing.tile_capture_ms.push(elapsed_ms(capture_started));
+        let capture = capture_result?;
         scan.discarded_capture_frames = scan
             .discarded_capture_frames
             .saturating_add(capture.metadata.settle_frames);
@@ -3533,8 +3640,11 @@ async fn capture_and_build_workspace_survey(
             scan.timestamp_fresh_frames = scan.timestamp_fresh_frames.saturating_add(1);
         }
         let frame = capture.frame;
+        let artifact_started = Instant::now();
         persist_workspace_tile_artifact(state, scan, tile, &frame, transient_sources.as_ref())?;
+        timing.tile_artifact_ms.push(elapsed_ms(artifact_started));
 
+        let mosaic_started = Instant::now();
         let mut active_streams = streams
             .take()
             .ok_or_else(|| "workspace mosaic streams are unavailable".to_string())?;
@@ -3560,6 +3670,7 @@ async fn capture_and_build_workspace_survey(
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
+        timing.tile_mosaic_ms.push(elapsed_ms(mosaic_started));
         streams = Some(returned_streams);
         parallax_stream = returned_parallax_stream;
 
@@ -3569,12 +3680,15 @@ async fn capture_and_build_workspace_survey(
             || scan.captured_tiles % WORKSPACE_PROGRESS_TILE_INTERVAL == 0
             || scan.captured_tiles == scan.planned_tiles
         {
+            let progress_started = Instant::now();
             state
                 .store
                 .put_workspace_scan(scan)
                 .map_err(|error| error.to_string())?;
+            timing.progress_store_ms.push(elapsed_ms(progress_started));
         }
     }
+    let finalize_started = Instant::now();
     drop(session.take());
     let streams = streams
         .take()
@@ -3614,7 +3728,9 @@ async fn capture_and_build_workspace_survey(
         )
         .await?
     };
-    complete_workspace_mosaics(state, scan, mosaics, parallax, height_artifacts)
+    let result = complete_workspace_mosaics(state, scan, mosaics, parallax, height_artifacts);
+    timing.mosaic_finalize_ms += elapsed_ms(finalize_started);
+    result
 }
 
 async fn build_retained_workspace_height_artifacts(
@@ -29624,6 +29740,28 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
     use velocitypnp_driver::SimulatorDriver;
+
+    #[test]
+    fn workspace_timing_distribution_reports_bounded_summary() {
+        let summary = workspace_timing_distribution(&[4.0, 1.0, 3.0, 2.0]);
+
+        assert_eq!(summary["count"], 4);
+        assert_eq!(summary["total_ms"], 10.0);
+        assert_eq!(summary["mean_ms"], 2.5);
+        assert_eq!(summary["p95_ms"], 4.0);
+        assert_eq!(summary["maximum_ms"], 4.0);
+    }
+
+    #[test]
+    fn empty_workspace_timing_distribution_has_null_samples() {
+        let summary = workspace_timing_distribution(&[]);
+
+        assert_eq!(summary["count"], 0);
+        assert_eq!(summary["total_ms"], 0.0);
+        assert!(summary["mean_ms"].is_null());
+        assert!(summary["p95_ms"].is_null());
+        assert!(summary["maximum_ms"].is_null());
+    }
 
     fn held_part_report(width_mm: f64, length_mm: f64) -> HeldPartInspectionReport {
         HeldPartInspectionReport {

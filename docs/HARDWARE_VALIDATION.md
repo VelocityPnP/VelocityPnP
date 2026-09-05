@@ -3079,6 +3079,105 @@ No machine motion occurred. After restart, the API reported the machine as
 disconnected, not homed, with no lease and no active calibration revision.
 See `docs/baselines/placement-verification-v2.json` for the complete baseline.
 
+### Speed-indexed direction response and carried transit
+
+On 2026-09-05, the connected LumenPnP V3.0.2 reported a 30,000 mm/min
+controller limit on X and Y, 2,000 mm/s2 maximum axis acceleration, and 1,000
+mm/s2 travel acceleration. X and Y use 64 microsteps with interpolation and
+StealthChop enabled. These controller limits are not validated mechanical
+limits.
+
+A clear-XY camera-return sweep passed at 1,200, 3,000, 6,000, 9,000, and
+12,000 mm/min. The maximum return errors were 0.01518, 0.02076, 0.01695,
+0.01769, and 0.01231 mm. The worst stationary pairwise error was 0.00166 mm.
+
+The speed-indexed direction runner then captured X and Y arrival response from
+both sides. Each condition used three paired observations at 5 and 25 mm and a
+separate holdout pair. The table gives the stored primary-axis compensation
+for negative and positive arrival, the raw direction gap, and the independent
+holdout gap. All values are in millimeters.
+
+| Feed | X neg | X pos | X gap | X holdout | Y neg | Y pos | Y gap | Y holdout |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 300 | -0.00029 | -0.05149 | 0.05119 | 0.00519 | +0.01741 | -0.05479 | 0.07220 | 0.01283 |
+| 1,200 | -0.00640 | -0.04688 | 0.04048 | 0.00822 | +0.00707 | -0.04417 | 0.05124 | 0.01020 |
+| 3,000 | -0.00676 | -0.04580 | 0.03904 | 0.00615 | +0.00726 | -0.05135 | 0.05861 | 0.00766 |
+| 6,000 | -0.01336 | -0.04178 | 0.02842 | 0.00724 | -0.00693 | -0.04201 | 0.03508 | 0.00125 |
+| 9,000 | -0.01473 | -0.04395 | 0.02922 | 0.00930 | -0.00883 | -0.04336 | 0.03453 | 0.00227 |
+| 12,000 | -0.01435 | -0.04325 | 0.02891 | 0.00490 | -0.00981 | -0.04521 | 0.03541 | 0.00164 |
+
+The worst absolute holdout residual was 0.01505 mm. All 12 speed and axis
+conditions passed the 0.05 mm limit. Artifact
+`local_xy_direction_response.v3`, stored in calibration
+`3b837434-a961-4e60-945a-18335b42d21f`, keeps the complete two-axis vectors.
+The motion planner applies a vector only at its exact feed, axis, and arrival
+side. It does not interpolate or extrapolate.
+
+Fine-home operation `b4e73459-9d7a-4c8c-a249-ef420a355101` passed with N2.
+It reset the measured datum contact from nozzle Z59.200 to Z59.100. Fine home
+used the fixed negative-X and negative-Y 300 mm/min datum approach. It removed
+the stored approach response before it applied the camera home correction.
+
+Live pocket holdout `ecd563e5-1733-4c9b-8c6f-6569ded11159` passed at feeder 1
+pocket 10. It found four sprocket centers and measured X+0.08757 and Y-0.55973
+mm correction. The total correction was 0.56654 mm. The pocket was occupied
+at 0.788 confidence.
+
+N1 pickup-return qualification `c75ac060-3850-48c6-a9bb-838793fdd224`
+passed with an N045 tip and algorithm `strip_feeder_pickup.v7`. Clear and
+carried transit both used 12,000 mm/min. Vacuum was acquired at nozzle Z4.100
+and remained held after transfer. The held median was 228. Bottom vision
+finished with a 0.04795 mm center residual. The first release attempt cleared
+the nozzle. Top vision found the returned 1206 part in pocket 10 with a
+0.00460 mm center shift. The pocket remains occupied and available.
+
+The full pickup-return operation took 180.5 seconds. Its motion totals were:
+
+| Feed (mm/min) | Moves | Distance (mm) | Actual (s) | Ideal (s) |
+| ---: | ---: | ---: | ---: | ---: |
+| 60 | 14 | 1.400 | 2.040 | 1.400 |
+| 300 | 11 | 430.736 | 87.335 | 86.147 |
+| 12,000 | 6 | 839.597 | 6.018 | 4.198 |
+
+The two carried 134 mm legs took 0.974 and 0.975 seconds. Their constant-speed
+times were 0.671 and 0.673 seconds. Camera capture, vacuum and light waits,
+and analysis used about 85 seconds of the operation. This trace makes the next
+work clear: reduce safe precision, camera-settle, and actuator delays with
+separate evidence.
+
+One-row survey `c8277770-ca0f-4f45-a291-420371e224a7`, operation
+`ebd0feb4-65ce-4ae4-adde-6c6bdf995086`, then measured the scan path. It
+covered X200 through X280 mm and Y180 through Y181 mm. It captured all 10
+tiles at 1,200 mm/min in 27.37 seconds, against a 39-second estimate. The
+mosaic had full coverage. Four of nine overlap registrations passed.
+Calibrated machine placement supplied the other five, so registration quality
+did not pass as strongly as capture coverage.
+
+The 10 tile moves covered 85.317 mm in 5.457 seconds. The final 54.791 mm
+datum park used 300 mm/min and took 11.063 seconds. The first capture started
+7.514 seconds after its tile move completed. Later tile cycles used about
+0.30 seconds outside motion. The survey discarded 96 frames: 60 before its
+first accepted frame and four after each of the other nine moves. At the
+configured 10 FPS, the first-settle policy alone has a nominal six-second
+cost.
+
+Source instrumentation now adds one ordered
+`operation.workspace_scan_timing` event per scan. It records camera open,
+first and later tile capture distributions, tile motion, artifact storage,
+mosaic work, progress storage, finalization, parking, light control, and total
+time. Machine actuator and sensor events also record elapsed time. These new
+fields passed automated tests but were not deployed for the physical row. Its
+measurements came from operation timestamps, motion events, and capture frame
+counts.
+
+A real guarded PCB placement remains deferred until a board-compatible part
+is available. Do not use a 1206 pickup-return test as proof of PCB approach,
+contact, release, or post-placement timing.
+
+The machine ended ready, homed, fault-free, at X220.131, Y190.271, and
+Z31.500. Calibration revision
+`3b837434-a961-4e60-945a-18335b42d21f` remained active.
+
 ### Session closeout
 
 The web test, TypeScript check, and production build passed with Node 22.23.2

@@ -184,6 +184,21 @@ impl MachineHandle {
         .await
     }
 
+    /// Adds internal operation evidence to the ordered machine event stream.
+    /// This is not exposed as a client-controlled machine command.
+    pub async fn record_operation_event(
+        &self,
+        kind: String,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        request(&self.tx, |reply| Command::RecordOperationEvent {
+            kind,
+            payload,
+            reply,
+        })
+        .await
+    }
+
     pub async fn apply_visual_homing_offset(&self, lease_id: Uuid) -> Result<Pose> {
         request(&self.tx, |reply| Command::ApplyVisualHomingOffset {
             lease_id,
@@ -287,6 +302,11 @@ enum Command {
         lease_id: Uuid,
         sensor_id: String,
         reply: oneshot::Sender<Result<SensorReading>>,
+    },
+    RecordOperationEvent {
+        kind: String,
+        payload: serde_json::Value,
+        reply: oneshot::Sender<Result<()>>,
     },
     ApplyVisualHomingOffset {
         lease_id: Uuid,
@@ -418,6 +438,14 @@ impl MachineActor {
                     reply,
                 } => {
                     let _ = reply.send(self.read_sensor(lease_id, sensor_id).await);
+                }
+                Command::RecordOperationEvent {
+                    kind,
+                    payload,
+                    reply,
+                } => {
+                    self.emit(&kind, payload);
+                    let _ = reply.send(Ok(()));
                 }
                 Command::ApplyVisualHomingOffset { lease_id, reply } => {
                     let _ = reply.send(self.apply_visual_homing_offset(lease_id).await);
@@ -796,10 +824,15 @@ impl MachineActor {
         {
             bail!("actuator {actuator_id} is not present in the active profile");
         }
+        let started = Instant::now();
         self.driver.actuate(&actuator_id, enabled).await?;
         self.emit(
             "machine.actuator",
-            json!({"actuator_id": actuator_id, "enabled": enabled}),
+            json!({
+                "actuator_id": actuator_id,
+                "enabled": enabled,
+                "elapsed_ms": started.elapsed().as_secs_f64() * 1_000.0,
+            }),
         );
         Ok(())
     }
@@ -819,6 +852,7 @@ impl MachineActor {
         if self.status().state == MachineState::Disconnected {
             return Ok(());
         }
+        let started = Instant::now();
         if let Err(error) = self.driver.actuate(&actuator_id, false).await {
             let message = format!("failed to disable actuator {actuator_id}: {error}");
             self.set_fault("actuator_disable_failed", message.clone(), true);
@@ -830,6 +864,7 @@ impl MachineActor {
                 "actuator_id": actuator_id,
                 "enabled": false,
                 "fail_safe": true,
+                "elapsed_ms": started.elapsed().as_secs_f64() * 1_000.0,
             }),
         );
         Ok(())
@@ -850,13 +885,20 @@ impl MachineActor {
             .find(|sensor| sensor.id == sensor_id)
             .cloned()
             .with_context(|| format!("sensor {sensor_id} is not present in the active profile"))?;
+        let started = Instant::now();
         let reading = SensorReading {
             raw_value: self.driver.read_sensor(&sensor_id).await?,
             sensor_id,
             unit: sensor.unit,
             observed_at: Utc::now(),
         };
-        self.emit("machine.sensor", json!({"reading": reading}));
+        self.emit(
+            "machine.sensor",
+            json!({
+                "reading": reading,
+                "elapsed_ms": started.elapsed().as_secs_f64() * 1_000.0,
+            }),
+        );
         Ok(reading)
     }
 
@@ -1057,6 +1099,26 @@ mod tests {
         assert!(handle.status().controller.is_none());
     }
 
+    #[tokio::test]
+    async fn internal_operation_event_uses_ordered_machine_stream() {
+        let profile = profile();
+        let handle = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile,
+        );
+        let mut events = handle.subscribe();
+
+        handle
+            .record_operation_event("operation.test_timing".into(), json!({"elapsed_ms": 12.5}))
+            .await
+            .unwrap();
+
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.sequence, 1);
+        assert_eq!(event.kind, "operation.test_timing");
+        assert_eq!(event.payload["elapsed_ms"], 12.5);
+    }
+
     struct PhysicalPoseDriver;
 
     #[async_trait]
@@ -1235,6 +1297,7 @@ mod tests {
         handle.complete_preflight(true).await.unwrap();
         let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
         handle.home(lease.id, true).await.unwrap();
+        let mut events = handle.subscribe();
         assert_eq!(
             handle
                 .read_sensor(lease.id, "vacuum_1".into())
@@ -1255,6 +1318,17 @@ mod tests {
                 .raw_value,
             -5
         );
+        let events = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        let actuator = events
+            .iter()
+            .find(|event| event.kind == "machine.actuator")
+            .unwrap();
+        let sensor = events
+            .iter()
+            .find(|event| event.kind == "machine.sensor")
+            .unwrap();
+        assert!(actuator.payload["elapsed_ms"].as_f64().unwrap() >= 0.0);
+        assert!(sensor.payload["elapsed_ms"].as_f64().unwrap() >= 0.0);
     }
 
     #[tokio::test]

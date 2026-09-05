@@ -5,11 +5,13 @@ vision session. Verify live state again before each new session.
 
 ## Live state
 
-- The physical daemon listens on `0.0.0.0:4080` and uses `velocitypnp.db`.
-- The API reports the machine as disconnected, not homed, with no control
-  lease and no active calibration revision.
-- A motion session must connect, run preflight, acquire a lease, run standard
-  XYZ home, and run fine XYZ home before precision work.
+- The release physical daemon listens on `127.0.0.1:4080` and uses
+  `velocitypnp.db`.
+- At 22:23 UTC, the API reported the machine ready, homed, fault-free, and at
+  X220.131, Y190.271, Z31.500. Its calibration revision was
+  `3b837434-a961-4e60-945a-18335b42d21f`.
+- Control lease `fdc48cb3-f3b5-4c1a-be80-6def86ca898b` expires at 23:22 UTC.
+  Verify that it is still active before more motion.
 - Do not infer that the machine is safe from this document. Get a new operator
   confirmation before motion.
 - The daemon reports all three learned models as ready.
@@ -63,15 +65,45 @@ It stops speed escalation when a return differs from the baseline by more than
 
 Continue the performance work with measurement:
 
-1. Capture X and Y response from both directions at every qualified transit
-   feed. Each exact condition must pass an independent 0.05 mm holdout.
-2. Run fine home with its fixed negative-X and negative-Y datum approach.
-3. Run a 1206 pickup-return qualification at 12,000 mm/min clear and carried
-   transit.
-4. Measure camera-settle time and actuator wait time for one guarded placement
-   and one scan row.
-5. Validate controlled stop and reconnect. Use emergency stop only for an
-   actual emergency.
+The 2026-09-05 measured pass completed these items:
+
+1. X and Y response from both directions passed at 300, 1,200, 3,000, 6,000,
+   9,000, and 12,000 mm/min. Each condition used three training pairs and an
+   independent holdout. The worst holdout direction gap was 0.01283 mm. The
+   worst absolute holdout residual was 0.01505 mm.
+2. Fine-home operation `b4e73459-9d7a-4c8c-a249-ef420a355101` passed. It used
+   the fixed negative-X and negative-Y approach and removed the stored 300
+   mm/min datum-approach response from the home correction.
+3. Live holdout `ecd563e5-1733-4c9b-8c6f-6569ded11159` passed at pocket 10.
+   Pickup-return qualification `c75ac060-3850-48c6-a9bb-838793fdd224` then
+   passed with N1 at 12,000 mm/min clear and carried transit. The 1206 part was
+   returned to pocket 10, which remains occupied and available.
+4. One-row survey `c8277770-ca0f-4f45-a291-420371e224a7` captured all 10
+   planned tiles in 27.37 seconds at 1,200 mm/min. It produced full coverage.
+   Four of nine overlap registrations passed; calibrated placement supplied
+   the other five.
+
+The pickup-return operation took 180.5 seconds. Its six fast moves covered
+839.6 mm in 6.02 seconds. Precision moves at 300 mm/min took 87.33 seconds.
+Camera, vacuum, light, and analysis work used about 85 seconds. More transit
+speed is not the first target for this qualification path.
+
+The scan used 5.46 seconds for tile motion and 11.06 seconds for its final
+300 mm/min park. The first capture waited 7.51 seconds after motion. Later
+tile cycles used about 0.30 seconds outside motion. The camera profile discards
+60 frames for its first capture and four frames after each later move.
+
+New source instrumentation writes one `operation.workspace_scan_timing` event
+per scan. It separates camera open, first and later captures, tile motion,
+artifact storage, mosaic work, progress storage, finalization, parking, and
+light control. Actuator and sensor events now include elapsed time. The active
+physical daemon does not contain this uncommitted build and must not be treated
+as proof of the new timing event.
+
+Defer a normal guarded placement until a board-compatible component is
+available. Next, use the new timing event in simulation or after a controlled
+daemon restart. Then validate a controlled stop and reconnect. Use emergency
+stop only for an actual emergency.
 
 The main code locations are:
 
