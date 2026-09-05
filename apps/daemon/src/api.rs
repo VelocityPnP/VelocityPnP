@@ -8004,6 +8004,7 @@ async fn start_strip_feeder_live_holdout(
         updated_at: now,
         sample_count: body.sample_count,
         pocket_index: pocket_index as u32,
+        requested_pocket_only: body.pocket_index.is_some(),
         predicted_pocket_machine_mm,
         report: None,
         message: None,
@@ -8387,11 +8388,12 @@ async fn measure_strip_feeder_live_holdout(
         camera_poses.extend(std::iter::repeat_n(measured_pose, captured.len()));
         frames.extend(captured);
     }
+    let tape_pitch_mm = registration.tape_pitch_mm;
     let registration = registration.clone();
     let camera_model = camera_model.clone();
     let predicted = run.predicted_pocket_machine_mm;
     let retained_step = run.sample_count.max(1) as usize;
-    let (analysis, retained_frames) = tokio::task::spawn_blocking(move || {
+    let (mut analysis, retained_frames) = tokio::task::spawn_blocking(move || {
         let analysis = analyze_live_strip_feeder_holdout(
             &frames,
             &camera_poses,
@@ -8418,6 +8420,13 @@ async fn measure_strip_feeder_live_holdout(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
+    if run.requested_pocket_only {
+        enforce_requested_holdout_pocket(
+            &mut analysis.report,
+            run.predicted_pocket_machine_mm,
+            tape_pitch_mm,
+        );
+    }
     let encoded = encode_rgb_png(&analysis.preview).map_err(|error| error.to_string())?;
     state
         .store
@@ -8438,6 +8447,40 @@ async fn measure_strip_feeder_live_holdout(
         report.source_frame_camera_poses.push(pose);
     }
     Ok(report)
+}
+
+fn enforce_requested_holdout_pocket(
+    report: &mut velocitypnp_domain::StripFeederLiveHoldoutReport,
+    requested_pocket_machine_mm: [f64; 2],
+    tape_pitch_mm: f64,
+) {
+    let selected_offset_mm = (report.predicted_pocket_machine_mm[0]
+        - requested_pocket_machine_mm[0])
+        .hypot(report.predicted_pocket_machine_mm[1] - requested_pocket_machine_mm[1]);
+    if selected_holdout_matches_request(
+        report.predicted_pocket_machine_mm,
+        requested_pocket_machine_mm,
+        tape_pitch_mm,
+    ) {
+        return;
+    }
+    report.passed = false;
+    report
+        .findings
+        .retain(|finding| !finding.contains("passed the live holdout"));
+    report.findings.push(format!(
+        "the live holdout selected a pocket {selected_offset_mm:.3} mm from the explicitly requested pocket",
+    ));
+}
+
+fn selected_holdout_matches_request(
+    selected_pocket_machine_mm: [f64; 2],
+    requested_pocket_machine_mm: [f64; 2],
+    tape_pitch_mm: f64,
+) -> bool {
+    (selected_pocket_machine_mm[0] - requested_pocket_machine_mm[0])
+        .hypot(selected_pocket_machine_mm[1] - requested_pocket_machine_mm[1])
+        <= 0.45 * tape_pitch_mm
 }
 
 async fn get_strip_feeder_live_holdout(
@@ -31393,6 +31436,25 @@ mod tests {
         assert!(source_empty_observation_is_confirmed(
             true,
             StripPocketOccupancy::Empty,
+        ));
+    }
+
+    #[test]
+    fn explicit_live_holdout_rejects_a_neighbor_pocket() {
+        assert!(selected_holdout_matches_request(
+            [130.0, 150.0],
+            [130.0, 150.0],
+            4.0,
+        ));
+        assert!(selected_holdout_matches_request(
+            [130.3, 149.7],
+            [130.0, 150.0],
+            4.0,
+        ));
+        assert!(!selected_holdout_matches_request(
+            [130.0, 154.0],
+            [130.0, 150.0],
+            4.0,
         ));
     }
 

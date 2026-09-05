@@ -1080,7 +1080,9 @@ occupied pocket. If the requested pocket has strong occupied evidence, it is
 kept even when a visible neighbor has a stronger response. A neighbor is used
 only when the requested pocket is not occupied. The pickup operation measures
 the component center again in a fresh top-camera image immediately before
-nozzle motion.
+nozzle motion. When the API request names a pocket index, a neighbor cannot
+satisfy that request. A neighbor selection fails the explicit holdout and
+cannot change the named pocket's persistent state.
 
 The persistent report gives predicted and measured machine coordinates. Its
 PNG marks expected sprocket lines in yellow, the expected pocket centerline in

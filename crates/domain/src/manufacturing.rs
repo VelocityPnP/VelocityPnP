@@ -525,6 +525,9 @@ pub struct StripFeederLiveHoldoutRun {
     pub sample_count: u32,
     #[serde(default)]
     pub pocket_index: u32,
+    /// True when the caller named a pocket and neighbor fallback is invalid.
+    #[serde(default)]
+    pub requested_pocket_only: bool,
     pub predicted_pocket_machine_mm: [f64; 2],
     #[serde(default)]
     pub report: Option<StripFeederLiveHoldoutReport>,

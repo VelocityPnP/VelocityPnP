@@ -2973,6 +2973,27 @@ Feeder 5 has no available parts, feeder 8 was previously exhausted, and no
 further board-compatible placement source is available without operator
 loading.
 
+### Feeder 5 exact-pocket recovery
+
+On 2026-09-05, standard home `f49b9b33-a15c-4dbe-872d-284f2c68f069`
+and fine XYZ home `9aa090a5-5a2e-48fd-a451-08c19e1b5015` passed. Fine
+home reset the measured N2 datum contact from Z59.000 to Z59.100.
+
+Five-view holdouts checked the component-bearing end of feeder 5. Pocket 10
+was selected at 57% occupancy confidence, but it remains under review because
+the earlier source model and vacuum check both rejected it. Pocket 12 passed
+at 94% confidence. Pocket 13 passed at 96% confidence.
+
+The pocket 11 request selected a component two tape pitches away at pocket 9.
+Its 80% confidence therefore described pocket 9, not pocket 11. The retained
+pocket 14 center frame clearly shows a resistor, but its holdout failed because
+the tape end did not provide the required three-hole sprocket lattice.
+
+The recovered inventory records pockets 9, 12, 13, and 14 as occupied. Pockets
+10 and 11 remain under review. The active feeder count is four. This run also
+showed that an explicit pocket request must not accept a visible neighbor as
+its result.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
