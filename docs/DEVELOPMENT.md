@@ -1518,6 +1518,21 @@ draft manifest. Outcome records provide weak label proposals only. Review all
 states and outlines before finalization. A `stacked` outcome proposes one flat
 part before contact and multiple parts after contact.
 
+After review and finalization, merge the new execution data with the earlier
+reviewed survey:
+
+```bash
+python python/tools/merge_placement_verification_datasets.py \
+  datasets/placement-verification-v2/merged \
+  datasets/placement-verification-v1/review-corrected \
+  datasets/placement-verification-v2/review-executions
+```
+
+The merge keeps source capture groups together. It also keeps all images for
+one board reference in one split, including images from different sessions.
+Evaluation membership propagates through these links. This prevents a view of
+the same physical target from becoming a near-copy across both splits.
+
 Training augmentation uses small scale and crop-registration changes, target-
 axis-preserving flips, bounded brightness and contrast, mild gamma and focus
 changes, and sensor noise. Do not rotate the complete crop by an arbitrary
