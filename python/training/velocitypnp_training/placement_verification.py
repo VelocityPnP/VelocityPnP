@@ -207,6 +207,40 @@ def placement_dataset_summary(root: Path) -> dict[str, Any]:
     }
 
 
+def placement_sampling_weights(
+    samples: list[PlacementSample], angle_bins: int = 4
+) -> list[float]:
+    """Balance states and the flat-part axis without synthetic rotation."""
+
+    if angle_bins < 2:
+        raise ValueError("placement sampling needs at least two angle bins")
+    class_counts = Counter(sample.class_id for sample in samples)
+    flat_bins: dict[str, int] = {}
+    for sample in samples:
+        if sample.class_id != PLACEMENT_CLASS_NAMES.index("component_flat"):
+            continue
+        if sample.outline_px is None:
+            raise ValueError(f"flat sample {sample.sample_id} has no outline")
+        pose = polygon_to_pose(np.asarray(sample.outline_px), 1)
+        theta = 0.5 * math.atan2(float(pose[5]), float(pose[4]))
+        bin_id = int(
+            ((theta + math.pi / (2 * angle_bins)) % math.pi)
+            / (math.pi / angle_bins)
+        )
+        flat_bins[sample.sample_id] = bin_id
+    flat_bin_counts = Counter(flat_bins.values())
+    weights = []
+    for sample in samples:
+        if sample.sample_id in flat_bins:
+            weight = 1.0 / (
+                len(flat_bin_counts) * flat_bin_counts[flat_bins[sample.sample_id]]
+            )
+        else:
+            weight = 1.0 / class_counts[sample.class_id]
+        weights.append(weight)
+    return weights
+
+
 class PlacementDataset(Dataset):
     """Torch dataset for reviewed, target-normalized placement images."""
 

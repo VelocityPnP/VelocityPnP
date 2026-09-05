@@ -20,9 +20,11 @@ from .placement_verification import (
     PLACEMENT_CLASS_NAMES,
     PlacementDataset,
     PlacementModelConfig,
+    PlacementSample,
     PlacementVerificationModel,
     load_placement_samples,
     placement_dataset_summary,
+    placement_sampling_weights,
 )
 
 __all__ = [
@@ -42,7 +44,9 @@ __all__ = [
     "PLACEMENT_CLASS_NAMES",
     "PlacementDataset",
     "PlacementModelConfig",
+    "PlacementSample",
     "PlacementVerificationModel",
     "load_placement_samples",
     "placement_dataset_summary",
+    "placement_sampling_weights",
 ]

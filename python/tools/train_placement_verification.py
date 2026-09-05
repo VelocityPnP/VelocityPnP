@@ -34,6 +34,7 @@ from velocitypnp_training import (  # noqa: E402
     PlacementModelConfig,
     PlacementVerificationModel,
     placement_dataset_summary,
+    placement_sampling_weights,
 )
 from velocitypnp_training.placement_evaluation import (  # noqa: E402
     evaluate_placements,
@@ -102,8 +103,7 @@ def configure_determinism(seed: int) -> None:
 def balanced_sampler(
     dataset: PlacementDataset, seed: int
 ) -> WeightedRandomSampler:
-    counts = Counter(sample.class_id for sample in dataset.samples)
-    weights = [1.0 / counts[sample.class_id] for sample in dataset.samples]
+    weights = placement_sampling_weights(dataset.samples)
     return WeightedRandomSampler(
         weights,
         num_samples=len(dataset),

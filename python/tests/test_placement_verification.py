@@ -19,8 +19,10 @@ if torch is not None:
     from velocitypnp_training import (
         PlacementDataset,
         PlacementModelConfig,
+        PlacementSample,
         PlacementVerificationModel,
         placement_dataset_summary,
+        placement_sampling_weights,
     )
 
 
@@ -127,6 +129,50 @@ class PlacementVerificationTests(unittest.TestCase):
         torch.testing.assert_close(
             torch.linalg.norm(pose[:, 4:], dim=1), torch.ones(2)
         )
+
+    def test_sampling_balances_flat_angle_bins(self):
+        samples = [
+            PlacementSample(
+                sample_id="empty",
+                split="train",
+                group_id="empty",
+                image_path=Path("empty.png"),
+                class_id=0,
+                outline_px=None,
+                reference="R1",
+                package="R0603",
+                target_machine_mm=(0.0, 0.0),
+            ),
+            *[
+                PlacementSample(
+                    sample_id=f"horizontal-{index}",
+                    split="train",
+                    group_id=f"horizontal-{index}",
+                    image_path=Path("flat.png"),
+                    class_id=1,
+                    outline_px=((0, 0), (20, 0), (20, 10), (0, 10)),
+                    reference="R2",
+                    package="R0603",
+                    target_machine_mm=(0.0, 0.0),
+                )
+                for index in range(2)
+            ],
+            PlacementSample(
+                sample_id="vertical",
+                split="train",
+                group_id="vertical",
+                image_path=Path("flat.png"),
+                class_id=1,
+                outline_px=((0, 0), (0, 20), (-10, 20), (-10, 0)),
+                reference="R3",
+                package="R0603",
+                target_machine_mm=(0.0, 0.0),
+            ),
+        ]
+
+        weights = placement_sampling_weights(samples)
+
+        self.assertEqual(weights, [1.0, 0.25, 0.25, 0.5])
 
 
 if __name__ == "__main__":
