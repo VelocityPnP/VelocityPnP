@@ -1530,6 +1530,21 @@ keeps annotated training and evaluation sheets. Model output remains
 non-authoritative until independent sessions cover all condition classes and
 calibrate acceptance thresholds.
 
+Verify that ONNX export matches the selected PyTorch checkpoint:
+
+```bash
+DATASET=datasets/placement-verification-v1/review-current
+MODEL="$DATASET/training/placement-verification-v1"
+python python/tools/verify_placement_verification.py \
+  "$DATASET" \
+  "$MODEL/best.pt" "$MODEL/best.onnx" \
+  --report "$MODEL/onnx-parity.json"
+```
+
+The first reviewed run is recorded in
+`docs/baselines/placement-verification-v1.json`. It is a shadow-only baseline.
+Its small, single-session evaluation set is not an acceptance threshold.
+
 Raw captures and normalized samples are below `datasets/`, which Git ignores.
 Keep them across restarts. Their image hashes and registration IDs provide the
 source identity needed for later grouped train and evaluation splits.

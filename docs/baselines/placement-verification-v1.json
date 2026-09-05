@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "run": "placement-verification-v1-balanced",
+  "completed_at": "2026-09-05T01:52:28.318046+00:00",
+  "contract_version": "velocitypnp.placement-verification.v1",
+  "dataset": {
+    "manifest_sha256": "ba1a89fb89779fb311c066babe8123b3721c35e0e05934b49fded822fd18e17b",
+    "content_sha256": "dfda4820736e68a83cb45677201d391accac91a05f4101427fa6ea9301cb4c1d",
+    "train_samples": 35,
+    "evaluation_samples": 5,
+    "train_capture_groups": 18,
+    "evaluation_capture_groups": 3,
+    "train_empty_samples": 26,
+    "train_flat_samples": 9,
+    "evaluation_empty_samples": 3,
+    "evaluation_flat_samples": 2,
+    "on_edge_samples": 0,
+    "multiple_component_samples": 0
+  },
+  "training": {
+    "device": "NVIDIA GB10",
+    "torch": "2.14.0a0+4fdf77b940.nv26.08",
+    "duration_seconds": 58.74057636084035,
+    "parameter_count": 596833,
+    "pretrained_weights": false,
+    "requested_epochs": 240,
+    "completed_epochs": 230,
+    "best_epoch": 180,
+    "early_stopping_patience": 50,
+    "batch_size": 16,
+    "learning_rate": 0.002,
+    "seed": 0
+  },
+  "evaluation_metrics": {
+    "classification_accuracy": 0.8,
+    "occupancy": {
+      "true_positives": 2,
+      "false_positives": 1,
+      "false_negatives": 0,
+      "precision": 0.6666666666666666,
+      "recall": 1.0
+    },
+    "pose": {
+      "mean_center_error_input_px": 1.7369986176490784,
+      "mean_center_error_mm": 0.03618747120102247,
+      "maximum_center_error_mm": 0.053153167168299355,
+      "mean_extent_error_input_px": 1.850938081741333,
+      "mean_angle_error_degrees_mod_180": 6.003350345986317,
+      "mean_oriented_iou": 0.8634380563530699
+    },
+    "known_false_positive": "R8"
+  },
+  "training_metrics": {
+    "classification_accuracy": 0.9714285714285714,
+    "occupancy": {
+      "true_positives": 9,
+      "false_positives": 1,
+      "false_negatives": 0,
+      "precision": 0.9,
+      "recall": 1.0
+    },
+    "pose": {
+      "mean_center_error_mm": 0.04618717122960974,
+      "maximum_center_error_mm": 0.0893652339776357,
+      "mean_angle_error_degrees_mod_180": 11.571521895687509,
+      "mean_oriented_iou": 0.8288534061115624
+    }
+  },
+  "artifacts": {
+    "checkpoint_sha256": "ebc97a07ae278dcd571a43fb4aa227a7d7896882f9160c4c2f04fb2b377512d8",
+    "onnx_sha256": "420a07b36ef55d502f1988454b95ab01732ae1a3b5ccc3c52e52f1f7e6a0e455"
+  },
+  "pytorch_onnx_parity": {
+    "runtime": "onnx.reference",
+    "sample_count": 5,
+    "absolute_tolerance": 0.0001,
+    "maximum_state_log_probability_difference": 9.5367431640625e-07,
+    "maximum_pose_difference": 1.55717134475708e-06,
+    "class_mismatches": 0,
+    "passed": true
+  },
+  "license": {
+    "artifact": "Apache-2.0",
+    "training_code": "Apache-2.0",
+    "training_framework": "BSD-3-Clause"
+  },
+  "limitations": [
+    "The data comes from one machine and one board session.",
+    "The evaluation split is too small for a production gate.",
+    "The data has no on-edge or multiple-component examples.",
+    "The evaluation set contains one empty-target false positive at R8.",
+    "Model output is shadow-only and cannot authorize placement acceptance."
+  ]
+}
