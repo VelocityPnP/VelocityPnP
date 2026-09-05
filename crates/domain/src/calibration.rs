@@ -959,18 +959,17 @@ impl LocalXyAxisEstimate {
         self.sample_pairs >= minimum_pairs.max(5)
     }
 
-    pub fn negative_compensation(&self) -> [f64; 2] {
-        // Remove the common capture offset. Backlash compensation is the
-        // zero-mean half-gap between approach directions, not an absolute
-        // correction to one datum image.
-        [
-            -self.direction_gap_x_mm / 2.0,
-            -self.direction_gap_y_mm / 2.0,
-        ]
-    }
-
-    pub fn positive_compensation(&self) -> [f64; 2] {
-        [self.direction_gap_x_mm / 2.0, self.direction_gap_y_mm / 2.0]
+    pub fn mean_correction(&self, side: ApproachSide) -> [f64; 2] {
+        match side {
+            ApproachSide::Negative => [
+                self.negative_mean_correction_x_mm,
+                self.negative_mean_correction_y_mm,
+            ],
+            ApproachSide::Positive => [
+                self.positive_mean_correction_x_mm,
+                self.positive_mean_correction_y_mm,
+            ],
+        }
     }
 
     pub fn uncompensated_direction_gap_mm(&self) -> f64 {
@@ -991,13 +990,16 @@ pub struct LocalXyCompensationHoldout {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalXyAxisDirectionReport {
+pub struct LocalXyFeedDirectionReport {
+    pub feed_mm_per_min: f64,
     pub estimate: LocalXyAxisEstimate,
     pub stopping_reason: String,
     pub holdout: LocalXyCompensationHoldout,
-    /// False means the measured effect was unresolved or the holdout did not
-    /// improve. In that case both applied vectors are stored as zero.
+    /// True when the independent holdout tested the stored correction.
     pub compensation_enabled: bool,
+    /// True when the independent holdout permits this exact feed in the
+    /// calibrated motion planner.
+    pub qualified: bool,
     pub applied_negative_compensation_x_mm: f64,
     pub applied_negative_compensation_y_mm: f64,
     pub applied_positive_compensation_x_mm: f64,
@@ -1005,7 +1007,17 @@ pub struct LocalXyAxisDirectionReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalXyAxisDirectionReport {
+    pub axis: LinearAxis,
+    pub feeds: Vec<LocalXyFeedDirectionReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalXyDirectionResponseReport {
+    pub datum_x_approach: ApproachSide,
+    pub datum_y_approach: ApproachSide,
+    pub datum_approach_distance_mm: f64,
+    pub datum_approach_feed_mm_per_min: f64,
     pub reference_controller_x_mm: f64,
     pub reference_controller_y_mm: f64,
     pub reference_observed_x_px: f64,
@@ -2033,12 +2045,14 @@ mod tests {
         assert!((estimate.cross_axis_gap_mm - 0.004).abs() < 1e-12);
         assert!(estimate.effect_resolved);
         assert!(estimate.sampling_complete(3, 7, 0.5));
-        assert_eq!(estimate.negative_compensation(), [0.04, 0.002]);
-        assert_eq!(estimate.positive_compensation(), [-0.04, -0.002]);
-        let negative = estimate.negative_compensation();
-        let positive = estimate.positive_compensation();
-        assert_eq!(negative[0] + positive[0], 0.0);
-        assert_eq!(negative[1] + positive[1], 0.0);
+        assert_eq!(
+            estimate.mean_correction(ApproachSide::Negative),
+            [0.04, 0.002]
+        );
+        assert_eq!(
+            estimate.mean_correction(ApproachSide::Positive),
+            [-0.04, -0.002]
+        );
     }
 
     #[test]
@@ -2046,8 +2060,18 @@ mod tests {
         let mut samples = Vec::new();
         for pair in 1..=5 {
             let noise = (f64::from(pair) - 3.0) * 0.002;
-            samples.push(direction_sample(ApproachSide::Negative, pair, noise, 0.0));
-            samples.push(direction_sample(ApproachSide::Positive, pair, noise, 0.0));
+            samples.push(direction_sample(
+                ApproachSide::Negative,
+                pair,
+                0.03 + noise,
+                0.0,
+            ));
+            samples.push(direction_sample(
+                ApproachSide::Positive,
+                pair,
+                0.03 + noise,
+                0.0,
+            ));
         }
 
         let estimate = LocalXyAxisEstimate::from_samples(LinearAxis::X, &samples).unwrap();
@@ -2055,5 +2079,6 @@ mod tests {
         assert_eq!(estimate.primary_axis_gap_mm, 0.0);
         assert!(!estimate.effect_resolved);
         assert!(estimate.sampling_complete(3, 7, 0.5));
+        assert!((estimate.mean_correction(ApproachSide::Negative)[0] - 0.03).abs() < 1e-12);
     }
 }

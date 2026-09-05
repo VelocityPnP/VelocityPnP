@@ -2025,31 +2025,38 @@ on both sides after non-repeatable stall homing. N1 remains selectable, but its
 contact is close to the profile's established lower safety limit.
 
 Local X/Y direction response is a separate automatic capture. It reuses the
-current top-camera working-plane map, performs one live visual home, and ends
-every measurement at the same datum pose. Fixed datum location and local lens
-distortion therefore cancel. The runner approaches from both sides of X and Y
-with the profile distances and feeds:
+current top-camera working-plane map and performs one live visual home. Visual
+home always finishes at the datum from negative X and negative Y at the
+profile datum feed. This approach defines the coordinate anchor. Fixed datum
+location and local lens distortion therefore cancel. The runner approaches
+from both sides of X and Y at each exact profile feed:
 
 ```bash
 velocitypnp calibrate-xy-direction-response CALIBRATION_UUID \
   --lease "$VELOCITYPNP_LEASE" --confirm-safety-checks
 ```
 
-Sampling is adaptive. It starts with three pairs that cover multiple distances
-and feeds. A resolved direction gap can stop when its 95% confidence interval
-is small relative to the observed effect. An unresolved result gets five pairs.
-An uncertain resolved result can continue to seven pairs. No fixed millimetre
-accuracy rule decides whether backlash exists. The runner tests each measured
-direction correction on an independent holdout pair. It stores zero applied
-compensation when the effect is unresolved or the holdout does not reduce the
-direction gap. The two direction corrections are the zero-mean half-gap. This
-removes camera drift and other common offset from the backlash term.
+Sampling is adaptive for each axis and feed. It starts with three pairs across
+the configured distances. A resolved direction gap can stop when its 95%
+confidence interval is small relative to the observed effect. An unresolved
+result gets five pairs. No fixed millimetre rule decides whether backlash
+exists. The runner tests each correction on an independent holdout pair. The
+holdout must keep both its direction gap and each absolute residual at or below
+0.05 mm. The correction is tested even when the two directions have the same
+response. This permits correction of a speed-dependent common shift. The run
+saves the failed condition and stops before it tests another speed.
+
+The stored corrections are absolute camera residuals for each axis, approach
+side, and exact feed. The motion planner does not interpolate or extrapolate.
+It subtracts the negative-X, negative-Y datum-feed correction that was present
+when fine home assigned the datum coordinates. Thus the fine-home approach has
+zero later correction, while another approach gets only its measured
+difference from that anchor.
 
 This result is local to the homing datum. It does not establish full-bed scale,
-skew, or lens distortion. A simulated job can select the snapshot explicitly
-and apply its holdout-enabled vectors while retaining logical coordinates.
-Manual jog and calibration motion remain raw, and physical job execution is
-not implemented.
+skew, or lens distortion. Calibrated job and strip-feeder transit use only
+qualified exact feeds while retaining logical coordinates. Manual jog and
+other calibration motion remain raw.
 
 ## Installed camera and plate geometry
 

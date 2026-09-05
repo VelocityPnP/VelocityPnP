@@ -317,7 +317,8 @@ export interface LocalXyAxisEstimate {
   effect_resolved: boolean;
 }
 
-export interface LocalXyAxisDirectionReport {
+export interface LocalXyFeedDirectionReport {
+  feed_mm_per_min: number;
   estimate: LocalXyAxisEstimate;
   stopping_reason: string;
   holdout: {
@@ -331,10 +332,19 @@ export interface LocalXyAxisDirectionReport {
     improved: boolean;
   };
   compensation_enabled: boolean;
+  qualified: boolean;
   applied_negative_compensation_x_mm: number;
   applied_negative_compensation_y_mm: number;
   applied_positive_compensation_x_mm: number;
   applied_positive_compensation_y_mm: number;
+}
+
+export interface LocalXyAxisDirectionReport {
+  axis?: "x" | "y";
+  feeds?: LocalXyFeedDirectionReport[];
+  estimate?: LocalXyAxisEstimate;
+  holdout?: LocalXyFeedDirectionReport["holdout"];
+  compensation_enabled?: boolean;
 }
 
 export interface LocalXyDirectionResponseSample {
@@ -353,6 +363,10 @@ export interface LocalXyDirectionResponseSample {
 }
 
 export interface LocalXyDirectionResponseReport {
+  datum_x_approach?: "negative" | "positive";
+  datum_y_approach?: "negative" | "positive";
+  datum_approach_distance_mm?: number;
+  datum_approach_feed_mm_per_min?: number;
   reference_controller_x_mm: number;
   reference_controller_y_mm: number;
   reference_observed_x_px: number;

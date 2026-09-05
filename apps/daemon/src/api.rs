@@ -38,32 +38,32 @@ use velocitypnp_domain::{
     InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job, JobExecutionRun,
     JobExecutionStatus, JobExecutionStep, JobExecutionStepStatus, JogTarget, LinearAxis,
     LocalXyAxisDirectionReport, LocalXyAxisEstimate, LocalXyCompensationHoldout,
-    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, MachineProfile, MachineState,
-    NozzleHeightModel, NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport,
-    NozzleRunoutSample, Operation, OperationStatus, Part, PartOrientation,
-    PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
-    PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
-    PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
-    PlacementVerificationClass, PlacementVerificationComparisonReport,
-    PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
-    Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
-    SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
-    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupDisposition,
-    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
-    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
-    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
-    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
-    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
-    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
-    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
-    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
-    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
-    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
-    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
-    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
-    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
-    WorkspaceSurfaceModel,
+    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, LocalXyFeedDirectionReport,
+    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
+    NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample, Operation,
+    OperationStatus, Part, PartOrientation, PlacementExecutionReport, PlacementExecutionRun,
+    PlacementExecutionStage, PlacementExecutionStageReport, PlacementOutcomeDisposition,
+    PlacementOutcomeRecord, PlacementPickupAttemptReport, PlacementProcessEstimate,
+    PlacementReleaseAttemptReport, PlacementVerificationClass,
+    PlacementVerificationComparisonReport, PlanarCameraCalibrationReport,
+    PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
+    SourceComponentClass, SourceComponentModelPrediction, SourceComponentShadowReport,
+    StripFeederInventoryLane, StripFeederInventoryReport, StripFeederInventorySummary,
+    StripFeederLiveHoldoutRun, StripFeederPickupDisposition, StripFeederPickupQualificationReport,
+    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
+    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
+    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
+    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
+    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
+    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
+    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
+    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
+    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
+    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
+    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
+    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -127,7 +127,7 @@ const MAX_TOOLING_CAPTURE_ATTEMPTS: u32 = 3;
 const MAX_CAMERA_CAPTURE_ATTEMPTS: u32 = 5;
 const MAX_PLACED_PART_ROTATION_ERROR_DEG: f64 = 4.0;
 const CAMERA_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(500);
-const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v6";
+const STRIP_FEEDER_PICKUP_ALGORITHM: &str = "strip_feeder_pickup.v7";
 const HELD_PART_ALIGNMENT_ALGORITHM: &str = "held_part_alignment.v3";
 const NOZZLE_RELEASE_VERIFICATION_ALGORITHM: &str = "nozzle_release_verification.v6";
 const MAXIMUM_RELEASE_ATTEMPTS: u32 = 2;
@@ -8560,6 +8560,9 @@ struct PreparedStripFeederPickup {
     source_rotation_deg: f64,
     rotation_capture_offsets_deg: Vec<f64>,
     artifact_target: TransferArtifactTarget,
+    motion_planner: MotionPlanner,
+    clear_xy_feed_mm_per_min: f64,
+    carried_xy_feed_mm_per_min: f64,
 }
 
 struct SourceComponentPickControl {
@@ -9061,6 +9064,11 @@ async fn start_strip_feeder_pickup_qualification(
         ApiError::bad_request("active profile does not define strip-feeder pickup")
     })?;
     pickup_profile.validate().map_err(ApiError::bad_request)?;
+    state
+        .profile
+        .transit_motion
+        .validate(state.profile.maximum_feed_mm_per_min)
+        .map_err(ApiError::bad_request)?;
     let registration = state
         .store
         .get_strip_feeder_registration(registration_id)
@@ -9251,6 +9259,7 @@ async fn start_strip_feeder_pickup_qualification(
             .put_calibration(&snapshot)
             .map_err(ApiError::internal)?;
     }
+    let motion_calibration = load_job_motion_calibration(&state, registration.calibration_id)?;
     state
         .machine
         .renew_lease(body.lease_id, 900)
@@ -9318,6 +9327,9 @@ async fn start_strip_feeder_pickup_qualification(
         source_rotation_deg,
         rotation_capture_offsets_deg: body.rotation_capture_offsets_deg,
         artifact_target,
+        motion_planner: MotionPlanner::new(state.profile.bounds, Some(motion_calibration)),
+        clear_xy_feed_mm_per_min: state.profile.transit_motion.clear_xy_feed_mm_per_min,
+        carried_xy_feed_mm_per_min: state.profile.transit_motion.carried_xy_feed_mm_per_min,
     };
     spawn_prepared_operation(
         state,
@@ -9692,6 +9704,8 @@ async fn execute_simulated_strip_feeder_pickup(
     let passed = vacuum_held && alignment.passed && released && nozzle_clear;
     Ok(StripFeederPickupQualificationReport {
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+        clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
+        carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
         nozzle_id: prepared.run.nozzle_id.clone(),
         tip_id: prepared.geometry.tip_id.clone(),
         sensor_id: prepared.vacuum_characterization.sensor_id.clone(),
@@ -10149,15 +10163,13 @@ async fn execute_physical_strip_feeder_pickup(
         z_mm: approach_controller_z_mm,
         ..level_target
     };
-    state
-        .machine
-        .jog(
-            prepared.lease_id,
-            level_target,
-            vacuum_profile.xy_feed_mm_per_min,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    execute_pickup_xy_transit(
+        state,
+        prepared,
+        level_target,
+        prepared.clear_xy_feed_mm_per_min,
+    )
+    .await?;
     state
         .machine
         .jog(
@@ -10214,6 +10226,8 @@ async fn execute_physical_strip_feeder_pickup(
         ));
         return Ok(StripFeederPickupQualificationReport {
             algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+            clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
+            carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
             nozzle_id: nozzle_id.clone(),
             tip_id: prepared.geometry.tip_id.clone(),
             sensor_id: sensor_id.clone(),
@@ -10258,20 +10272,18 @@ async fn execute_physical_strip_feeder_pickup(
             )
             .await
             .map_err(|error| error.to_string())?;
-        state
-            .machine
-            .jog(
-                prepared.lease_id,
-                JogTarget {
-                    x_mm: bottom_pose.x_mm,
-                    y_mm: bottom_pose.y_mm,
-                    z_mm: bottom_pose.z_mm,
-                    rotation_deg: None,
-                },
-                bottom.feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        execute_pickup_xy_transit(
+            state,
+            prepared,
+            JogTarget {
+                x_mm: bottom_pose.x_mm,
+                y_mm: bottom_pose.y_mm,
+                z_mm: bottom_pose.z_mm,
+                rotation_deg: None,
+            },
+            prepared.carried_xy_feed_mm_per_min,
+        )
+        .await?;
         let held_raw_values = collect_sensor_values(
             state,
             prepared.lease_id,
@@ -10573,6 +10585,8 @@ async fn execute_physical_strip_feeder_pickup(
     }
     Ok(StripFeederPickupQualificationReport {
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+        clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
+        carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
         nozzle_id: nozzle_id.clone(),
         tip_id: prepared.geometry.tip_id.clone(),
         sensor_id: sensor_id.clone(),
@@ -10646,20 +10660,18 @@ async fn release_and_verify_nozzle_clear(
         release_surface_machine_mm = surface;
         release_raw_values.extend(raw_values);
 
-        state
-            .machine
-            .jog(
-                prepared.lease_id,
-                JogTarget {
-                    x_mm: bottom_pose.x_mm,
-                    y_mm: bottom_pose.y_mm,
-                    z_mm: bottom_pose.z_mm,
-                    rotation_deg: None,
-                },
-                bottom.feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        execute_pickup_xy_transit(
+            state,
+            prepared,
+            JogTarget {
+                x_mm: bottom_pose.x_mm,
+                y_mm: bottom_pose.y_mm,
+                z_mm: bottom_pose.z_mm,
+                rotation_deg: None,
+            },
+            prepared.clear_xy_feed_mm_per_min,
+        )
+        .await?;
         let post_release = capture_bottom_mean_with_lights(
             state,
             prepared.lease_id,
@@ -11088,15 +11100,13 @@ async fn release_pickup_part(
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        state
-            .machine
-            .jog(
-                prepared.lease_id,
-                release_level,
-                vacuum_profile.xy_feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        execute_pickup_xy_transit(
+            state,
+            prepared,
+            release_level,
+            prepared.carried_xy_feed_mm_per_min,
+        )
+        .await?;
         if release_at_pickup_z {
             state
                 .machine
@@ -11471,9 +11481,13 @@ async fn capture_top_pocket_mean(
             .pose
             .map_or(0.0, |pose| pose.rotation_deg),
     };
-    let visual = state.profile.visual_homing.as_ref().unwrap();
-    let measured_pose =
-        jog_board_registration_target(state, prepared.lease_id, target, visual).await?;
+    let measured_pose = execute_pickup_xy_transit(
+        state,
+        prepared,
+        target.into(),
+        prepared.clear_xy_feed_mm_per_min,
+    )
+    .await?;
     if prepared.top_camera_profile.lighting_enabled {
         state
             .machine
@@ -11503,6 +11517,51 @@ async fn capture_top_pocket_mean(
             "{error}; top-camera light cleanup also failed: {cleanup_error}"
         )),
     }
+}
+
+async fn execute_pickup_xy_transit(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    target: JogTarget,
+    feed_mm_per_min: f64,
+) -> Result<Pose, String> {
+    state
+        .profile
+        .transit_motion
+        .validate(state.profile.maximum_feed_mm_per_min)
+        .map_err(str::to_string)?;
+    let current = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "pickup transit has no trusted machine pose".to_string())?;
+    let logical_target = target
+        .resolve(current)
+        .ok_or_else(|| "pickup transit target is invalid".to_string())?;
+    if (current.z_mm - logical_target.z_mm).abs() > 1e-9
+        || (current.rotation_deg - logical_target.rotation_deg).abs() > 1e-9
+    {
+        return Err("pickup XY transit requires level Z and fixed rotation".into());
+    }
+    let mut motion_state = prepared
+        .motion_planner
+        .initial_state(current)
+        .map_err(|error| error.to_string())?;
+    execute_job_motion(
+        &state.machine,
+        prepared.lease_id,
+        &prepared.motion_planner,
+        &mut motion_state,
+        logical_target,
+        feed_mm_per_min,
+        MotionMode::Calibrated,
+    )
+    .await?;
+    state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "pickup transit lost the machine pose".to_string())
 }
 
 async fn capture_bottom_mean_with_lights(
@@ -11747,6 +11806,7 @@ fn current_pickup_sequence_ids(
             && run.calibration_id == registration.calibration_id
             && run.report.as_ref().is_some_and(|report| {
                 report.algorithm_version == STRIP_FEEDER_PICKUP_ALGORITHM
+                    && pickup_report_uses_current_transit(&state.profile, report)
                     && report.nozzle_id == run.nozzle_id
                     && report.passed
                     && report.disposition == StripFeederPickupDisposition::ReturnedToPocket
@@ -11767,6 +11827,16 @@ fn current_pickup_sequence_ids(
     let mut ids = runs.into_iter().map(|run| run.id).collect::<Vec<_>>();
     ids.reverse();
     Ok(ids)
+}
+
+fn pickup_report_uses_current_transit(
+    profile: &MachineProfile,
+    report: &StripFeederPickupQualificationReport,
+) -> bool {
+    (report.clear_xy_feed_mm_per_min - profile.transit_motion.clear_xy_feed_mm_per_min).abs() < 1e-6
+        && (report.carried_xy_feed_mm_per_min - profile.transit_motion.carried_xy_feed_mm_per_min)
+            .abs()
+            < 1e-6
 }
 
 fn deactivate_strip_feeder(
@@ -14314,6 +14384,10 @@ struct VisualHomingExecution {
     verification: Option<VisualHomingPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     final_pose: Option<Pose>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    datum_approach_distance_mm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    datum_approach_feed_mm_per_min: Option<f64>,
 }
 
 struct VisualHomingRunOptions {
@@ -14438,6 +14512,8 @@ async fn run_visual_homing(
             corrections: Vec::new(),
             verification: None,
             final_pose: None,
+            datum_approach_distance_mm: None,
+            datum_approach_feed_mm_per_min: None,
         });
     }
     if !initial.within_capture_bound || !initial.within_correction_bound {
@@ -14452,11 +14528,9 @@ async fn run_visual_homing(
         let target =
             next_visual_correction_target(options.seed_pose, corrected_pose, &verification, visual)
                 .map_err(ApiError::bad_request)?;
-        corrected_pose = state
-            .machine
-            .jog(lease_id, target, visual.feed_mm_per_min)
+        corrected_pose = approach_visual_datum_from_negative_xy(state, lease_id, target)
             .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            .map_err(ApiError::bad_request)?;
         corrections.push(VisualHomingCorrection {
             attempt,
             observation: verification,
@@ -14501,7 +14575,48 @@ async fn run_visual_homing(
         corrections,
         verification: Some(verification),
         final_pose: Some(final_pose),
+        datum_approach_distance_mm: state
+            .profile
+            .local_xy_direction_response
+            .as_ref()
+            .map(|profile| profile.datum_approach_distance_mm),
+        datum_approach_feed_mm_per_min: state
+            .profile
+            .local_xy_direction_response
+            .as_ref()
+            .map(|profile| profile.datum_approach_feed_mm_per_min),
     })
+}
+
+async fn approach_visual_datum_from_negative_xy(
+    state: &AppState,
+    lease_id: Uuid,
+    target: JogTarget,
+) -> Result<Pose, String> {
+    let profile = state
+        .profile
+        .local_xy_direction_response
+        .as_ref()
+        .ok_or_else(|| "active profile has no local XY direction response".to_string())?;
+    let away = negative_xy_approach_start(target, profile.datum_approach_distance_mm);
+    state
+        .machine
+        .jog(lease_id, away, profile.datum_approach_feed_mm_per_min)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .machine
+        .jog(lease_id, target, profile.datum_approach_feed_mm_per_min)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn negative_xy_approach_start(target: JogTarget, distance_mm: f64) -> JogTarget {
+    JogTarget {
+        x_mm: target.x_mm - distance_mm,
+        y_mm: target.y_mm - distance_mm,
+        ..target
+    }
 }
 
 fn visual_verification_accepted(
@@ -16682,6 +16797,18 @@ async fn start_local_xy_direction_response(
     direction_profile
         .validate()
         .map_err(ApiError::bad_request)?;
+    if direction_profile
+        .approach_feeds_mm_per_min
+        .iter()
+        .chain(std::iter::once(
+            &direction_profile.datum_approach_feed_mm_per_min,
+        ))
+        .any(|feed| *feed > state.profile.maximum_feed_mm_per_min)
+    {
+        return Err(ApiError::bad_request(
+            "local XY direction-response feed exceeds the active profile limit",
+        ));
+    }
     let visual = state
         .profile
         .visual_homing
@@ -16703,7 +16830,12 @@ async fn start_local_xy_direction_response(
         .copied()
         .fold(0.0, f64::max);
     let bound = max_distance + visual.max_correction_mm;
-    for (x_offset, y_offset) in [(-bound, 0.0), (bound, 0.0), (0.0, -bound), (0.0, bound)] {
+    for (x_offset, y_offset) in [
+        (-bound, -bound),
+        (-bound, bound),
+        (bound, -bound),
+        (bound, bound),
+    ] {
         if !state.profile.bounds.contains(Pose {
             x_mm: visual.fiducial_x_mm + x_offset,
             y_mm: visual.fiducial_y_mm + y_offset,
@@ -16726,7 +16858,7 @@ async fn start_local_xy_direction_response(
     .map_err(|_| ApiError::bad_request("stored top-camera working-plane map is invalid"))?;
     state
         .machine
-        .renew_lease(body.lease_id, 900)
+        .renew_lease(body.lease_id, 3_600)
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if artifacts_changed {
@@ -16765,11 +16897,6 @@ async fn execute_local_xy_direction_response(
     let base_pose = visual_alignment
         .final_pose
         .ok_or_else(|| "visual alignment did not return a final pose".to_string())?;
-    let visual = state
-        .profile
-        .visual_homing
-        .as_ref()
-        .ok_or_else(|| "active profile has no visual homing".to_string())?;
     let camera_profile =
         stored_camera_profile(&state, CameraRole::TopCamera).map_err(|error| error.message)?;
     let camera_path = camera_path_for_role(CameraRole::TopCamera).map_err(|error| error.message)?;
@@ -16790,12 +16917,9 @@ async fn execute_local_xy_direction_response(
     )
     .await;
     let restore = if state.machine.status().state == MachineState::Ready {
-        state
-            .machine
-            .jog(prepared.lease_id, base_pose.into(), visual.feed_mm_per_min)
+        approach_visual_datum_from_negative_xy(&state, prepared.lease_id, base_pose.into())
             .await
             .map(|_| ())
-            .map_err(|error| error.to_string())
     } else {
         Ok(())
     };
@@ -16810,13 +16934,39 @@ async fn execute_local_xy_direction_response(
     restore.map_err(|error| format!("local XY calibration restore failed: {error}"))?;
     lights_off.map_err(|error| format!("local XY light cleanup failed: {error}"))?;
     persist_local_xy_direction_response(&state, prepared.calibration_id, &report)?;
-    let enabled = report
+    if let Some((axis, feed)) = report.axes.iter().find_map(|axis| {
+        axis.feeds
+            .iter()
+            .find(|feed| !feed.qualified)
+            .map(|feed| (axis.axis, feed))
+    }) {
+        let maximum_residual_mm = feed
+            .holdout
+            .negative_residual_x_mm
+            .hypot(feed.holdout.negative_residual_y_mm)
+            .max(
+                feed.holdout
+                    .positive_residual_x_mm
+                    .hypot(feed.holdout.positive_residual_y_mm),
+            );
+        return Err(format!(
+            "local {axis:?} response at {:.0} mm/min failed holdout: {:.4}mm direction gap, {:.4}mm maximum residual",
+            feed.feed_mm_per_min, feed.holdout.direction_gap_mm, maximum_residual_mm,
+        ));
+    }
+    let qualified = report
         .axes
         .iter()
-        .filter(|axis| axis.compensation_enabled)
+        .flat_map(|axis| &axis.feeds)
+        .filter(|feed| feed.qualified)
         .count();
+    let condition_count = report
+        .axes
+        .iter()
+        .map(|axis| axis.feeds.len())
+        .sum::<usize>();
     Ok(Some(format!(
-        "Measured local X/Y direction response; {enabled} of 2 axis compensations passed holdout",
+        "Measured local X/Y direction response; {qualified} of {condition_count} axis-feed conditions passed holdout",
     )))
 }
 
@@ -16849,119 +16999,169 @@ async fn measure_local_xy_direction_response(
         .map_err(calibration_stop_message)?;
     let mut samples = Vec::new();
     let mut axes = Vec::new();
+    let mut stopped = false;
     for axis in [LinearAxis::X, LinearAxis::Y] {
-        let estimate = measure_local_xy_axis(
-            state,
-            lease_id,
-            base_pose,
-            reference,
-            camera_profile,
-            camera_path,
-            mapping,
-            axis,
-            &mut samples,
-        )
-        .await?;
-        let negative_compensation = estimate.negative_compensation();
-        let positive_compensation = estimate.positive_compensation();
-        let compensation_bound = state
-            .profile
-            .visual_homing
-            .as_ref()
-            .unwrap()
-            .max_correction_mm;
-        if negative_compensation[0]
-            .hypot(negative_compensation[1])
-            .max(positive_compensation[0].hypot(positive_compensation[1]))
-            > compensation_bound
-        {
-            return Err(format!(
-                "{axis:?} direction-response compensation exceeds the {compensation_bound:.3}mm visual safety bound",
-            ));
+        let mut feeds = Vec::new();
+        for feed_mm_per_min in profile.approach_feeds_mm_per_min.iter().copied() {
+            let feed = measure_local_xy_axis_feed(
+                state,
+                lease_id,
+                base_pose,
+                reference,
+                camera_profile,
+                camera_path,
+                mapping,
+                axis,
+                feed_mm_per_min,
+                &mut samples,
+            )
+            .await?;
+            stopped = !feed.qualified;
+            feeds.push(feed);
+            if stopped {
+                break;
+            }
         }
-        let pair = estimate.sample_pairs + 1;
-        let condition = direction_response_condition(profile, pair - 1);
-        let negative_holdout = capture_local_xy_direction_sample(
-            state,
-            lease_id,
-            base_pose,
-            reference,
-            camera_profile,
-            camera_path,
-            mapping,
-            axis,
-            ApproachSide::Negative,
-            pair,
-            condition.0,
-            condition.1,
-            negative_compensation,
-        )
-        .await?;
-        let positive_holdout = capture_local_xy_direction_sample(
-            state,
-            lease_id,
-            base_pose,
-            reference,
-            camera_profile,
-            camera_path,
-            mapping,
-            axis,
-            ApproachSide::Positive,
-            pair,
-            condition.0,
-            condition.1,
-            positive_compensation,
-        )
-        .await?;
-        let holdout_gap = (positive_holdout.residual_correction_x_mm
-            - negative_holdout.residual_correction_x_mm)
-            .hypot(
-                positive_holdout.residual_correction_y_mm
-                    - negative_holdout.residual_correction_y_mm,
-            );
-        let improved = holdout_gap < estimate.uncompensated_direction_gap_mm();
-        let compensation_enabled = estimate.effect_resolved && improved;
-        let applied_negative = if compensation_enabled {
-            negative_compensation
-        } else {
-            [0.0, 0.0]
-        };
-        let applied_positive = if compensation_enabled {
-            positive_compensation
-        } else {
-            [0.0, 0.0]
-        };
-        let stopping_reason = direction_response_stopping_reason(profile, &estimate);
-        axes.push(LocalXyAxisDirectionReport {
-            estimate,
-            stopping_reason,
-            holdout: LocalXyCompensationHoldout {
-                negative_residual_x_mm: negative_holdout.residual_correction_x_mm,
-                negative_residual_y_mm: negative_holdout.residual_correction_y_mm,
-                positive_residual_x_mm: positive_holdout.residual_correction_x_mm,
-                positive_residual_y_mm: positive_holdout.residual_correction_y_mm,
-                direction_gap_mm: holdout_gap,
-                improved,
-                negative_sample: negative_holdout,
-                positive_sample: positive_holdout,
-            },
-            compensation_enabled,
-            applied_negative_compensation_x_mm: applied_negative[0],
-            applied_negative_compensation_y_mm: applied_negative[1],
-            applied_positive_compensation_x_mm: applied_positive[0],
-            applied_positive_compensation_y_mm: applied_positive[1],
-        });
+        axes.push(LocalXyAxisDirectionReport { axis, feeds });
+        if stopped {
+            break;
+        }
     }
+    let expected_conditions = 2 * profile.approach_feeds_mm_per_min.len();
+    let tested_conditions = axes.iter().map(|axis| axis.feeds.len()).sum::<usize>();
+    let passed = !stopped && tested_conditions == expected_conditions;
     Ok(LocalXyDirectionResponseReport {
+        datum_x_approach: ApproachSide::Negative,
+        datum_y_approach: ApproachSide::Negative,
+        datum_approach_distance_mm: profile.datum_approach_distance_mm,
+        datum_approach_feed_mm_per_min: profile.datum_approach_feed_mm_per_min,
         reference_controller_x_mm: base_pose.x_mm,
         reference_controller_y_mm: base_pose.y_mm,
         reference_observed_x_px: reference.x_px,
         reference_observed_y_px: reference.y_px,
         pixel_error_to_machine_mm: mapping,
-        passed: axes.len() == 2,
+        passed,
         axes,
         samples,
         observed_at: Utc::now(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_local_xy_axis_feed(
+    state: &AppState,
+    lease_id: Uuid,
+    base_pose: Pose,
+    reference: FiducialDetection,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    mapping: [[f64; 2]; 2],
+    axis: LinearAxis,
+    feed_mm_per_min: f64,
+    samples: &mut Vec<LocalXyDirectionResponseSample>,
+) -> Result<LocalXyFeedDirectionReport, String> {
+    let profile = state.profile.local_xy_direction_response.as_ref().unwrap();
+    let estimate = measure_local_xy_axis(
+        state,
+        lease_id,
+        base_pose,
+        reference,
+        camera_profile,
+        camera_path,
+        mapping,
+        axis,
+        feed_mm_per_min,
+        samples,
+    )
+    .await?;
+    let compensation_enabled = true;
+    let negative_compensation = estimate.mean_correction(ApproachSide::Negative);
+    let positive_compensation = estimate.mean_correction(ApproachSide::Positive);
+    let compensation_bound = state
+        .profile
+        .visual_homing
+        .as_ref()
+        .unwrap()
+        .max_correction_mm;
+    if negative_compensation[0]
+        .hypot(negative_compensation[1])
+        .max(positive_compensation[0].hypot(positive_compensation[1]))
+        > compensation_bound
+    {
+        return Err(format!(
+            "{axis:?} direction-response compensation at {feed_mm_per_min:.0} mm/min exceeds the {compensation_bound:.3}mm visual safety bound",
+        ));
+    }
+    let pair = estimate.sample_pairs + 1;
+    let distance = direction_response_distance(profile, pair - 1);
+    let negative_holdout = capture_local_xy_direction_sample(
+        state,
+        lease_id,
+        base_pose,
+        reference,
+        camera_profile,
+        camera_path,
+        mapping,
+        axis,
+        ApproachSide::Negative,
+        pair,
+        distance,
+        feed_mm_per_min,
+        negative_compensation,
+    )
+    .await?;
+    let positive_holdout = capture_local_xy_direction_sample(
+        state,
+        lease_id,
+        base_pose,
+        reference,
+        camera_profile,
+        camera_path,
+        mapping,
+        axis,
+        ApproachSide::Positive,
+        pair,
+        distance,
+        feed_mm_per_min,
+        positive_compensation,
+    )
+    .await?;
+    let holdout_gap = (positive_holdout.residual_correction_x_mm
+        - negative_holdout.residual_correction_x_mm)
+        .hypot(
+            positive_holdout.residual_correction_y_mm - negative_holdout.residual_correction_y_mm,
+        );
+    let maximum_residual_mm = negative_holdout
+        .residual_correction_x_mm
+        .hypot(negative_holdout.residual_correction_y_mm)
+        .max(
+            positive_holdout
+                .residual_correction_x_mm
+                .hypot(positive_holdout.residual_correction_y_mm),
+        );
+    let improved = holdout_gap < estimate.uncompensated_direction_gap_mm();
+    let qualified = holdout_gap <= profile.maximum_holdout_error_mm
+        && maximum_residual_mm <= profile.maximum_holdout_error_mm;
+    Ok(LocalXyFeedDirectionReport {
+        feed_mm_per_min,
+        stopping_reason: direction_response_stopping_reason(profile, &estimate),
+        estimate,
+        holdout: LocalXyCompensationHoldout {
+            negative_residual_x_mm: negative_holdout.residual_correction_x_mm,
+            negative_residual_y_mm: negative_holdout.residual_correction_y_mm,
+            positive_residual_x_mm: positive_holdout.residual_correction_x_mm,
+            positive_residual_y_mm: positive_holdout.residual_correction_y_mm,
+            direction_gap_mm: holdout_gap,
+            improved,
+            negative_sample: negative_holdout,
+            positive_sample: positive_holdout,
+        },
+        compensation_enabled,
+        qualified,
+        applied_negative_compensation_x_mm: negative_compensation[0],
+        applied_negative_compensation_y_mm: negative_compensation[1],
+        applied_positive_compensation_x_mm: positive_compensation[0],
+        applied_positive_compensation_y_mm: positive_compensation[1],
     })
 }
 
@@ -16975,37 +17175,39 @@ async fn measure_local_xy_axis(
     camera_path: &str,
     mapping: [[f64; 2]; 2],
     axis: LinearAxis,
+    feed_mm_per_min: f64,
     samples: &mut Vec<LocalXyDirectionResponseSample>,
 ) -> Result<LocalXyAxisEstimate, String> {
     let profile = state.profile.local_xy_direction_response.as_ref().unwrap();
+    let mut feed_samples = Vec::new();
     for pair in 1..=profile.maximum_sample_pairs {
-        let (distance, feed) = direction_response_condition(profile, pair - 1);
+        let distance = direction_response_distance(profile, pair - 1);
         let sides = if pair % 2 == 1 {
             [ApproachSide::Negative, ApproachSide::Positive]
         } else {
             [ApproachSide::Positive, ApproachSide::Negative]
         };
         for side in sides {
-            samples.push(
-                capture_local_xy_direction_sample(
-                    state,
-                    lease_id,
-                    base_pose,
-                    reference,
-                    camera_profile,
-                    camera_path,
-                    mapping,
-                    axis,
-                    side,
-                    pair,
-                    distance,
-                    feed,
-                    [0.0, 0.0],
-                )
-                .await?,
-            );
+            let sample = capture_local_xy_direction_sample(
+                state,
+                lease_id,
+                base_pose,
+                reference,
+                camera_profile,
+                camera_path,
+                mapping,
+                axis,
+                side,
+                pair,
+                distance,
+                feed_mm_per_min,
+                [0.0, 0.0],
+            )
+            .await?;
+            samples.push(sample.clone());
+            feed_samples.push(sample);
         }
-        if let Some(estimate) = LocalXyAxisEstimate::from_samples(axis, samples) {
+        if let Some(estimate) = LocalXyAxisEstimate::from_samples(axis, &feed_samples) {
             if estimate.sampling_complete(
                 profile.minimum_sample_pairs,
                 profile.maximum_sample_pairs,
@@ -17015,19 +17217,16 @@ async fn measure_local_xy_axis(
             }
         }
     }
-    LocalXyAxisEstimate::from_samples(axis, samples)
+    LocalXyAxisEstimate::from_samples(axis, &feed_samples)
         .ok_or_else(|| format!("{axis:?} direction-response estimate is incomplete"))
 }
 
-fn direction_response_condition(
+fn direction_response_distance(
     profile: &velocitypnp_domain::LocalXyDirectionResponseProfile,
     zero_based_pair: u32,
-) -> (f64, f64) {
+) -> f64 {
     let index = zero_based_pair as usize;
-    let distance = profile.approach_distances_mm[index % profile.approach_distances_mm.len()];
-    let feed = profile.approach_feeds_mm_per_min
-        [(index / profile.approach_distances_mm.len()) % profile.approach_feeds_mm_per_min.len()];
-    (distance, feed)
+    profile.approach_distances_mm[index % profile.approach_distances_mm.len()]
 }
 
 fn direction_response_stopping_reason(
@@ -17059,11 +17258,22 @@ async fn capture_local_xy_direction_sample(
     feed_mm_per_min: f64,
     compensation: [f64; 2],
 ) -> Result<LocalXyDirectionResponseSample, String> {
+    let target = JogTarget {
+        x_mm: base_pose.x_mm + compensation[0],
+        y_mm: base_pose.y_mm + compensation[1],
+        z_mm: base_pose.z_mm,
+        rotation_deg: None,
+    };
+    // First put the inactive axis at its compensated coordinate with the
+    // datum approach. The measured-axis return then changes only that axis.
+    approach_visual_datum_from_negative_xy(state, lease_id, target).await?;
     let side_sign = match approach_side {
         ApproachSide::Negative => -1.0,
         ApproachSide::Positive => 1.0,
     };
-    let mut away = base_pose;
+    let mut away = target
+        .resolve(base_pose)
+        .ok_or_else(|| "local XY compensation target is invalid".to_string())?;
     match axis {
         LinearAxis::X => away.x_mm += side_sign * approach_distance_mm,
         LinearAxis::Y => away.y_mm += side_sign * approach_distance_mm,
@@ -17073,12 +17283,6 @@ async fn capture_local_xy_direction_sample(
         .jog(lease_id, away.into(), feed_mm_per_min)
         .await
         .map_err(|error| error.to_string())?;
-    let target = JogTarget {
-        x_mm: base_pose.x_mm + compensation[0],
-        y_mm: base_pose.y_mm + compensation[1],
-        z_mm: base_pose.z_mm,
-        rotation_deg: None,
-    };
     state
         .machine
         .jog(lease_id, target, feed_mm_per_min)
@@ -17136,9 +17340,13 @@ fn persist_local_xy_direction_response(
         snapshot
             .completed_steps
             .insert(CalibrationStepId::LocalXyDirectionResponse);
-        if let Some(residuals) =
-            summarize_residuals(report.axes.iter().map(|axis| axis.holdout.direction_gap_mm))
-        {
+        if let Some(residuals) = summarize_residuals(
+            report
+                .axes
+                .iter()
+                .flat_map(|axis| &axis.feeds)
+                .map(|feed| feed.holdout.direction_gap_mm),
+        ) {
             snapshot
                 .residuals
                 .insert(CalibrationStepId::LocalXyDirectionResponse, residuals);
@@ -24915,6 +25123,11 @@ fn prepare_retained_part_physical_context(
         ApiError::bad_request("active profile does not define strip-feeder pickup")
     })?;
     pickup_profile.validate().map_err(ApiError::bad_request)?;
+    state
+        .profile
+        .transit_motion
+        .validate(state.profile.maximum_feed_mm_per_min)
+        .map_err(ApiError::bad_request)?;
     let source_pickup = source_report
         .pickup_report
         .as_ref()
@@ -25020,6 +25233,7 @@ fn prepare_retained_part_physical_context(
     }
     let top_camera_profile = stored_camera_profile(state, CameraRole::TopCamera)?;
     let top_camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let motion_calibration = load_job_motion_calibration(state, placement_run.calibration_id)?;
     let synthetic_pickup_run = StripFeederPickupQualificationRun {
         id: placement_run.id,
         operation_id: placement_run.operation_id,
@@ -25053,6 +25267,9 @@ fn prepare_retained_part_physical_context(
         source_rotation_deg: step.feeder_part_rotation_deg,
         rotation_capture_offsets_deg: Vec::new(),
         artifact_target: TransferArtifactTarget::PlacementExecution(placement_run.id),
+        motion_planner: MotionPlanner::new(state.profile.bounds, Some(motion_calibration)),
+        clear_xy_feed_mm_per_min: state.profile.transit_motion.clear_xy_feed_mm_per_min,
+        carried_xy_feed_mm_per_min: state.profile.transit_motion.carried_xy_feed_mm_per_min,
     })
 }
 
@@ -25303,6 +25520,11 @@ fn prepare_physical_placement_pickup(
         ApiError::bad_request("active profile does not define strip-feeder pickup")
     })?;
     pickup_profile.validate().map_err(ApiError::bad_request)?;
+    state
+        .profile
+        .transit_motion
+        .validate(state.profile.maximum_feed_mm_per_min)
+        .map_err(ApiError::bad_request)?;
     let selected_pocket = placement_available_strip_feeder_pocket(&registration, step.feeder_pick)
         .ok_or_else(|| ApiError::bad_request("strip feeder has no available occupied pocket"))?;
     let selected_pocket_index = selected_pocket.pocket_index;
@@ -25419,6 +25641,7 @@ fn prepare_physical_placement_pickup(
     }
     let top_camera_profile = stored_camera_profile(state, CameraRole::TopCamera)?;
     let top_camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let motion_calibration = load_job_motion_calibration(state, registration.calibration_id)?;
     let synthetic_pickup_run = StripFeederPickupQualificationRun {
         id: placement_run.id,
         operation_id: placement_run.operation_id,
@@ -25470,6 +25693,9 @@ fn prepare_physical_placement_pickup(
         source_rotation_deg: step.feeder_part_rotation_deg,
         rotation_capture_offsets_deg: Vec::new(),
         artifact_target: TransferArtifactTarget::PlacementExecution(placement_run.id),
+        motion_planner: MotionPlanner::new(state.profile.bounds, Some(motion_calibration)),
+        clear_xy_feed_mm_per_min: state.profile.transit_motion.clear_xy_feed_mm_per_min,
+        carried_xy_feed_mm_per_min: state.profile.transit_motion.carried_xy_feed_mm_per_min,
     })
 }
 
@@ -25554,6 +25780,13 @@ fn validate_guarded_strip_feeder(
         .as_ref()
         .filter(|report| report.passed)
         .ok_or_else(|| ApiError::bad_request("placement feeder pickup evidence did not pass"))?;
+    if report.algorithm_version != STRIP_FEEDER_PICKUP_ALGORITHM
+        || !pickup_report_uses_current_transit(&state.profile, report)
+    {
+        return Err(ApiError::bad_request(
+            "placement feeder pickup evidence uses a different transit-speed policy",
+        ));
+    }
     if qualification.nozzle_id != step.nozzle_id {
         return Err(ApiError::bad_request(format!(
             "placement nozzle {} has no current pickup qualification",
@@ -26002,15 +26235,13 @@ async fn execute_physical_retained_part_recovery(
         x_mm: prepared.geometry.head_offset_x_mm - runout_x_mm,
         y_mm: prepared.geometry.head_offset_y_mm - runout_y_mm,
     };
-    let bottom_pose = state
-        .machine
-        .jog(
-            lease_id,
-            bottom.nozzle_target(nozzle),
-            bottom.feed_mm_per_min,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    let bottom_pose = execute_pickup_xy_transit(
+        state,
+        prepared,
+        bottom.nozzle_target(nozzle),
+        prepared.carried_xy_feed_mm_per_min,
+    )
+    .await?;
     let held = capture_bottom_mean_with_lights(
         state,
         lease_id,
@@ -26197,7 +26428,7 @@ async fn execute_physical_retained_part_recovery(
         ..place_level
     };
     for (target, feed) in [
-        (place_level, vacuum.xy_feed_mm_per_min),
+        (place_level, prepared.carried_xy_feed_mm_per_min),
         (place_contact, vacuum.z_approach_feed_mm_per_min),
     ] {
         let planned = execute_job_motion(
@@ -27046,7 +27277,7 @@ async fn execute_physical_guarded_placement(
             planner,
             &mut motion_state,
             place_level,
-            vacuum.xy_feed_mm_per_min,
+            prepared.carried_xy_feed_mm_per_min,
             MotionMode::Calibrated,
         )
         .await?;
@@ -27421,7 +27652,7 @@ async fn release_part_at_board_and_verify(
                 .initial_state(current_pose)
                 .map_err(|error| error.to_string())?;
             for (target, feed) in [
-                (attempt_level, vacuum.xy_feed_mm_per_min),
+                (attempt_level, prepared.carried_xy_feed_mm_per_min),
                 (attempt_contact, vacuum.z_approach_feed_mm_per_min),
             ] {
                 let planned = execute_job_motion(
@@ -27487,15 +27718,13 @@ async fn release_part_at_board_and_verify(
         });
         release_sensor_confirmed |= sensor_released;
         release_raw_values.extend(raw_values.iter().copied());
-        let retry_bottom_pose = state
-            .machine
-            .jog(
-                lease_id,
-                translation_only_jog_target(acquired.bottom_pose),
-                bottom.feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        let retry_bottom_pose = execute_pickup_xy_transit(
+            state,
+            prepared,
+            translation_only_jog_target(acquired.bottom_pose),
+            prepared.clear_xy_feed_mm_per_min,
+        )
+        .await?;
         let post_release = capture_bottom_mean_with_lights(
             state,
             lease_id,
@@ -28061,11 +28290,13 @@ async fn acquire_physical_placement_part(
                 return Err("pickup-center retry is outside machine bounds".into());
             }
         }
-        state
-            .machine
-            .jog(prepared.lease_id, level_target, vacuum.xy_feed_mm_per_min)
-            .await
-            .map_err(|error| error.to_string())?;
+        execute_pickup_xy_transit(
+            state,
+            prepared,
+            level_target,
+            prepared.clear_xy_feed_mm_per_min,
+        )
+        .await?;
         state
             .machine
             .jog(
@@ -28189,20 +28420,18 @@ async fn acquire_physical_placement_part(
             )
             .await
             .map_err(|error| error.to_string())?;
-        state
-            .machine
-            .jog(
-                prepared.lease_id,
-                JogTarget {
-                    x_mm: bottom_pose.x_mm,
-                    y_mm: bottom_pose.y_mm,
-                    z_mm: bottom_pose.z_mm,
-                    rotation_deg: None,
-                },
-                bottom.feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        execute_pickup_xy_transit(
+            state,
+            prepared,
+            JogTarget {
+                x_mm: bottom_pose.x_mm,
+                y_mm: bottom_pose.y_mm,
+                z_mm: bottom_pose.z_mm,
+                rotation_deg: None,
+            },
+            prepared.carried_xy_feed_mm_per_min,
+        )
+        .await?;
         let held_raw_values = collect_sensor_values(
             state,
             prepared.lease_id,
@@ -28486,6 +28715,8 @@ fn build_placement_pickup_report(
     }
     StripFeederPickupQualificationReport {
         algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+        clear_xy_feed_mm_per_min: prepared.clear_xy_feed_mm_per_min,
+        carried_xy_feed_mm_per_min: prepared.carried_xy_feed_mm_per_min,
         nozzle_id: prepared.run.nozzle_id.clone(),
         tip_id: prepared.geometry.tip_id.clone(),
         sensor_id: prepared.vacuum_characterization.sensor_id.clone(),
@@ -29879,6 +30110,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pickup_sequence_rejects_old_transit_feed_evidence() {
+        let state = test_state();
+        let now = Utc::now();
+        let registration = test_pickup_registration(now);
+        for pocket_index in 0..3 {
+            let mut run = test_pickup_qualification(
+                &registration,
+                pocket_index,
+                OperationStatus::Succeeded,
+                now + chrono::Duration::seconds(i64::from(pocket_index)),
+            );
+            if pocket_index == 2 {
+                run.report.as_mut().unwrap().carried_xy_feed_mm_per_min = 1_200.0;
+            }
+            state
+                .store
+                .put_strip_feeder_pickup_qualification(&run)
+                .unwrap();
+        }
+
+        assert!(current_pickup_sequence_ids(&state, &registration)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn pickup_sequence_rejects_repeated_pockets_and_mixed_nozzles() {
         let state = test_state();
         let now = Utc::now();
@@ -30451,6 +30708,8 @@ mod tests {
             rotation_capture_offsets_deg: Vec::new(),
             report: Some(StripFeederPickupQualificationReport {
                 algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
+                clear_xy_feed_mm_per_min: 12_000.0,
+                carried_xy_feed_mm_per_min: 12_000.0,
                 nozzle_id: "N1".into(),
                 tip_id: "N045".into(),
                 sensor_id: "vacuum_1".into(),
@@ -31097,42 +31356,52 @@ mod tests {
         negative: [f64; 2],
         positive: [f64; 2],
     ) -> LocalXyAxisDirectionReport {
+        let estimate = LocalXyAxisEstimate {
+            axis,
+            sample_pairs: 3,
+            negative_mean_correction_x_mm: negative[0],
+            negative_mean_correction_y_mm: negative[1],
+            positive_mean_correction_x_mm: positive[0],
+            positive_mean_correction_y_mm: positive[1],
+            direction_gap_x_mm: 0.0,
+            direction_gap_y_mm: 0.0,
+            primary_axis_gap_mm: 0.05,
+            cross_axis_gap_mm: 0.01,
+            primary_axis_confidence_interval_95_mm: 0.01,
+            effect_resolved: true,
+        };
         LocalXyAxisDirectionReport {
-            estimate: LocalXyAxisEstimate {
-                axis,
-                sample_pairs: 3,
-                negative_mean_correction_x_mm: 0.0,
-                negative_mean_correction_y_mm: 0.0,
-                positive_mean_correction_x_mm: 0.0,
-                positive_mean_correction_y_mm: 0.0,
-                direction_gap_x_mm: 0.0,
-                direction_gap_y_mm: 0.0,
-                primary_axis_gap_mm: 0.05,
-                cross_axis_gap_mm: 0.01,
-                primary_axis_confidence_interval_95_mm: 0.01,
-                effect_resolved: true,
-            },
-            stopping_reason: "test fixture".into(),
-            holdout: LocalXyCompensationHoldout {
-                negative_residual_x_mm: 0.0,
-                negative_residual_y_mm: 0.0,
-                positive_residual_x_mm: 0.0,
-                positive_residual_y_mm: 0.0,
-                direction_gap_mm: 0.01,
-                improved: true,
-                negative_sample: test_direction_sample(axis, ApproachSide::Negative),
-                positive_sample: test_direction_sample(axis, ApproachSide::Positive),
-            },
-            compensation_enabled: true,
-            applied_negative_compensation_x_mm: negative[0],
-            applied_negative_compensation_y_mm: negative[1],
-            applied_positive_compensation_x_mm: positive[0],
-            applied_positive_compensation_y_mm: positive[1],
+            axis,
+            feeds: vec![LocalXyFeedDirectionReport {
+                feed_mm_per_min: 300.0,
+                estimate,
+                stopping_reason: "test fixture".into(),
+                holdout: LocalXyCompensationHoldout {
+                    negative_residual_x_mm: 0.0,
+                    negative_residual_y_mm: 0.0,
+                    positive_residual_x_mm: 0.0,
+                    positive_residual_y_mm: 0.0,
+                    direction_gap_mm: 0.01,
+                    improved: true,
+                    negative_sample: test_direction_sample(axis, ApproachSide::Negative),
+                    positive_sample: test_direction_sample(axis, ApproachSide::Positive),
+                },
+                compensation_enabled: true,
+                qualified: true,
+                applied_negative_compensation_x_mm: negative[0],
+                applied_negative_compensation_y_mm: negative[1],
+                applied_positive_compensation_x_mm: positive[0],
+                applied_positive_compensation_y_mm: positive[1],
+            }],
         }
     }
 
     fn test_direction_report() -> LocalXyDirectionResponseReport {
         LocalXyDirectionResponseReport {
+            datum_x_approach: ApproachSide::Negative,
+            datum_y_approach: ApproachSide::Negative,
+            datum_approach_distance_mm: 5.0,
+            datum_approach_feed_mm_per_min: 300.0,
             reference_controller_x_mm: 0.0,
             reference_controller_y_mm: 0.0,
             reference_observed_x_px: 320.0,
@@ -31545,6 +31814,23 @@ mod tests {
         .unwrap();
         let planner = MotionPlanner::new(state.profile.bounds, Some(calibration));
         let mut motion_state = planner.initial_state(home).unwrap();
+        let positioning_target = Pose {
+            x_mm: 20.0,
+            y_mm: 20.0,
+            z_mm: 31.5,
+            rotation_deg: 0.0,
+        };
+        execute_job_motion(
+            &state.machine,
+            lease.id,
+            &planner,
+            &mut motion_state,
+            positioning_target,
+            300.0,
+            MotionMode::Raw,
+        )
+        .await
+        .unwrap();
         let logical_target = Pose {
             x_mm: 10.0,
             y_mm: 10.0,
@@ -31567,8 +31853,8 @@ mod tests {
         assert_eq!(
             lateral.controller_target,
             Pose {
-                x_mm: 10.032,
-                y_mm: 10.015,
+                x_mm: 9.936,
+                y_mm: 9.97,
                 ..logical_target
             }
         );
@@ -31590,8 +31876,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(motion_state.logical_pose, vertical_target);
-        assert_eq!(vertical.controller_target.x_mm, 10.032);
-        assert_eq!(vertical.controller_target.y_mm, 10.015);
+        assert_eq!(vertical.controller_target.x_mm, 9.936);
+        assert_eq!(vertical.controller_target.y_mm, 9.97);
     }
 
     #[tokio::test]
@@ -31628,8 +31914,8 @@ mod tests {
             placement_seating_offset_mm: 0.0,
             placement_release_seating_offsets_mm: vec![0.0],
             feeder_pick: Pose {
-                x_mm: 100.0,
-                y_mm: 100.0,
+                x_mm: 300.0,
+                y_mm: 300.0,
                 z_mm: 4.0,
                 rotation_deg: 0.0,
             },
@@ -34830,13 +35116,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xy_direction_conditions_cover_distances_and_feeds_before_repeating() {
+    async fn xy_direction_distances_repeat_for_each_exact_feed() {
         let state = test_state();
         let profile = state.profile.local_xy_direction_response.as_ref().unwrap();
-        assert_eq!(direction_response_condition(profile, 0), (1.0, 300.0));
-        assert_eq!(direction_response_condition(profile, 1), (5.0, 300.0));
-        assert_eq!(direction_response_condition(profile, 2), (1.0, 900.0));
-        assert_eq!(direction_response_condition(profile, 3), (5.0, 900.0));
+        assert_eq!(direction_response_distance(profile, 0), 5.0);
+        assert_eq!(direction_response_distance(profile, 1), 25.0);
+        assert_eq!(direction_response_distance(profile, 2), 5.0);
     }
 
     #[tokio::test]
@@ -35222,6 +35507,23 @@ mod tests {
             ..seed
         };
         assert!(next_visual_correction_target(seed, current, &observation, &visual).is_err());
+    }
+
+    #[test]
+    fn fine_home_starts_below_the_datum_on_both_axes() {
+        let target = JogTarget {
+            x_mm: 220.125,
+            y_mm: 190.25,
+            z_mm: 31.5,
+            rotation_deg: None,
+        };
+
+        let start = negative_xy_approach_start(target, 5.0);
+
+        assert_eq!(start.x_mm, 215.125);
+        assert_eq!(start.y_mm, 185.25);
+        assert_eq!(start.z_mm, target.z_mm);
+        assert_eq!(start.rotation_deg, target.rotation_deg);
     }
 
     #[test]

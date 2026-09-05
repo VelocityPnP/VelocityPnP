@@ -45,29 +45,32 @@ source repository.
 
 ## Motion-performance session
 
-The V3.0.2 profile keeps 1,200 mm/min as its normal default. It has a separate
-12,000 mm/min qualification ceiling. Important calibration feeds are 300
-mm/min, installed-plate scans use 600 mm/min, and vacuum contact uses 60
-mm/min. These values are conservative. They are not measured machine limits.
+The V3.0.2 profile keeps 1,200 mm/min as its general default. Configured clear
+and carried safe-Z transit use 12,000 mm/min. Important calibration feeds are
+300 mm/min, installed-plate scans use 600 mm/min, and vacuum contact uses 60
+mm/min. The controller reports a 30,000 mm/min X/Y limit. This is not a
+validated mechanical limit.
 
 Connection now records the active `M503` and `M122` controller settings in
 machine status. Each jog records requested feed, linear distance, ideal
 constant-speed time, controller-wait time, and failure details in the event
 journal. The `motion-sweep` CLI command runs clear-XY moves at safe Z. Its
 default levels are 1,200, 3,000, 6,000, 9,000, and 12,000 mm/min. It compares
-each return with a camera observation at the primary datum. It stops speed
-escalation when a return differs from the baseline by more than 0.05 mm.
+each return with a direction-conditioned camera baseline at the primary datum.
+It stops speed escalation when a return differs from the baseline by more than
+0.05 mm. The attached machine passed all levels. Its worst return error was
+0.02076 mm.
 
 Continue the performance work with measurement:
 
-1. Run the default physical `motion-sweep` after a new operator safety check.
-2. Keep the fastest level that passes all three 0.05 mm return checks.
-3. Run a 1206 pickup-return qualification at the selected clear-XY feed.
-4. Separate long safe-Z travel, short vision correction, Z approach, Z contact,
-   and rotation feeds in the profile and motion request types.
-5. Measure camera-settle time and actuator wait time for one guarded placement
+1. Capture X and Y response from both directions at every qualified transit
+   feed. Each exact condition must pass an independent 0.05 mm holdout.
+2. Run fine home with its fixed negative-X and negative-Y datum approach.
+3. Run a 1206 pickup-return qualification at 12,000 mm/min clear and carried
+   transit.
+4. Measure camera-settle time and actuator wait time for one guarded placement
    and one scan row.
-6. Validate controlled stop and reconnect. Use emergency stop only for an
+5. Validate controlled stop and reconnect. Use emergency stop only for an
    actual emergency.
 
 The main code locations are:

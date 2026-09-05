@@ -16,6 +16,10 @@
   "safe_z_mm": 31.5,
   "default_feed_mm_per_min": 1200.0,
   "maximum_feed_mm_per_min": 12000.0,
+  "transit_motion": {
+    "clear_xy_feed_mm_per_min": 12000.0,
+    "carried_xy_feed_mm_per_min": 12000.0
+  },
   "homing": {
     "method": "sensorless",
     "operator_checks": [
@@ -198,11 +202,21 @@
     "alignment_max_rotation_correction_deg": 180.0
   },
   "local_xy_direction_response": {
-    "approach_distances_mm": [1.0, 5.0],
-    "approach_feeds_mm_per_min": [300.0, 900.0],
+    "datum_approach_distance_mm": 5.0,
+    "datum_approach_feed_mm_per_min": 300.0,
+    "approach_distances_mm": [5.0, 25.0],
+    "approach_feeds_mm_per_min": [
+      300.0,
+      1200.0,
+      3000.0,
+      6000.0,
+      9000.0,
+      12000.0
+    ],
     "minimum_sample_pairs": 3,
-    "maximum_sample_pairs": 7,
-    "resolved_relative_uncertainty": 0.5
+    "maximum_sample_pairs": 5,
+    "resolved_relative_uncertainty": 0.5,
+    "maximum_holdout_error_mm": 0.05
   },
   "installed_geometry_calibration": {
     "installed_plate_depth_below_working_plane_mm": 1.6,

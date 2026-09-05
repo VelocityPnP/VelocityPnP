@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{timeout, Instant};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use velocitypnp_domain::{
@@ -31,6 +31,34 @@ const MAX_MOVE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MOVE_TIMEOUT_MARGIN_SECONDS: f64 = 15.0;
 const MOVE_TIMEOUT_SAFETY_FACTOR: f64 = 1.5;
 const STOP_RESTART_SETTLE: Duration = Duration::from_secs(1);
+
+enum PolledLine {
+    Pending,
+    Complete(String),
+    Disconnected,
+}
+
+async fn poll_complete_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    wait: Duration,
+) -> std::io::Result<PolledLine> {
+    match timeout(wait, reader.read_until(b'\n', buffer)).await {
+        Err(_) => Ok(PolledLine::Pending),
+        Ok(Err(error)) => Err(error),
+        Ok(Ok(0)) => Ok(PolledLine::Disconnected),
+        Ok(Ok(_)) => {
+            let bytes = std::mem::take(buffer);
+            let line = String::from_utf8(bytes)
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                })?
+                .trim()
+                .to_owned();
+            Ok(PolledLine::Complete(line))
+        }
+    }
+}
 
 pub struct MarlinDriver {
     path: String,
@@ -81,6 +109,7 @@ impl MarlinDriver {
 
         let deadline = Instant::now() + command_timeout;
         let mut lines = Vec::new();
+        let mut line_buffer = Vec::new();
         loop {
             if self.emergency_flag.swap(false, Ordering::AcqRel) {
                 stream.get_mut().write_all(b"M112\n").await?;
@@ -91,20 +120,19 @@ impl MarlinDriver {
             if remaining.is_zero() {
                 bail!("controller timed out after {command_timeout:?} for {command}");
             }
-            let mut line = String::new();
-            let count = match timeout(
+            let line = match poll_complete_line(
+                stream,
+                &mut line_buffer,
                 remaining.min(Duration::from_millis(20)),
-                stream.read_line(&mut line),
             )
-            .await
+            .await?
             {
-                Ok(result) => result?,
-                Err(_) => continue,
+                PolledLine::Pending => continue,
+                PolledLine::Disconnected => {
+                    bail!("controller disconnected while waiting for {command}")
+                }
+                PolledLine::Complete(line) => line,
             };
-            if count == 0 {
-                bail!("controller disconnected while waiting for {command}");
-            }
-            let line = line.trim().to_string();
             if line.starts_with("Error:") || line.starts_with("echo:busy: paused for user") {
                 bail!("controller rejected {command}: {line}");
             }
@@ -136,21 +164,23 @@ impl MarlinDriver {
             .context("writing Marlin stop-restart command M999")?;
         tokio::time::sleep(STOP_RESTART_SETTLE).await;
         let deadline = Instant::now() + Duration::from_secs(1);
+        let mut line_buffer = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
             }
-            let mut line = String::new();
-            match timeout(
+            match poll_complete_line(
+                stream,
+                &mut line_buffer,
                 remaining.min(Duration::from_millis(100)),
-                stream.read_line(&mut line),
             )
             .await
             {
-                Ok(Ok(0)) | Err(_) => break,
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => return Err(error).context("draining Marlin M999 reply"),
+                Ok(PolledLine::Pending) if line_buffer.is_empty() => break,
+                Ok(PolledLine::Pending | PolledLine::Complete(_)) => {}
+                Ok(PolledLine::Disconnected) => break,
+                Err(error) => return Err(error).context("draining Marlin M999 reply"),
             }
         }
         self.controller_stopped = false;
@@ -196,8 +226,7 @@ impl MarlinDriver {
             .command("M122", Duration::from_secs(10))
             .await
             .context("reading active TMC driver settings")?;
-        let settings = parse_controller_settings(&m503, &m122)
-            .context("decoding active Marlin controller settings")?;
+        let settings = parse_controller_settings(&m503, &m122)?;
         Ok(ControllerConnection { firmware, settings })
     }
 }
@@ -529,7 +558,7 @@ fn parse_controller_settings(m503: &[String], m122: &[String]) -> Result<Control
         parse_gcode_values(m503, "M205").and_then(|values| values.get("J").copied());
     let axes = parse_tmc_axes(m122).context("M122 did not report TMC axes")?;
     let microsteps = parse_tmc_row(m122, &axes, "msteps", str::parse::<u16>)
-        .context("M122 did not report TMC microsteps")?;
+        .with_context(|| format!("M122 did not report TMC microsteps for axes {axes:?}"))?;
     let interpolation = parse_tmc_row(m122, &axes, "interp", str::parse::<bool>)
         .context("M122 did not report TMC interpolation")?;
     Ok(ControllerSettings {
@@ -938,6 +967,32 @@ mod tests {
         assert_eq!(settings.junction_deviation_mm, Some(0.01));
         assert_eq!(settings.microsteps["X"], 64);
         assert!(settings.interpolation["Y"]);
+    }
+
+    #[tokio::test]
+    async fn serial_poll_keeps_a_line_split_across_timeouts() {
+        let (read_half, mut write_half) = tokio::io::duplex(128);
+        tokio::spawn(async move {
+            write_half.write_all(b"msteps\t\t64\t64\t").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            write_half.write_all(b"8\t8\t8\t256\r\n").await.unwrap();
+        });
+        let mut reader = BufReader::new(read_half);
+        let mut buffer = Vec::new();
+        for _ in 0..20 {
+            match poll_complete_line(&mut reader, &mut buffer, Duration::from_millis(5))
+                .await
+                .unwrap()
+            {
+                PolledLine::Pending => {}
+                PolledLine::Complete(line) => {
+                    assert_eq!(line, "msteps\t\t64\t64\t8\t8\t8\t256");
+                    return;
+                }
+                PolledLine::Disconnected => panic!("stream disconnected before the full line"),
+            }
+        }
+        panic!("timed out before the full line was read");
     }
 
     #[test]

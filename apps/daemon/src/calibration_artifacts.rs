@@ -1094,7 +1094,7 @@ fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
         TopCameraWorkingPlaneMap | BottomCameraLocalMap => "camera_motion_mapping.v1",
         TopCameraPlanarModel | BottomCameraPlanarModel => "planar_camera_model.v1",
         InstalledPlateGeometry => "installed_plate_geometry.v1",
-        LocalXyDirectionResponse => "local_xy_direction_response.v2",
+        LocalXyDirectionResponse => "local_xy_direction_response.v3",
         ReciprocalCameraGeometry => "reciprocal_camera_geometry.v2",
         CameraRayTransfer => "camera_ray_transfer.v2",
         NozzleAxisRunoutN1 | NozzleAxisRunoutN2 => "nozzle_axis_runout.v1",

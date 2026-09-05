@@ -161,6 +161,7 @@ pub struct MachineProfile {
     pub safe_z_mm: f64,
     pub default_feed_mm_per_min: f64,
     pub maximum_feed_mm_per_min: f64,
+    pub transit_motion: TransitMotionProfile,
     pub homing: HomingProfile,
     pub axes: Vec<AxisProfile>,
     pub actuators: Vec<ActuatorProfile>,
@@ -188,6 +189,30 @@ pub struct MachineProfile {
     #[serde(default)]
     pub workspace_fixtures: Vec<WorkspaceFixtureRegionProfile>,
     pub capabilities: BTreeMap<String, bool>,
+}
+
+/// Qualified lateral travel feeds at level Z.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitMotionProfile {
+    pub clear_xy_feed_mm_per_min: f64,
+    pub carried_xy_feed_mm_per_min: f64,
+}
+
+impl TransitMotionProfile {
+    pub fn validate(&self, maximum_feed_mm_per_min: f64) -> Result<(), &'static str> {
+        if !maximum_feed_mm_per_min.is_finite()
+            || maximum_feed_mm_per_min <= 0.0
+            || !self.clear_xy_feed_mm_per_min.is_finite()
+            || !self.carried_xy_feed_mm_per_min.is_finite()
+            || self.clear_xy_feed_mm_per_min <= 0.0
+            || self.carried_xy_feed_mm_per_min <= 0.0
+            || self.clear_xy_feed_mm_per_min > maximum_feed_mm_per_min
+            || self.carried_xy_feed_mm_per_min > maximum_feed_mm_per_min
+        {
+            return Err("transit motion profile is invalid");
+        }
+        Ok(())
+    }
 }
 
 impl MachineProfile {
@@ -459,6 +484,10 @@ fn default_board_release_valve_pulse_ms() -> u64 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalXyDirectionResponseProfile {
+    /// Distance used to finish visual home from negative X and Y.
+    pub datum_approach_distance_mm: f64,
+    /// Feed used for the direction-controlled visual-home arrival.
+    pub datum_approach_feed_mm_per_min: f64,
     /// Final-approach distances used to expose short- and long-move response.
     pub approach_distances_mm: Vec<f64>,
     /// Final-approach feeds used to expose speed-dependent response.
@@ -468,6 +497,8 @@ pub struct LocalXyDirectionResponseProfile {
     /// A resolved effect can stop when its 95% confidence interval is no more
     /// than this fraction of the measured direction gap.
     pub resolved_relative_uncertainty: f64,
+    /// Maximum absolute residual and direction gap permitted in a holdout.
+    pub maximum_holdout_error_mm: f64,
 }
 
 /// A camera sweep at its normal operating height. The offsets move the
@@ -746,23 +777,37 @@ impl StripFeederPickupProfile {
 
 impl LocalXyDirectionResponseProfile {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.approach_distances_mm.len() < 2
+        if !self.datum_approach_distance_mm.is_finite()
+            || !(0.5..=25.0).contains(&self.datum_approach_distance_mm)
+            || !self.datum_approach_feed_mm_per_min.is_finite()
+            || !(30.0..=30_000.0).contains(&self.datum_approach_feed_mm_per_min)
+            || self.approach_distances_mm.len() < 2
             || self.approach_distances_mm.len() > 6
             || self
                 .approach_distances_mm
                 .iter()
                 .any(|value| !value.is_finite() || !(0.5..=25.0).contains(value))
             || self.approach_feeds_mm_per_min.len() < 2
-            || self.approach_feeds_mm_per_min.len() > 6
+            || self.approach_feeds_mm_per_min.len() > 8
             || self
                 .approach_feeds_mm_per_min
                 .iter()
-                .any(|value| !value.is_finite() || !(30.0..=2_400.0).contains(value))
+                .any(|value| !value.is_finite() || !(30.0..=30_000.0).contains(value))
+            || !self
+                .approach_feeds_mm_per_min
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || !self
+                .approach_feeds_mm_per_min
+                .iter()
+                .any(|feed| (*feed - self.datum_approach_feed_mm_per_min).abs() < 1e-6)
             || !(3..=5).contains(&self.minimum_sample_pairs)
             || self.maximum_sample_pairs < self.minimum_sample_pairs
             || self.maximum_sample_pairs > 9
             || !self.resolved_relative_uncertainty.is_finite()
             || !(0.1..=1.0).contains(&self.resolved_relative_uncertainty)
+            || !self.maximum_holdout_error_mm.is_finite()
+            || !(0.005..=0.25).contains(&self.maximum_holdout_error_mm)
         {
             return Err("local XY direction-response profile is invalid");
         }
@@ -1335,10 +1380,16 @@ mod tests {
         assert_eq!(vacuum.search_end_nozzle_z_mm, 3.0);
         assert_eq!(characterization.characterization_clearance_mm, 0.3);
         assert_eq!(characterization.characterization_sample_count, 20);
-        assert_eq!(direction_response.approach_distances_mm, [1.0, 5.0]);
-        assert_eq!(direction_response.approach_feeds_mm_per_min, [300.0, 900.0]);
+        assert_eq!(direction_response.datum_approach_distance_mm, 5.0);
+        assert_eq!(direction_response.datum_approach_feed_mm_per_min, 300.0);
+        assert_eq!(direction_response.approach_distances_mm, [5.0, 25.0]);
+        assert_eq!(
+            direction_response.approach_feeds_mm_per_min,
+            [300.0, 1_200.0, 3_000.0, 6_000.0, 9_000.0, 12_000.0]
+        );
         assert_eq!(direction_response.minimum_sample_pairs, 3);
-        assert_eq!(direction_response.maximum_sample_pairs, 7);
+        assert_eq!(direction_response.maximum_sample_pairs, 5);
+        assert_eq!(direction_response.maximum_holdout_error_mm, 0.05);
         assert_eq!(installed.plates.len(), 2);
         assert_eq!(installed.plates[0].role, InstalledPlateRole::Staging);
         assert_eq!(installed.plates[1].role, InstalledPlateRole::Build);

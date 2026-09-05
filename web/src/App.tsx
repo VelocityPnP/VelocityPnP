@@ -571,8 +571,12 @@ function CalibrationPanel({ status, devices, setError }: {
         })}
       </div>}
       {active?.values.local_xy_direction_response && <div className="run-result">
-        {active.values.local_xy_direction_response.axes.map((axis) =>
-          <p key={axis.estimate.axis}>{axis.estimate.axis.toUpperCase()}: <strong>{axis.compensation_enabled ? "holdout-validated compensation" : axis.estimate.effect_resolved ? "compensation rejected by holdout" : "no resolved direction effect"}</strong>; gap {axis.estimate.primary_axis_gap_mm.toFixed(4)} mm ± {axis.estimate.primary_axis_confidence_interval_95_mm.toFixed(4)} mm; holdout {axis.holdout.direction_gap_mm.toFixed(4)} mm; {axis.estimate.sample_pairs} pairs</p>)}
+        {active.values.local_xy_direction_response.axes.flatMap((axis) => axis.feeds?.length
+          ? axis.feeds.map((feed) =>
+            <p key={`${axis.axis}-${feed.feed_mm_per_min}`}>{axis.axis?.toUpperCase()} at {feed.feed_mm_per_min.toFixed(0)} mm/min: <strong>{feed.qualified ? feed.compensation_enabled ? "qualified compensation" : "qualified without compensation" : "not qualified"}</strong>; gap {feed.estimate.primary_axis_gap_mm.toFixed(4)} mm ± {feed.estimate.primary_axis_confidence_interval_95_mm.toFixed(4)} mm; holdout {feed.holdout.direction_gap_mm.toFixed(4)} mm; {feed.estimate.sample_pairs} pairs</p>)
+          : axis.estimate && axis.holdout
+            ? [<p key={axis.estimate.axis}>{axis.estimate.axis.toUpperCase()}: legacy direction response; recalibration required</p>]
+            : [])}
       </div>}
       {activeRun && <div className="calibration-run">
         <div className="run-heading"><strong>{pretty(activeRun.status)}</strong><span>{pretty(activeRun.phase)}</span></div>

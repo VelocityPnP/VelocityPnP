@@ -1616,6 +1616,8 @@ async fn main() -> Result<()> {
 }
 
 const DEFAULT_MOTION_SWEEP_FEEDS: [f64; 5] = [1_200.0, 3_000.0, 6_000.0, 9_000.0, 12_000.0];
+const MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN: f64 = 1_200.0;
+const MOTION_SWEEP_BASELINE_SAMPLES: usize = 3;
 
 struct MotionSweepPlan {
     feeds: Vec<f64>,
@@ -1658,16 +1660,54 @@ async fn run_motion_sweep(
         lease,
         status.pose.unwrap(),
         plan.seed,
-        plan.feeds[0],
+        MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN,
     )
     .await
     .context("moving to the motion-sweep seed")?;
-    let baseline = observe_visual_home(client, base, lease)
-        .await
-        .context("capturing the motion-sweep baseline")?;
-    let baseline_correction = visual_correction(&baseline)?;
-    if !visual_observation_valid(&baseline) {
-        bail!("motion-sweep baseline exceeded the configured fiducial bounds");
+    let conditioning_outbound = timed_jog(
+        client,
+        base,
+        lease,
+        plan.seed,
+        plan.high,
+        MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN,
+    )
+    .await
+    .context("conditioning the motion-sweep baseline approach")?;
+    let conditioning_return = timed_jog(
+        client,
+        base,
+        lease,
+        plan.high,
+        plan.seed,
+        MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN,
+    )
+    .await
+    .context("returning from the motion-sweep baseline approach")?;
+    let mut baseline_observations = Vec::with_capacity(MOTION_SWEEP_BASELINE_SAMPLES);
+    let mut baseline_corrections = Vec::with_capacity(MOTION_SWEEP_BASELINE_SAMPLES);
+    for sample in 1..=MOTION_SWEEP_BASELINE_SAMPLES {
+        let observation = observe_visual_home(client, base, lease)
+            .await
+            .with_context(|| format!("capturing motion-sweep baseline sample {sample}"))?;
+        if !visual_observation_valid(&observation) {
+            bail!("motion-sweep baseline sample {sample} exceeded the fiducial bounds");
+        }
+        baseline_corrections.push(visual_correction(&observation)?);
+        baseline_observations.push(observation["initial"].clone());
+    }
+    let baseline_correction = mean_correction(&baseline_corrections);
+    let baseline_max_deviation_mm = baseline_corrections
+        .iter()
+        .map(|correction| {
+            (correction[0] - baseline_correction[0]).hypot(correction[1] - baseline_correction[1])
+        })
+        .fold(0.0_f64, f64::max);
+    let baseline_max_pairwise_error_mm = max_pairwise_correction_error(&baseline_corrections);
+    if baseline_max_pairwise_error_mm > return_tolerance_mm {
+        bail!(
+            "stationary camera spread {baseline_max_pairwise_error_mm:.4}mm exceeds the motion-sweep tolerance of {return_tolerance_mm:.4}mm"
+        );
     }
 
     let mut passed = true;
@@ -1746,6 +1786,7 @@ async fn run_motion_sweep(
         "stopped_early": stopped_early,
         "stop_reason": stop_reason,
         "cycles_per_feed": cycles,
+        "baseline_feed_mm_per_min": MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN,
         "return_tolerance_mm": return_tolerance_mm,
         "requested_feeds_mm_per_min": plan.feeds,
         "points": {
@@ -1755,10 +1796,13 @@ async fn run_motion_sweep(
         },
         "controller": status.controller,
         "initial_move": initial_move,
+        "conditioning_moves": [conditioning_outbound, conditioning_return],
         "baseline": {
             "correction_x_mm": baseline_correction[0],
             "correction_y_mm": baseline_correction[1],
-            "observation": baseline["initial"].clone(),
+            "max_deviation_mm": baseline_max_deviation_mm,
+            "max_pairwise_error_mm": baseline_max_pairwise_error_mm,
+            "observations": baseline_observations,
         },
         "levels": levels,
     }))
@@ -1805,6 +1849,9 @@ fn motion_sweep_plan(
             profile.maximum_feed_mm_per_min
         );
     }
+    if MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN > profile.maximum_feed_mm_per_min {
+        bail!("motion-sweep baseline feed exceeds the active profile limit");
+    }
     if feeds.windows(2).any(|pair| pair[0] >= pair[1]) {
         bail!("motion-sweep feeds must be in strictly ascending order");
     }
@@ -1818,7 +1865,11 @@ fn motion_sweep_plan(
             .max_feed_units_per_second
             .get(axis)
             .with_context(|| format!("controller settings do not include the {axis} feed limit"))?;
-        let highest_feed = *feeds.last().unwrap();
+        let highest_feed = feeds
+            .last()
+            .copied()
+            .unwrap()
+            .max(MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN);
         if highest_feed / 60.0 > *axis_limit {
             bail!(
                 "requested feed {highest_feed:.0} mm/min exceeds controller {axis} limit of {:.0} mm/min",
@@ -1936,6 +1987,24 @@ fn visual_correction(observation: &Value) -> Result<[f64; 2]> {
     Ok([x, y])
 }
 
+fn mean_correction(corrections: &[[f64; 2]]) -> [f64; 2] {
+    let count = corrections.len() as f64;
+    [
+        corrections.iter().map(|value| value[0]).sum::<f64>() / count,
+        corrections.iter().map(|value| value[1]).sum::<f64>() / count,
+    ]
+}
+
+fn max_pairwise_correction_error(corrections: &[[f64; 2]]) -> f64 {
+    let mut maximum = 0.0_f64;
+    for (index, left) in corrections.iter().enumerate() {
+        for right in &corrections[index + 1..] {
+            maximum = maximum.max((left[0] - right[0]).hypot(left[1] - right[1]));
+        }
+    }
+    maximum
+}
+
 fn visual_observation_valid(observation: &Value) -> bool {
     observation["initial"]["within_capture_bound"]
         .as_bool()
@@ -1947,10 +2016,14 @@ fn visual_observation_valid(observation: &Value) -> bool {
 
 async fn newest_event_sequence(client: &Client, base: &str) -> Result<Option<u64>> {
     let recent = get(client, &format!("{base}/events/recent")).await?;
-    Ok(recent["events"]
+    Ok(newest_persisted_event_sequence(&recent))
+}
+
+fn newest_persisted_event_sequence(recent: &Value) -> Option<u64> {
+    recent["events"]
         .as_array()
-        .and_then(|events| events.first())
-        .and_then(|event| event["sequence"].as_u64()))
+        .and_then(|events| events.last())
+        .and_then(|event| event["sequence"].as_u64())
 }
 
 async fn wait_for_motion_telemetry(
@@ -2276,5 +2349,25 @@ mod tests {
                 ..
             } if parsed_lease == lease && feeds == vec![1_200.0, 6_000.0, 12_000.0]
         ));
+    }
+
+    #[test]
+    fn timing_marker_uses_the_last_persisted_event_after_a_daemon_restart() {
+        let recent = json!({
+            "events": [
+                {"sequence": 740, "kind": "old.session"},
+                {"sequence": 7, "kind": "current.session"},
+            ]
+        });
+
+        assert_eq!(newest_persisted_event_sequence(&recent), Some(7));
+    }
+
+    #[test]
+    fn baseline_summary_measures_stationary_camera_spread() {
+        let corrections = [[0.01, 0.02], [0.03, 0.02], [0.02, 0.02]];
+
+        assert_eq!(mean_correction(&corrections), [0.02, 0.02]);
+        assert!((max_pairwise_correction_error(&corrections) - 0.02).abs() < 1e-12);
     }
 }

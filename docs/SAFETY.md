@@ -173,13 +173,20 @@ also remain inside the visual-homing correction safety bound before a holdout
 move is allowed. A motion fault does not trigger an emergency stop or an
 uncertain return move; the normal fault state invalidates homing.
 
+Applied visual home always reaches the datum from negative X and negative Y at
+the configured datum feed. This makes the travel response at fine home
+repeatable. Calibrated motion subtracts this datum response from every selected
+axis, direction, and exact-feed correction. It does not interpolate correction
+data between qualified feeds.
+
 Job motion has separate logical and controller poses. The motion planner checks
 the requested logical pose, applies only current holdout-enabled compensation,
 and checks the corrected controller pose again. It rejects a calibration change
 during an active sequence. Raw mode bypasses and clears direction state.
-Calibration runners and manual jog remain on the raw machine-actor path. Only
-the simulator job endpoint uses the calibrated path; physical job execution is
-still disabled.
+Calibration runners and manual jog remain on the raw machine-actor path.
+Physical strip-feeder pickup and placement require the current calibration and
+use separate profile feeds for clear and carried safe-Z transit. Old pickup
+evidence or evidence from another transit feed cannot authorize production.
 
 Physical disconnect and graceful daemon shutdown command both vacuum channels
 and the shared lights off before releasing serial. SIGINT and SIGTERM use this

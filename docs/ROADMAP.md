@@ -205,7 +205,7 @@ a failed placement.
 
 - [ ] Measure command, travel, camera-settle, actuator, and inspection time for
   a guarded placement and a workspace scan row
-- [ ] Separate profile-scoped safe-Z transit, vision correction, Z approach,
+- [x] Separate profile-scoped safe-Z transit, vision correction, Z approach,
   Z contact, and rotation speed limits
 - [ ] Validate faster motion one class at a time against bounds, controller
   limits, controlled stop, and calibration residuals

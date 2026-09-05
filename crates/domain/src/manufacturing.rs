@@ -1088,6 +1088,10 @@ pub struct HeldPartRotationCapture {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederPickupQualificationReport {
     pub algorithm_version: String,
+    #[serde(default)]
+    pub clear_xy_feed_mm_per_min: f64,
+    #[serde(default)]
+    pub carried_xy_feed_mm_per_min: f64,
     pub nozzle_id: String,
     pub tip_id: String,
     pub sensor_id: String,

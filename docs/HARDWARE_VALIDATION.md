@@ -51,9 +51,21 @@ cargo run --release -p velocitypnp -- motion-sweep \
 It uses the primary datum seed at safe Z and diagonal endpoints 150 mm in X
 and 100 mm in Y from that seed. At each default feed of 1,200, 3,000, 6,000,
 9,000, and 12,000 mm/min, it runs three cycles and measures camera-based return
-error. It stops at the first invalid observation or error above 0.05 mm. This
-test requires a new physical safety check. No physical sweep result is recorded
-yet.
+error. It stops at the first invalid observation or error above 0.05 mm.
+
+The attached sweep passed all five levels on 2026-09-05. The maximum return
+errors were 0.01518, 0.02076, 0.01695, 0.01769, and 0.01231 mm in ascending
+feed order. The three stationary baseline frames had 0.00166 mm maximum
+pairwise spread. At 12,000 mm/min, the measured controller waits were about
+1.204 seconds for each 180.278 mm leg and 2.116 seconds for the 360.555 mm
+crossing. The ideal constant-speed times were 0.901 and 1.803 seconds.
+
+An earlier trial stopped on a 0.0965 mm return. Its baseline and return used
+opposite arrival directions. A direction-conditioned repeat did not reproduce
+the error. This is consistent with backlash and does not show a skipped step.
+The sweep now conditions its baseline at 1,200 mm/min, takes three baseline
+frames, and reports stationary spread. It does not treat an unmatched approach
+as a speed failure.
 
 ## Passed
 
