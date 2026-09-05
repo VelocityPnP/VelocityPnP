@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset
@@ -241,6 +241,25 @@ def placement_sampling_weights(
     return weights
 
 
+def augment_placement_appearance(
+    image: Image.Image, rng: random.Random
+) -> Image.Image:
+    """Add bounded camera variation without changing board geometry."""
+
+    image = ImageEnhance.Brightness(image).enhance(rng.uniform(0.85, 1.15))
+    image = ImageEnhance.Contrast(image).enhance(rng.uniform(0.85, 1.15))
+    gamma = rng.uniform(0.88, 1.12)
+    table = [
+        round(255.0 * ((value / 255.0) ** gamma)) for value in range(256)
+    ]
+    image = image.point(table * len(image.getbands()))
+    if rng.random() < 0.35:
+        image = image.filter(
+            ImageFilter.GaussianBlur(radius=rng.uniform(0.1, 0.7))
+        )
+    return image
+
+
 class PlacementDataset(Dataset):
     """Torch dataset for reviewed, target-normalized placement images."""
 
@@ -276,12 +295,7 @@ class PlacementDataset(Dataset):
             )
         if self.augment:
             image, points = _augment_geometry(image, points, self.rng)
-            image = ImageEnhance.Brightness(image).enhance(
-                self.rng.uniform(0.85, 1.15)
-            )
-            image = ImageEnhance.Contrast(image).enhance(
-                self.rng.uniform(0.85, 1.15)
-            )
+            image = augment_placement_appearance(image, self.rng)
         array = np.asarray(image, dtype=np.float32).copy() / 255.0
         tensor = torch.from_numpy(array).permute(2, 0, 1)
         if self.augment:

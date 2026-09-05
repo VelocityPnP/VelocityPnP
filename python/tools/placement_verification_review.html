@@ -160,9 +160,14 @@ function show() {
   document.querySelector("#meta").textContent = JSON.stringify({
     id: sample.id, reference: sample.reference, package: sample.package,
     source_capture: sample.source_capture,
+    source_state: sample.source_state,
+    operator_disposition: sample.operator_disposition,
+    automatic_disposition: sample.automatic_disposition,
+    operator_note: sample.operator_note,
     target_machine_mm: sample.target_machine_mm,
     target_rotation_deg: sample.target_rotation_deg,
-    draft_state: sample.draft_state
+    draft_state: sample.draft_state,
+    draft_label_source: sample.draft_label_source
   }, null, 2);
 }
 function persist(decision = current().decision) {

@@ -1503,6 +1503,29 @@ output crop covers a 4 mm square, centers the KiCad target, and puts the
 expected package long axis on the image X axis. This makes board rotation and
 camera pose independent of the training label.
 
+Retained physical placement executions provide paired evidence without new
+machine motion. Export all usable before-contact and after-contact images with:
+
+```bash
+python python/tools/export_placement_execution_dataset.py \
+  velocitypnp.db \
+  datasets/placement-verification-v2/review-executions
+```
+
+The exporter uses the same target-normalized crop as the daemon. It keeps each
+before/after pair in one source group and records unusable executions in the
+draft manifest. Outcome records provide weak label proposals only. Review all
+states and outlines before finalization. A `stacked` outcome proposes one flat
+part before contact and multiple parts after contact.
+
+Training augmentation uses small scale and crop-registration changes, target-
+axis-preserving flips, bounded brightness and contrast, mild gamma and focus
+changes, and sensor noise. Do not rotate the complete crop by an arbitrary
+angle. The crop is already aligned to the expected package axis, and a complete
+rotation also rotates board pads and text. Component-only pose augmentation can
+be added after reviewed outlines provide reliable masks and the generated edge
+transitions pass visual review.
+
 Snapshots made before the placement-angle correction reflected the component
 angle through the top-side board transform. Re-export the snapshot. Then move
 the reviewed outlines into the corrected crop basis without changing their

@@ -214,6 +214,44 @@ def normalized_crop(
     )
 
 
+def normalized_crop_at_pixel(
+    image: Image.Image,
+    target_center_px: list[float],
+    pixel_to_machine: list[list[float]],
+    target_rotation_rad: float,
+) -> Image.Image:
+    """Match the daemon crop when the registered target pixel is known."""
+
+    machine_to_pixel = inverse_2x2(pixel_to_machine)
+    scale = OUTPUT_SPAN_MM / OUTPUT_SIZE
+    cosine = math.cos(target_rotation_rad)
+    sine = math.sin(target_rotation_rad)
+    output_x_pixel = multiply_2x2(
+        machine_to_pixel, [scale * cosine, scale * sine]
+    )
+    output_y_pixel = multiply_2x2(
+        machine_to_pixel, [-scale * sine, scale * cosine]
+    )
+    half = OUTPUT_SIZE / 2.0
+    coefficients = (
+        output_x_pixel[0],
+        output_y_pixel[0],
+        target_center_px[0]
+        - half * (output_x_pixel[0] + output_y_pixel[0]),
+        output_x_pixel[1],
+        output_y_pixel[1],
+        target_center_px[1]
+        - half * (output_x_pixel[1] + output_y_pixel[1]),
+    )
+    return image.transform(
+        (OUTPUT_SIZE, OUTPUT_SIZE),
+        Image.Transform.AFFINE,
+        coefficients,
+        resample=RESAMPLING,
+        fillcolor=127,
+    )
+
+
 def expected_outline(length_mm: float, width_mm: float) -> list[list[float]]:
     pixels_per_mm = OUTPUT_SIZE / OUTPUT_SPAN_MM
     half_length = 0.5 * length_mm * pixels_per_mm
@@ -269,7 +307,7 @@ def render_contact_sheet(output: Path, samples: list[dict[str, Any]]) -> None:
             fill=(255, 190, 0),
             width=1,
         )
-        state = "placed" if sample["draft_state"] == "component_flat" else "empty"
+        state = sample["draft_state"]
         draw.text(
             (left + 4, top + tile + 5),
             f'{sample["reference"]}  {state}',

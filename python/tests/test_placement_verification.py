@@ -24,6 +24,9 @@ if torch is not None:
         placement_dataset_summary,
         placement_sampling_weights,
     )
+    from velocitypnp_training.placement_verification import (
+        augment_placement_appearance,
+    )
 
 
 @unittest.skipIf(torch is None, "training dependencies are not installed")
@@ -173,6 +176,16 @@ class PlacementVerificationTests(unittest.TestCase):
         weights = placement_sampling_weights(samples)
 
         self.assertEqual(weights, [1.0, 0.25, 0.25, 0.5])
+
+    def test_appearance_augmentation_keeps_image_shape(self):
+        import random
+
+        image = Image.new("RGB", (192, 192), (96, 128, 160))
+
+        result = augment_placement_appearance(image, random.Random(7))
+
+        self.assertEqual(result.size, image.size)
+        self.assertEqual(result.mode, image.mode)
 
 
 if __name__ == "__main__":

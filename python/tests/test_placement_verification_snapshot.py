@@ -16,6 +16,7 @@ from export_placement_verification_snapshot import (  # noqa: E402
     machine_rotation,
     mean_frames,
     normalized_crop,
+    normalized_crop_at_pixel,
     normalized_crop_coefficients,
     part_dimensions,
     reference_sort_key,
@@ -90,6 +91,21 @@ class PlacementVerificationSnapshotTests(unittest.TestCase):
             pixel_to_machine=[[0.01, 0.0], [0.0, 0.01]],
             camera_machine_mm=[100.0, 200.0],
             target_machine_mm=[100.2, 199.9],
+            target_rotation_rad=0.0,
+        )
+
+        self.assertGreater(crop.getpixel((OUTPUT_SIZE // 2, OUTPUT_SIZE // 2)), 240)
+
+    def test_pixel_target_crop_matches_registered_center(self):
+        source = Image.new("L", (512, 512))
+        for x in range(275, 278):
+            for y in range(245, 248):
+                source.putpixel((x, y), 255)
+
+        crop = normalized_crop_at_pixel(
+            source,
+            target_center_px=[276.0, 246.0],
+            pixel_to_machine=[[0.01, 0.0], [0.0, 0.01]],
             target_rotation_rad=0.0,
         )
 
