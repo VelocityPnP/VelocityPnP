@@ -8520,6 +8520,13 @@ struct SourceComponentPickRejection {
     observed_empty: bool,
 }
 
+fn source_empty_observation_is_confirmed(
+    model_reported_empty: bool,
+    deterministic_occupancy: StripPocketOccupancy,
+) -> bool {
+    model_reported_empty && deterministic_occupancy == StripPocketOccupancy::Empty
+}
+
 async fn select_source_component_pick_center(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
@@ -8603,6 +8610,10 @@ async fn select_source_component_pick_center(
         learned_flat && prediction.confidence_gate_passed && prediction.pose.valid;
     let model_reported_empty =
         prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty;
+    let confirmed_empty = source_empty_observation_is_confirmed(
+        model_reported_empty,
+        analysis.report.deterministic_occupancy,
+    );
     let mut rejection = if model_reported_empty {
         Some("the source-component model reports an empty qualification pocket".into())
     } else if prediction.confidence_gate_passed
@@ -8652,6 +8663,12 @@ async fn select_source_component_pick_center(
         .report
         .findings
         .retain(|finding| !finding.contains("shadow evidence"));
+    if model_reported_empty && !confirmed_empty {
+        analysis.report.findings.push(
+            "the learned empty result lacks agreeing deterministic CV evidence; the pocket must remain under review"
+                .into(),
+        );
+    }
     let learned_control_authorized = learned_measurement.is_some();
     let (center_machine_mm, method_finding) = if let Some((
         learned_center_machine_mm,
@@ -8735,7 +8752,7 @@ async fn select_source_component_pick_center(
         findings: vec![method_finding],
         rejection: rejection.map(|message| SourceComponentPickRejection {
             message,
-            observed_empty: model_reported_empty,
+            observed_empty: confirmed_empty,
         }),
         learned_control_authorized,
     })
@@ -31357,6 +31374,26 @@ mod tests {
             report.review_required,
         );
         assert_eq!(&preview.pixels[303..306], &[245, 40, 210]);
+    }
+
+    #[test]
+    fn source_empty_requires_learned_and_deterministic_agreement() {
+        assert!(!source_empty_observation_is_confirmed(
+            true,
+            StripPocketOccupancy::Occupied,
+        ));
+        assert!(!source_empty_observation_is_confirmed(
+            true,
+            StripPocketOccupancy::Uncertain,
+        ));
+        assert!(!source_empty_observation_is_confirmed(
+            false,
+            StripPocketOccupancy::Empty,
+        ));
+        assert!(source_empty_observation_is_confirmed(
+            true,
+            StripPocketOccupancy::Empty,
+        ));
     }
 
     #[tokio::test]

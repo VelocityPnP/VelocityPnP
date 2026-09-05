@@ -742,9 +742,11 @@ uses the bounded deterministic center. The retained JSON report records
 whether the learned center controlled that pickup. The model runs before the
 legacy source-pose comparison. A confident flat-part result controls the
 pickup while the legacy result remains audit evidence. A confident `empty`
-result settles the reserved pocket as empty, selects the next available
-pocket, and synchronizes the active feeder count. Held-part pose results
-remain in shadow mode outside the strict post-release bare-nozzle gate.
+result settles the reserved pocket as empty only when deterministic CV also
+reports `empty`. A detector disagreement stops motion and keeps the pocket
+under review. An agreed empty result selects the next available pocket and
+synchronizes the active feeder count. Held-part pose results remain in shadow
+mode outside the strict post-release bare-nozzle gate.
 
 For a later capture session, carry reviewed labels into a new dataset without
 showing them again:

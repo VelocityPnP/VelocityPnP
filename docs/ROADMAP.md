@@ -172,8 +172,8 @@ The project is organized by measurable gates rather than calendar estimates.
   persist shadow predictions, deterministic comparisons, and review artifacts
 - [x] Use a high-confidence flat source-component model center for guarded
   pickup, with occupied-pocket, machine-offset, and CV-disagreement bounds
-- [x] Invalidate stale occupied-pocket state when fresh source-model evidence
-  confidently reports an empty pocket before nozzle descent
+- [x] Invalidate stale occupied-pocket state before nozzle descent only when
+  the source model and deterministic CV agree that the pocket is empty
 - [ ] Calibrate learned-model confidence gates on independent machines and
   component families before model output can make broader feeder decisions
 - [x] Add paired bare/observed held-part dataset export with deterministic
