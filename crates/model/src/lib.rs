@@ -1,8 +1,10 @@
 //! Versioned learned-model loading and inference.
 
 mod held_part;
+mod placement_verification;
 
 pub use held_part::*;
+pub use placement_verification::*;
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -100,6 +102,12 @@ struct ManifestInput {
     range: [f64; 2],
     resize: String,
     letterbox_value: u8,
+    #[serde(default)]
+    normalization_span_mm: Option<f64>,
+    #[serde(default)]
+    target_center_normalized: Option<[f64; 2]>,
+    #[serde(default)]
+    target_long_axis: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

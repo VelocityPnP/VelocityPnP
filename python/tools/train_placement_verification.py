@@ -454,7 +454,7 @@ def main() -> None:
             "This is a one-machine, one-board-session development split.",
             "The evaluation split is too small for a production gate.",
             "The training set has no on-edge or multiple-component examples.",
-            "Model output cannot authorize placement acceptance.",
+            "The model artifact does not define daemon acceptance policy.",
         ],
     }
     (output / "training-history.json").write_text(

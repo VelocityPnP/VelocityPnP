@@ -1484,6 +1484,22 @@ output crop covers a 4 mm square, centers the KiCad target, and puts the
 expected package long axis on the image X axis. This makes board rotation and
 camera pose independent of the training label.
 
+Snapshots made before the placement-angle correction reflected the component
+angle through the top-side board transform. Re-export the snapshot. Then move
+the reviewed outlines into the corrected crop basis without changing their
+operator labels:
+
+```bash
+python python/tools/migrate_placement_verification_review.py \
+  datasets/placement-verification-v1/review-current/manifest.ground-truth.json \
+  datasets/placement-verification-v1/review-corrected/manifest.draft.json \
+  datasets/placement-verification-v1/review-corrected/review-decisions.json
+```
+
+Open the corrected review page and check the migrated outlines before
+training. The migration only transforms existing operator labels. It does not
+use a detector to create new ground truth.
+
 `manifest.draft.json` contains operator-supplied presence as a draft only. It
 does not make this data ground truth. Open `index.html` and accept, correct, or
 reject every sample. A flat-component outline must cover the complete physical
@@ -1503,10 +1519,11 @@ python python/tools/finalize_placement_verification_dataset.py \
 
 The first model predicts `empty`, `component_flat`, `component_on_edge`, or
 `multiple_components` and one undirected package outline. The outline gives
-center, extent, and rotation relative to the normalized KiCad target. A later
-policy can map these measurements to `missing`, `good`, `offset`, `rotated`,
-`tombstoned`, or `stacked`. A class with no reviewed examples remains in the
-model contract but is a reported dataset limitation.
+center, extent, and rotation relative to the normalized KiCad target. The
+daemon policy can map these measurements to `missing`, `good`, `offset`,
+`rotated`, `tombstoned`, or `stacked`. The current guarded policy uses the
+`empty` and `component_flat` classes. A class with no reviewed examples remains
+in the model contract but is a reported dataset limitation.
 
 Validate the reviewed data without fitting parameters:
 
@@ -1526,8 +1543,8 @@ python/training/run-placement-container.sh \
 The model starts without pretrained parameters. Training code and weights use
 Apache-2.0 terms. PyTorch uses BSD-3-Clause terms. The training report records
 exact dataset, source, environment, parameter, and artifact hashes. It also
-keeps annotated training and evaluation sheets. Model output remains
-non-authoritative until independent sessions cover all condition classes and
+keeps annotated training and evaluation sheets. Broad model-only decisions
+remain disabled until independent sessions cover all condition classes and
 calibrate acceptance thresholds.
 
 Verify that ONNX export matches the selected PyTorch checkpoint:
@@ -1542,8 +1559,44 @@ python python/tools/verify_placement_verification.py \
 ```
 
 The first reviewed run is recorded in
-`docs/baselines/placement-verification-v1.json`. It is a shadow-only baseline.
-Its small, single-session evaluation set is not an acceptance threshold.
+`docs/baselines/placement-verification-v1.json`. Its small, single-session
+evaluation set is not an acceptance threshold.
+
+Load the exported package in the daemon with:
+
+```bash
+cargo run -p velocitypnpd -- \
+  --placement-verification-model-dir "$MODEL"
+```
+
+The environment variable
+`VELOCITYPNP_PLACEMENT_VERIFICATION_MODEL_DIR` supplies the same setting. The
+health response reports `placement_verification` as `ready`, `disabled`, or
+`invalid`. The daemon checks the contract, license, tensor shape, ONNX hash,
+file size, and one startup inference before it reports `ready`.
+
+The first promoted policy is a guarded hybrid. The model can control an
+axis-symmetric placement only when it confidently predicts `empty` or
+`component_flat`. Deterministic CV must agree about occupancy and must register
+the local target. A flat prediction must also match the configured package
+size. A disagreement cannot pass. Low-confidence results and classes without
+training examples keep the deterministic result and require review. Directed
+parts continue to use deterministic orientation checks because this model has
+no polarity output.
+
+Every model run keeps `board-placement-model-crop.png`,
+`board-placement-model-inspection.png`, and
+`board-placement-model-comparison.json`. The existing
+`board-placement-inspection.png` keeps the paired-frame deterministic result.
+This evidence supports later gate calibration and direct comparisons.
+
+Replay the package through the same Rust ONNX runtime used by the daemon:
+
+```bash
+cargo run -p velocitypnp-model \
+  --example evaluate_placement_verification -- \
+  "$MODEL" "$DATASET" eval
+```
 
 Raw captures and normalized samples are below `datasets/`, which Git ignores.
 Keep them across restarts. Their image hashes and registration IDs provide the

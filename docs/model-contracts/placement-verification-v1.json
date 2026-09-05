@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velocitypnp.org/model-contracts/placement-verification-v1.json",
+  "title": "VelocityPnP placement verification model v1",
+  "description": "One condition and undirected pose prediction from a target-normalized top-camera image.",
+  "type": "object",
+  "required": ["state_log_probabilities", "pose"],
+  "properties": {
+    "state_log_probabilities": {
+      "description": "Log probabilities in empty, component_flat, component_on_edge, and multiple_components order.",
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"type": "number"}
+    },
+    "pose": {
+      "description": "Normalized center and size followed by the doubled-angle unit vector.",
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": -1, "maximum": 1},
+        {"type": "number", "minimum": -1, "maximum": 1}
+      ],
+      "minItems": 6,
+      "maxItems": 6
+    }
+  },
+  "additionalProperties": false,
+  "x-velocitypnp": {
+    "contract_version": "velocitypnp.placement-verification.v1",
+    "input": {
+      "name": "images",
+      "layout": "NCHW",
+      "shape": ["batch", 3, 192, 192],
+      "channels": ["red", "green", "blue"],
+      "type": "float32",
+      "range": [0, 1],
+      "resize": "velocitypnp.half-pixel-bilinear-u8.v1",
+      "resize_coordinates": "half-pixel centers with clamped source edges",
+      "resize_rounding": "round non-negative interpolated values down from x+0.5",
+      "dimension_rounding": "round positive scaled dimensions down from x+0.5",
+      "letterbox_rgb": [127, 127, 127],
+      "normalization_span_mm": 4.0,
+      "target_center_normalized": [0.5, 0.5],
+      "target_long_axis": "positive_x"
+    },
+    "angle_period_degrees": 180,
+    "polarity_supported": false
+  }
+}

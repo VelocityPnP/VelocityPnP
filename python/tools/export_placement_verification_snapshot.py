@@ -105,12 +105,8 @@ def transform_point(matrix: list[float], point: list[float]) -> list[float]:
 
 
 def machine_rotation(matrix: list[float], design_rotation_deg: float) -> float:
-    radians = math.radians(design_rotation_deg)
-    vector = transform_point(
-        [matrix[0], matrix[1], 0.0, matrix[3], matrix[4], 0.0],
-        [math.cos(radians), math.sin(radians)],
-    )
-    return math.atan2(vector[1], vector[0])
+    board_rotation = math.atan2(matrix[3], matrix[0])
+    return board_rotation + math.radians(design_rotation_deg)
 
 
 def mean_frames(paths: list[Path]) -> Image.Image:

@@ -37,9 +37,11 @@ pub use held_part::{
 pub use opencv_backend::{gray_frame_from_mat, gray_frame_to_mat, resize_gray_frame};
 pub use placed_part::{
     inspect_placed_part, inspect_placed_part_with_orientation,
-    register_two_terminal_placement_target, PlacedPartInspectionArtifacts,
-    PlacementTargetRegistrationArtifacts, PLACED_PART_INSPECTION_ALGORITHM,
-    PLACEMENT_TARGET_REGISTRATION_ALGORITHM,
+    normalize_placement_verification_crop, register_two_terminal_placement_target,
+    render_placement_verification_preview, PlacedPartInspectionArtifacts,
+    PlacementTargetRegistrationArtifacts, PlacementVerificationCrop,
+    PLACED_PART_INSPECTION_ALGORITHM, PLACEMENT_TARGET_REGISTRATION_ALGORITHM,
+    PLACEMENT_VERIFICATION_CROP_SIZE_PX, PLACEMENT_VERIFICATION_CROP_SPAN_MM,
 };
 pub use strip_feeder::{
     analyze_live_strip_feeder_holdout, analyze_strip_feeder_candidate,

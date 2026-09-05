@@ -179,8 +179,8 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Add paired same-angle bare and held bottom-camera rotation sweeps to the
   guarded pickup-return operation and held-part dataset exporter
 - [x] Add package-template pose comparison after live fiducial verification
-- [ ] Train and integrate a top-camera placement condition and pose model from
-  registration-normalized, operator-reviewed board targets
+- [x] Train, export, and integrate a top-camera placement condition and pose
+  model with guarded CV agreement from registration-normalized reviews
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles

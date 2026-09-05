@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "run": "placement-verification-v1-balanced",
-  "completed_at": "2026-09-05T01:52:28.318046+00:00",
+  "run": "placement-verification-v1-corrected",
+  "completed_at": "2026-09-05T02:14:55.334152+00:00",
   "contract_version": "velocitypnp.placement-verification.v1",
   "dataset": {
-    "manifest_sha256": "ba1a89fb89779fb311c066babe8123b3721c35e0e05934b49fded822fd18e17b",
-    "content_sha256": "dfda4820736e68a83cb45677201d391accac91a05f4101427fa6ea9301cb4c1d",
+    "manifest_sha256": "0657230354a787697d5053b60eb4ee5c3f8917db31e5cfc553a3e1387f5bda45",
+    "content_sha256": "e781080a73f46a693774c01a4ac6af139d0f5bf6a2f719beca23ca28739055be",
     "train_samples": 35,
     "evaluation_samples": 5,
     "train_capture_groups": 18,
@@ -15,17 +15,18 @@
     "evaluation_empty_samples": 3,
     "evaluation_flat_samples": 2,
     "on_edge_samples": 0,
-    "multiple_component_samples": 0
+    "multiple_component_samples": 0,
+    "correction": "Placement angles use board rotation plus KiCad rotation."
   },
   "training": {
     "device": "NVIDIA GB10",
     "torch": "2.14.0a0+4fdf77b940.nv26.08",
-    "duration_seconds": 58.74057636084035,
+    "duration_seconds": 71.6738075078465,
     "parameter_count": 596833,
     "pretrained_weights": false,
     "requested_epochs": 240,
-    "completed_epochs": 230,
-    "best_epoch": 180,
+    "completed_epochs": 240,
+    "best_epoch": 224,
     "early_stopping_patience": 50,
     "batch_size": 16,
     "learning_rate": 0.002,
@@ -41,43 +42,83 @@
       "recall": 1.0
     },
     "pose": {
-      "mean_center_error_input_px": 1.7369986176490784,
-      "mean_center_error_mm": 0.03618747120102247,
-      "maximum_center_error_mm": 0.053153167168299355,
-      "mean_extent_error_input_px": 1.850938081741333,
-      "mean_angle_error_degrees_mod_180": 6.003350345986317,
-      "mean_oriented_iou": 0.8634380563530699
+      "mean_center_error_input_px": 0.4330563247203827,
+      "mean_center_error_mm": 0.009022006765007973,
+      "maximum_center_error_mm": 0.011503820617993673,
+      "mean_extent_error_input_px": 1.1635615825653076,
+      "mean_angle_error_degrees_mod_180": 3.5772503712060697,
+      "mean_oriented_iou": 0.9204376557533125
     },
-    "known_false_positive": "R8"
+    "known_false_positive": "R8",
+    "known_false_positive_passed_runtime_gate": false
   },
   "training_metrics": {
-    "classification_accuracy": 0.9714285714285714,
+    "classification_accuracy": 0.9428571428571428,
     "occupancy": {
       "true_positives": 9,
-      "false_positives": 1,
+      "false_positives": 2,
       "false_negatives": 0,
-      "precision": 0.9,
+      "precision": 0.8181818181818182,
       "recall": 1.0
     },
     "pose": {
-      "mean_center_error_mm": 0.04618717122960974,
-      "maximum_center_error_mm": 0.0893652339776357,
-      "mean_angle_error_degrees_mod_180": 11.571521895687509,
-      "mean_oriented_iou": 0.8288534061115624
+      "mean_center_error_mm": 0.037711538581384554,
+      "maximum_center_error_mm": 0.08591865499814351,
+      "mean_angle_error_degrees_mod_180": 3.3347578832242153,
+      "mean_oriented_iou": 0.8911550028554258
     }
   },
   "artifacts": {
-    "checkpoint_sha256": "ebc97a07ae278dcd571a43fb4aa227a7d7896882f9160c4c2f04fb2b377512d8",
-    "onnx_sha256": "420a07b36ef55d502f1988454b95ab01732ae1a3b5ccc3c52e52f1f7e6a0e455"
+    "checkpoint_sha256": "975cad55c65dfc86f772971a4eb20f744c09132c570437c3972dc2c4359be7ad",
+    "onnx_sha256": "03bbba78cfd7cba573b406d8ad764b878d670e47fb077db403062a1e248aa018"
   },
   "pytorch_onnx_parity": {
-    "runtime": "onnx.reference",
+    "runtime": "onnxruntime",
     "sample_count": 5,
     "absolute_tolerance": 0.0001,
-    "maximum_state_log_probability_difference": 9.5367431640625e-07,
-    "maximum_pose_difference": 1.55717134475708e-06,
+    "maximum_state_log_probability_difference": 1.430511474609375e-06,
+    "maximum_pose_difference": 8.046627044677734e-07,
     "class_mismatches": 0,
     "passed": true
+  },
+  "rust_runtime": {
+    "runtime": "tract-onnx-0.22",
+    "sample_count": 5,
+    "class_mismatches": 1,
+    "confidence_gate_pass_count": 4,
+    "mean_center_error_mm": 0.009011107278841027,
+    "maximum_center_error_mm": 0.011535110718461278,
+    "mean_angle_error_degrees_mod_180": 3.577468100312757,
+    "known_mismatch": "R8",
+    "known_mismatch_passed_runtime_gate": false
+  },
+  "historical_cv_comparison": {
+    "algorithm": "placed_package_geometry.v3",
+    "paired_inspection_count": 9,
+    "known_correct_findings": [
+      "R18 missing",
+      "R5 initially missing"
+    ],
+    "known_wrong_findings": [
+      "R12 stacked placement accepted as flat",
+      "R13 stacked placement accepted as flat",
+      "R14 operator-acceptable placement rejected"
+    ],
+    "directly_comparable_reviewed_samples": 0
+  },
+  "promotion_policy": {
+    "mode": "guarded_hybrid",
+    "supported_orientation": "axis_symmetric",
+    "supported_classes": [
+      "empty",
+      "component_flat"
+    ],
+    "minimum_class_probability": 0.6,
+    "minimum_class_margin": 0.25,
+    "requires_cv_occupancy_agreement": true,
+    "requires_cv_target_registration": true,
+    "minimum_size_ratio": 0.6,
+    "maximum_size_ratio": 1.5
   },
   "license": {
     "artifact": "Apache-2.0",
@@ -88,7 +129,7 @@
     "The data comes from one machine and one board session.",
     "The evaluation split is too small for a production gate.",
     "The data has no on-edge or multiple-component examples.",
-    "The evaluation set contains one empty-target false positive at R8.",
-    "Model output is shadow-only and cannot authorize placement acceptance."
+    "The CV comparison uses historical outcomes, not the same five crops.",
+    "The model cannot verify directed component polarity."
   ]
 }

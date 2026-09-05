@@ -1,3 +1,4 @@
+import math
 import sys
 from pathlib import Path
 import unittest
@@ -12,6 +13,7 @@ from export_placement_verification_snapshot import (  # noqa: E402
     OUTPUT_SIZE,
     crop_fits_image,
     expected_outline,
+    machine_rotation,
     mean_frames,
     normalized_crop,
     normalized_crop_coefficients,
@@ -21,6 +23,10 @@ from export_placement_verification_snapshot import (  # noqa: E402
 from finalize_placement_verification_dataset import (  # noqa: E402
     validate_outline,
     validate_review,
+)
+from migrate_placement_verification_review import (  # noqa: E402
+    migrate_review,
+    remap_point,
 )
 
 
@@ -114,6 +120,74 @@ class PlacementVerificationSnapshotTests(unittest.TestCase):
             expected_outline(1.6, 0.8),
             [[76.8, 102.4], [179.2, 102.4], [179.2, 153.6], [76.8, 153.6]],
         )
+
+    def test_machine_rotation_does_not_reflect_the_placement_angle(self):
+        board_rotation = 12.0
+        radians = math.radians(board_rotation)
+        transform = [
+            math.cos(radians),
+            math.sin(radians),
+            10.0,
+            math.sin(radians),
+            -math.cos(radians),
+            20.0,
+        ]
+
+        result = machine_rotation(transform, 45.0)
+
+        self.assertAlmostEqual(math.degrees(result), 57.0)
+
+    def test_review_point_follows_a_corrected_crop_rotation(self):
+        result = remap_point([128.0, 64.0], [128.0, 128.0], -45.0, 45.0)
+
+        self.assertAlmostEqual(result[0], 64.0)
+        self.assertAlmostEqual(result[1], 128.0)
+
+    def test_review_migration_keeps_operator_labels(self):
+        source = {
+            "normalization": {"output_span_mm": 4.0},
+            "samples": [
+                {
+                    "id": "r1",
+                    "reference": "R1",
+                    "included": True,
+                    "target_machine_mm": [10.0, 20.0],
+                    "target_rotation_deg": -45.0,
+                    "class_name": "component_flat",
+                    "outline_px": [
+                        [128.0, 64.0],
+                        [160.0, 64.0],
+                        [160.0, 96.0],
+                        [128.0, 96.0],
+                    ],
+                    "review_note": "operator label",
+                }
+            ],
+        }
+        target = {
+            "name": "corrected",
+            "generated_at": "2026-09-05T00:00:00Z",
+            "normalization": {
+                "output_span_mm": 4.0,
+                "target_center_px": [128.0, 128.0],
+            },
+            "samples": [
+                {
+                    "id": "r1",
+                    "reference": "R1",
+                    "target_machine_mm": [10.0, 20.0],
+                    "target_rotation_deg": 45.0,
+                }
+            ],
+        }
+
+        review = migrate_review(source, target)
+
+        decision = review["decisions"]["r1"]
+        self.assertEqual(decision["class_name"], "component_flat")
+        self.assertEqual(decision["note"], "operator label")
+        self.assertAlmostEqual(decision["outline_px"][0][0], 64.0)
+        self.assertAlmostEqual(decision["outline_px"][0][1], 128.0)
 
     def test_reference_sort_key_orders_numeric_suffixes(self):
         references = ["R10", "R2", "D3", "R1"]

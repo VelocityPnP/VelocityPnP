@@ -6,10 +6,13 @@ use opencv::core::{self, Mat, MatTraitConst, Rect, Size, Vec4i, Vector, CV_32S};
 use opencv::imgproc;
 use velocitypnp_domain::{
     PartOrientation, PlacedPartInspectionReport, PlacementTargetRegistrationReport,
+    PlacementVerificationModelPrediction,
 };
 
 pub const PLACED_PART_INSPECTION_ALGORITHM: &str = "placed_package_geometry.v3";
 pub const PLACEMENT_TARGET_REGISTRATION_ALGORITHM: &str = "local_two_terminal_target.v1";
+pub const PLACEMENT_VERIFICATION_CROP_SIZE_PX: u32 = 256;
+pub const PLACEMENT_VERIFICATION_CROP_SPAN_MM: f64 = 4.0;
 
 const DIFFERENCE_FLOOR: u8 = 18;
 const MINIMUM_BODY_CHANGE_FRACTION: f64 = 0.55;
@@ -31,6 +34,165 @@ pub struct PlacedPartInspectionArtifacts {
 pub struct PlacementTargetRegistrationArtifacts {
     pub report: PlacementTargetRegistrationReport,
     pub preview: RgbFrame,
+}
+
+/// One package-axis-aligned top-camera image and its source transform.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementVerificationCrop {
+    pub frame: GrayFrame,
+    source_from_crop: [[f64; 3]; 2],
+}
+
+impl PlacementVerificationCrop {
+    pub fn source_pixel(&self, crop_pixel: [f64; 2]) -> [f64; 2] {
+        [
+            self.source_from_crop[0][0] * crop_pixel[0]
+                + self.source_from_crop[0][1] * crop_pixel[1]
+                + self.source_from_crop[0][2],
+            self.source_from_crop[1][0] * crop_pixel[0]
+                + self.source_from_crop[1][1] * crop_pixel[1]
+                + self.source_from_crop[1][2],
+        ]
+    }
+}
+
+/// Rectify one post-placement image into the training model's target basis.
+pub fn normalize_placement_verification_crop(
+    frame: &GrayFrame,
+    target_center_px: [f64; 2],
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+    target_rotation_deg: f64,
+) -> Result<PlacementVerificationCrop> {
+    ensure!(
+        frame.width >= PLACEMENT_VERIFICATION_CROP_SIZE_PX
+            && frame.height >= PLACEMENT_VERIFICATION_CROP_SIZE_PX
+            && frame.pixels.len() == frame.width as usize * frame.height as usize,
+        "placement-verification source frame is invalid"
+    );
+    ensure!(
+        target_center_px.into_iter().all(f64::is_finite)
+            && pixel_error_to_machine_mm
+                .into_iter()
+                .flatten()
+                .all(f64::is_finite)
+            && target_rotation_deg.is_finite(),
+        "placement-verification crop policy is invalid"
+    );
+    let determinant = matrix_determinant(pixel_error_to_machine_mm);
+    ensure!(
+        determinant.is_finite() && determinant.abs() > 1e-9,
+        "top-camera map is singular"
+    );
+    let machine_to_pixel = [
+        [
+            pixel_error_to_machine_mm[1][1] / determinant,
+            -pixel_error_to_machine_mm[0][1] / determinant,
+        ],
+        [
+            -pixel_error_to_machine_mm[1][0] / determinant,
+            pixel_error_to_machine_mm[0][0] / determinant,
+        ],
+    ];
+    let radians = target_rotation_deg.to_radians();
+    let scale =
+        PLACEMENT_VERIFICATION_CROP_SPAN_MM / f64::from(PLACEMENT_VERIFICATION_CROP_SIZE_PX);
+    let x_machine = [scale * radians.cos(), scale * radians.sin()];
+    let y_machine = [-scale * radians.sin(), scale * radians.cos()];
+    let x_source = map_vector(machine_to_pixel, x_machine);
+    let y_source = map_vector(machine_to_pixel, y_machine);
+    let half = 0.5 * f64::from(PLACEMENT_VERIFICATION_CROP_SIZE_PX);
+    let source_from_crop = [
+        [
+            x_source[0],
+            y_source[0],
+            target_center_px[0] - half * (x_source[0] + y_source[0]),
+        ],
+        [
+            x_source[1],
+            y_source[1],
+            target_center_px[1] - half * (x_source[1] + y_source[1]),
+        ],
+    ];
+    let mut pixels = Vec::with_capacity(
+        (PLACEMENT_VERIFICATION_CROP_SIZE_PX * PLACEMENT_VERIFICATION_CROP_SIZE_PX) as usize,
+    );
+    for y in 0..PLACEMENT_VERIFICATION_CROP_SIZE_PX {
+        for x in 0..PLACEMENT_VERIFICATION_CROP_SIZE_PX {
+            let source = [
+                source_from_crop[0][0] * f64::from(x)
+                    + source_from_crop[0][1] * f64::from(y)
+                    + source_from_crop[0][2],
+                source_from_crop[1][0] * f64::from(x)
+                    + source_from_crop[1][1] * f64::from(y)
+                    + source_from_crop[1][2],
+            ];
+            let value = bilinear_luma(frame, source[0], source[1])
+                .map(|value| value.round().clamp(0.0, 255.0) as u8)
+                .unwrap_or(127);
+            pixels.push(value);
+        }
+    }
+    Ok(PlacementVerificationCrop {
+        frame: GrayFrame {
+            width: PLACEMENT_VERIFICATION_CROP_SIZE_PX,
+            height: PLACEMENT_VERIFICATION_CROP_SIZE_PX,
+            pixels,
+        },
+        source_from_crop,
+    })
+}
+
+/// Render the expected package and the learned package prediction.
+pub fn render_placement_verification_preview(
+    crop: &GrayFrame,
+    prediction: &PlacementVerificationModelPrediction,
+    expected_width_mm: f64,
+    expected_length_mm: f64,
+    review_required: bool,
+) -> RgbFrame {
+    let mut preview = grayscale_preview(crop);
+    let pixels_per_mm =
+        f64::from(PLACEMENT_VERIFICATION_CROP_SIZE_PX) / PLACEMENT_VERIFICATION_CROP_SPAN_MM;
+    let center = 0.5 * f64::from(PLACEMENT_VERIFICATION_CROP_SIZE_PX);
+    let half_length = 0.5 * expected_length_mm * pixels_per_mm;
+    let half_width = 0.5 * expected_width_mm * pixels_per_mm;
+    draw_polygon(
+        &mut preview,
+        &[
+            [center - half_length, center - half_width],
+            [center + half_length, center - half_width],
+            [center + half_length, center + half_width],
+            [center - half_length, center + half_width],
+        ],
+        [255, 0, 220],
+    );
+    if prediction.class.occupied() && prediction.pose.valid {
+        draw_polygon(&mut preview, &prediction.pose.outline_px, [0, 240, 255]);
+        draw_cross(
+            &mut preview,
+            prediction.pose.center_px[0].round() as i32,
+            prediction.pose.center_px[1].round() as i32,
+            [0, 240, 255],
+            8,
+        );
+    } else {
+        draw_cross(
+            &mut preview,
+            center.round() as i32,
+            center.round() as i32,
+            [255, 48, 32],
+            8,
+        );
+    }
+    if review_required {
+        let edge = f64::from(PLACEMENT_VERIFICATION_CROP_SIZE_PX - 1);
+        draw_polygon(
+            &mut preview,
+            &[[0.0, 0.0], [edge, 0.0], [edge, edge], [0.0, edge]],
+            [255, 0, 255],
+        );
+    }
+    preview
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -642,6 +804,7 @@ fn empty_report(
         orientation_contrast_luma: None,
         orientation_confidence: 0.0,
         orientation_matched: None,
+        placement_condition: None,
         changed_pixel_count: 0,
         mean_difference_luma: 0.0,
         body_change_fraction: 0.0,
@@ -1397,6 +1560,34 @@ mod tests {
             height: 240,
             pixels: vec![value; 320 * 240],
         }
+    }
+
+    #[test]
+    fn placement_model_crop_aligns_the_package_axis() {
+        let mut source = GrayFrame {
+            width: 320,
+            height: 320,
+            pixels: vec![10; 320 * 320],
+        };
+        let center = [160.0, 160.0];
+        let mapping = [[0.02, 0.0], [0.0, 0.02]];
+        draw_package(
+            &mut source,
+            center,
+            mapping,
+            [0.0, 0.0],
+            0.8,
+            1.6,
+            30.0,
+            200,
+        );
+
+        let crop = normalize_placement_verification_crop(&source, center, mapping, 30.0).unwrap();
+
+        assert_eq!(crop.frame.pixels[128 * 256 + 128], 200);
+        assert_eq!(crop.frame.pixels[128 * 256 + 168], 200);
+        assert_eq!(crop.frame.pixels[168 * 256 + 128], 10);
+        assert_eq!(crop.source_pixel([128.0, 128.0]), center);
     }
 
     #[allow(clippy::too_many_arguments)]

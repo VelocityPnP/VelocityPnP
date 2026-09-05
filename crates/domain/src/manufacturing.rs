@@ -771,6 +771,57 @@ pub struct HeldPartInspectionReport {
     pub findings: Vec<String>,
 }
 
+/// Condition classes exported by the placement-verification model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementVerificationClass {
+    Empty,
+    ComponentFlat,
+    ComponentOnEdge,
+    MultipleComponents,
+}
+
+impl PlacementVerificationClass {
+    pub fn occupied(self) -> bool {
+        !matches!(self, Self::Empty)
+    }
+}
+
+/// Normalized class probabilities for one board-target crop.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlacementVerificationClassProbabilities {
+    pub empty: f64,
+    pub component_flat: f64,
+    pub component_on_edge: f64,
+    pub multiple_components: f64,
+}
+
+/// Package pose decoded into the target-normalized crop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementVerificationPosePrediction {
+    pub center_px: [f64; 2],
+    pub size_px: [f64; 2],
+    pub rotation_deg_mod_180: f64,
+    pub outline_px: [[f64; 2]; 4],
+    pub valid: bool,
+}
+
+/// One versioned learned placement prediction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementVerificationModelPrediction {
+    pub contract_version: String,
+    pub model_artifact_sha256: String,
+    pub runtime: String,
+    pub class: PlacementVerificationClass,
+    pub probabilities: PlacementVerificationClassProbabilities,
+    pub class_confidence: f64,
+    pub class_margin: f64,
+    pub confidence_gate_passed: bool,
+    pub pose: PlacementVerificationPosePrediction,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
 /// Top-camera evidence for one placed package at its planned board pose.
 ///
 /// This report is separate from held-part inspection. The detector matches a
@@ -833,6 +884,9 @@ pub struct PlacedPartInspectionReport {
     /// Marker result for an end-marked part. Other policies leave this empty.
     #[serde(default)]
     pub orientation_matched: Option<bool>,
+    /// Set when a promoted learned model supplied the active condition.
+    #[serde(default)]
+    pub placement_condition: Option<PlacementVerificationClass>,
     pub changed_pixel_count: u32,
     pub mean_difference_luma: f64,
     #[serde(default)]
@@ -842,6 +896,27 @@ pub struct PlacedPartInspectionReport {
     pub confidence: f64,
     pub passed: bool,
     pub artifact_name: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Learned placement evidence compared with the deterministic CV result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementVerificationComparisonReport {
+    pub algorithm_version: String,
+    pub deterministic: PlacedPartInspectionReport,
+    pub prediction: PlacementVerificationModelPrediction,
+    pub occupancy_agreement: bool,
+    #[serde(default)]
+    pub center_delta_mm: Option<f64>,
+    #[serde(default)]
+    pub rotation_delta_deg_mod_180: Option<f64>,
+    pub review_required: bool,
+    /// True when the learned result supplied the active inspection report.
+    pub control_authorized: bool,
+    pub report_artifact_name: String,
+    pub preview_artifact_name: String,
+    pub crop_artifact_name: String,
     #[serde(default)]
     pub findings: Vec<String>,
 }
@@ -1421,6 +1496,8 @@ pub struct PlacementExecutionReport {
     #[serde(default)]
     pub top_inspection: Option<PlacedPartInspectionReport>,
     #[serde(default)]
+    pub top_inspection_comparison: Option<PlacementVerificationComparisonReport>,
+    #[serde(default)]
     pub artifact_names: Vec<String>,
     pub corrected_move_count: u32,
     pub passed: bool,
@@ -1552,6 +1629,21 @@ pub fn classify_placement_outcome(
     let Some(inspection) = report.top_inspection.as_ref() else {
         return (PlacementOutcomeDisposition::Uncertain, 0.0);
     };
+    match inspection.placement_condition {
+        Some(PlacementVerificationClass::MultipleComponents) => {
+            return (PlacementOutcomeDisposition::Stacked, inspection.confidence);
+        }
+        Some(PlacementVerificationClass::ComponentOnEdge) => {
+            return (
+                PlacementOutcomeDisposition::Tombstoned,
+                inspection.confidence,
+            );
+        }
+        Some(PlacementVerificationClass::Empty) => {
+            return (PlacementOutcomeDisposition::Missing, inspection.confidence);
+        }
+        Some(PlacementVerificationClass::ComponentFlat) | None => {}
+    }
     if inspection.passed {
         return (PlacementOutcomeDisposition::Good, inspection.confidence);
     }

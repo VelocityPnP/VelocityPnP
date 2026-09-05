@@ -44,6 +44,7 @@ use velocitypnp_domain::{
     PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
     PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
     PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
+    PlacementVerificationClass, PlacementVerificationComparisonReport,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel, Pose,
     Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
     SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
@@ -67,7 +68,8 @@ use velocitypnp_domain::{
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
 use velocitypnp_model::{
-    HeldPartModel, HeldPartModelStatus, SourceComponentModel, SourceComponentModelStatus,
+    HeldPartModel, HeldPartModelStatus, PlacementVerificationModel,
+    PlacementVerificationModelStatus, SourceComponentModel, SourceComponentModelStatus,
 };
 use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::{
@@ -90,18 +92,21 @@ use velocitypnp_vision::{
     inspect_strip_feeder_pocket_return, inspect_strip_feeder_source_pose,
     interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
     measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, reanalyze_workspace_seam_health, register_two_terminal_placement_target,
+    normalize_placement_verification_crop, plan_bottom_camera_correction, plan_pixel_correction,
+    plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    reanalyze_workspace_seam_health, register_two_terminal_placement_target,
     render_board_fiducial_evidence, render_held_part_shadow_preview,
-    render_source_component_shadow_preview, render_workspace_height_mosaic_with_consistency,
+    render_placement_verification_preview, render_source_component_shadow_preview,
+    render_workspace_height_mosaic_with_consistency,
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, source_component_crop_pixel_to_machine, summarize_camera_reproducibility,
     summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
     summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
     BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
     DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
-    HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture, RgbFrame, RgbaFrame,
-    StripFeederInventoryBuild, StripFeederInventorySourceMosaic, StripFeederSourceComponentDraft,
+    HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture,
+    PlacedPartInspectionArtifacts, RgbFrame, RgbaFrame, StripFeederInventoryBuild,
+    StripFeederInventorySourceMosaic, StripFeederSourceComponentDraft,
     StripFeederSourcePoseArtifacts, V4l2CaptureConfig, VisualHomingPlan,
     WorkspaceCameraApertureComposite, WorkspaceHeightComposite, WorkspaceHeightMap,
     WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceObservedObject, WorkspaceParallaxObservation,
@@ -169,6 +174,13 @@ const BOARD_PLACEMENT_BEFORE_ARTIFACT: &str = "board-placement-before.png";
 const BOARD_TARGET_REGISTRATION_ARTIFACT: &str = "board-target-registration.png";
 const BOARD_PLACEMENT_AFTER_ARTIFACT: &str = "board-placement-after.png";
 const BOARD_PLACEMENT_INSPECTION_ARTIFACT: &str = "board-placement-inspection.png";
+const BOARD_PLACEMENT_MODEL_CROP_ARTIFACT: &str = "board-placement-model-crop.png";
+const BOARD_PLACEMENT_MODEL_INSPECTION_ARTIFACT: &str = "board-placement-model-inspection.png";
+const BOARD_PLACEMENT_MODEL_REPORT_ARTIFACT: &str = "board-placement-model-comparison.json";
+const PLACEMENT_VERIFICATION_COMPARISON_ALGORITHM: &str = "placement_verification_comparison.v1";
+const PLACEMENT_VERIFICATION_CONTROL_ALGORITHM: &str = "placement_verification_model.v1";
+const MINIMUM_PLACEMENT_SIZE_RATIO: f64 = 0.60;
+const MAXIMUM_PLACEMENT_SIZE_RATIO: f64 = 1.50;
 const REUSED_TOP_PLANAR_REPORT: &str = "reused_top_camera_planar_report";
 const REUSED_BOTTOM_PLANAR_REPORT: &str = "reused_bottom_camera_planar_report";
 const REUSED_INSTALLED_GEOMETRY_SOURCE_RUN: &str = "reused_installed_geometry_source_run";
@@ -254,6 +266,8 @@ pub struct AppState {
     source_component_model_status: Arc<SourceComponentModelStatus>,
     held_part_model: Option<Arc<HeldPartModel>>,
     held_part_model_status: Arc<HeldPartModelStatus>,
+    placement_verification_model: Option<Arc<PlacementVerificationModel>>,
+    placement_verification_model_status: Arc<PlacementVerificationModelStatus>,
 }
 
 impl AppState {
@@ -269,6 +283,10 @@ impl AppState {
             source_component_model_status: Arc::new(SourceComponentModelStatus::disabled()),
             held_part_model: None,
             held_part_model_status: Arc::new(HeldPartModelStatus::disabled()),
+            placement_verification_model: None,
+            placement_verification_model_status: Arc::new(
+                PlacementVerificationModelStatus::disabled(),
+            ),
         };
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
@@ -336,6 +354,38 @@ impl AppState {
                 self.held_part_model = None;
                 self.held_part_model_status =
                     Arc::new(HeldPartModelStatus::invalid(error.to_string()));
+            }
+        }
+        self
+    }
+
+    pub fn with_placement_verification_model_package(
+        mut self,
+        package_dir: Option<&FilePath>,
+    ) -> Self {
+        let Some(package_dir) = package_dir else {
+            return self;
+        };
+        match PlacementVerificationModel::load(package_dir) {
+            Ok(model) => {
+                let status = model.status();
+                tracing::info!(
+                    path = %model.package_dir().display(),
+                    sha256 = status.artifact_sha256.as_deref().unwrap_or_default(),
+                    "loaded placement-verification model"
+                );
+                self.placement_verification_model = Some(Arc::new(model));
+                self.placement_verification_model_status = Arc::new(status);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %package_dir.display(),
+                    %error,
+                    "placement-verification model is disabled"
+                );
+                self.placement_verification_model = None;
+                self.placement_verification_model_status =
+                    Arc::new(PlacementVerificationModelStatus::invalid(error.to_string()));
             }
         }
         self
@@ -1212,6 +1262,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "models": {
             "source_component_pose": state.source_component_model_status.as_ref(),
             "held_part_pose": state.held_part_model_status.as_ref(),
+            "placement_verification":
+                state.placement_verification_model_status.as_ref(),
         },
     }))
 }
@@ -6709,6 +6761,311 @@ async fn analyze_and_persist_held_part_shadow(
         return None;
     }
     Some(analysis.report)
+}
+
+struct PlacementVerificationArtifacts {
+    active: velocitypnp_domain::PlacedPartInspectionReport,
+    comparison: PlacementVerificationComparisonReport,
+    crop: GrayFrame,
+    preview: RgbFrame,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_placement_verification(
+    model: &PlacementVerificationModel,
+    after: &GrayFrame,
+    deterministic: &PlacedPartInspectionArtifacts,
+    top_mapping: [[f64; 2]; 2],
+    expected_width_mm: f64,
+    expected_length_mm: f64,
+    expected_rotation_deg: f64,
+    maximum_center_offset_mm: f64,
+    orientation: PartOrientation,
+) -> Result<PlacementVerificationArtifacts, String> {
+    let target_center_px = [
+        deterministic.report.expected_center_x_px,
+        deterministic.report.expected_center_y_px,
+    ];
+    let crop = normalize_placement_verification_crop(
+        after,
+        target_center_px,
+        top_mapping,
+        expected_rotation_deg,
+    )
+    .map_err(|error| error.to_string())?;
+    let prediction = model
+        .predict_gray(crop.frame.width, crop.frame.height, &crop.frame.pixels)
+        .map_err(|error| error.to_string())?;
+    build_placement_verification_artifacts(
+        crop,
+        deterministic,
+        prediction,
+        expected_width_mm,
+        expected_length_mm,
+        expected_rotation_deg,
+        maximum_center_offset_mm,
+        orientation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_placement_verification_artifacts(
+    crop: velocitypnp_vision::PlacementVerificationCrop,
+    deterministic: &PlacedPartInspectionArtifacts,
+    prediction: velocitypnp_domain::PlacementVerificationModelPrediction,
+    expected_width_mm: f64,
+    expected_length_mm: f64,
+    expected_rotation_deg: f64,
+    maximum_center_offset_mm: f64,
+    orientation: PartOrientation,
+) -> Result<PlacementVerificationArtifacts, String> {
+    let learned_occupied = prediction.class.occupied();
+    let occupancy_agreement = deterministic.report.detected == learned_occupied;
+    let scale_mm_per_px = velocitypnp_vision::PLACEMENT_VERIFICATION_CROP_SPAN_MM
+        / f64::from(velocitypnp_vision::PLACEMENT_VERIFICATION_CROP_SIZE_PX);
+    let crop_center = 0.5 * f64::from(velocitypnp_vision::PLACEMENT_VERIFICATION_CROP_SIZE_PX);
+    let local_offset_mm = [
+        (prediction.pose.center_px[0] - crop_center) * scale_mm_per_px,
+        (prediction.pose.center_px[1] - crop_center) * scale_mm_per_px,
+    ];
+    let radians = expected_rotation_deg.to_radians();
+    let learned_offset_mm = [
+        radians.cos() * local_offset_mm[0] - radians.sin() * local_offset_mm[1],
+        radians.sin() * local_offset_mm[0] + radians.cos() * local_offset_mm[1],
+    ];
+    let learned_offset_norm = learned_offset_mm[0].hypot(learned_offset_mm[1]);
+    let learned_length_mm = prediction.pose.size_px[0] * scale_mm_per_px;
+    let learned_width_mm = prediction.pose.size_px[1] * scale_mm_per_px;
+    let learned_rotation_error_deg =
+        ((prediction.pose.rotation_deg_mod_180 + 90.0).rem_euclid(180.0)) - 90.0;
+    let learned_rotation_deg =
+        ((expected_rotation_deg + learned_rotation_error_deg + 90.0).rem_euclid(180.0)) - 90.0;
+    let size_passed = (MINIMUM_PLACEMENT_SIZE_RATIO..=MAXIMUM_PLACEMENT_SIZE_RATIO)
+        .contains(&(learned_width_mm / expected_width_mm))
+        && (MINIMUM_PLACEMENT_SIZE_RATIO..=MAXIMUM_PLACEMENT_SIZE_RATIO)
+            .contains(&(learned_length_mm / expected_length_mm));
+    let trained_class = matches!(
+        prediction.class,
+        PlacementVerificationClass::Empty | PlacementVerificationClass::ComponentFlat
+    );
+    let orientation_supported = orientation == PartOrientation::AxisSymmetric;
+    let control_authorized = prediction.confidence_gate_passed
+        && trained_class
+        && occupancy_agreement
+        && deterministic.report.target_registered
+        && orientation_supported
+        && (prediction.class == PlacementVerificationClass::Empty
+            || (prediction.pose.valid && size_passed));
+    let center_delta_mm = deterministic
+        .report
+        .offset_x_mm
+        .zip(deterministic.report.offset_y_mm)
+        .filter(|_| prediction.class == PlacementVerificationClass::ComponentFlat)
+        .map(|(x, y)| (x - learned_offset_mm[0]).hypot(y - learned_offset_mm[1]));
+    let rotation_delta_deg_mod_180 = deterministic
+        .report
+        .rotation_error_deg
+        .filter(|_| prediction.class == PlacementVerificationClass::ComponentFlat)
+        .map(|value| undirected_rotation_delta_deg(value, learned_rotation_error_deg));
+    let mut findings = prediction.findings.clone();
+    if !occupancy_agreement {
+        findings.push("learned and deterministic placement occupancy disagree".into());
+    }
+    if !trained_class {
+        findings.push("the predicted condition has no reviewed training examples".into());
+    }
+    if !orientation_supported {
+        findings.push("the undirected model cannot verify this orientation policy".into());
+    }
+    if prediction.class == PlacementVerificationClass::ComponentFlat && !size_passed {
+        findings.push(format!(
+            "learned package size {learned_width_mm:.3} by \
+             {learned_length_mm:.3} mm is outside the expected bounds",
+        ));
+    }
+    let mut active = deterministic.report.clone();
+    if control_authorized {
+        active.algorithm_version = PLACEMENT_VERIFICATION_CONTROL_ALGORITHM.into();
+        active.placement_condition = Some(prediction.class);
+        active.confidence = prediction.class_confidence;
+        active.artifact_name = BOARD_PLACEMENT_MODEL_INSPECTION_ARTIFACT.into();
+        active.findings = findings.clone();
+        match prediction.class {
+            PlacementVerificationClass::Empty => {
+                active.detected = false;
+                active.center_x_px = None;
+                active.center_y_px = None;
+                active.offset_x_mm = None;
+                active.offset_y_mm = None;
+                active.offset_mm = None;
+                active.width_mm = None;
+                active.length_mm = None;
+                active.rotation_deg = None;
+                active.rotation_error_deg = None;
+                active.passed = false;
+                active
+                    .findings
+                    .push("the promoted model found no component at the target".into());
+            }
+            PlacementVerificationClass::ComponentFlat => {
+                let source_center = crop.source_pixel(prediction.pose.center_px);
+                active.detected = true;
+                active.center_x_px = Some(source_center[0]);
+                active.center_y_px = Some(source_center[1]);
+                active.offset_x_mm = Some(learned_offset_mm[0]);
+                active.offset_y_mm = Some(learned_offset_mm[1]);
+                active.offset_mm = Some(learned_offset_norm);
+                active.width_mm = Some(learned_width_mm);
+                active.length_mm = Some(learned_length_mm);
+                active.rotation_deg = Some(learned_rotation_deg);
+                active.rotation_error_deg = Some(learned_rotation_error_deg);
+                active.orientation = orientation;
+                active.orientation_rotation_deg = None;
+                active.orientation_contrast_luma = None;
+                active.orientation_confidence = 0.0;
+                active.orientation_matched = None;
+                active.passed = learned_offset_norm <= maximum_center_offset_mm
+                    && learned_rotation_error_deg.abs() <= MAX_PLACED_PART_ROTATION_ERROR_DEG;
+                active.findings.push(format!(
+                    "the promoted model found a flat package at X{:+.3} Y{:+.3} mm and {:+.2} degrees",
+                    learned_offset_mm[0],
+                    learned_offset_mm[1],
+                    learned_rotation_error_deg,
+                ));
+            }
+            PlacementVerificationClass::ComponentOnEdge
+            | PlacementVerificationClass::MultipleComponents => unreachable!(),
+        }
+    } else if prediction.confidence_gate_passed && !occupancy_agreement {
+        active.passed = false;
+        active
+            .findings
+            .push("learned and deterministic placement evidence requires review".into());
+    }
+    let review_required = !control_authorized;
+    let preview = render_placement_verification_preview(
+        &crop.frame,
+        &prediction,
+        expected_width_mm,
+        expected_length_mm,
+        review_required,
+    );
+    if control_authorized {
+        findings.push("the learned result is the active placement inspection".into());
+    } else {
+        findings.push("deterministic CV remains active for this inspection".into());
+    }
+    let comparison = PlacementVerificationComparisonReport {
+        algorithm_version: PLACEMENT_VERIFICATION_COMPARISON_ALGORITHM.into(),
+        deterministic: deterministic.report.clone(),
+        prediction,
+        occupancy_agreement,
+        center_delta_mm,
+        rotation_delta_deg_mod_180,
+        review_required,
+        control_authorized,
+        report_artifact_name: BOARD_PLACEMENT_MODEL_REPORT_ARTIFACT.into(),
+        preview_artifact_name: BOARD_PLACEMENT_MODEL_INSPECTION_ARTIFACT.into(),
+        crop_artifact_name: BOARD_PLACEMENT_MODEL_CROP_ARTIFACT.into(),
+        findings,
+    };
+    Ok(PlacementVerificationArtifacts {
+        active,
+        comparison,
+        crop: crop.frame,
+        preview,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn analyze_and_persist_placement_verification(
+    state: &AppState,
+    execution_id: Uuid,
+    after: &GrayFrame,
+    deterministic: &PlacedPartInspectionArtifacts,
+    top_mapping: [[f64; 2]; 2],
+    expected_width_mm: f64,
+    expected_length_mm: f64,
+    expected_rotation_deg: f64,
+    maximum_center_offset_mm: f64,
+    orientation: PartOrientation,
+) -> Option<PlacementVerificationArtifacts> {
+    let model = state.placement_verification_model.clone()?;
+    let after = after.clone();
+    let deterministic = deterministic.clone();
+    let analysis = match tokio::task::spawn_blocking(move || {
+        analyze_placement_verification(
+            &model,
+            &after,
+            &deterministic,
+            top_mapping,
+            expected_width_mm,
+            expected_length_mm,
+            expected_rotation_deg,
+            maximum_center_offset_mm,
+            orientation,
+        )
+    })
+    .await
+    {
+        Ok(Ok(analysis)) => analysis,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, %execution_id, "placement-verification inference failed");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %execution_id, "placement-verification task failed");
+            return None;
+        }
+    };
+    let report = match serde_json::to_vec_pretty(&analysis.comparison) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, %execution_id, "placement-verification report failed");
+            return None;
+        }
+    };
+    let crop = match encode_gray_png(&analysis.crop) {
+        Ok(crop) => crop,
+        Err(error) => {
+            tracing::warn!(%error, %execution_id, "placement-verification crop failed");
+            return None;
+        }
+    };
+    let preview = match encode_rgb_png(&analysis.preview) {
+        Ok(preview) => preview,
+        Err(error) => {
+            tracing::warn!(%error, %execution_id, "placement-verification preview failed");
+            return None;
+        }
+    };
+    for (name, media_type, data) in [
+        (
+            BOARD_PLACEMENT_MODEL_REPORT_ARTIFACT,
+            "application/json",
+            report.as_slice(),
+        ),
+        (
+            BOARD_PLACEMENT_MODEL_CROP_ARTIFACT,
+            "image/png",
+            crop.as_slice(),
+        ),
+        (
+            BOARD_PLACEMENT_MODEL_INSPECTION_ARTIFACT,
+            "image/png",
+            preview.as_slice(),
+        ),
+    ] {
+        if let Err(error) =
+            state
+                .store
+                .put_placement_execution_artifact(execution_id, name, media_type, data)
+        {
+            tracing::warn!(%error, %execution_id, "placement-verification persistence failed");
+            return None;
+        }
+    }
+    Some(analysis)
 }
 
 #[derive(Clone, Copy)]
@@ -25238,6 +25595,7 @@ async fn execute_retained_part_recovery_task(
         pickup_report: None,
         board_target_registration: None,
         top_inspection: None,
+        top_inspection_comparison: None,
         artifact_names: Vec::new(),
         corrected_move_count: 0,
         passed: false,
@@ -25817,18 +26175,42 @@ async fn execute_physical_retained_part_recovery(
     report
         .artifact_names
         .push(BOARD_PLACEMENT_INSPECTION_ARTIFACT.into());
-    report.top_inspection = Some(top_inspection.report.clone());
+    let active_inspection = if let Some(learned) = analyze_and_persist_placement_verification(
+        state,
+        run.id,
+        &board_after,
+        &top_inspection,
+        top_mapping,
+        step.body_width_mm,
+        step.body_length_mm,
+        step.board_place.rotation_deg,
+        placement_center_tolerance_mm,
+        step.part_orientation,
+    )
+    .await
+    {
+        report.artifact_names.extend([
+            learned.comparison.report_artifact_name.clone(),
+            learned.comparison.preview_artifact_name.clone(),
+            learned.comparison.crop_artifact_name.clone(),
+        ]);
+        report.top_inspection_comparison = Some(learned.comparison);
+        learned.active
+    } else {
+        top_inspection.report.clone()
+    };
+    report.top_inspection = Some(active_inspection.clone());
     report.stages.push(PlacementExecutionStageReport {
         stage: PlacementExecutionStage::TopInspection,
-        passed: top_inspection.report.passed,
-        message: if top_inspection.report.passed {
+        passed: active_inspection.passed,
+        message: if active_inspection.passed {
             "top vision confirmed the recovered resistor at the target".into()
         } else {
             "top vision did not confirm the recovered resistor".into()
         },
     });
     persist_placement_progress(state, run, report)?;
-    if !top_inspection.report.passed {
+    if !active_inspection.passed {
         return Err("top vision did not confirm the recovered resistor placement".into());
     }
     Ok(())
@@ -25933,6 +26315,7 @@ async fn execute_guarded_placement_task(
         pickup_report: None,
         board_target_registration: None,
         top_inspection: None,
+        top_inspection_comparison: None,
         artifact_names: Vec::new(),
         corrected_move_count: 0,
         passed: false,
@@ -26619,7 +27002,32 @@ async fn execute_physical_guarded_placement(
         report
             .artifact_names
             .push(BOARD_PLACEMENT_INSPECTION_ARTIFACT.into());
-        report.top_inspection = Some(top_inspection.report.clone());
+        let active_inspection = if let Some(learned) =
+            analyze_and_persist_placement_verification(
+                state,
+                run.id,
+                &board_after,
+                &top_inspection,
+                top_mapping,
+                step.body_width_mm,
+                step.body_length_mm,
+                step.board_place.rotation_deg,
+                placement_center_tolerance_mm,
+                step.part_orientation,
+            )
+            .await
+        {
+            report.artifact_names.extend([
+                learned.comparison.report_artifact_name.clone(),
+                learned.comparison.preview_artifact_name.clone(),
+                learned.comparison.crop_artifact_name.clone(),
+            ]);
+            report.top_inspection_comparison = Some(learned.comparison);
+            learned.active
+        } else {
+            top_inspection.report.clone()
+        };
+        report.top_inspection = Some(active_inspection.clone());
         report.pickup_report = Some(build_placement_pickup_report(
             prepared,
             &acquired,
@@ -26633,8 +27041,8 @@ async fn execute_physical_guarded_placement(
         ));
         report.stages.push(PlacementExecutionStageReport {
             stage: PlacementExecutionStage::TopInspection,
-            passed: top_inspection.report.passed,
-            message: if top_inspection.report.passed {
+            passed: active_inspection.passed,
+            message: if active_inspection.passed {
                 "top vision detected the placed component at the planned location".into()
             } else {
                 "top vision did not confirm the placed component".into()
@@ -26651,7 +27059,7 @@ async fn execute_physical_guarded_placement(
             .map_err(|error| error.to_string())?;
         decrement_feeder_remaining(state, step.feeder_id)?;
         persist_placement_progress(state, run, report)?;
-        if !top_inspection.report.passed {
+        if !active_inspection.passed {
             return Err("top vision did not confirm the physical placement".into());
         }
         report.findings.push(format!(
@@ -28423,6 +28831,9 @@ async fn reanalyze_placement_execution(
         .map(|profile| profile.maximum_part_offset_mm)
         .unwrap_or(1.0);
     let maximum_center_offset_mm = (0.5 * body_width_mm).max(0.25).min(pickup_center_offset_mm);
+    let after_for_model = after.clone();
+    let expected_rotation_deg = report.board_place.rotation_deg;
+    let orientation = report.part_orientation;
     let inspection = tokio::task::spawn_blocking(move || {
         inspect_placed_part_with_orientation(
             &before,
@@ -28450,28 +28861,57 @@ async fn reanalyze_placement_execution(
         &inspection.preview,
     )
     .map_err(ApiError::internal)?;
-    report.top_inspection = Some(inspection.report.clone());
+    let active_inspection = if let Some(learned) = analyze_and_persist_placement_verification(
+        &state,
+        id,
+        &after_for_model,
+        &inspection,
+        top_mapping,
+        body_width_mm,
+        body_length_mm,
+        expected_rotation_deg,
+        maximum_center_offset_mm,
+        orientation,
+    )
+    .await
+    {
+        for name in [
+            learned.comparison.report_artifact_name.clone(),
+            learned.comparison.preview_artifact_name.clone(),
+            learned.comparison.crop_artifact_name.clone(),
+        ] {
+            if !report.artifact_names.contains(&name) {
+                report.artifact_names.push(name);
+            }
+        }
+        report.top_inspection_comparison = Some(learned.comparison);
+        learned.active
+    } else {
+        report.top_inspection_comparison = None;
+        inspection.report.clone()
+    };
+    report.top_inspection = Some(active_inspection.clone());
     if let Some(stage) = report
         .stages
         .iter_mut()
         .find(|stage| stage.stage == PlacementExecutionStage::TopInspection)
     {
-        stage.passed = inspection.report.passed;
-        stage.message = if inspection.report.passed {
-            "package-aware top vision confirmed the placed component".into()
+        stage.passed = active_inspection.passed;
+        stage.message = if active_inspection.passed {
+            "top vision confirmed the placed component".into()
         } else {
-            "package-aware top vision did not confirm the placed component".into()
+            "top vision did not confirm the placed component".into()
         };
     }
     report
         .findings
         .retain(|finding| !finding.contains("retained package-aware placement reanalysis"));
-    report.findings.push(if inspection.report.passed {
-        "retained package-aware placement reanalysis passed".into()
+    report.findings.push(if active_inspection.passed {
+        "retained placement reanalysis passed".into()
     } else {
-        "retained package-aware placement reanalysis failed".into()
+        "retained placement reanalysis failed".into()
     });
-    report.passed = inspection.report.passed
+    report.passed = active_inspection.passed
         && report
             .stages
             .iter()
@@ -28753,6 +29193,134 @@ mod tests {
             artifact_name: "fixture.png".into(),
             findings: Vec::new(),
         }
+    }
+
+    fn placed_part_artifacts(detected: bool) -> PlacedPartInspectionArtifacts {
+        let report = serde_json::from_value(json!({
+            "algorithm_version": "placed_package_geometry.v3",
+            "detected": detected,
+            "target_registered": true,
+            "expected_center_x_px": 160.0,
+            "expected_center_y_px": 160.0,
+            "expected_width_mm": 0.8,
+            "expected_length_mm": 1.6,
+            "expected_rotation_deg": 0.0,
+            "center_x_px": if detected { Some(160.0) } else { None },
+            "center_y_px": if detected { Some(160.0) } else { None },
+            "offset_x_mm": if detected { Some(0.0) } else { None },
+            "offset_y_mm": if detected { Some(0.0) } else { None },
+            "offset_mm": if detected { Some(0.0) } else { None },
+            "width_mm": if detected { Some(0.8) } else { None },
+            "length_mm": if detected { Some(1.6) } else { None },
+            "rotation_deg": if detected { Some(0.0) } else { None },
+            "rotation_error_deg": if detected { Some(0.0) } else { None },
+            "changed_pixel_count": 100,
+            "mean_difference_luma": 60.0,
+            "confidence": 0.9,
+            "passed": detected,
+            "artifact_name": "cv.png",
+            "findings": []
+        }))
+        .unwrap();
+        PlacedPartInspectionArtifacts {
+            report,
+            preview: RgbFrame {
+                width: 1,
+                height: 1,
+                pixels: vec![0, 0, 0],
+            },
+        }
+    }
+
+    fn placement_prediction(
+        class: PlacementVerificationClass,
+    ) -> velocitypnp_domain::PlacementVerificationModelPrediction {
+        velocitypnp_domain::PlacementVerificationModelPrediction {
+            contract_version: "velocitypnp.placement-verification.v1".into(),
+            model_artifact_sha256: "a".repeat(64),
+            runtime: "test".into(),
+            class,
+            probabilities: velocitypnp_domain::PlacementVerificationClassProbabilities {
+                empty: 0.02,
+                component_flat: 0.96,
+                component_on_edge: 0.01,
+                multiple_components: 0.01,
+            },
+            class_confidence: 0.96,
+            class_margin: 0.94,
+            confidence_gate_passed: true,
+            pose: velocitypnp_domain::PlacementVerificationPosePrediction {
+                center_px: [130.0, 126.0],
+                size_px: [102.4, 51.2],
+                rotation_deg_mod_180: 1.0,
+                outline_px: [[78.8, 100.4], [181.2, 100.4], [181.2, 151.6], [78.8, 151.6]],
+                valid: true,
+            },
+            findings: Vec::new(),
+        }
+    }
+
+    fn placement_crop() -> velocitypnp_vision::PlacementVerificationCrop {
+        let frame = GrayFrame {
+            width: 320,
+            height: 320,
+            pixels: vec![100; 320 * 320],
+        };
+        normalize_placement_verification_crop(
+            &frame,
+            [160.0, 160.0],
+            [[0.02, 0.0], [0.0, 0.02]],
+            0.0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn placement_model_controls_flat_pose_when_cv_agrees() {
+        let result = build_placement_verification_artifacts(
+            placement_crop(),
+            &placed_part_artifacts(true),
+            placement_prediction(PlacementVerificationClass::ComponentFlat),
+            0.8,
+            1.6,
+            0.0,
+            0.4,
+            PartOrientation::AxisSymmetric,
+        )
+        .unwrap();
+
+        assert!(result.comparison.control_authorized);
+        assert_eq!(
+            result.active.algorithm_version,
+            PLACEMENT_VERIFICATION_CONTROL_ALGORITHM
+        );
+        assert_eq!(
+            result.active.placement_condition,
+            Some(PlacementVerificationClass::ComponentFlat)
+        );
+        assert!(result.active.passed);
+        assert!((result.active.offset_x_mm.unwrap() - 0.03125).abs() < 1e-9);
+        assert!((result.active.offset_y_mm.unwrap() + 0.03125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn placement_model_disagreement_cannot_pass_inspection() {
+        let result = build_placement_verification_artifacts(
+            placement_crop(),
+            &placed_part_artifacts(false),
+            placement_prediction(PlacementVerificationClass::ComponentFlat),
+            0.8,
+            1.6,
+            0.0,
+            0.4,
+            PartOrientation::AxisSymmetric,
+        )
+        .unwrap();
+
+        assert!(!result.comparison.control_authorized);
+        assert!(result.comparison.review_required);
+        assert!(!result.active.passed);
+        assert_eq!(result.active.placement_condition, None);
     }
 
     #[test]
@@ -29651,6 +30219,7 @@ mod tests {
             pickup_report: Some(pickup),
             board_target_registration: None,
             top_inspection: Some(top_inspection),
+            top_inspection_comparison: None,
             artifact_names: Vec::new(),
             corrected_move_count: 1,
             passed: true,
@@ -30728,6 +31297,7 @@ mod tests {
             pickup_report: None,
             board_target_registration: None,
             top_inspection: None,
+            top_inspection_comparison: None,
             artifact_names: Vec::new(),
             corrected_move_count: 0,
             passed: false,
