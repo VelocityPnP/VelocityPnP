@@ -45,6 +45,23 @@ from velocitypnp_training.placement_evaluation import (  # noqa: E402
 CONTRACT_VERSION = "velocitypnp.placement-verification.v1"
 
 
+def model_limitations(summary: dict[str, Any]) -> list[str]:
+    limitations = [
+        "This data comes from one machine and one PCB design.",
+        "The evaluation split is too small for a production gate.",
+    ]
+    for split in ("training", "evaluation"):
+        missing = summary.get(f"{split}_limitations", [])
+        if missing:
+            limitations.append(
+                f"The {split} data has no reviewed examples for: "
+                + ", ".join(missing)
+                + "."
+            )
+    limitations.append("The model artifact does not define daemon acceptance policy.")
+    return limitations
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -450,12 +467,7 @@ def main() -> None:
         },
         "metrics": metrics,
         "training_metrics": training_metrics,
-        "limitations": [
-            "This is a one-machine, one-board-session development split.",
-            "The evaluation split is too small for a production gate.",
-            "The training set has no on-edge or multiple-component examples.",
-            "The model artifact does not define daemon acceptance policy.",
-        ],
+        "limitations": model_limitations(summary),
     }
     (output / "training-history.json").write_text(
         json.dumps(history, indent=2) + "\n"

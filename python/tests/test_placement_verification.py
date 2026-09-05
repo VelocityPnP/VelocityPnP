@@ -28,6 +28,11 @@ if torch is not None:
         augment_placement_appearance,
     )
 
+TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS_ROOT))
+if torch is not None:
+    from train_placement_verification import model_limitations
+
 
 @unittest.skipIf(torch is None, "training dependencies are not installed")
 class PlacementVerificationTests(unittest.TestCase):
@@ -186,6 +191,17 @@ class PlacementVerificationTests(unittest.TestCase):
 
         self.assertEqual(result.size, image.size)
         self.assertEqual(result.mode, image.mode)
+
+    def test_limitations_report_only_absent_classes(self):
+        limitations = model_limitations(
+            {
+                "training_limitations": ["component_on_edge"],
+                "evaluation_limitations": ["component_on_edge"],
+            }
+        )
+
+        self.assertTrue(any("component_on_edge" in text for text in limitations))
+        self.assertFalse(any("multiple_components" in text for text in limitations))
 
 
 if __name__ == "__main__":
