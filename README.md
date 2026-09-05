@@ -2,7 +2,7 @@
 
 VelocityPnP is a headless, API-first pick-and-place control system focused on
 measurable calibration, safe motion, and automation. The initial hardware
-target is a LumenPnP V3.0.4 with REV4 controller electronics.
+target is a LumenPnP V3.0.2 with REV4 controller electronics.
 
 > **Safety:** VelocityPnP controls machinery. Keep hands and tools clear,
 > maintain access to physical power isolation, and validate all motion in the
@@ -47,7 +47,8 @@ This repository contains the first working platform slice:
   agreement and persistent before/after evidence
 - persistent guarded job execution with pause, recovery, and restart-safe state
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
-- V3.0.4 profile, calibration workflow definitions and test fixtures
+- live Marlin motion settings, per-move timing, and bounded XY speed sweeps
+- V3.0.2 profile, calibration workflow definitions and test fixtures
 
 Supported physical calibration stages are executed by the daemon; callers
 cannot mark a step complete by entering measurements. Later calibration,

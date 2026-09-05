@@ -1262,7 +1262,7 @@ mod tests {
             id: Uuid::new_v4(),
             operation_id: Uuid::new_v4(),
             registration_id: Uuid::new_v4(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             calibration_id: Uuid::new_v4(),
             nozzle_id: "N1".into(),
             status: OperationStatus::Pending,
@@ -1297,11 +1297,11 @@ mod tests {
     #[test]
     fn camera_profile_round_trip_uses_machine_and_role_key() {
         let store = Store::memory().unwrap();
-        let profile = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.4", CameraRole::BottomCamera);
+        let profile = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.2", CameraRole::BottomCamera);
         store.put_camera_profile(&profile).unwrap();
         assert_eq!(
             store
-                .get_camera_profile("lumenpnp-v3.0.4", CameraRole::BottomCamera)
+                .get_camera_profile("lumenpnp-v3.0.2", CameraRole::BottomCamera)
                 .unwrap(),
             Some(profile)
         );
@@ -1530,7 +1530,7 @@ mod tests {
             id: Uuid::new_v4(),
             calibration_id: Uuid::new_v4(),
             operation_id: Uuid::new_v4(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             created_at: now,
             updated_at: now,
             status: CalibrationRunStatus::Running,
@@ -1793,7 +1793,7 @@ mod tests {
             id: Uuid::new_v4(),
             operation_id: Uuid::new_v4(),
             calibration_id: Uuid::new_v4(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             parent_scan_id: None,
             refinement_target_index: None,
             refinement_algorithm_version: None,

@@ -14,7 +14,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use velocitypnp_domain::Pose;
+use velocitypnp_domain::{ControllerConnection, Pose};
 
 #[async_trait]
 pub trait MachineDriver: Send {
@@ -22,7 +22,7 @@ pub trait MachineDriver: Send {
     /// Installs a flag that blocking driver operations must monitor. Physical
     /// drivers use it to issue their controller's immediate stop command.
     fn set_emergency_flag(&mut self, _flag: Arc<AtomicBool>) {}
-    async fn connect(&mut self) -> Result<String>;
+    async fn connect(&mut self) -> Result<ControllerConnection>;
     async fn disconnect(&mut self) -> Result<()>;
     async fn home(&mut self) -> Result<Pose>;
     async fn move_to(&mut self, target: Pose, feed_mm_per_min: f64) -> Result<Pose>;

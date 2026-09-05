@@ -5,11 +5,12 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use uuid::Uuid;
 use velocitypnp_domain::{
-    ControlLease, JogTarget, MachineEvent, MachineProfile, MachineState, MachineStatus, Pose,
-    SensorReading,
+    ControlLease, ControllerConnection, JogTarget, MachineEvent, MachineProfile, MachineState,
+    MachineStatus, Pose, SensorReading,
 };
 
 #[derive(Clone)]
@@ -60,7 +61,7 @@ impl MachineHandle {
         self.events.subscribe()
     }
 
-    pub async fn connect(&self) -> Result<String> {
+    pub async fn connect(&self) -> Result<ControllerConnection> {
         request(&self.tx, |reply| Command::Connect { reply }).await
     }
 
@@ -231,7 +232,7 @@ async fn request<T>(
 
 enum Command {
     Connect {
-        reply: oneshot::Sender<Result<String>>,
+        reply: oneshot::Sender<Result<ControllerConnection>>,
     },
     Disconnect {
         reply: oneshot::Sender<Result<()>>,
@@ -330,6 +331,7 @@ impl MachineActor {
                         s.pose = None;
                         s.control_lease = None;
                         s.calibration_revision = None;
+                        s.controller = None;
                     });
                     self.emit("machine.disconnected", json!({}));
                     let _ = reply.send(result);
@@ -454,22 +456,24 @@ impl MachineActor {
         }
     }
 
-    async fn connect(&mut self) -> Result<String> {
+    async fn connect(&mut self) -> Result<ControllerConnection> {
         if self.status().state != MachineState::Disconnected {
             bail!("machine is already connected");
         }
         match self.driver.connect().await {
-            Ok(firmware) => {
+            Ok(connection) => {
                 self.calibration_rotation_references.clear();
                 self.update(|s| {
                     s.state = MachineState::Preflight;
                     s.fault = None;
                     s.calibration_revision = None;
+                    s.controller = Some(connection.clone());
                 });
-                self.emit("machine.connected", json!({"firmware": firmware}));
-                Ok(firmware)
+                self.emit("machine.connected", json!({"controller": connection}));
+                Ok(connection)
             }
             Err(error) => {
+                self.update(|status| status.controller = None);
                 self.set_fault("connect_failed", error.to_string(), true);
                 Err(error)
             }
@@ -572,15 +576,59 @@ impl MachineActor {
                 "physical nozzle rotation is disabled until rotation motion is hardware-validated"
             );
         }
-        let max_feed = self.profile.default_feed_mm_per_min.max(1.0);
-        let feed = feed_mm_per_min.clamp(1.0, max_feed);
-        match self.driver.move_to(target, feed).await {
+        let max_feed = self.profile.maximum_feed_mm_per_min.max(1.0);
+        if !feed_mm_per_min.is_finite() || feed_mm_per_min <= 0.0 {
+            bail!("feed rate must be finite and positive");
+        }
+        if feed_mm_per_min > max_feed {
+            bail!(
+                "requested feed {feed_mm_per_min:.0} mm/min exceeds the active profile limit of {max_feed:.0} mm/min"
+            );
+        }
+        let linear_distance_mm = (target.x_mm - current.x_mm)
+            .hypot(target.y_mm - current.y_mm)
+            .hypot(target.z_mm - current.z_mm);
+        let ideal_constant_speed_ms = linear_distance_mm / feed_mm_per_min * 60_000.0;
+        self.emit(
+            "machine.motion_started",
+            json!({
+                "from": current,
+                "target": target,
+                "feed_mm_per_min": feed_mm_per_min,
+                "linear_distance_mm": linear_distance_mm,
+                "ideal_constant_speed_ms": ideal_constant_speed_ms,
+            }),
+        );
+        let started = Instant::now();
+        match self.driver.move_to(target, feed_mm_per_min).await {
             Ok(pose) => {
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
                 self.update(|s| s.pose = Some(pose));
+                self.emit(
+                    "machine.motion_completed",
+                    json!({
+                        "pose": pose,
+                        "feed_mm_per_min": feed_mm_per_min,
+                        "linear_distance_mm": linear_distance_mm,
+                        "ideal_constant_speed_ms": ideal_constant_speed_ms,
+                        "elapsed_ms": elapsed_ms,
+                        "elapsed_minus_ideal_ms": elapsed_ms - ideal_constant_speed_ms,
+                    }),
+                );
                 self.emit("machine.position", json!({"pose": pose}));
                 Ok(pose)
             }
             Err(error) => {
+                self.emit(
+                    "machine.motion_failed",
+                    json!({
+                        "target": target,
+                        "feed_mm_per_min": feed_mm_per_min,
+                        "linear_distance_mm": linear_distance_mm,
+                        "elapsed_ms": started.elapsed().as_secs_f64() * 1_000.0,
+                        "error": error.to_string(),
+                    }),
+                );
                 self.set_fault("motion_failed", error.to_string(), true);
                 Err(error)
             }
@@ -957,17 +1005,27 @@ mod tests {
     use std::time::Duration;
 
     fn profile() -> MachineProfile {
-        serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap()
+        serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap()
+    }
+
+    fn test_connection(firmware: &str) -> ControllerConnection {
+        ControllerConnection {
+            firmware: firmware.into(),
+            ..ControllerConnection::default()
+        }
     }
 
     #[tokio::test]
     async fn simulator_requires_preflight_lease_and_home_before_jog() {
         let profile = profile();
+        let excessive_feed = profile.maximum_feed_mm_per_min + 1.0;
         let handle = MachineHandle::spawn(
             Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
             profile,
         );
-        handle.connect().await.unwrap();
+        let mut events = handle.subscribe();
+        let connection = handle.connect().await.unwrap();
+        assert_eq!(handle.status().controller.as_ref(), Some(&connection),);
         assert_eq!(handle.status().state, MachineState::Preflight);
         handle.complete_preflight(true).await.unwrap();
         let lease = handle.acquire_lease("test".into(), 60).await.unwrap();
@@ -985,6 +1043,18 @@ mod tests {
             handle.jog(lease.id, pose.into(), 100.0).await.unwrap(),
             pose
         );
+        assert!(handle
+            .jog(lease.id, Pose { x_mm: 20.0, ..pose }.into(), excessive_feed,)
+            .await
+            .is_err());
+        assert_eq!(handle.status().state, MachineState::Ready);
+        let motion = std::iter::from_fn(|| events.try_recv().ok())
+            .find(|event| event.kind == "machine.motion_completed")
+            .expect("completed motion event");
+        assert_eq!(motion.payload["feed_mm_per_min"], 100.0);
+        assert!(motion.payload["elapsed_ms"].as_f64().unwrap() >= 0.0);
+        handle.disconnect().await.unwrap();
+        assert!(handle.status().controller.is_none());
     }
 
     struct PhysicalPoseDriver;
@@ -995,8 +1065,8 @@ mod tests {
             false
         }
 
-        async fn connect(&mut self) -> Result<String> {
-            Ok("Marlin test driver".into())
+        async fn connect(&mut self) -> Result<ControllerConnection> {
+            Ok(test_connection("Marlin test driver"))
         }
 
         async fn disconnect(&mut self) -> Result<()> {
@@ -1295,8 +1365,8 @@ mod tests {
             false
         }
 
-        async fn connect(&mut self) -> Result<String> {
-            Ok("actuator failure test driver".into())
+        async fn connect(&mut self) -> Result<ControllerConnection> {
+            Ok(test_connection("actuator failure test driver"))
         }
 
         async fn disconnect(&mut self) -> Result<()> {
@@ -1377,8 +1447,8 @@ mod tests {
             self.emergency_flag = flag;
         }
 
-        async fn connect(&mut self) -> Result<String> {
-            Ok("Marlin test driver".into())
+        async fn connect(&mut self) -> Result<ControllerConnection> {
+            Ok(test_connection("Marlin test driver"))
         }
 
         async fn disconnect(&mut self) -> Result<()> {

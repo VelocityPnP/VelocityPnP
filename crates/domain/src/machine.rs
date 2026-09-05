@@ -30,6 +30,8 @@ pub struct MachineStatus {
     pub fault: Option<Fault>,
     pub control_lease: Option<ControlLease>,
     pub calibration_revision: Option<Uuid>,
+    #[serde(default)]
+    pub controller: Option<ControllerConnection>,
 }
 
 impl Default for MachineStatus {
@@ -37,14 +39,44 @@ impl Default for MachineStatus {
         Self {
             state: MachineState::Disconnected,
             simulated: true,
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             pose: None,
             homed: false,
             fault: None,
             control_lease: None,
             calibration_revision: None,
+            controller: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ControllerConnection {
+    pub firmware: String,
+    #[serde(default)]
+    pub settings: ControllerSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ControllerSettings {
+    #[serde(default)]
+    pub steps_per_unit: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub max_feed_units_per_second: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub max_acceleration_units_per_second_squared: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub motion_acceleration_units_per_second_squared: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub junction_deviation_mm: Option<f64>,
+    #[serde(default)]
+    pub microsteps: BTreeMap<String, u16>,
+    #[serde(default)]
+    pub interpolation: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub raw_m503: Vec<String>,
+    #[serde(default)]
+    pub raw_m122: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +147,12 @@ impl MachineStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineProfile {
     pub id: String,
+    /// Prior identifiers for the same physical machine configuration.
+    ///
+    /// Persisted evidence keeps the identifier that was active when it was
+    /// captured. Compatibility must therefore be explicit and one-way.
+    #[serde(default)]
+    pub legacy_profile_ids: Vec<String>,
     pub display_name: String,
     pub mechanics_revision: String,
     pub controller_families: Vec<String>,
@@ -122,6 +160,7 @@ pub struct MachineProfile {
     pub home_pose: Pose,
     pub safe_z_mm: f64,
     pub default_feed_mm_per_min: f64,
+    pub maximum_feed_mm_per_min: f64,
     pub homing: HomingProfile,
     pub axes: Vec<AxisProfile>,
     pub actuators: Vec<ActuatorProfile>,
@@ -149,6 +188,16 @@ pub struct MachineProfile {
     #[serde(default)]
     pub workspace_fixtures: Vec<WorkspaceFixtureRegionProfile>,
     pub capabilities: BTreeMap<String, bool>,
+}
+
+impl MachineProfile {
+    pub fn accepts_profile_id(&self, profile_id: &str) -> bool {
+        profile_id == self.id
+            || self
+                .legacy_profile_ids
+                .iter()
+                .any(|legacy| legacy == profile_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1128,9 +1177,18 @@ mod tests {
     }
 
     #[test]
+    fn attached_profile_accepts_only_its_current_and_declared_legacy_ids() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        assert!(profile.accepts_profile_id("lumenpnp-v3.0.2"));
+        assert!(profile.accepts_profile_id("lumenpnp-v3.0.4"));
+        assert!(!profile.accepts_profile_id("lumenpnp-v3.1.0"));
+    }
+
+    #[test]
     fn attached_v3_visual_home_mapping_matches_physical_axis_probes() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let visual = profile.visual_homing.unwrap();
         assert!(visual.validate().is_ok());
         assert!(profile.bounds.contains(Pose {
@@ -1149,7 +1207,7 @@ mod tests {
     #[test]
     fn attached_v3_bottom_vision_targets_both_configured_nozzles() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let bottom = profile.bottom_vision.as_ref().unwrap();
         assert!(bottom.validate().is_ok());
         assert_eq!(bottom.nozzles[0].expected_tip_id, "N045");
@@ -1188,7 +1246,7 @@ mod tests {
     #[test]
     fn attached_v3_workspace_fixtures_are_semantic_and_valid() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         assert_eq!(profile.workspace_fixtures.len(), 2);
         assert!(profile
             .workspace_fixtures
@@ -1205,7 +1263,7 @@ mod tests {
     #[test]
     fn installed_plate_layout_derives_build_origin_and_scopes_resume_geometry() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let installed = profile.installed_geometry_calibration.unwrap();
         let staging = &installed.plates[0];
         let build = &installed.plates[1];
@@ -1233,7 +1291,7 @@ mod tests {
     #[test]
     fn attached_v3_maps_each_nozzle_working_z_to_the_shared_controller_axis() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let z = profile.z_kinematics.as_ref().unwrap();
         let vacuum = profile.vacuum_calibration.as_ref().unwrap();
         let characterization = profile.vacuum_characterization.as_ref().unwrap();

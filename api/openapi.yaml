@@ -4202,9 +4202,53 @@ components:
         top_left_y_mm: { type: number }
         x_mm_per_pixel: { type: number, exclusiveMinimum: 0 }
         y_mm_per_pixel: { type: number, exclusiveMaximum: 0 }
+    ControllerSettings:
+      type: object
+      required:
+        - steps_per_unit
+        - max_feed_units_per_second
+        - max_acceleration_units_per_second_squared
+        - motion_acceleration_units_per_second_squared
+        - junction_deviation_mm
+        - microsteps
+        - interpolation
+        - raw_m503
+        - raw_m122
+      properties:
+        steps_per_unit:
+          type: object
+          additionalProperties: { type: number }
+        max_feed_units_per_second:
+          type: object
+          additionalProperties: { type: number }
+        max_acceleration_units_per_second_squared:
+          type: object
+          additionalProperties: { type: number }
+        motion_acceleration_units_per_second_squared:
+          type: object
+          additionalProperties: { type: number }
+        junction_deviation_mm: { type: [number, "null"] }
+        microsteps:
+          type: object
+          additionalProperties: { type: integer, minimum: 1 }
+        interpolation:
+          type: object
+          additionalProperties: { type: boolean }
+        raw_m503:
+          type: array
+          items: { type: string }
+        raw_m122:
+          type: array
+          items: { type: string }
+    ControllerConnection:
+      type: object
+      required: [firmware, settings]
+      properties:
+        firmware: { type: string }
+        settings: { $ref: "#/components/schemas/ControllerSettings" }
     MachineStatus:
       type: object
-      required: [state, simulated, profile_id, homed]
+      required: [state, simulated, profile_id, homed, controller]
       properties:
         state:
           type: string
@@ -4216,6 +4260,10 @@ components:
         fault: { type: [object, "null"] }
         control_lease: { type: [object, "null"] }
         calibration_revision: { type: [string, "null"], format: uuid }
+        controller:
+          oneOf:
+            - { $ref: "#/components/schemas/ControllerConnection" }
+            - { type: "null" }
     DeviceIdentity:
       type: object
       required: [kind, path]

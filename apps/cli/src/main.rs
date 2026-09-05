@@ -3,9 +3,11 @@ use clap::{Parser, Subcommand};
 use reqwest::{multipart, Client, Response};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
-use velocitypnp_domain::{JogTarget, Operation, OperationStatus};
+use velocitypnp_domain::{
+    JogTarget, MachineProfile, MachineState, MachineStatus, Operation, OperationStatus, Pose,
+};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "VelocityPnP command-line client")]
@@ -61,6 +63,26 @@ enum Command {
         rotation: Option<f64>,
         #[arg(long, default_value_t = 300.0)]
         feed: f64,
+    },
+    /// Measure clear-XY travel time and camera-based return repeatability.
+    MotionSweep {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Ascending XY feed rates in mm/min.
+        #[arg(long = "feed", num_args = 1..)]
+        feeds: Vec<f64>,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=20))]
+        cycles: u32,
+        #[arg(long, default_value_t = 150.0)]
+        x_excursion_mm: f64,
+        #[arg(long, default_value_t = 100.0)]
+        y_excursion_mm: f64,
+        #[arg(long, default_value_t = 0.05)]
+        return_tolerance_mm: f64,
+        /// Confirm level nozzles, a clear XY path at safe Z, and reachable
+        /// power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
     },
     Actuate {
         #[arg(long, env = "VELOCITYPNP_LEASE")]
@@ -572,6 +594,32 @@ async fn main() -> Result<()> {
                     Some(json!({"lease_id": lease, "target": target, "feed_mm_per_min": feed})),
                 )
                 .await?,
+            )
+            .await?
+        }
+        Command::MotionSweep {
+            lease,
+            feeds,
+            cycles,
+            x_excursion_mm,
+            y_excursion_mm,
+            return_tolerance_mm,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "motion sweep requires --confirm-safety-checks after inspecting the level nozzles, clear XY path at safe Z, and power isolation"
+                );
+            }
+            run_motion_sweep(
+                &client,
+                base,
+                lease,
+                feeds,
+                cycles,
+                x_excursion_mm,
+                y_excursion_mm,
+                return_tolerance_mm,
             )
             .await?
         }
@@ -1567,6 +1615,380 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+const DEFAULT_MOTION_SWEEP_FEEDS: [f64; 5] = [1_200.0, 3_000.0, 6_000.0, 9_000.0, 12_000.0];
+
+struct MotionSweepPlan {
+    feeds: Vec<f64>,
+    seed: Pose,
+    low: Pose,
+    high: Pose,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_motion_sweep(
+    client: &Client,
+    base: &str,
+    lease: Uuid,
+    feeds: Vec<f64>,
+    cycles: u32,
+    x_excursion_mm: f64,
+    y_excursion_mm: f64,
+    return_tolerance_mm: f64,
+) -> Result<Value> {
+    let status_value = get(client, &format!("{base}/machine/status")).await?;
+    let status: MachineStatus = serde_json::from_value(status_value["machine"].clone())
+        .context("machine status response did not contain a valid machine")?;
+    let profile: MachineProfile = get(client, &format!("{base}/machine/profile"))
+        .await
+        .and_then(|value| {
+            serde_json::from_value(value).context("machine profile response was invalid")
+        })?;
+    let plan = motion_sweep_plan(
+        &status,
+        &profile,
+        feeds,
+        x_excursion_mm,
+        y_excursion_mm,
+        return_tolerance_mm,
+    )?;
+
+    let initial_move = timed_jog(
+        client,
+        base,
+        lease,
+        status.pose.unwrap(),
+        plan.seed,
+        plan.feeds[0],
+    )
+    .await
+    .context("moving to the motion-sweep seed")?;
+    let baseline = observe_visual_home(client, base, lease)
+        .await
+        .context("capturing the motion-sweep baseline")?;
+    let baseline_correction = visual_correction(&baseline)?;
+    if !visual_observation_valid(&baseline) {
+        bail!("motion-sweep baseline exceeded the configured fiducial bounds");
+    }
+
+    let mut passed = true;
+    let mut stopped_early = false;
+    let mut stop_reason: Option<String> = None;
+    let mut levels = Vec::with_capacity(plan.feeds.len());
+    for feed in &plan.feeds {
+        let mut samples = Vec::with_capacity(cycles as usize);
+        let mut return_errors = Vec::with_capacity(cycles as usize);
+        let mut level_passed = true;
+        for cycle in 1..=cycles {
+            let outbound = timed_jog(client, base, lease, plan.seed, plan.low, *feed)
+                .await
+                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, outbound move"))?;
+            let traverse = timed_jog(client, base, lease, plan.low, plan.high, *feed)
+                .await
+                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, traverse move"))?;
+            let returning = timed_jog(client, base, lease, plan.high, plan.seed, *feed)
+                .await
+                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, return move"))?;
+            let observation = observe_visual_home(client, base, lease)
+                .await
+                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, return observation"))?;
+            let correction = visual_correction(&observation)?;
+            let error_x_mm = correction[0] - baseline_correction[0];
+            let error_y_mm = correction[1] - baseline_correction[1];
+            let return_error_mm = error_x_mm.hypot(error_y_mm);
+            let observation_valid = visual_observation_valid(&observation);
+            let sample_passed = observation_valid && return_error_mm <= return_tolerance_mm;
+            return_errors.push(return_error_mm);
+            samples.push(json!({
+                "cycle": cycle,
+                "moves": [outbound, traverse, returning],
+                "observed_correction_x_mm": correction[0],
+                "observed_correction_y_mm": correction[1],
+                "return_error_x_mm": error_x_mm,
+                "return_error_y_mm": error_y_mm,
+                "return_error_mm": return_error_mm,
+                "observation_valid": observation_valid,
+                "passed": sample_passed,
+            }));
+            if !sample_passed {
+                passed = false;
+                level_passed = false;
+                stopped_early = true;
+                stop_reason = Some(if observation_valid {
+                    format!(
+                        "feed {feed:.0}, cycle {cycle}: return error {return_error_mm:.4}mm exceeds {return_tolerance_mm:.4}mm"
+                    )
+                } else {
+                    format!(
+                        "feed {feed:.0}, cycle {cycle}: fiducial observation exceeded its configured bounds"
+                    )
+                });
+                break;
+            }
+        }
+        let mean_return_error_mm = return_errors.iter().sum::<f64>() / return_errors.len() as f64;
+        let max_return_error_mm = return_errors.iter().copied().fold(0.0_f64, f64::max);
+        levels.push(json!({
+            "feed_mm_per_min": feed,
+            "passed": level_passed && return_errors.len() == cycles as usize,
+            "mean_return_error_mm": mean_return_error_mm,
+            "max_return_error_mm": max_return_error_mm,
+            "samples": samples,
+        }));
+        if stopped_early {
+            break;
+        }
+    }
+
+    Ok(json!({
+        "kind": "clear_xy_motion_sweep",
+        "profile_id": profile.id,
+        "passed": passed,
+        "stopped_early": stopped_early,
+        "stop_reason": stop_reason,
+        "cycles_per_feed": cycles,
+        "return_tolerance_mm": return_tolerance_mm,
+        "requested_feeds_mm_per_min": plan.feeds,
+        "points": {
+            "seed": plan.seed,
+            "low": plan.low,
+            "high": plan.high,
+        },
+        "controller": status.controller,
+        "initial_move": initial_move,
+        "baseline": {
+            "correction_x_mm": baseline_correction[0],
+            "correction_y_mm": baseline_correction[1],
+            "observation": baseline["initial"].clone(),
+        },
+        "levels": levels,
+    }))
+}
+
+fn motion_sweep_plan(
+    status: &MachineStatus,
+    profile: &MachineProfile,
+    feeds: Vec<f64>,
+    x_excursion_mm: f64,
+    y_excursion_mm: f64,
+    return_tolerance_mm: f64,
+) -> Result<MotionSweepPlan> {
+    if status.simulated {
+        bail!("motion sweep requires a physical machine");
+    }
+    if status.state != MachineState::Ready || !status.homed {
+        bail!("motion sweep requires a homed ready machine");
+    }
+    if !profile.accepts_profile_id(&status.profile_id) {
+        bail!("machine status and active profile do not match");
+    }
+    if !x_excursion_mm.is_finite()
+        || !y_excursion_mm.is_finite()
+        || x_excursion_mm <= 0.0
+        || y_excursion_mm <= 0.0
+    {
+        bail!("motion-sweep excursions must be finite and positive");
+    }
+    if !return_tolerance_mm.is_finite() || return_tolerance_mm <= 0.0 {
+        bail!("motion-sweep return tolerance must be finite and positive");
+    }
+    let feeds = if feeds.is_empty() {
+        DEFAULT_MOTION_SWEEP_FEEDS.to_vec()
+    } else {
+        feeds
+    };
+    if feeds
+        .iter()
+        .any(|feed| !feed.is_finite() || *feed <= 0.0 || *feed > profile.maximum_feed_mm_per_min)
+    {
+        bail!(
+            "motion-sweep feeds must be positive and no more than the profile limit of {:.0} mm/min",
+            profile.maximum_feed_mm_per_min
+        );
+    }
+    if feeds.windows(2).any(|pair| pair[0] >= pair[1]) {
+        bail!("motion-sweep feeds must be in strictly ascending order");
+    }
+    let controller = status
+        .controller
+        .as_ref()
+        .context("motion sweep requires recorded controller settings")?;
+    for axis in ["X", "Y"] {
+        let axis_limit = controller
+            .settings
+            .max_feed_units_per_second
+            .get(axis)
+            .with_context(|| format!("controller settings do not include the {axis} feed limit"))?;
+        let highest_feed = *feeds.last().unwrap();
+        if highest_feed / 60.0 > *axis_limit {
+            bail!(
+                "requested feed {highest_feed:.0} mm/min exceeds controller {axis} limit of {:.0} mm/min",
+                axis_limit * 60.0
+            );
+        }
+    }
+
+    let current = status.pose.context("motion sweep requires a known pose")?;
+    let visual = profile
+        .visual_homing
+        .as_ref()
+        .context("active profile does not define visual homing")?;
+    visual
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .context("active visual-homing profile is invalid")?;
+    let seed = visual
+        .seed_pose
+        .resolve(current)
+        .context("visual-homing seed pose is invalid")?;
+    if (seed.z_mm - profile.safe_z_mm).abs() > 1e-6 {
+        bail!("motion-sweep seed must be at the configured safe Z");
+    }
+    let low = Pose {
+        x_mm: seed.x_mm - x_excursion_mm,
+        y_mm: seed.y_mm - y_excursion_mm,
+        ..seed
+    };
+    let high = Pose {
+        x_mm: seed.x_mm + x_excursion_mm,
+        y_mm: seed.y_mm + y_excursion_mm,
+        ..seed
+    };
+    if !profile.bounds.contains(low) || !profile.bounds.contains(high) {
+        bail!("motion-sweep points are outside the active machine bounds");
+    }
+    Ok(MotionSweepPlan {
+        feeds,
+        seed,
+        low,
+        high,
+    })
+}
+
+async fn timed_jog(
+    client: &Client,
+    base: &str,
+    lease: Uuid,
+    from: Pose,
+    target: Pose,
+    feed_mm_per_min: f64,
+) -> Result<Value> {
+    let event_marker = newest_event_sequence(client, base).await?;
+    let started = Instant::now();
+    let operation = post(
+        client,
+        &format!("{base}/machine/jog"),
+        Some(json!({
+            "lease_id": lease,
+            "target": JogTarget {
+                x_mm: target.x_mm,
+                y_mm: target.y_mm,
+                z_mm: target.z_mm,
+                rotation_deg: None,
+            },
+            "feed_mm_per_min": feed_mm_per_min,
+        })),
+    )
+    .await?;
+    run_operation(client, base, operation).await?;
+    let client_elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let telemetry =
+        wait_for_motion_telemetry(client, base, event_marker, target, feed_mm_per_min).await?;
+    let linear_distance_mm = (target.x_mm - from.x_mm)
+        .hypot(target.y_mm - from.y_mm)
+        .hypot(target.z_mm - from.z_mm);
+    Ok(json!({
+        "from": from,
+        "target": target,
+        "feed_mm_per_min": feed_mm_per_min,
+        "linear_distance_mm": linear_distance_mm,
+        "ideal_constant_speed_ms": linear_distance_mm / feed_mm_per_min * 60_000.0,
+        "client_elapsed_ms": client_elapsed_ms,
+        "controller_wait_telemetry": telemetry,
+    }))
+}
+
+async fn observe_visual_home(client: &Client, base: &str, lease: Uuid) -> Result<Value> {
+    post(
+        client,
+        &format!("{base}/machine/visual-home"),
+        Some(json!({
+            "lease_id": lease,
+            "apply_offset": false,
+            "move_to_seed": false,
+        })),
+    )
+    .await
+}
+
+fn visual_correction(observation: &Value) -> Result<[f64; 2]> {
+    let initial = observation
+        .get("initial")
+        .context("visual observation did not contain an initial result")?;
+    let x = initial["correction_x_mm"]
+        .as_f64()
+        .context("visual observation did not contain correction_x_mm")?;
+    let y = initial["correction_y_mm"]
+        .as_f64()
+        .context("visual observation did not contain correction_y_mm")?;
+    if !x.is_finite() || !y.is_finite() {
+        bail!("visual observation returned a non-finite correction");
+    }
+    Ok([x, y])
+}
+
+fn visual_observation_valid(observation: &Value) -> bool {
+    observation["initial"]["within_capture_bound"]
+        .as_bool()
+        .unwrap_or(false)
+        && observation["initial"]["within_correction_bound"]
+            .as_bool()
+            .unwrap_or(false)
+}
+
+async fn newest_event_sequence(client: &Client, base: &str) -> Result<Option<u64>> {
+    let recent = get(client, &format!("{base}/events/recent")).await?;
+    Ok(recent["events"]
+        .as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| event["sequence"].as_u64()))
+}
+
+async fn wait_for_motion_telemetry(
+    client: &Client,
+    base: &str,
+    event_marker: Option<u64>,
+    target: Pose,
+    feed_mm_per_min: f64,
+) -> Result<Value> {
+    for _ in 0..20 {
+        let recent = get(client, &format!("{base}/events/recent")).await?;
+        if let Some(event) = recent["events"].as_array().and_then(|events| {
+            events.iter().find(|event| {
+                event["kind"] == "machine.motion_completed"
+                    && event["sequence"]
+                        .as_u64()
+                        .is_some_and(|sequence| event_marker.is_none_or(|marker| sequence > marker))
+                    && event["payload"]["feed_mm_per_min"]
+                        .as_f64()
+                        .is_some_and(|feed| (feed - feed_mm_per_min).abs() < 1e-6)
+                    && event["payload"]["pose"]["x_mm"]
+                        .as_f64()
+                        .is_some_and(|x| (x - target.x_mm).abs() < 1e-6)
+                    && event["payload"]["pose"]["y_mm"]
+                        .as_f64()
+                        .is_some_and(|y| (y - target.y_mm).abs() < 1e-6)
+                    && event["payload"]["pose"]["z_mm"]
+                        .as_f64()
+                        .is_some_and(|z| (z - target.z_mm).abs() < 1e-6)
+            })
+        }) {
+            return Ok(event["payload"].clone());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    bail!("motion completed, but its timing event was not persisted");
+}
+
 async fn get(client: &Client, url: &str) -> Result<Value> {
     decode(client.get(url).send().await?).await
 }
@@ -1794,6 +2216,65 @@ mod tests {
                 lanes,
                 confirm_safety_checks: true,
             } if parsed_scan == scan && parsed_lease == lease && lanes == vec![0, 2]
+        ));
+    }
+
+    #[test]
+    fn motion_sweep_uses_the_bounded_default_escalation() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let mut status = MachineStatus {
+            state: MachineState::Ready,
+            simulated: false,
+            profile_id: profile.id.clone(),
+            pose: Some(profile.home_pose),
+            homed: true,
+            ..MachineStatus::default()
+        };
+        let mut controller = velocitypnp_domain::ControllerConnection::default();
+        controller
+            .settings
+            .max_feed_units_per_second
+            .insert("X".into(), 500.0);
+        controller
+            .settings
+            .max_feed_units_per_second
+            .insert("Y".into(), 500.0);
+        status.controller = Some(controller);
+
+        let plan = motion_sweep_plan(&status, &profile, Vec::new(), 150.0, 100.0, 0.05)
+            .expect("default sweep plan");
+
+        assert_eq!(plan.feeds, DEFAULT_MOTION_SWEEP_FEEDS);
+        assert!(profile.bounds.contains(plan.low));
+        assert!(profile.bounds.contains(plan.high));
+        assert_eq!(plan.seed.z_mm, profile.safe_z_mm);
+    }
+
+    #[test]
+    fn motion_sweep_cli_accepts_multiple_feed_levels() {
+        let lease = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "motion-sweep",
+            "--lease",
+            &lease.to_string(),
+            "--feed",
+            "1200",
+            "6000",
+            "12000",
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::MotionSweep {
+                lease: parsed_lease,
+                feeds,
+                confirm_safety_checks: true,
+                ..
+            } if parsed_lease == lease && feeds == vec![1_200.0, 6_000.0, 12_000.0]
         ));
     }
 }

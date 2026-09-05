@@ -38,7 +38,7 @@ export default function App() {
     void api.devices().then(setDevices).catch(() => undefined);
     const timer = window.setInterval(() => void refresh(), 1000);
     const source = new EventSource("/api/v1/events");
-    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.position", "machine.actuator", "machine.sensor", "machine.visual_home_applied", "machine.fine_z_home_applied", "machine.fault", "machine.emergency_stopped", "control.lease_acquired", "control.lease_renewed"];
+    const kinds = ["machine.connected", "machine.disconnected", "machine.preflight_completed", "machine.homing_started", "machine.homing_completed", "machine.motion_started", "machine.motion_completed", "machine.motion_failed", "machine.position", "machine.actuator", "machine.sensor", "machine.visual_home_applied", "machine.fine_z_home_applied", "machine.fault", "machine.emergency_stopped", "control.lease_acquired", "control.lease_renewed"];
     for (const kind of kinds) {
       source.addEventListener(kind, (message) => {
         const event = message as MessageEvent;
@@ -74,7 +74,7 @@ export default function App() {
       </aside>
       <main>
         <header className="topbar">
-          <div><p className="eyebrow">LumenPnP V3.0.4</p><h1>{tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : tab === "boards" ? "Board library" : "Job execution"}</h1></div>
+          <div><p className="eyebrow">LumenPnP V3.0.2</p><h1>{tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : tab === "boards" ? "Board library" : "Job execution"}</h1></div>
           <button className="estop" onClick={() => {
             if (window.confirm("Emergency stop immediately? The controller may require a reset.")) void run(async () => waitForOperation(await api.emergencyStop()));
           }}>EMERGENCY STOP</button>
@@ -201,6 +201,16 @@ function MachinePanel({ status, devices, events, busy, run }: {
   const [visualHome, setVisualHome] = useState<VisualHomingResult | null>(null);
   const lease = status.control_lease;
   const pose = status.pose ?? EMPTY_POSE;
+  const controllerSettings = status.controller?.settings;
+  const xyFeedLimit = controllerSettings
+    ? Math.min(
+      controllerSettings.max_feed_units_per_second.X ?? Number.POSITIVE_INFINITY,
+      controllerSettings.max_feed_units_per_second.Y ?? Number.POSITIVE_INFINITY,
+    ) * 60
+    : null;
+  const xyMicrosteps = controllerSettings
+    ? `${controllerSettings.microsteps.X ?? "—"}/${controllerSettings.microsteps.Y ?? "—"}`
+    : null;
   const machineAction = (action: () => Promise<Parameters<typeof waitForOperation>[0]>) => run(async () => waitForOperation(await action()));
   const jog = (dx: number, dy: number, dz = 0) => {
     if (!lease) return;
@@ -269,6 +279,10 @@ function MachinePanel({ status, devices, events, busy, run }: {
         <div><strong>{device.product ?? device.kind}</strong><small>{device.suggested_role ? pretty(device.suggested_role) : device.path}</small></div>
         <code>{device.vendor_id}:{device.product_id}</code>
       </div>)}</div>
+      {status.controller && <p className="hint">
+        Active XY limit {xyFeedLimit && Number.isFinite(xyFeedLimit) ? `${xyFeedLimit.toFixed(0)} mm/min` : "not reported"};
+        microsteps X/Y {xyMicrosteps}; interpolation {controllerSettings?.interpolation.X && controllerSettings?.interpolation.Y ? "on" : "not reported"}.
+      </p>}
     </section>
 
     <section className="card hardware-check-card">

@@ -1,4 +1,4 @@
-# LumenPnP V3.0.4 hardware validation
+# LumenPnP V3.0.2 hardware validation
 
 This is the evidence log for the first attached-machine validation on
 2026-08-14. It is deliberately split into facts observed by software and
@@ -16,6 +16,44 @@ bounded physical homing and translation session completed on the same date.
 The two cameras report the same manufacturer serial, so role assignment must
 also use their distinct USB product names and stable by-id paths. Metadata-only
 `video-index1` nodes are excluded from capture candidates.
+
+## Controller motion audit on 2026-09-05
+
+A read-only attached-controller audit identified Marlin `bugfix-2.1.x`, built
+on 2022-10-03 for `MACHINE_TYPE:LumenPnP`. `M503` reported these active motion
+settings:
+
+- X/Y steps per mm: 320.
+- X/Y controller maximum feed: 500 mm/s, or 30,000 mm/min.
+- X/Y controller maximum acceleration: 2,000 mm/s².
+- Active travel acceleration: 1,000 mm/s².
+- Junction deviation: 0.01 mm.
+
+`M122` reported 64 microsteps on X and Y, interpolation enabled on both axes,
+and StealthChop enabled. Z, I, and J use eight microsteps with interpolation.
+The audit did not change a controller setting and did not save to EEPROM. The
+serial open reset the controller, but the audit issued no motion command.
+
+The controller limit is not a validated mechanical limit. The software keeps
+1,200 mm/min as the normal default and limits the first clear-XY qualification
+to 12,000 mm/min. Connection now records the active `M503` and `M122` reports
+in machine status. Each jog records its distance, ideal constant-speed time,
+and measured controller-wait time in the event journal.
+
+The bounded qualification command is:
+
+```bash
+cargo run --release -p velocitypnp -- motion-sweep \
+  --lease "$VELOCITYPNP_LEASE" \
+  --confirm-safety-checks
+```
+
+It uses the primary datum seed at safe Z and diagonal endpoints 150 mm in X
+and 100 mm in Y from that seed. At each default feed of 1,200, 3,000, 6,000,
+9,000, and 12,000 mm/min, it runs three cycles and measures camera-based return
+error. It stops at the first invalid observation or error above 0.05 mm. This
+test requires a new physical safety check. No physical sweep result is recorded
+yet.
 
 ## Passed
 
@@ -36,9 +74,9 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
 - SIGINT while physically connected ran the graceful disconnect path, exited
   successfully, and released the serial device.
 - The sanitized M115 response is retained as a driver regression fixture at
-  `crates/driver/tests/fixtures/lumenpnp-v3.0.4-rev4-m115.txt`.
+  `crates/driver/tests/fixtures/lumenpnp-v3.0.2-rev4-m115.txt`.
 - The non-moving unhomed M114 response is retained at
-  `crates/driver/tests/fixtures/lumenpnp-v3.0.4-rev4-m114-unhomed.txt`.
+  `crates/driver/tests/fixtures/lumenpnp-v3.0.2-rev4-m114-unhomed.txt`.
 - Each camera delivered 10 of 10 full-resolution YUYV frames at 10 frames per
   second after the USB connection was physically reconnected.
 - The native VelocityPnP V4L2 backend resolved each stable role, discarded five
@@ -90,13 +128,13 @@ also use their distinct USB product names and stable by-id paths. Metadata-only
 
 ## First working-plane observations
 
-The top camera acquired the correct 1 mm datum target from the V3.0.4 nominal
+The top camera acquired the correct 1 mm datum target from the V3.0.2 nominal
 seed. A +1 mm X probe measured approximately +75 raw pixels, consistent with
 the 0.01351 mm/pixel seed. The manually centered coarse-home position was
 X=220.131, Y=190.271, with the fiducial center within roughly one pixel of the
 1280x720 image center. The image was optically sharp.
 
-Using the V3.0.4 N1 head offset, the bottom camera acquired N1 at safe
+Using the V3.0.2 N1 head offset, the bottom camera acquired N1 at safe
 Z=31.5. Separate +1 mm probes measured approximately +30 pixels in X and +32
 pixels in Y. The manually centered head position was X=242.335, Y=215.353,
 which implies a provisional bottom-camera location of X=218.574, Y=148.734
@@ -183,7 +221,7 @@ The primary-datum fixture produces a bounded visual-home observation. A prior
 +1 mm Y probe moved it from raw Y=368.33 to Y=297.17, a -71.17 px shift. Thus
 target error converts to machine correction with a negative X coefficient and
 a positive Y coefficient. The probe exposed and corrected the provisional Y
-sign copied from the tagged profile. The attached V3.0.4 profile now marks the
+sign copied from the tagged profile. The attached V3.0.2 profile now marks the
 mapping validated. At this stage, apply mode still required physical
 verification of its bounded correction and a post-move residual no larger than
 one pixel before an XY-only `G92` reset. Later attached-machine evidence below
@@ -268,7 +306,7 @@ During that run the operator observed that the axis-scoped `G28 Z` command
 moved the gantry toward X/Y zero before homing Z. Because the required operator
 check already levels both nozzles, the staged sequence did not provide its
 intended safety property. The run was already rejected at N1 when software
-emergency stop was requested. The V3.0.4 profile now uses one standard `G28`
+emergency stop was requested. The V3.0.2 profile now uses one standard `G28`
 command and verifies its reported X/Y/Z result together.
 
 The same emergency stop exposed a host-recovery defect: shutdown tried ordinary
@@ -293,7 +331,7 @@ unhomed with no trusted pose, lease, or fault. This validates proactive `M999`
 normalization on a responsive controller; it does not claim that firmware-level
 recovery can succeed after this REV4 build stops servicing its USB endpoint.
 
-The V3.0.4 bottom-vision seed uses the attached machine's observed camera
+The V3.0.2 bottom-vision seed uses the attached machine's observed camera
 center and the tagged Opulo N1/N2 head offsets. The retained N045 fixture
 measures a 0.422 mm bore and is automatically classified as N045. N24 uses a
 higher threshold for its reflective bore edge while keeping the physical
@@ -428,7 +466,7 @@ late cleanup request then changed the disconnected state to a recoverable
 actuator fault. The cleanup path now treats output disable after disconnect as
 an idempotent operation. No emergency stop was used.
 
-Inspection of the tagged Opulo V3.0.4 files confirmed that controller Z=31.5
+Inspection of the tagged Opulo V3.0.2 files confirmed that controller Z=31.5
 is the level home coordinate. Working Z=0 maps to controller Z=0 for N1 and
 Z=63 for N2. The datum PCB puts the visual fiducial at (40, -25) and a 5 mm
 front-mask opening at (17.5, -17.5). After the machine Y-axis inversion, the
@@ -654,7 +692,7 @@ Y=-0.375 mm with 0.125 mm uncertainty. A corrected N2 rerun remains required.
 ### Camera-only transfer revision
 
 The prior N2 detector centered a roughly 75 px inner feature. The tagged Opulo
-V3.0.4 machine profile instead uses a 140-to-170 px N24 outer-tip feature. The
+V3.0.2 machine profile instead uses a 140-to-170 px N24 outer-tip feature. The
 revised profile therefore identifies N045 from its 0.45 mm bore and N24 from
 its 4.86 mm outer tip. The detector carries this configured feature identity
 through tooling checks, runout, and height tracking.
@@ -832,7 +870,7 @@ that a production part is held; known-part distributions remain pending.
 
 ## Local X/Y direction response
 
-The adaptive local direction-response runner passed on the attached V3.0.4 on
+The adaptive local direction-response runner passed on the attached V3.0.2 on
 2026-08-17. It reused the current visual-home qualification and top-camera
 working-plane map. It performed one live visual home, then approached the same
 datum pose from both sides of X and Y at 1 mm and 5 mm distances and 300 and
@@ -869,7 +907,7 @@ planner.
 ## Installed camera and plate geometry
 
 Initial installed-geometry run `8fc53288-e0d9-46ca-b342-37a0d0ef6798`
-qualified the staging plate on the attached V3.0.4 on 2026-08-18. It
+qualified the staging plate on the attached V3.0.2 on 2026-08-18. It
 requalified 25-position top- and bottom-camera sweeps from run
 `f0cfaf51-c278-40ff-89d5-e7d02643f1cd`. The top-camera distortion model had a
 0.04544 mm holdout RMS. The bottom-camera model had a 0.03601 mm holdout RMS.
@@ -939,7 +977,7 @@ Both affine models improved their nominal holdouts. There were no plate
 limitations.
 
 The later workspace survey showed that this conclusion selected the wrong
-alias of the repetitive 15 mm grid. The tagged V3.0.4 KiCad source defines a
+alias of the repetitive 15 mm grid. The tagged V3.0.2 KiCad source defines a
 600 by 120 mm plate with 39 numbered columns, seven lettered rows, and one
 pitch from each outer feature center to the PCB outline. The old profile
 declared 40 columns and made the two plate grids overlap by 30 mm. It therefore
@@ -1011,7 +1049,7 @@ Z=31.5.
 ### Streaming datum-PCB survey
 
 Scan `57efc86e-1b2f-4052-9ea6-4f4ff6dae09e` exercised the streaming survey
-path over the complete V3.0.4 datum-PCB bounding box. The tagged drawing puts
+path over the complete V3.0.2 datum-PCB bounding box. The tagged drawing puts
 the PCB at X=0–80 mm and Y=-35–0 mm, with the visual datum at (40, -25).
 After the installed Y-axis inversion, the requested machine region was
 X=180.131–260.131 mm and Y=165.271–200.271 mm.
@@ -1692,7 +1730,7 @@ stop was used.
 
 ### No-motion PCB and feeder recognition
 
-On 2026-08-22, the official LumenPnP V3.0.4 FTP KiCad board was imported as
+On 2026-08-22, the official LumenPnP V3.0.2 FTP KiCad board was imported as
 `Opulo FTP PCB REV00`. The importer read a 75-by-75 mm Edge.Cuts outline and
 90 placements without warnings. The attached machine stayed disconnected.
 
@@ -1788,7 +1826,7 @@ N1 reached its established Z=3.0 lower bound without a qualifying transition.
 Its stored contact is Z=3.2, so non-repeatable stall homing leaves too little
 search margin on that side. The runner switched the pump off, retracted, and
 returned fault-free without applying a reset. N2/N24 has useful safe margin on
-both sides and is now the V3.0.4 default. It succeeded once with a +0.100 mm
+both sides and is now the V3.0.2 default. It succeeded once with a +0.100 mm
 reset from controller Z59.100 to Z59.200. Two later runs reproduced contact at
 Z59.200 and applied zero correction. Final fine-home operation
 `c43af07a-d29f-46e1-a97f-c3be617935ef` succeeded.
@@ -2547,7 +2585,7 @@ final off command succeeded before the tool retracted to Z31.5. A bottom-camera
 capture still showed the resistor moving with N1. The combined cycles did not
 release the part.
 
-The V3.0.4 profile then gained an independent `blowoff_1` actuator. Driver tests
+The V3.0.2 profile then gained an independent `blowoff_1` actuator. Driver tests
 verified that it sends only `M106 P1 S255` and `M107 P1`. After daemon restart,
 N1 remained physically at safe Z over pocket 12. The controller was connected
 but not re-homed. Three 250 ms valve-only pulses succeeded with the pump off,
@@ -3047,8 +3085,8 @@ locations, and safety boundaries for both sessions.
 - [Opulo V3 homing-fiducial calibration](https://docs.opulo.io/misc/calibration/4-homing-fiducial/)
 - [Opulo V2/V3 G-code macro update guide](https://docs.opulo.io/guides/update-gcode-macros/)
 - [Opulo actuator check](https://docs.opulo.io/byop/testing/actuator-check/)
-- [Opulo LumenPnP V3.0.4 OpenPnP machine profile](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml)
-- [Opulo LumenPnP V3.0.4 datum PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/datum/datum.kicad_pcb)
-- [Opulo LumenPnP V3.0.4 staging plate](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/staging-plate/staging-plate.kicad_pcb)
-- [Opulo LumenPnP V3.0.4 FTP PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/pnp/pcb/ftp/ftp.kicad_pcb)
+- [Opulo LumenPnP V3.0.2 OpenPnP machine profile](https://github.com/opulo-inc/lumenpnp/blob/v3.0.2/openpnp/machine.xml)
+- [Opulo LumenPnP V3.0.2 datum PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.2/pnp/pcb/datum/datum.kicad_pcb)
+- [Opulo LumenPnP V3.0.2 staging plate](https://github.com/opulo-inc/lumenpnp/blob/v3.0.2/pnp/pcb/staging-plate/staging-plate.kicad_pcb)
+- [Opulo LumenPnP V3.0.2 FTP PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.2/pnp/pcb/ftp/ftp.kicad_pcb)
 - [ANSI/EIA-481-C carrier-tape dimensions](https://community.nxp.com/pwmxy87654/attachments/pwmxy87654/kinetis/37830/1/EIA-481-2003.pdf)

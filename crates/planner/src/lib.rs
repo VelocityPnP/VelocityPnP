@@ -406,7 +406,7 @@ mod tests {
     use velocitypnp_domain::{BoardInstance, Placement, Transform2d};
 
     fn profile() -> MachineProfile {
-        serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap()
+        serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap()
     }
 
     #[test]

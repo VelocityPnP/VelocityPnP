@@ -4550,7 +4550,7 @@ mod tests {
     #[test]
     fn physical_feeder_ground_truth_has_the_confirmed_totals() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/lumenpnp-v3.0.4-strip-feeder-bank-ground-truth.json"
+            "../tests/fixtures/lumenpnp-v3.0.2-strip-feeder-bank-ground-truth.json"
         ))
         .unwrap();
         let lanes = fixture["lanes"].as_array().unwrap();

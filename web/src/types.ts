@@ -23,6 +23,23 @@ export interface ControlLease {
   expires_at: string;
 }
 
+export interface ControllerSettings {
+  steps_per_unit: Record<string, number>;
+  max_feed_units_per_second: Record<string, number>;
+  max_acceleration_units_per_second_squared: Record<string, number>;
+  motion_acceleration_units_per_second_squared: Record<string, number>;
+  junction_deviation_mm: number | null;
+  microsteps: Record<string, number>;
+  interpolation: Record<string, boolean>;
+  raw_m503: string[];
+  raw_m122: string[];
+}
+
+export interface ControllerConnection {
+  firmware: string;
+  settings: ControllerSettings;
+}
+
 export interface MachineStatus {
   state: MachineState;
   simulated: boolean;
@@ -32,6 +49,7 @@ export interface MachineStatus {
   fault: { code: string; message: string; recoverable: boolean } | null;
   control_lease: ControlLease | null;
   calibration_revision: string | null;
+  controller: ControllerConnection | null;
 }
 
 export interface Device {

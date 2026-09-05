@@ -3,7 +3,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::time::sleep;
-use velocitypnp_domain::{Bounds, Pose};
+use velocitypnp_domain::{Bounds, ControllerConnection, Pose};
 
 pub struct SimulatorDriver {
     connected: bool,
@@ -46,10 +46,13 @@ impl MachineDriver for SimulatorDriver {
         true
     }
 
-    async fn connect(&mut self) -> Result<String> {
+    async fn connect(&mut self) -> Result<ControllerConnection> {
         sleep(Duration::from_millis(80)).await;
         self.connected = true;
-        Ok("FIRMWARE_NAME:VelocityPnP Simulator MACHINE_TYPE:LumenPnP".into())
+        Ok(ControllerConnection {
+            firmware: "FIRMWARE_NAME:VelocityPnP Simulator MACHINE_TYPE:LumenPnP".into(),
+            ..ControllerConnection::default()
+        })
     }
 
     async fn disconnect(&mut self) -> Result<()> {

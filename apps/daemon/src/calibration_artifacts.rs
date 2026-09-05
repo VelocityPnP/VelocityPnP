@@ -653,7 +653,7 @@ fn insert_artifact(
     source_run_id: Option<Uuid>,
     value: Value,
 ) -> Result<(), String> {
-    let input_fingerprints = expected_inputs(state, definition.id)?;
+    let input_fingerprints = expected_inputs(state, &snapshot.profile_id, definition.id)?;
     let dependency_fingerprints = definition
         .dependencies
         .iter()
@@ -733,7 +733,7 @@ fn artifact_stale_reason(
             artifact.algorithm_version
         ));
     }
-    let Ok(inputs) = expected_inputs(state, definition.id) else {
+    let Ok(inputs) = expected_inputs(state, &snapshot.profile_id, definition.id) else {
         return Some("current input fingerprints could not be calculated".into());
     };
     if artifact.input_fingerprints != inputs {
@@ -785,12 +785,13 @@ fn artifact_stale_reason(
 
 fn expected_inputs(
     state: &AppState,
+    profile_id: &str,
     id: CalibrationArtifactId,
 ) -> Result<BTreeMap<String, String>, String> {
     use CalibrationArtifactId::*;
     let mut inputs = BTreeMap::new();
-    let top_profile = || camera_profile(state, CameraRole::TopCamera);
-    let bottom_profile = || camera_profile(state, CameraRole::BottomCamera);
+    let top_profile = || camera_profile(state, profile_id, CameraRole::TopCamera);
+    let bottom_profile = || camera_profile(state, profile_id, CameraRole::BottomCamera);
     let visual = || {
         state
             .profile
@@ -1013,15 +1014,30 @@ mod erased {
     }
 }
 
-fn camera_profile(state: &AppState, role: CameraRole) -> Result<CameraProfile, String> {
-    state
+fn camera_profile(
+    state: &AppState,
+    profile_id: &str,
+    role: CameraRole,
+) -> Result<CameraProfile, String> {
+    if let Some(profile) = state
         .store
-        .get_camera_profile(&state.profile.id, role)
-        .map_err(|error| error.to_string())
-        .map(|profile| {
-            profile
-                .unwrap_or_else(|| CameraProfile::initial_lumenpnp(state.profile.id.clone(), role))
-        })
+        .get_camera_profile(profile_id, role)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(profile);
+    }
+    if profile_id == state.profile.id {
+        for legacy_profile_id in &state.profile.legacy_profile_ids {
+            if let Some(profile) = state
+                .store
+                .get_camera_profile(legacy_profile_id, role)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(profile);
+            }
+        }
+    }
+    Ok(CameraProfile::initial_lumenpnp(profile_id, role))
 }
 
 fn artifact_result<T: serde::de::DeserializeOwned>(
@@ -1121,7 +1137,7 @@ mod tests {
 
     fn state() -> AppState {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let machine = MachineHandle::spawn(
             Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
             profile.clone(),
@@ -1211,7 +1227,12 @@ mod tests {
     #[tokio::test]
     async fn fingerprints_change_with_relevant_profile_input() {
         let state = state();
-        let before = expected_inputs(&state, CalibrationArtifactId::CameraRayTransfer).unwrap();
+        let before = expected_inputs(
+            &state,
+            &state.profile.id,
+            CalibrationArtifactId::CameraRayTransfer,
+        )
+        .unwrap();
         let mut changed = (*state.profile).clone();
         changed
             .bottom_vision
@@ -1220,16 +1241,39 @@ mod tests {
             .head_geometry
             .bottom_camera_reference_diameter_mm += 1.0;
         let changed_state = AppState::new(state.machine.clone(), changed, state.store.clone());
-        let after =
-            expected_inputs(&changed_state, CalibrationArtifactId::CameraRayTransfer).unwrap();
+        let after = expected_inputs(
+            &changed_state,
+            &changed_state.profile.id,
+            CalibrationArtifactId::CameraRayTransfer,
+        )
+        .unwrap();
         assert_ne!(before, after);
+    }
+
+    #[tokio::test]
+    async fn legacy_profile_id_keeps_the_existing_camera_fingerprint() {
+        let state = state();
+        let inputs = expected_inputs(
+            &state,
+            "lumenpnp-v3.0.4",
+            CalibrationArtifactId::TopCameraReproducibility,
+        )
+        .unwrap();
+        assert_eq!(
+            inputs.get("top_camera_profile").map(String::as_str),
+            Some("1834e6e1608819495cab353bb0c9916dcb081b4f48808a0e56dbdccce8b20831"),
+        );
     }
 
     #[tokio::test]
     async fn plane_depth_does_not_invalidate_installed_plate_geometry() {
         let state = state();
-        let before =
-            expected_inputs(&state, CalibrationArtifactId::InstalledPlateGeometry).unwrap();
+        let before = expected_inputs(
+            &state,
+            &state.profile.id,
+            CalibrationArtifactId::InstalledPlateGeometry,
+        )
+        .unwrap();
         let mut changed = (*state.profile).clone();
         changed
             .installed_geometry_calibration
@@ -1239,6 +1283,7 @@ mod tests {
         let changed_state = AppState::new(state.machine.clone(), changed, state.store.clone());
         let after = expected_inputs(
             &changed_state,
+            &changed_state.profile.id,
             CalibrationArtifactId::InstalledPlateGeometry,
         )
         .unwrap();

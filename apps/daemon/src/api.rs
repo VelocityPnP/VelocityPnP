@@ -209,7 +209,7 @@ const RECONNAISSANCE_OUTPUT_MM_PER_PIXEL: f64 = 0.20;
 const RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES: u32 = 1;
 const RECONNAISSANCE_MAX_FRESH_CAPTURE_FRAMES: u32 = 32;
 // Account for the serialized jog completion and fresh-capture dispatch that
-// are not part of ideal feed time. This was measured on a LumenPnP V3.0.4.
+// are not part of ideal feed time. This was measured on a LumenPnP V3.0.2.
 const RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS: f64 = 0.20;
 const MIN_WORKSPACE_COVERAGE: f64 = 0.99;
 const DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL: f64 = 0.10;
@@ -1357,7 +1357,11 @@ async fn update_camera_profile(
     Json(profile): Json<CameraProfile>,
 ) -> ApiResult<Json<CameraProfile>> {
     let role = parse_camera_role(&role)?;
-    if profile.role != role || profile.machine_profile_id != state.profile.id {
+    if profile.role != role
+        || !state
+            .profile
+            .accepts_profile_id(&profile.machine_profile_id)
+    {
         return Err(ApiError::bad_request(
             "camera profile role and machine profile must match the active route",
         ));
@@ -1572,6 +1576,7 @@ struct WorkspaceRefinementQueueMetadata {
 #[derive(Debug, Clone)]
 struct WorkspaceRefinementSource {
     parent_scan_id: Uuid,
+    profile_id: String,
     target_index: u32,
     region: WorkspaceScanRegion,
     recommended_action: WorkspaceSeamHealthAction,
@@ -1825,7 +1830,7 @@ async fn resolve_workspace_refinement_source(
             "workspace refinement requires a successful reconnaissance parent",
         ));
     }
-    if parent.profile_id != state.profile.id
+    if !state.profile.accepts_profile_id(&parent.profile_id)
         || parent.calibration_id != specification.calibration_id
     {
         return Err(ApiError::bad_request(
@@ -1857,6 +1862,7 @@ async fn resolve_workspace_refinement_source(
         })?;
     Ok(Some(WorkspaceRefinementSource {
         parent_scan_id,
+        profile_id: parent.profile_id,
         target_index,
         region,
         recommended_action: artifacts.report.recommended_action,
@@ -2132,7 +2138,10 @@ fn pending_workspace_scan(
         id: Uuid::new_v4(),
         operation_id,
         calibration_id,
-        profile_id: state.profile.id.clone(),
+        profile_id: refinement.map_or_else(
+            || state.profile.id.clone(),
+            |source| source.profile_id.clone(),
+        ),
         parent_scan_id: refinement.map(|source| source.parent_scan_id),
         refinement_target_index: refinement.map(|source| source.target_index),
         refinement_algorithm_version: refinement.map(|source| source.algorithm_version.clone()),
@@ -2927,7 +2936,7 @@ fn load_workspace_camera_model(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -4882,7 +4891,9 @@ async fn start_workspace_refinement_batch(
             "workspace refinement requires a successful reconnaissance parent",
         ));
     }
-    if parent.profile_id != state.profile.id || parent.calibration_id != body.calibration_id {
+    if !state.profile.accepts_profile_id(&parent.profile_id)
+        || parent.calibration_id != body.calibration_id
+    {
         return Err(ApiError::bad_request(
             "workspace refinement must use its parent's profile and calibration",
         ));
@@ -4946,6 +4957,7 @@ async fn start_workspace_refinement_batch(
     for (queue_index, target) in selected.into_iter().enumerate() {
         let refinement = WorkspaceRefinementSource {
             parent_scan_id: parent.id,
+            profile_id: parent.profile_id.clone(),
             target_index: target.target_index,
             region: target.region,
             recommended_action: artifacts.report.recommended_action,
@@ -6226,7 +6238,7 @@ async fn start_strip_feeder_source_capture(
     ensure_no_active_strip_feeder_source_captures(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
     let (scan, inventory) = load_strip_feeder_inventory(&state, scan_id)?;
-    if scan.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&scan.profile_id) {
         return Err(ApiError::bad_request(
             "feeder source inventory uses a different machine profile",
         ));
@@ -7947,7 +7959,7 @@ async fn start_strip_feeder_live_holdout(
         .get_strip_feeder_registration(registration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
-    if registration.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&registration.profile_id) {
         return Err(ApiError::bad_request(
             "live pocket holdout registration uses a different machine profile",
         ));
@@ -7997,7 +8009,7 @@ async fn start_strip_feeder_live_holdout(
         id: Uuid::new_v4(),
         operation_id: operation.id,
         registration_id,
-        profile_id: state.profile.id.clone(),
+        profile_id: registration.profile_id.clone(),
         calibration_id: registration.calibration_id,
         status: OperationStatus::Pending,
         created_at: now,
@@ -9054,7 +9066,7 @@ async fn start_strip_feeder_pickup_qualification(
         .get_strip_feeder_registration(registration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
-    if registration.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&registration.profile_id) {
         return Err(ApiError::bad_request(
             "pickup registration uses a different machine profile",
         ));
@@ -9250,7 +9262,7 @@ async fn start_strip_feeder_pickup_qualification(
         id: Uuid::new_v4(),
         operation_id: operation.id,
         registration_id,
-        profile_id: state.profile.id.clone(),
+        profile_id: registration.profile_id.clone(),
         calibration_id: registration.calibration_id,
         status: OperationStatus::Pending,
         created_at: now,
@@ -12308,7 +12320,9 @@ async fn start_board_registration(
         .get_workspace_scan(scan_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
-    if scan.status != WorkspaceScanStatus::Succeeded || scan.profile_id != state.profile.id {
+    if scan.status != WorkspaceScanStatus::Succeeded
+        || !state.profile.accepts_profile_id(&scan.profile_id)
+    {
         return Err(ApiError::bad_request(
             "board registration requires a successful scan from the active machine profile",
         ));
@@ -12381,7 +12395,7 @@ async fn start_board_registration(
     let registration = BoardRegistrationRun {
         id: Uuid::new_v4(),
         operation_id: operation.id,
-        profile_id: state.profile.id.clone(),
+        profile_id: scan.profile_id.clone(),
         calibration_id: scan.calibration_id,
         source_scan_id: scan.id,
         source_candidate_index: candidate.candidate_index,
@@ -12987,7 +13001,7 @@ async fn start_board_surface_measurement(
             "board surface measurement requires a passing board registration",
         ));
     }
-    if registration.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&registration.profile_id) {
         return Err(ApiError::bad_request(
             "board registration does not match the active machine profile",
         ));
@@ -13072,7 +13086,7 @@ async fn start_board_surface_measurement(
         id: Uuid::new_v4(),
         operation_id: operation.id,
         registration_id,
-        profile_id: state.profile.id.clone(),
+        profile_id: registration.profile_id.clone(),
         calibration_id: registration.calibration_id,
         nozzle_id: body.nozzle_id,
         status: OperationStatus::Pending,
@@ -13718,9 +13732,12 @@ fn latest_workspace_inventory_baseline(
         .map_err(ApiError::internal)?
         .into_iter()
         .filter(|baseline| {
-            profile_id.is_none_or(|profile_id| baseline.profile_id == profile_id)
-                && calibration_id
-                    .is_none_or(|calibration_id| baseline.calibration_id == calibration_id)
+            profile_id.is_none_or(|profile_id| {
+                baseline.profile_id == profile_id
+                    || (profile_id == state.profile.id
+                        && state.profile.accepts_profile_id(&baseline.profile_id))
+            }) && calibration_id
+                .is_none_or(|calibration_id| baseline.calibration_id == calibration_id)
         })
         .max_by_key(|baseline| baseline.activated_at))
 }
@@ -14022,11 +14039,19 @@ fn parse_camera_role(role: &str) -> ApiResult<CameraRole> {
 }
 
 fn stored_camera_profile(state: &AppState, role: CameraRole) -> ApiResult<CameraProfile> {
-    Ok(state
-        .store
-        .get_camera_profile(&state.profile.id, role)
-        .map_err(ApiError::internal)?
-        .unwrap_or_else(|| CameraProfile::initial_lumenpnp(state.profile.id.clone(), role)))
+    for profile_id in std::iter::once(&state.profile.id).chain(&state.profile.legacy_profile_ids) {
+        if let Some(profile) = state
+            .store
+            .get_camera_profile(profile_id, role)
+            .map_err(ApiError::internal)?
+        {
+            return Ok(profile);
+        }
+    }
+    Ok(CameraProfile::initial_lumenpnp(
+        state.profile.id.clone(),
+        role,
+    ))
 }
 
 fn profile_control_updates(profile: &CameraProfile) -> Vec<CameraControlUpdate> {
@@ -14078,7 +14103,7 @@ async fn connect(State(state): State<AppState>) -> ApiResult<(StatusCode, Json<O
         machine
             .connect()
             .await
-            .map(Some)
+            .map(|connection| Some(connection.firmware))
             .map_err(|error| error.to_string())
     })
 }
@@ -14763,7 +14788,7 @@ async fn plan_calibration_artifacts(
         .get_calibration(id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -14797,7 +14822,7 @@ async fn recompute_calibration_artifacts(
         .get_calibration(id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -14863,7 +14888,7 @@ async fn record_nozzle_height_observation(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -15196,7 +15221,7 @@ async fn start_vacuum_operation(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -16619,7 +16644,7 @@ async fn start_local_xy_direction_response(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -17195,7 +17220,7 @@ async fn start_calibration_run(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -17268,14 +17293,14 @@ async fn start_calibration_run(
         id: Uuid::new_v4(),
         calibration_id,
         operation_id: operation.id,
-        profile_id: state.profile.id.clone(),
+        profile_id: snapshot.profile_id.clone(),
         created_at: now,
         updated_at: now,
         status: CalibrationRunStatus::Pending,
         phase: CalibrationRunPhase::Pending,
         config,
         checks: initial_calibration_checks(json!({
-            "machine_profile_id": state.profile.id,
+            "machine_profile_id": snapshot.profile_id,
             "top_camera": top_camera_path,
             "bottom_camera": bottom_camera_path,
         })),
@@ -17329,7 +17354,7 @@ async fn start_head_geometry_run(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -17421,7 +17446,7 @@ async fn start_head_geometry_run(
         id: Uuid::new_v4(),
         calibration_id,
         operation_id: operation.id,
-        profile_id: state.profile.id.clone(),
+        profile_id: snapshot.profile_id.clone(),
         created_at: now,
         updated_at: now,
         status: CalibrationRunStatus::Pending,
@@ -17432,7 +17457,7 @@ async fn start_head_geometry_run(
             &visual_homing_report,
             machine.pose,
             json!({
-                "machine_profile_id": state.profile.id,
+                "machine_profile_id": snapshot.profile_id,
                 "top_camera": top_camera_path,
                 "bottom_camera": bottom_camera_path,
             }),
@@ -17500,7 +17525,7 @@ async fn start_calibration_artifact_run(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -17591,7 +17616,7 @@ async fn start_calibration_artifact_run(
         id: Uuid::new_v4(),
         calibration_id,
         operation_id: operation.id,
-        profile_id: state.profile.id.clone(),
+        profile_id: snapshot.profile_id.clone(),
         created_at: now,
         updated_at: now,
         status: CalibrationRunStatus::Pending,
@@ -17739,7 +17764,7 @@ fn reusable_installed_geometry_camera_reports(
     runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     for run in runs.into_iter().filter(|run| {
         run.calibration_id == calibration_id
-            && run.profile_id == state.profile.id
+            && state.profile.accepts_profile_id(&run.profile_id)
             && run.simulated == state.machine.status().simulated
             && !matches!(
                 run.status,
@@ -17800,7 +17825,7 @@ fn reusable_installed_plate_progress(
     runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     for run in runs.into_iter().filter(|run| {
         run.calibration_id == calibration_id
-            && run.profile_id == state.profile.id
+            && state.profile.accepts_profile_id(&run.profile_id)
             && run.simulated == state.machine.status().simulated
             && !matches!(
                 run.status,
@@ -17937,7 +17962,7 @@ async fn start_installed_geometry_run(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -18059,7 +18084,7 @@ async fn start_installed_geometry_run(
         id: Uuid::new_v4(),
         calibration_id,
         operation_id: operation.id,
-        profile_id: state.profile.id.clone(),
+        profile_id: snapshot.profile_id.clone(),
         created_at: now,
         updated_at: now,
         status: CalibrationRunStatus::Pending,
@@ -24999,7 +25024,7 @@ fn prepare_retained_part_physical_context(
         id: placement_run.id,
         operation_id: placement_run.operation_id,
         registration_id: registration.id,
-        profile_id: state.profile.id.clone(),
+        profile_id: registration.profile_id.clone(),
         calibration_id: placement_run.calibration_id,
         status: OperationStatus::Pending,
         created_at: placement_run.created_at,
@@ -25398,7 +25423,7 @@ fn prepare_physical_placement_pickup(
         id: placement_run.id,
         operation_id: placement_run.operation_id,
         registration_id: registration.id,
-        profile_id: state.profile.id.clone(),
+        profile_id: registration.profile_id.clone(),
         calibration_id: registration.calibration_id,
         status: OperationStatus::Pending,
         created_at: placement_run.created_at,
@@ -29187,7 +29212,7 @@ fn load_job_motion_calibration(
         .get_calibration(calibration_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
-    if snapshot.profile_id != state.profile.id {
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
         return Err(ApiError::bad_request(
             "calibration snapshot does not match the active machine profile",
         ));
@@ -29677,7 +29702,7 @@ mod tests {
     #[test]
     fn registered_phase_resolves_an_ambiguous_flat_led() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let pickup = profile.strip_feeder_pickup.unwrap();
         let orientation = PartOrientation::BrighterEnd {
             minimum_contrast_luma: 4.0,
@@ -29705,7 +29730,7 @@ mod tests {
     #[test]
     fn registered_phase_does_not_accept_an_edge_pick() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let pickup = profile.strip_feeder_pickup.unwrap();
         let orientation = PartOrientation::BrighterEnd {
             minimum_contrast_luma: 4.0,
@@ -30621,7 +30646,7 @@ mod tests {
     #[tokio::test]
     async fn daemon_restart_retains_job_and_requires_placement_recovery() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let store = Store::memory().unwrap();
         let now = Utc::now();
         let operation = Operation {
@@ -30733,7 +30758,7 @@ mod tests {
     #[test]
     fn rotation_capture_angles_are_bounded_and_unique() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         assert!(validate_held_part_rotation_capture_offsets(
             &[-165.0, -45.0, 45.0, 165.0],
             &profile,
@@ -30789,7 +30814,7 @@ mod tests {
 
     fn test_state() -> AppState {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let machine = MachineHandle::spawn(
             Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
             profile.clone(),
@@ -30803,7 +30828,7 @@ mod tests {
             id: Uuid::new_v4(),
             operation_id,
             calibration_id: Uuid::new_v4(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             parent_scan_id: None,
             refinement_target_index: None,
             refinement_algorithm_version: None,
@@ -31001,7 +31026,7 @@ mod tests {
             id: Uuid::new_v4(),
             calibration_id: Uuid::new_v4(),
             operation_id,
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             created_at: now,
             updated_at: now,
             status: CalibrationRunStatus::Pending,
@@ -31133,7 +31158,7 @@ mod tests {
         let parent = CalibrationSnapshot {
             id: parent_id,
             machine_serial: "test-machine".into(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             created_at: Utc::now(),
             completed_steps,
             residuals: BTreeMap::from([(
@@ -31196,7 +31221,7 @@ mod tests {
         let parent = CalibrationSnapshot {
             id: parent_id,
             machine_serial: "test-machine".into(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             created_at: Utc::now(),
             completed_steps: BTreeSet::from(HEAD_GEOMETRY_PREREQUISITES),
             residuals: BTreeMap::new(),
@@ -31265,7 +31290,7 @@ mod tests {
         let mut snapshot = CalibrationSnapshot {
             id: Uuid::new_v4(),
             machine_serial: "test".into(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             created_at: Utc::now(),
             completed_steps: BTreeSet::new(),
             residuals: BTreeMap::new(),
@@ -31782,7 +31807,7 @@ mod tests {
     #[tokio::test]
     async fn startup_marks_interrupted_calibration_and_operation_failed() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let store = Store::memory().unwrap();
         let operation = Operation::pending("calibration.initial_machine");
         let run = test_calibration_run(operation.id);
@@ -31816,7 +31841,7 @@ mod tests {
     #[tokio::test]
     async fn startup_marks_interrupted_workspace_scan_and_operation_failed() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let store = Store::memory().unwrap();
         let operation = Operation::pending("vision.workspace_scan");
         let batch_operation = Operation::pending("vision.workspace_refinement_batch");
@@ -31999,6 +32024,7 @@ mod tests {
         };
         let refinement = WorkspaceRefinementSource {
             parent_scan_id: refinement_specification.parent_scan_id.unwrap(),
+            profile_id: state.profile.id.clone(),
             target_index: 2,
             region: WorkspaceScanRegion {
                 x_min_mm: plan.region.x_min_mm + 20.0,
@@ -33799,7 +33825,7 @@ mod tests {
     #[tokio::test]
     async fn visual_home_apply_rejects_unvalidated_mapping_before_camera_access() {
         let mut profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         profile
             .visual_homing
             .as_mut()
@@ -34258,7 +34284,7 @@ mod tests {
     #[test]
     fn attached_profile_allows_a_full_directed_package_turn() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let maximum = profile
             .strip_feeder_pickup
             .as_ref()
@@ -34941,7 +34967,7 @@ mod tests {
         let snapshot = CalibrationSnapshot {
             id: Uuid::new_v4(),
             machine_serial: "test".into(),
-            profile_id: "lumenpnp-v3.0.4".into(),
+            profile_id: "lumenpnp-v3.0.2".into(),
             created_at: Utc::now(),
             completed_steps: BTreeSet::from([
                 CalibrationStepId::NozzleOffsets,
@@ -35163,7 +35189,7 @@ mod tests {
     #[test]
     fn iterative_visual_home_bounds_total_offset_from_the_seed() {
         let profile: MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let visual = profile.visual_homing.unwrap();
         let seed = Pose {
             x_mm: visual.seed_pose.x_mm,

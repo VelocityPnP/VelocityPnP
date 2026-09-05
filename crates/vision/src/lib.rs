@@ -2531,11 +2531,11 @@ mod tests {
     fn opencv_statistics_match_the_validated_legacy_calculation() {
         let frames = [
             decode_gray_png(include_bytes!(
-                "../tests/fixtures/lumenpnp-v3.0.4-top-datum-exp200.png"
+                "../tests/fixtures/lumenpnp-v3.0.2-top-datum-exp200.png"
             ))
             .unwrap(),
             decode_gray_png(include_bytes!(
-                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n045-exp200.png"
+                "../tests/fixtures/lumenpnp-v3.0.2-bottom-n045-exp200.png"
             ))
             .unwrap(),
         ];
@@ -2951,7 +2951,7 @@ mod tests {
         )
         .unwrap();
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let bottom = machine.bottom_vision.unwrap();
         let error = target(652.4, 353.4);
         let correction =
@@ -2997,7 +2997,7 @@ mod tests {
     }
 
     #[test]
-    fn v304_camera_cutout_recovers_observed_working_plane_transfer() {
+    fn v302_camera_cutout_recovers_observed_working_plane_transfer() {
         let observation = |feature_id: &str, x_mm, y_mm, diameter_px| HeadFeatureCenterReport {
             feature_id: feature_id.into(),
             controller_x_mm: x_mm,
@@ -3038,7 +3038,7 @@ mod tests {
     #[test]
     fn head_camera_detector_requires_concentric_evidence() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom = machine.bottom_vision.unwrap();
         bottom.frame_center_x_px = 90.0;
         bottom.frame_center_y_px = 90.0;
@@ -3071,7 +3071,7 @@ mod tests {
     #[test]
     fn runout_fit_separates_axis_offset_and_periodic_tip_error() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let bottom = machine.bottom_vision.unwrap();
         let nozzle = &bottom.nozzles[0];
         let samples = bottom
@@ -3174,7 +3174,7 @@ mod tests {
     #[test]
     fn tooling_ignores_smaller_components_outside_known_tip_ranges() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom_vision = machine.bottom_vision.unwrap();
         bottom_vision.frame_center_x_px = 64.0;
         bottom_vision.frame_center_y_px = 64.0;
@@ -3205,7 +3205,7 @@ mod tests {
     #[test]
     fn tooling_detects_the_configured_n24_outer_tip_circle() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom_vision = machine.bottom_vision.unwrap();
         bottom_vision.frame_center_x_px = 128.0;
         bottom_vision.frame_center_y_px = 128.0;
@@ -3241,7 +3241,7 @@ mod tests {
     #[test]
     fn geometric_tracker_keeps_a_verified_reflective_outer_tip() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom_vision = machine.bottom_vision.unwrap();
         bottom_vision.frame_center_x_px = 128.0;
         bottom_vision.frame_center_y_px = 128.0;
@@ -3281,7 +3281,7 @@ mod tests {
     #[test]
     fn tooling_accepts_three_stable_detections_but_not_two() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom_vision = machine.bottom_vision.unwrap();
         bottom_vision.frame_center_x_px = 64.0;
         bottom_vision.frame_center_y_px = 64.0;
@@ -3343,7 +3343,7 @@ mod tests {
     #[test]
     fn tooling_prefers_the_n045_bore_over_a_more_stable_outer_annulus() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom_vision = machine.bottom_vision.unwrap();
         bottom_vision.frame_center_x_px = 64.0;
         bottom_vision.frame_center_y_px = 64.0;
@@ -3383,7 +3383,7 @@ mod tests {
     #[test]
     fn tooling_prefers_a_repeated_n24_over_intermittent_n045_sized_noise() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom_vision = machine.bottom_vision.unwrap();
         bottom_vision.frame_center_x_px = 128.0;
         bottom_vision.frame_center_y_px = 128.0;
@@ -3424,7 +3424,7 @@ mod tests {
     #[test]
     fn tooling_reports_a_consistent_wrong_tip_instead_of_accepting_it() {
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let mut bottom_vision = machine.bottom_vision.unwrap();
         bottom_vision.frame_center_x_px = 128.0;
         bottom_vision.frame_center_y_px = 128.0;
@@ -3446,11 +3446,11 @@ mod tests {
     #[test]
     fn detects_targets_in_attached_v3_camera_fixtures() {
         let top = decode_gray_png(include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-top-datum-exp200.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-top-datum-exp200.png"
         ))
         .unwrap();
         let bottom = decode_gray_png(include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-bottom-n045-exp200.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-bottom-n045-exp200.png"
         ))
         .unwrap();
         let top_target = camera_sample_metrics(&top, CameraRole::TopCamera)
@@ -3467,7 +3467,7 @@ mod tests {
         assert!((bottom_target.y_px - 360.0).abs() < 10.0);
 
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let bottom_vision = machine.bottom_vision.as_ref().unwrap();
         let n1 = &bottom_vision.nozzles[0];
         let tooling = summarize_nozzle_tooling(&[bottom], bottom_vision, n1);
@@ -3479,20 +3479,20 @@ mod tests {
     fn detects_n24_across_attached_reflective_frames() {
         let frames = [
             decode_gray_png(include_bytes!(
-                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-1.png"
+                "../tests/fixtures/lumenpnp-v3.0.2-bottom-n24-exp200-1.png"
             ))
             .unwrap(),
             decode_gray_png(include_bytes!(
-                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-2.png"
+                "../tests/fixtures/lumenpnp-v3.0.2-bottom-n24-exp200-2.png"
             ))
             .unwrap(),
             decode_gray_png(include_bytes!(
-                "../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-3.png"
+                "../tests/fixtures/lumenpnp-v3.0.2-bottom-n24-exp200-3.png"
             ))
             .unwrap(),
         ];
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let bottom = machine.bottom_vision.unwrap();
         let n2 = &bottom.nozzles[1];
 
@@ -3512,13 +3512,13 @@ mod tests {
     #[test]
     fn detects_cropped_bottom_camera_lens_in_attached_top_view() {
         let frame = decode_gray_png(include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-top-over-bottom-camera.png"
         ))
         .unwrap();
         let target = detect_opposed_camera_feature(&frame, 640.0, 360.0, 400.0, 700.0, 1100.0)
             .expect("cropped bottom-camera lens was not detected");
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let visual = machine.visual_homing.unwrap();
         let correction = plan_pixel_correction(
             target,
@@ -3537,7 +3537,7 @@ mod tests {
     #[test]
     fn keeps_outer_bottom_camera_lens_across_reciprocal_correction() {
         let frame = decode_gray_png(include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera-near-centered.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-top-over-bottom-camera-near-centered.png"
         ))
         .unwrap();
         let target = detect_opposed_camera_feature(&frame, 640.0, 360.0, 400.0, 700.0, 1100.0)
@@ -3550,11 +3550,11 @@ mod tests {
     #[test]
     fn plans_a_bounded_correction_from_the_attached_top_fixture() {
         let frame = decode_gray_png(include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-top-datum-exp200.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-top-datum-exp200.png"
         ))
         .unwrap();
         let machine: velocitypnp_domain::MachineProfile =
-            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json")).unwrap();
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let plan = plan_visual_homing(&frame, machine.visual_homing.as_ref().unwrap()).unwrap();
         assert!((plan.error_x_px - 6.0).abs() < 1.0);
         assert!(plan.error_y_px.abs() < 1.0);

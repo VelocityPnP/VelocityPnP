@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     }
 
     let profile: MachineProfile =
-        serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.4.json"))
+        serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json"))
             .context("decoding built-in machine profile")?;
     let driver: Box<dyn MachineDriver> = if args.simulate {
         Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm))

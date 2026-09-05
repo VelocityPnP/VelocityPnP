@@ -1,13 +1,16 @@
 use crate::MachineDriver;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{timeout, Instant};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
-use velocitypnp_domain::{HomingAxis, HomingProfile, Pose};
+use velocitypnp_domain::{
+    ControllerConnection, ControllerSettings, HomingAxis, HomingProfile, Pose,
+};
 
 const DISCONNECT_FAILSAFE_COMMANDS: [&str; 5] =
     ["M107 P1", "M107", "M107 P2", "M107 P3", "M150 P0"];
@@ -154,7 +157,7 @@ impl MarlinDriver {
         Ok(())
     }
 
-    async fn connect_inner(&mut self) -> Result<String> {
+    async fn connect_inner(&mut self) -> Result<ControllerConnection> {
         let serial = tokio_serial::new(&self.path, self.baud)
             .timeout(Duration::from_secs(5))
             .open_native_async()
@@ -185,7 +188,17 @@ impl MarlinDriver {
                     })?;
             }
         }
-        Ok(firmware)
+        let m503 = self
+            .command("M503", Duration::from_secs(10))
+            .await
+            .context("reading active Marlin motion settings")?;
+        let m122 = self
+            .command("M122", Duration::from_secs(10))
+            .await
+            .context("reading active TMC driver settings")?;
+        let settings = parse_controller_settings(&m503, &m122)
+            .context("decoding active Marlin controller settings")?;
+        Ok(ControllerConnection { firmware, settings })
     }
 }
 
@@ -199,7 +212,7 @@ impl MachineDriver for MarlinDriver {
         self.emergency_flag = flag;
     }
 
-    async fn connect(&mut self) -> Result<String> {
+    async fn connect(&mut self) -> Result<ControllerConnection> {
         let result = self.connect_inner().await;
         if result.is_err() {
             self.stream = None;
@@ -503,6 +516,85 @@ fn parse_vacuum_sensor_report(lines: &[String]) -> Result<i64> {
     bail!("M261 response did not contain a data field")
 }
 
+fn parse_controller_settings(m503: &[String], m122: &[String]) -> Result<ControllerSettings> {
+    let steps_per_unit =
+        parse_gcode_values(m503, "M92").context("M503 did not report steps per unit with M92")?;
+    let max_feed_units_per_second = parse_gcode_values(m503, "M203")
+        .context("M503 did not report maximum feed rates with M203")?;
+    let max_acceleration_units_per_second_squared = parse_gcode_values(m503, "M201")
+        .context("M503 did not report maximum acceleration with M201")?;
+    let motion_acceleration_units_per_second_squared = parse_gcode_values(m503, "M204")
+        .context("M503 did not report motion acceleration with M204")?;
+    let junction_deviation_mm =
+        parse_gcode_values(m503, "M205").and_then(|values| values.get("J").copied());
+    let axes = parse_tmc_axes(m122).context("M122 did not report TMC axes")?;
+    let microsteps = parse_tmc_row(m122, &axes, "msteps", str::parse::<u16>)
+        .context("M122 did not report TMC microsteps")?;
+    let interpolation = parse_tmc_row(m122, &axes, "interp", str::parse::<bool>)
+        .context("M122 did not report TMC interpolation")?;
+    Ok(ControllerSettings {
+        steps_per_unit,
+        max_feed_units_per_second,
+        max_acceleration_units_per_second_squared,
+        motion_acceleration_units_per_second_squared,
+        junction_deviation_mm,
+        microsteps,
+        interpolation,
+        raw_m503: m503.to_vec(),
+        raw_m122: m122.to_vec(),
+    })
+}
+
+fn parse_gcode_values(lines: &[String], command: &str) -> Option<BTreeMap<String, f64>> {
+    lines.iter().find_map(|line| {
+        let line = line
+            .trim()
+            .strip_prefix("echo:")
+            .unwrap_or(line.trim())
+            .trim();
+        let values = line.strip_prefix(command)?;
+        if !values.is_empty() && !values.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let parsed = values
+            .split_whitespace()
+            .filter_map(|token| {
+                let (axis, value) = token.split_at_checked(1)?;
+                Some((axis.to_string(), value.parse::<f64>().ok()?))
+            })
+            .collect::<BTreeMap<_, _>>();
+        (!parsed.is_empty()).then_some(parsed)
+    })
+}
+
+fn parse_tmc_axes(lines: &[String]) -> Option<Vec<String>> {
+    lines.iter().find_map(|line| {
+        let axes = line
+            .split_whitespace()
+            .filter(|token| token.len() == 1 && token.chars().all(|axis| axis.is_ascii_uppercase()))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        (axes.len() >= 3 && axes.first().is_some_and(|axis| axis == "X")).then_some(axes)
+    })
+}
+
+fn parse_tmc_row<T, E>(
+    lines: &[String],
+    axes: &[String],
+    label: &str,
+    parse: impl Fn(&str) -> std::result::Result<T, E>,
+) -> Option<BTreeMap<String, T>> {
+    lines.iter().find_map(|line| {
+        let values = line.trim().strip_prefix(label)?;
+        let parsed = values
+            .split_whitespace()
+            .map(&parse)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .ok()?;
+        (parsed.len() == axes.len()).then(|| axes.iter().cloned().zip(parsed).collect())
+    })
+}
+
 fn supported_firmware(firmware: &str) -> bool {
     firmware.contains("FIRMWARE_NAME:Marlin") && firmware.contains("MACHINE_TYPE:LumenPnP")
 }
@@ -650,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn actuator_commands_match_the_v3_0_4_profile() {
+    fn actuator_commands_match_the_v3_0_2_profile() {
         assert_eq!(
             actuator_commands("lights", true).unwrap(),
             ["M150 P255 R255 U255 B255"]
@@ -808,12 +900,44 @@ mod tests {
 
     #[test]
     fn captured_rev4_firmware_is_recognized() {
-        let firmware = include_str!("../tests/fixtures/lumenpnp-v3.0.4-rev4-m115.txt");
+        let firmware = include_str!("../tests/fixtures/lumenpnp-v3.0.2-rev4-m115.txt");
         assert!(supported_firmware(firmware));
         assert!(!supported_firmware(
             "FIRMWARE_NAME:Marlin 2.1\nMACHINE_TYPE:3D Printer\nok"
         ));
         assert!(!supported_firmware("MACHINE_TYPE:LumenPnP\nok"));
+    }
+
+    #[test]
+    fn parses_attached_rev4_motion_and_microstep_settings() {
+        let m503 = [
+            "echo:  M92 X320.00 Y320.00 Z40.00 A4.44 B4.44 C40.00".into(),
+            "echo:  M203 X500.00 Y500.00 Z500.00 A50000.00 B50000.00 C5000.00".into(),
+            "echo:  M201 X2000.00 Y2000.00 Z2000.00 A3000 B3000 C3000".into(),
+            "echo:  M204 P1000.00 R3000.00 T1000.00".into(),
+            "echo:  M205 B20000.00 S0.00 T0.00 J0.01".into(),
+            "ok".into(),
+        ];
+        let m122 = [
+            "X Y Z I J K".into(),
+            "msteps 64 64 8 8 8 256".into(),
+            "interp true true true true true false".into(),
+            "ok".into(),
+        ];
+        let settings = parse_controller_settings(&m503, &m122).unwrap();
+        assert_eq!(settings.steps_per_unit["X"], 320.0);
+        assert_eq!(settings.max_feed_units_per_second["Y"], 500.0);
+        assert_eq!(
+            settings.max_acceleration_units_per_second_squared["X"],
+            2000.0
+        );
+        assert_eq!(
+            settings.motion_acceleration_units_per_second_squared["T"],
+            1000.0
+        );
+        assert_eq!(settings.junction_deviation_mm, Some(0.01));
+        assert_eq!(settings.microsteps["X"], 64);
+        assert!(settings.interpolation["Y"]);
     }
 
     #[test]
@@ -839,7 +963,7 @@ mod tests {
 
     #[test]
     fn parses_attached_rev4_unhomed_position_fixture() {
-        let lines = include_str!("../tests/fixtures/lumenpnp-v3.0.4-rev4-m114-unhomed.txt")
+        let lines = include_str!("../tests/fixtures/lumenpnp-v3.0.2-rev4-m114-unhomed.txt")
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();

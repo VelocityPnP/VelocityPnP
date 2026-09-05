@@ -13,6 +13,14 @@ Before homing or motion:
 6. Before runout calibration, make sure each nozzle tube is fully seated,
    follows its normal routing, and is not kinked or caught on another cable.
 
+Before a speed qualification, also verify that the complete diagonal test path
+is clear at safe Z. Watch and listen during each speed level. Stop the test if
+the machine skips, binds, vibrates unusually, moves a loose cable or tube, or
+approaches an obstruction. A controller setting is only an electronic limit;
+it does not prove that the stock wheel and extrusion system is stable at that
+speed. Do not change microsteps, acceleration, junction deviation, or EEPROM
+settings during the first feed-rate sweep.
+
 Precision scanning and board registration require a session fine XYZ home for
 the selected calibration. Fine home uses the fixed datum PCB: the top camera
 refines X/Y, then N2 reproduces the validated vacuum contact on the separate
@@ -90,7 +98,7 @@ nozzle compression tuning from changing calibration evidence.
 The complete release schedule must fit the calibrated nozzle height range and
 controller Z model before pickup starts.
 
-The V3.0.4 profile uses the firmware's standard combined `G28` command after
+The V3.0.2 profile uses the firmware's standard combined `G28` command after
 the operator levels both nozzles. Axis-scoped `G28 Z` was retired after the
 attached firmware was observed moving X/Y toward zero before homing Z, which
 defeated the intended Z-before-X/Y safety property.
@@ -109,7 +117,7 @@ roughly 20 ms in the driver, but USB, firmware, and electrical failures can
 still defeat a software stop.
 
 Physical jog requests preserve the controller-reported primary-nozzle angle
-when rotation is omitted. The V3.0.4 profile disables rotation motion until it
+when rotation is omitted. The V3.0.2 profile disables rotation motion until it
 is separately hardware-validated, and the machine actor rejects an explicit
 angle change before any command reaches the driver. This interlock applies to
 all API, CLI, UI, Python, and internal job callers.
@@ -121,7 +129,7 @@ returns the nozzle to its starting angle. The mapping from N1/N2 to A/B comes
 from the active machine profile. A driver error faults the machine and revokes
 control. This capability does not enable normal jog or job rotation.
 
-The V3.0.4 Z mechanism also has profile-scoped nozzle mappings. Controller Z
+The V3.0.2 Z mechanism also has profile-scoped nozzle mappings. Controller Z
 equals nozzle working Z for N1 and `63 - nozzle working Z` for N2. Both nozzles
 are level and retracted at controller Z 31.5. Vacuum probing keeps them level
 for X/Y motion. It identifies and centers the current tip over the bottom
@@ -189,13 +197,13 @@ operation ends. A revoked, replaced, or invalid lease stops the run.
 
 ## Hardware-command provenance
 
-The V3.0.4 home position, travel bounds, axis letters, light commands, and
-vacuum commands are derived from Opulo's tagged V3.0.4 `machine.xml`, not from
+The V3.0.2 home position, travel bounds, axis letters, light commands, and
+vacuum commands are derived from Opulo's tagged V3.0.2 `machine.xml`, not from
 values measured on this particular machine. The Photon framing and CRC test
 vectors are derived from Opulo's published Photon protocol. See these upstream
 primary sources before changing a hardware profile:
 
-- https://github.com/opulo-inc/lumenpnp/blob/v3.0.4/openpnp/machine.xml
+- https://github.com/opulo-inc/lumenpnp/blob/v3.0.2/openpnp/machine.xml
 - https://docs.opulo.io/byop/testing/actuator-check/
 - https://docs.opulo.io/misc/calibration/4-homing-fiducial/
 - https://docs.opulo.io/misc/photon/

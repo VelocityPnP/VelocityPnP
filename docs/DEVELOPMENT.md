@@ -44,7 +44,7 @@ and independent holdouts.
 
 Fixture conformance tests compare the OpenCV statistics with the earlier
 validated calculation and keep datum, nozzle, camera-outline, and plate-hole
-detections tied to attached V3.0.4 captures. This boundary also makes OpenCV
+detections tied to attached V3.0.2 captures. This boundary also makes OpenCV
 feature matching and geometric estimation available to the workspace mosaic
 runner without routing camera capture through OpenCV.
 
@@ -164,7 +164,7 @@ the motion boundary. A camera without monotonic timestamps uses the validated
 four-frame fallback. The scan report records actual discarded frames in
 `discarded_capture_frames` and timestamp-selected captures in
 `timestamp_fresh_frames`. Its estimate includes the serialized motion-control
-and capture-dispatch cost measured on the attached V3.0.4 machine.
+and capture-dispatch cost measured on the attached V3.0.2 machine.
 
 Reconnaissance also measures every horizontal and vertical tile overlap. It
 combines projected-source luma disagreement with a bounded cross-axis
@@ -310,7 +310,7 @@ successful child scan is only evidence that capture and reconstruction
 finished. The separate composite result says whether the image passed the
 automatic gate.
 
-Start a bounded datum-PCB survey with the tagged V3.0.4 PCB extent:
+Start a bounded datum-PCB survey with the tagged V3.0.2 PCB extent:
 
 ```bash
 wget -qO- --method=POST \
@@ -498,7 +498,7 @@ candidate. This lower routing threshold does not activate a feeder. Known
 fixtures return before this rule, and the specialist must still find an
 EIA-481 sprocket lattice.
 
-The V3.0.4 profile supplies the source-derived datum-PCB outline and an
+The V3.0.2 profile supplies the source-derived datum-PCB outline and an
 installed nozzle-bank envelope. The detected bottom-camera aperture supplies a
 dynamic guard region. These objects remain semantic inventory evidence, but
 their board likelihood is zero. A reconnaissance parent can merge height maps
@@ -779,7 +779,7 @@ more bottom-camera observations. Export these pairs without machine motion:
 ```bash
 cargo run --release -p velocitypnpd \
   --example export_held_part_dataset -- \
-  velocitypnp.db profiles/lumenpnp-v3.0.4.json \
+  velocitypnp.db profiles/lumenpnp-v3.0.2.json \
   datasets/held-parts-v1 EVAL_REGISTRATION_UUID
 ```
 
@@ -796,7 +796,7 @@ crop hashes before it carries a label:
 ```bash
 cargo run --release -p velocitypnpd \
   --example export_held_part_dataset -- \
-  velocitypnp.db profiles/lumenpnp-v3.0.4.json \
+  velocitypnp.db profiles/lumenpnp-v3.0.2.json \
   datasets/held-parts-v2 EVAL_REGISTRATION_UUID \
   --carry-reviewed datasets/held-parts-v1
 ```
@@ -997,7 +997,7 @@ tape with small dark parts uses a fine central edge profile. A weak transition
 is `uncertain`; the detector does not force it to present or absent.
 
 The physical eight-feeder labels are retained in
-`crates/vision/tests/fixtures/lumenpnp-v3.0.4-strip-feeder-bank-ground-truth.json`.
+`crates/vision/tests/fixtures/lumenpnp-v3.0.2-strip-feeder-bank-ground-truth.json`.
 The fixture README gives the no-motion replay command. The evaluator aligns a
 consecutive detected range with each full labeled lane and fails if a
 confident occupancy label disagrees.
@@ -1713,7 +1713,7 @@ KiCad fiducials from three safe-Z camera positions. It derives the two offset
 views from 65% of the calibrated camera aperture, so it keeps margin at the
 model limits. Parallax between the working-plane and installed-plate camera
 models gives the bare PCB surface.
-The V3.0.4 profile records the 1.6 mm distance between these planes. The
+The V3.0.2 profile records the 1.6 mm distance between these planes. The
 stored N1 or N2 datum-contact result converts the optical fraction into that
 nozzle's working Z coordinates. The nozzle does not touch the PCB.
 
@@ -1782,7 +1782,7 @@ height products without keeping thousands of source frames. `thumbnails` and
 `mosaic_only` scans still produce the two endpoint mosaics and sparse parallax
 observations, but do not produce the unified map or corrected mosaic.
 
-The V3.0.4 plates are 600 by 120 mm, with 39 columns and seven rows; their
+The V3.0.2 plates are 600 by 120 mm, with 39 columns and seven rows; their
 outline is one 15 mm pitch outside the outer feature centers. The region is
 clipped to what the camera can observe from legal head poses, not to the
 head-center travel rectangle. Thus, the V3 top camera can see column 5 beyond
@@ -1837,7 +1837,7 @@ manual value is set.
 
 Role-scoped profiles persist capture format, ordered controls, ring-light use,
 and reproducibility thresholds in SQLite. A missing profile resolves to the
-V3.0.4 seed: 1280x720 YUYV at 10 frames per second, 60 settling frames,
+V3.0.2 seed: 1280x720 YUYV at 10 frames per second, 60 settling frames,
 manual exposure 200, manual 4600 K white balance, and zero gain. Update a
 profile with `PUT /api/v1/cameras/{role}/profile`.
 
@@ -1890,7 +1890,7 @@ executable timestamp and the expected hardware-path strings before connection.
 Use a release binary for height-aware scans; debug builds make the per-pixel
 reconstruction path much slower.
 
-The V3.0.4 profile exposes `vacuum_1` and `vacuum_2` as both actuators and raw
+The V3.0.2 profile exposes `vacuum_1` and `vacuum_2` as both actuators and raw
 pressure sensors. Reads require a lease and are allowed during preflight,
 unhomed, or ready states:
 
@@ -1917,7 +1917,7 @@ an explicit off command and a fail-safe disconnect.
 The bounded datum-board feasibility probe uses the homing fiducial only for
 visual registration. It seals on the separate 5 mm front-mask opening at
 X=-22.5 mm and Y=-7.5 mm from the fiducial. These coordinates come from the
-tagged Opulo V3.0.4 datum PCB. Before descent, the probe uses the bottom camera
+tagged Opulo V3.0.2 datum PCB. Before descent, the probe uses the bottom camera
 to identify and center the current tip. It then uses the top camera to center
 the 5 mm target instead of trusting the PCB offset alone. It moves X/Y while
 both nozzles are level at controller Z=31.5, lowers the selected nozzle to the
@@ -2020,7 +2020,7 @@ in machine status. Coarse re-home, disconnect, fault, or emergency stop clears
 it. Physical workspace scans, refinements, and board registration reject a
 missing or different fine-home revision.
 
-N2 is the V3.0.4 default because its stored contact has useful bounded travel
+N2 is the V3.0.2 default because its stored contact has useful bounded travel
 on both sides after non-repeatable stall homing. N1 remains selectable, but its
 contact is close to the profile's established lower safety limit.
 

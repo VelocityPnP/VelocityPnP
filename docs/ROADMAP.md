@@ -24,7 +24,7 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Define the V3 working-plane views: datum fiducial/top camera and N1 nozzle/bottom camera under ring lighting
 - [x] Lock camera exposure, white balance, gain, working-plane focus, and lighting
 - [x] Acquire the top datum and N1 bottom-camera views; measure initial geometry/exposure seeds
-- [x] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.4
+- [x] Validate the shared ring-light, vacuum valve/pump, and pressure sensor commands on V3.0.2
 - [x] Implement profile-scoped actuator and raw pressure-sensor APIs
 - [x] Persist role-scoped camera settings and reproducibility thresholds
 - [x] Record actual top-datum and cleaned-N045 camera fixtures

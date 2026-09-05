@@ -1998,11 +1998,11 @@ mod tests {
             candidate_fractions: vec![0.0, 1.0],
         };
         let off_center = decode_gray_png(include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-top-over-bottom-camera.png"
         ))
         .unwrap();
         let near_center = decode_gray_png(include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera-near-centered.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-top-over-bottom-camera-near-centered.png"
         ))
         .unwrap();
         let frames = [off_center.clone(), near_center, off_center];

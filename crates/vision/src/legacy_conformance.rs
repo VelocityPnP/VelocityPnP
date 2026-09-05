@@ -4,32 +4,32 @@ use std::collections::VecDeque;
 const FIXTURES: &[(&str, &[u8])] = &[
     (
         "top datum",
-        include_bytes!("../tests/fixtures/lumenpnp-v3.0.4-top-datum-exp200.png"),
+        include_bytes!("../tests/fixtures/lumenpnp-v3.0.2-top-datum-exp200.png"),
     ),
     (
         "bottom N045",
-        include_bytes!("../tests/fixtures/lumenpnp-v3.0.4-bottom-n045-exp200.png"),
+        include_bytes!("../tests/fixtures/lumenpnp-v3.0.2-bottom-n045-exp200.png"),
     ),
     (
         "bottom N24 frame 1",
-        include_bytes!("../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-1.png"),
+        include_bytes!("../tests/fixtures/lumenpnp-v3.0.2-bottom-n24-exp200-1.png"),
     ),
     (
         "bottom N24 frame 2",
-        include_bytes!("../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-2.png"),
+        include_bytes!("../tests/fixtures/lumenpnp-v3.0.2-bottom-n24-exp200-2.png"),
     ),
     (
         "bottom N24 frame 3",
-        include_bytes!("../tests/fixtures/lumenpnp-v3.0.4-bottom-n24-exp200-3.png"),
+        include_bytes!("../tests/fixtures/lumenpnp-v3.0.2-bottom-n24-exp200-3.png"),
     ),
     (
         "camera stare-down",
-        include_bytes!("../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera.png"),
+        include_bytes!("../tests/fixtures/lumenpnp-v3.0.2-top-over-bottom-camera.png"),
     ),
     (
         "centered camera stare-down",
         include_bytes!(
-            "../tests/fixtures/lumenpnp-v3.0.4-top-over-bottom-camera-near-centered.png"
+            "../tests/fixtures/lumenpnp-v3.0.2-top-over-bottom-camera-near-centered.png"
         ),
     ),
 ];
