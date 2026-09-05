@@ -18,6 +18,10 @@ from export_placement_verification_snapshot import (  # noqa: E402
     part_dimensions,
     reference_sort_key,
 )
+from finalize_placement_verification_dataset import (  # noqa: E402
+    validate_outline,
+    validate_review,
+)
 
 
 class PlacementVerificationSnapshotTests(unittest.TestCase):
@@ -131,6 +135,41 @@ class PlacementVerificationSnapshotTests(unittest.TestCase):
             result = mean_frames(paths)
 
         self.assertEqual(result.getpixel((0, 0)), 60)
+
+    def test_review_requires_the_exact_draft_generation(self):
+        draft = {
+            "name": "placement-review",
+            "generated_at": "2026-09-04T00:00:00Z",
+            "samples": [{"id": "r1"}],
+        }
+        review = {
+            "schema_version": 1,
+            "dataset": "placement-review",
+            "source_manifest_generated_at": "2026-09-04T00:00:01Z",
+            "decisions": {"r1": {"decision": "accept"}},
+        }
+
+        with self.assertRaisesRegex(ValueError, "another draft generation"):
+            validate_review(draft, review)
+
+    def test_outline_validation_accepts_a_rotated_rectangle(self):
+        result = validate_outline(
+            "r1",
+            [[80, 100], [180, 110], [175, 160], [75, 150]],
+            256,
+            256,
+        )
+
+        self.assertEqual(len(result), 4)
+
+    def test_outline_validation_rejects_a_trapezoid(self):
+        with self.assertRaisesRegex(ValueError, "not rectangular"):
+            validate_outline(
+                "r1",
+                [[80, 100], [180, 100], [160, 160], [80, 160]],
+                256,
+                256,
+            )
 
 
 if __name__ == "__main__":

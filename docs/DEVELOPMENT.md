@@ -1491,6 +1491,45 @@ package, including its end terminals. Use `component_on_edge` for a package
 that is not flat and `multiple_components` when one target has a stack.
 Download the result as `review-decisions.json`.
 
+Finalize the first review while keeping complete source-camera captures in one
+split. Repeat `--evaluation-capture` for each held-out capture:
+
+```bash
+python python/tools/finalize_placement_verification_dataset.py \
+  datasets/placement-verification-v1/review-current \
+  /path/to/review-decisions.json \
+  --evaluation-capture ring-upper
+```
+
+The first model predicts `empty`, `component_flat`, `component_on_edge`, or
+`multiple_components` and one undirected package outline. The outline gives
+center, extent, and rotation relative to the normalized KiCad target. A later
+policy can map these measurements to `missing`, `good`, `offset`, `rotated`,
+`tombstoned`, or `stacked`. A class with no reviewed examples remains in the
+model contract but is a reported dataset limitation.
+
+Validate the reviewed data without fitting parameters:
+
+```bash
+python python/tools/train_placement_verification.py \
+  datasets/placement-verification-v1/review-current --validate-only
+```
+
+Run the full fit in the pinned NVIDIA container:
+
+```bash
+python/training/run-placement-container.sh \
+  datasets/placement-verification-v1/review-current \
+  placement-verification-v1
+```
+
+The model starts without pretrained parameters. Training code and weights use
+Apache-2.0 terms. PyTorch uses BSD-3-Clause terms. The training report records
+exact dataset, source, environment, parameter, and artifact hashes. It also
+keeps annotated training and evaluation sheets. Model output remains
+non-authoritative until independent sessions cover all condition classes and
+calibrate acceptance thresholds.
+
 Raw captures and normalized samples are below `datasets/`, which Git ignores.
 Keep them across restarts. Their image hashes and registration IDs provide the
 source identity needed for later grouped train and evaluation splits.

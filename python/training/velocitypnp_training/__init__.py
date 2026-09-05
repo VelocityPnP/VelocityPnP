@@ -16,6 +16,14 @@ from .held_part import (
     held_part_dataset_summary,
     load_held_part_samples,
 )
+from .placement_verification import (
+    PLACEMENT_CLASS_NAMES,
+    PlacementDataset,
+    PlacementModelConfig,
+    PlacementVerificationModel,
+    load_placement_samples,
+    placement_dataset_summary,
+)
 
 __all__ = [
     "CLASS_NAMES",
@@ -31,4 +39,10 @@ __all__ = [
     "HeldPartPoseModel",
     "held_part_dataset_summary",
     "load_held_part_samples",
+    "PLACEMENT_CLASS_NAMES",
+    "PlacementDataset",
+    "PlacementModelConfig",
+    "PlacementVerificationModel",
+    "load_placement_samples",
+    "placement_dataset_summary",
 ]
