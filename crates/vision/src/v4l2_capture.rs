@@ -62,7 +62,35 @@ pub struct CaptureMetadata {
     #[serde(default)]
     pub timestamp_monotonic: bool,
     #[serde(default)]
+    pub timestamp_source: CaptureTimestampSource,
+    #[serde(default)]
     pub fresh_after_boundary: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureTimestampSource {
+    EndOfFrame,
+    StartOfExposure,
+    #[default]
+    Unknown,
+}
+
+impl CaptureTimestampSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EndOfFrame => "end_of_frame",
+            Self::StartOfExposure => "start_of_exposure",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureFreshnessBoundary {
+    pub exposure_started_after: Duration,
+    pub end_of_frame_exposure: Duration,
+    pub unknown_source_guard: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +105,7 @@ enum PersistentCaptureRequest {
         response: mpsc::SyncSender<Result<CapturedGrayFrame, String>>,
     },
     CaptureFreshAfter {
-        not_before: Duration,
+        boundary: CaptureFreshnessBoundary,
         fallback_settle_frames: u32,
         maximum_frames: u32,
         response: mpsc::SyncSender<Result<CapturedGrayFrame, String>>,
@@ -136,7 +164,7 @@ impl PersistentGrayCapture {
 
     pub fn capture_fresh_after(
         &self,
-        not_before: Duration,
+        boundary: CaptureFreshnessBoundary,
         fallback_settle_frames: u32,
         maximum_frames: u32,
     ) -> Result<CapturedGrayFrame> {
@@ -151,7 +179,7 @@ impl PersistentGrayCapture {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         self.requests
             .send(PersistentCaptureRequest::CaptureFreshAfter {
-                not_before,
+                boundary,
                 fallback_settle_frames,
                 maximum_frames,
                 response: response_tx,
@@ -500,12 +528,12 @@ fn persistent_capture_worker(
 
         let index = active.assessed_frames;
         active.assessed_frames = active.assessed_frames.saturating_add(1);
-        let timestamp_fresh = active.freshness.and_then(|not_before| {
+        let timestamp_fresh = active.freshness.and_then(|boundary| {
             frame_is_fresh_after(
                 metadata.flags,
                 metadata.timestamp.sec,
                 metadata.timestamp.usec,
-                not_before,
+                boundary,
             )
         });
         let accepted = timestamp_fresh.unwrap_or(index >= active.settle_frames);
@@ -531,6 +559,7 @@ fn persistent_capture_worker(
                     sequence: metadata.sequence,
                     settle_frames: index,
                     timestamp_monotonic: metadata.flags.contains(BufferFlags::TIMESTAMP_MONOTONIC),
+                    timestamp_source: capture_timestamp_source(metadata.flags),
                     fresh_after_boundary: timestamp_fresh == Some(true),
                 },
             })
@@ -550,7 +579,7 @@ fn persistent_capture_worker(
 
 struct PendingCapture {
     settle_frames: u32,
-    freshness: Option<Duration>,
+    freshness: Option<CaptureFreshnessBoundary>,
     frame_limit: u32,
     assessed_frames: u32,
     response: mpsc::SyncSender<Result<CapturedGrayFrame, String>>,
@@ -569,13 +598,13 @@ fn pending_capture(request: PersistentCaptureRequest) -> Option<PendingCapture> 
             response,
         }),
         PersistentCaptureRequest::CaptureFreshAfter {
-            not_before,
+            boundary,
             fallback_settle_frames,
             maximum_frames,
             response,
         } => Some(PendingCapture {
             settle_frames: fallback_settle_frames,
-            freshness: Some(not_before),
+            freshness: Some(boundary),
             frame_limit: maximum_frames,
             assessed_frames: 0,
             response,
@@ -588,7 +617,7 @@ fn frame_is_fresh_after(
     flags: BufferFlags,
     seconds: libc::time_t,
     microseconds: libc::time_t,
-    not_before: Duration,
+    boundary: CaptureFreshnessBoundary,
 ) -> Option<bool> {
     if !flags.contains(BufferFlags::TIMESTAMP_MONOTONIC)
         || seconds < 0
@@ -597,7 +626,23 @@ fn frame_is_fresh_after(
         return None;
     }
     let timestamp = Duration::new(seconds as u64, microseconds as u32 * 1_000);
+    let guard = match capture_timestamp_source(flags) {
+        CaptureTimestampSource::EndOfFrame => boundary.end_of_frame_exposure,
+        CaptureTimestampSource::StartOfExposure => Duration::ZERO,
+        CaptureTimestampSource::Unknown => boundary.unknown_source_guard,
+    };
+    let not_before = boundary.exposure_started_after.checked_add(guard)?;
     Some(timestamp >= not_before)
+}
+
+fn capture_timestamp_source(flags: BufferFlags) -> CaptureTimestampSource {
+    match flags.bits() & BufferFlags::TSTAMP_SRC_MASK.bits() {
+        value if value == BufferFlags::TSTAMP_SRC_EOF.bits() => CaptureTimestampSource::EndOfFrame,
+        value if value == BufferFlags::TSTAMP_SRC_SOE.bits() => {
+            CaptureTimestampSource::StartOfExposure
+        }
+        _ => CaptureTimestampSource::Unknown,
+    }
 }
 
 pub fn capture_gray_frame(config: &V4l2CaptureConfig) -> Result<CapturedGrayFrame> {
@@ -675,6 +720,7 @@ pub fn capture_gray_frames(
                 sequence: metadata.sequence,
                 settle_frames: config.settle_frames,
                 timestamp_monotonic: metadata.flags.contains(BufferFlags::TIMESTAMP_MONOTONIC),
+                timestamp_source: capture_timestamp_source(metadata.flags),
                 fresh_after_boundary: false,
             },
         });
@@ -856,7 +902,11 @@ mod tests {
     #[test]
     fn fresh_capture_uses_monotonic_camera_timestamps() {
         let flags = BufferFlags::TIMESTAMP_MONOTONIC;
-        let boundary = Duration::new(10, 500_000_000);
+        let boundary = CaptureFreshnessBoundary {
+            exposure_started_after: Duration::new(10, 480_000_000),
+            end_of_frame_exposure: Duration::from_millis(20),
+            unknown_source_guard: Duration::from_millis(34),
+        };
         assert_eq!(
             frame_is_fresh_after(flags, 10, 499_999, boundary),
             Some(false)
@@ -870,6 +920,37 @@ mod tests {
             None
         );
         assert_eq!(frame_is_fresh_after(flags, 10, 1_000_000, boundary), None);
+    }
+
+    #[test]
+    fn fresh_capture_uses_the_timestamp_source() {
+        let boundary = CaptureFreshnessBoundary {
+            exposure_started_after: Duration::from_secs(10),
+            end_of_frame_exposure: Duration::from_millis(20),
+            unknown_source_guard: Duration::from_millis(34),
+        };
+        let monotonic = BufferFlags::TIMESTAMP_MONOTONIC;
+        assert_eq!(
+            frame_is_fresh_after(monotonic, 10, 19_999, boundary),
+            Some(false)
+        );
+        assert_eq!(
+            frame_is_fresh_after(monotonic, 10, 20_000, boundary),
+            Some(true)
+        );
+        assert_eq!(
+            frame_is_fresh_after(monotonic | BufferFlags::TSTAMP_SRC_SOE, 10, 0, boundary,),
+            Some(true)
+        );
+        let unknown = BufferFlags::from(monotonic.bits() | 0x0002_0000);
+        assert_eq!(
+            frame_is_fresh_after(unknown, 10, 33_999, boundary),
+            Some(false)
+        );
+        assert_eq!(
+            frame_is_fresh_after(unknown, 10, 34_000, boundary),
+            Some(true)
+        );
     }
 
     #[test]

@@ -1,22 +1,19 @@
 # Session handoff
 
-This document records the state at the end of the 2026-09-05 hardware and
+This document records the state at the end of the 2026-09-06 hardware and
 vision session. Verify live state again before each new session.
 
 ## Live state
 
-- The release physical daemon listens on `127.0.0.1:4080` and uses
-  `velocitypnp.db`.
-- It contains the physically tested repeated pickup benchmark and camera
-  settling diagnostics. Its stored settle counts are 0 top-camera frames and
-  20 bottom-camera frames.
-- After the last pickup-return run, the API reported the machine ready, homed,
-  fault-free, and at
-  X220.131, Y190.271, Z31.500. Its calibration revision was
-  `3b837434-a961-4e60-945a-18335b42d21f`.
-- Control lease `58e62f8c-2b06-4282-ad0a-3b6fa36cc27d` was active during the
-  camera tests. Do not assume that it remains active. Acquire a new lease
-  before more motion.
+- The physical daemon is stopped. The machine is normally disconnected,
+  unhomed, and fault-free. Start a new release daemon with `velocitypnp.db`.
+- The database contains the motion, camera, pickup, board-registration, and
+  full-workspace qualification evidence. The stored camera profiles use
+  top-camera MJPEG at 30 FPS with zero initial discard and bottom-camera YUYV
+  at 10 FPS with 20 initial discard frames.
+- The last physical operation was normal disconnect
+  `7bab1274-9eba-432e-9927-830c3f50ce4c`. It cleared the calibration revision
+  and control lease. Acquire a new lease and home before more motion.
 - Do not infer that the machine is safe from this document. Get a new operator
   confirmation before motion.
 - The daemon reports all three learned models as ready.
@@ -50,7 +47,43 @@ The application still needs a versioned model download, cache, checksum, and
 selection mechanism. Do not put changing binary model history in the main
 source repository.
 
-## Motion-performance session
+## 2026-09-06 scan closeout
+
+The configured and direction-qualified clear-XY rate is 23,000 mm/min. The
+controller reports a 30,000 mm/min X/Y limit and 1,000 mm/s2 travel
+acceleration. X and Y use 64 microsteps with interpolation. These controller
+values are not independent proof of the mechanical limit.
+
+Full reconnaissance scan `42f9e894-b9c7-4ca0-ac81-f34f8709a341` captured
+all 1,023 tiles in 7 minutes 26.8 seconds. It used 5 minutes 39.4 seconds for
+tile motion and 1 minute 41.3 seconds for capture. The remaining work used
+about 6.1 seconds. The mosaic had full coverage. Visual review found no
+missing tiles. Its SHA-256 is
+`e71a2064d2d58e16b50014e516e9bbce115d4cf94ff058a7e658ad2860acf090`.
+The immediate no-move camera return error was 0.0201 mm.
+
+The scan now reserves the maximum calibrated correction at each controller
+edge. The attached calibration needs 0.060 mm in X and 0.070 mm in Y. Thus,
+the standard `installed_plates` request no longer needs a manual 0.10 mm
+region inset. Scan estimates also validate the calibrated path before motion.
+
+The connected estimate now models the controller acceleration and measured
+90 ms command cost. It estimates 432 seconds for the same full scan. This is a
+conservative estimate because it does not assume a camera timestamp source.
+
+The top camera reports start-of-exposure timestamps. Three 10-tile scans with
+the source-aware freshness gate took 5.343, 5.344, and 5.343 seconds. Each
+discarded exactly one frame per tile. Later captures averaged 64.1 to 66.1 ms,
+down from 97.8 ms. The three immediate no-move return errors were 0.0185,
+0.0174, and 0.0167 mm. All passed the 0.05 mm gate. The measured full-scan
+projection is about 412 seconds, or 6 minutes 52 seconds.
+
+The full scan found 612 unresolved and 46 elevated seams among 1,982 seams.
+It recommends eight targeted refinement regions. This is image-content and
+reconstruction work. It is not a coverage failure. Do not start all eight
+refinements without a new time and value review.
+
+## Motion-performance session (historical 2026-09-05)
 
 The V3.0.2 profile keeps 1,200 mm/min as its general default. Configured clear
 and carried safe-Z transit use 12,000 mm/min. Important calibration feeds are
@@ -185,9 +218,9 @@ as proof that its physical workflow is ready.
 
 ## Repository state
 
-The main worktree was clean before this handoff update. The local branch was
-29 commits ahead of `origin/main`; this handoff commit adds one more commit.
-Push these commits before work moves to another computer.
+The main worktree is expected to be clean after this handoff commit. The local
+branch will be 42 commits ahead of `origin/main`. Push these commits before
+work moves to another computer.
 
 There is no project `SKILL.md`. `AGENTS.md` contains the current repository
 rules, so no skill was created or changed during closeout.

@@ -3363,6 +3363,78 @@ YUYV repeat differed from itself by 5.04, while the MJPEG repeat differed by
 1.76. Visual review found a smoother MJPEG image with clear datum edges. It
 could not exclude some loss of low-contrast detail.
 
+### Full workspace and timestamp-source qualification
+
+On 2026-09-06, repeated FTP board registration
+`daa1afa0-c19f-4873-b87a-789b73bae403` passed in about 9.08 seconds. It found
+all three fiducials. Maximum residual was 0.0401 mm, and RMS residual was
+0.0327 mm. The immediate no-move camera return check passed at 0.0326 mm.
+
+The first standard installed-plates scan request stopped before motion. Its
+first logical camera center was on the X-min controller bound. The calibrated
+direction correction put the controller target outside the bound. A manual
+0.10 mm region inset admitted the qualification run.
+
+Reconnaissance scan `42f9e894-b9c7-4ca0-ac81-f34f8709a341`, operation
+`ffdf827c-42e9-4a4c-962b-f8a4059ba807`, captured all 1,023 tiles. It covered
+X=-7.926 through 440.932 mm and Y=84.154 through 325.891 mm at 0.20 mm/pixel.
+It completed in 446.762 seconds, or 7 minutes 26.8 seconds.
+
+| Work | Time (s) | Share |
+| --- | ---: | ---: |
+| Tile motion | 339.430 | 76.0% |
+| Camera capture | 101.273 | 22.7% |
+| Tile mosaic | 3.663 | 0.8% |
+| Datum park | 1.149 | 0.3% |
+| Camera open | 0.187 | less than 0.1% |
+| Progress storage and finalization | 0.980 | 0.2% |
+
+All 1,023 frames passed the monotonic timestamp gate. Later captures averaged
+98.95 ms and had a 103.88 ms p95. The scan discarded 2,042 queued frames.
+Tile moves averaged 331.80 ms and had a 333.97 ms p95. The controller's
+1,000 mm/s2 travel acceleration, not the 23,000 mm/min feed limit, dominated
+the short 14.43 mm raster moves.
+
+The mosaic had complete coverage and no nominal fallback. Visual review found
+the plate grid, feeder tapes, bottom-camera area, nozzle rack, and FTP PCB. It
+found no missing tiles. The mosaic SHA-256 is
+`e71a2064d2d58e16b50014e516e9bbce115d4cf94ff058a7e658ad2860acf090`.
+The seam report classified 1,324 healthy, 46 elevated, and 612 unresolved
+seams. It recommended eight targeted refinement regions.
+
+The immediate no-move return check passed at 0.0201 mm. Normal disconnect
+`4a1c3bdf-4e27-43a0-a363-83a1c99dbc78` followed the full-scan session.
+
+The scan planner now reserves the maximum calibrated correction at reachable
+controller edges. The active calibration reserves 0.060 mm in X and 0.070 mm
+in Y. The standard installed-plates estimate now admits a 1,023-tile path
+without a manual inset. The connected acceleration-aware estimate is 432
+seconds. The older distance-only estimate was 332 seconds.
+
+The top camera reports `start_of_exposure` in its V4L2 buffer flags. The
+freshness gate now uses that source directly. It uses the configured 20 ms
+manual exposure for an end-of-frame source and one full frame for an unknown
+source.
+
+Three repeated 10-tile scans qualified the source-aware gate:
+
+| Scan | Total (s) | Later mean (ms) | Discards | Registrations | Return (mm) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `f4de4c87-39ad-487d-8702-85442fab1e9c` | 5.343 | 64.58 | 10 | 5/9 | 0.0185 |
+| `73406b5c-c378-4c0e-aa79-c9d891c106a1` | 5.344 | 64.13 | 10 | 5/9 | 0.0174 |
+| `15eb582c-11aa-4c9f-9055-07cf610fe1c2` | 5.343 | 66.14 | 10 | 4/9 | 0.0167 |
+
+All runs captured 10 of 10 timestamp-fresh frames with complete coverage.
+Each tile discarded exactly one queued frame. The prior full-frame guard used
+97.78 ms per later capture and discarded 19 frames on the same path. The new
+gate removed about 33 ms from each later capture. Applied to the measured
+full scan, this gives an expected time of about 412 seconds, or 6 minutes 52
+seconds. This value is a projection. A second full scan did not run.
+
+Normal disconnect `7bab1274-9eba-432e-9927-830c3f50ce4c` ended the final
+qualification. The machine was disconnected, unhomed, and fault-free. Vacuum
+and lights were off. No component moved.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
@@ -3374,3 +3446,5 @@ could not exclude some loss of low-contrast detail.
 - [Opulo LumenPnP V3.0.2 staging plate](https://github.com/opulo-inc/lumenpnp/blob/v3.0.2/pnp/pcb/staging-plate/staging-plate.kicad_pcb)
 - [Opulo LumenPnP V3.0.2 FTP PCB](https://github.com/opulo-inc/lumenpnp/blob/v3.0.2/pnp/pcb/ftp/ftp.kicad_pcb)
 - [ANSI/EIA-481-C carrier-tape dimensions](https://community.nxp.com/pwmxy87654/attachments/pwmxy87654/kinetis/37830/1/EIA-481-2003.pdf)
+- [Linux V4L2 buffer timestamp flags](https://cdn.kernel.org/doc/html/latest/userspace-api/media/v4l/buffer.html)
+- [Linux V4L2 camera exposure controls](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/ext-ctrls-camera.html)

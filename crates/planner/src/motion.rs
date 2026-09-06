@@ -124,6 +124,24 @@ impl MotionCalibration {
             ApproachSide::Positive => compensation.positive_approach_mm,
         })
     }
+
+    fn maximum_controller_margin_mm(&self) -> [f64; 2] {
+        let mut maximum = [0.0_f64; 2];
+        for x in &self.x {
+            for x_correction in [x.negative_approach_mm, x.positive_approach_mm] {
+                for y in &self.y {
+                    for y_correction in [y.negative_approach_mm, y.positive_approach_mm] {
+                        for axis in 0..2 {
+                            let correction = x_correction[axis] + y_correction[axis]
+                                - self.datum_compensation_mm[axis];
+                            maximum[axis] = maximum[axis].max(correction.abs());
+                        }
+                    }
+                }
+            }
+        }
+        maximum
+    }
 }
 
 fn axis_compensation(
@@ -432,6 +450,13 @@ impl MotionPlanner {
     pub fn bounds(&self) -> Bounds {
         self.bounds
     }
+
+    /// Maximum X/Y space needed for any calibrated controller correction.
+    pub fn maximum_controller_margin_mm(&self) -> [f64; 2] {
+        self.calibration
+            .as_ref()
+            .map_or([0.0, 0.0], MotionCalibration::maximum_controller_margin_mm)
+    }
 }
 
 fn approach_side(delta_mm: f64) -> Option<ApproachSide> {
@@ -631,6 +656,17 @@ mod tests {
             .unwrap();
         assert_eq!(negative.x_approach, Some(ApproachSide::Positive));
         assert_eq!(negative.controller_target, pose(39.94, 50.01, 30.0));
+    }
+
+    #[test]
+    fn controller_margin_covers_all_direction_combinations() {
+        let planner = MotionPlanner::new(bounds(), Some(calibration()));
+
+        assert_eq!(planner.maximum_controller_margin_mm(), [0.064, 0.04]);
+        assert_eq!(
+            MotionPlanner::new(bounds(), None).maximum_controller_margin_mm(),
+            [0.0, 0.0]
+        );
     }
 
     #[test]

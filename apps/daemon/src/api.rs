@@ -104,7 +104,7 @@ use velocitypnp_vision::{
     summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
     summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
     BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
+    CaptureFreshnessBoundary, DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
     HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture,
     PlacedPartInspectionArtifacts, RgbFrame, RgbaFrame, StripFeederInventoryBuild,
     StripFeederInventorySourceMosaic, StripFeederSourceComponentDraft,
@@ -207,11 +207,20 @@ const RECONNAISSANCE_OVERLAP: f64 = 0.10;
 const MIN_RECONNAISSANCE_OVERLAP: f64 = 0.10;
 const MIN_WORKSPACE_OVERLAP: f64 = 0.20;
 const RECONNAISSANCE_OUTPUT_MM_PER_PIXEL: f64 = 0.20;
-const WORKSPACE_FRESH_FRAME_GUARD_FRAMES: u32 = 1;
+const WORKSPACE_UNKNOWN_TIMESTAMP_GUARD_FRAMES: u32 = 1;
+const WORKSPACE_INVALID_TIMESTAMP_SETTLE_FRAMES: u32 = 4;
 const WORKSPACE_MAX_FRESH_CAPTURE_FRAMES: u32 = 32;
-// Account for the serialized jog completion and fresh-capture dispatch that
-// are not part of ideal feed time. This was measured on a LumenPnP V3.0.2.
-const RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS: f64 = 0.20;
+// M400 completion, position read-back, and actor dispatch cost about 90 ms per
+// move on the attached LumenPnP V3.0.2.
+const WORKSPACE_MOTION_COMMAND_OVERHEAD_SECONDS: f64 = 0.09;
+const WORKSPACE_FALLBACK_COMMAND_OVERHEAD_SECONDS: f64 = 0.20;
+const WORKSPACE_CAMERA_OPEN_SECONDS: f64 = 0.20;
+const WORKSPACE_CAPTURE_PIPELINE_FRAMES: f64 = 2.0;
+const WORKSPACE_RECONSTRUCTION_SECONDS_PER_TILE: f64 = 0.004;
+const WORKSPACE_FIXED_OVERHEAD_SECONDS: f64 = 1.0;
+const CAMERA_EXPOSURE_AUTO_CONTROL_ID: u32 = 10_094_849;
+const CAMERA_EXPOSURE_ABSOLUTE_CONTROL_ID: u32 = 10_094_850;
+const CAMERA_MANUAL_EXPOSURE_MODE: i64 = 1;
 const MIN_WORKSPACE_COVERAGE: f64 = 0.99;
 const DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL: f64 = 0.10;
 const DEFAULT_SURVEY_OVERLAP: f64 = 0.30;
@@ -222,7 +231,7 @@ const MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 const WORKSPACE_THUMBNAIL_WIDTH: u32 = 192;
 const WORKSPACE_THUMBNAIL_HEIGHT: u32 = 108;
 const WORKSPACE_PROGRESS_TILE_INTERVAL: u32 = 25;
-const WORKSPACE_SCAN_TIMING_ALGORITHM: &str = "workspace_scan_timing.v2";
+const WORKSPACE_SCAN_TIMING_ALGORITHM: &str = "workspace_scan_timing.v3";
 const CAMERA_TARGET_OPERATION_TIMING_ALGORITHM: &str = "camera_target_operation_timing.v1";
 const WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS: u32 = 512;
 const WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS: u32 = 2;
@@ -266,6 +275,7 @@ struct WorkspaceScanTiming {
     capture_sequence_gaps: Vec<u32>,
     camera_fourcc: Option<String>,
     camera_interval: Option<[u32; 2]>,
+    camera_timestamp_sources: BTreeSet<String>,
     tile_artifact_ms: Vec<f64>,
     tile_mosaic_ms: Vec<f64>,
     progress_store_ms: Vec<f64>,
@@ -411,6 +421,9 @@ fn record_workspace_capture(
     timing.tile_capture_sequences.push(metadata.sequence);
     timing.camera_fourcc = Some(metadata.fourcc.clone());
     timing.camera_interval = Some([metadata.interval_numerator, metadata.interval_denominator]);
+    timing
+        .camera_timestamp_sources
+        .insert(metadata.timestamp_source.as_str().into());
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1546,6 +1559,10 @@ async fn camera_snapshot(
         .header("x-velocitypnp-frame-sequence", capture.1.sequence)
         .header("x-velocitypnp-frame-width", capture.1.width)
         .header("x-velocitypnp-frame-height", capture.1.height)
+        .header(
+            "x-velocitypnp-frame-timestamp-source",
+            capture.1.timestamp_source.as_str(),
+        )
         .body(axum::body::Body::from(capture.0))
         .map_err(ApiError::internal)
 }
@@ -2184,12 +2201,19 @@ async fn estimate_workspace_scan(
             effective_workspace_region_preset(&body.specification, refinement.as_ref()),
             body.specification.mode,
         )?;
-    let current_pose = state
-        .machine
-        .status()
-        .pose
-        .unwrap_or(state.profile.home_pose);
-    let (_, estimate) = prepare_workspace_scan(
+    let status = state.machine.status();
+    let current_pose = status.pose.unwrap_or(state.profile.home_pose);
+    let motion_calibration = if status.simulated {
+        None
+    } else {
+        Some(load_motion_calibration(
+            &state,
+            body.specification.calibration_id,
+            "workspace scan estimate",
+        )?)
+    };
+    let motion_planner = MotionPlanner::new(state.profile.bounds, motion_calibration);
+    let (plan, estimate) = prepare_workspace_scan(
         &state,
         &body.specification,
         &top_profile,
@@ -2199,6 +2223,15 @@ async fn estimate_workspace_scan(
         installed_geometry.as_ref(),
         refinement.as_ref(),
         current_pose,
+        motion_planner.maximum_controller_margin_mm(),
+        controller_xy_acceleration_mm_per_s2(&status),
+    )?;
+    validate_workspace_motion_plan(
+        &state.profile,
+        &motion_planner,
+        current_pose,
+        &plan,
+        estimate.feed_mm_per_min,
     )?;
     Ok(Json(estimate))
 }
@@ -2249,17 +2282,6 @@ async fn start_workspace_scan(
             effective_workspace_region_preset(&body.specification, refinement.as_ref()),
             body.specification.mode,
         )?;
-    let (plan, estimate) = prepare_workspace_scan(
-        &state,
-        &body.specification,
-        &top_profile,
-        &camera_model,
-        surface_model,
-        installed_camera_model.as_ref(),
-        installed_geometry.as_ref(),
-        refinement.as_ref(),
-        current_pose,
-    )?;
     let motion_calibration = if status.simulated {
         None
     } else {
@@ -2270,6 +2292,19 @@ async fn start_workspace_scan(
         )?)
     };
     let motion_planner = MotionPlanner::new(state.profile.bounds, motion_calibration);
+    let (plan, estimate) = prepare_workspace_scan(
+        &state,
+        &body.specification,
+        &top_profile,
+        &camera_model,
+        surface_model,
+        installed_camera_model.as_ref(),
+        installed_geometry.as_ref(),
+        refinement.as_ref(),
+        current_pose,
+        motion_planner.maximum_controller_margin_mm(),
+        controller_xy_acceleration_mm_per_s2(&status),
+    )?;
     validate_workspace_motion_plan(
         &state.profile,
         &motion_planner,
@@ -2476,6 +2511,8 @@ fn prepare_workspace_scan(
     installed_geometry: Option<&InstalledPlateGeometryReport>,
     refinement: Option<&WorkspaceRefinementSource>,
     start_pose: Pose,
+    controller_margin_mm: [f64; 2],
+    xy_acceleration_mm_per_s2: Option<f64>,
 ) -> ApiResult<(WorkspaceScanPlan, WorkspaceScanEstimate)> {
     let mut warnings = Vec::new();
     let reconnaissance = specification.mode == WorkspaceScanMode::Reconnaissance;
@@ -2508,6 +2545,13 @@ fn prepare_workspace_scan(
                 top_profile.height,
             )
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            let reachable_region = inset_workspace_region(reachable_region, controller_margin_mm)?;
+            if controller_margin_mm[0] > 0.0 || controller_margin_mm[1] > 0.0 {
+                warnings.push(format!(
+                    "top-camera coverage reserves {:.3} mm X and {:.3} mm Y for calibrated controller corrections",
+                    controller_margin_mm[0], controller_margin_mm[1],
+                ));
+            }
             let clipped_region = intersect_workspace_regions(plate_region, reachable_region)?;
             if let Some(warning) = workspace_camera_clip_warning(plate_region, clipped_region) {
                 warnings.push(warning);
@@ -2709,8 +2753,10 @@ fn prepare_workspace_scan(
                 z_mm: visual.seed_pose.z_mm,
                 rotation_deg: start_pose.rotation_deg,
             },
+            park_feed_mm_per_min: state.profile.transit_motion.clear_xy_feed_mm_per_min,
             start_pose,
             feed_mm_per_min,
+            xy_acceleration_mm_per_s2,
         },
     );
     estimate.warnings = warnings;
@@ -2951,6 +2997,30 @@ fn intersect_workspace_regions(
     Ok(intersection)
 }
 
+fn inset_workspace_region(
+    region: WorkspaceScanRegion,
+    controller_margin_mm: [f64; 2],
+) -> ApiResult<WorkspaceScanRegion> {
+    if controller_margin_mm
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(ApiError::bad_request(
+            "calibrated controller margin is invalid",
+        ));
+    }
+    let inset = WorkspaceScanRegion {
+        x_min_mm: region.x_min_mm + controller_margin_mm[0],
+        x_max_mm: region.x_max_mm - controller_margin_mm[0],
+        y_min_mm: region.y_min_mm + controller_margin_mm[1],
+        y_max_mm: region.y_max_mm - controller_margin_mm[1],
+    };
+    inset.validate().map_err(|_| {
+        ApiError::bad_request("calibrated controller margin removes all camera coverage")
+    })?;
+    Ok(inset)
+}
+
 fn workspace_camera_clip_warning(
     requested: WorkspaceScanRegion,
     clipped: WorkspaceScanRegion,
@@ -3057,8 +3127,51 @@ struct WorkspaceScanEstimateContext<'a> {
     artifact_quota_bytes: u64,
     top_profile: &'a CameraProfile,
     park_pose: Pose,
+    park_feed_mm_per_min: f64,
     start_pose: Pose,
     feed_mm_per_min: f64,
+    xy_acceleration_mm_per_s2: Option<f64>,
+}
+
+fn estimated_linear_motion_seconds(
+    distance_mm: f64,
+    feed_mm_per_min: f64,
+    acceleration_mm_per_s2: Option<f64>,
+) -> f64 {
+    if distance_mm <= 0.0 {
+        return 0.0;
+    }
+    let speed_mm_per_s = feed_mm_per_min / 60.0;
+    let Some(acceleration_mm_per_s2) = acceleration_mm_per_s2 else {
+        return distance_mm / speed_mm_per_s;
+    };
+    let full_speed_distance_mm = speed_mm_per_s * speed_mm_per_s / acceleration_mm_per_s2;
+    if distance_mm >= full_speed_distance_mm {
+        distance_mm / speed_mm_per_s + speed_mm_per_s / acceleration_mm_per_s2
+    } else {
+        2.0 * (distance_mm / acceleration_mm_per_s2).sqrt()
+    }
+}
+
+fn controller_xy_acceleration_mm_per_s2(status: &velocitypnp_domain::MachineStatus) -> Option<f64> {
+    let settings = &status.controller.as_ref()?.settings;
+    let x = *settings
+        .max_acceleration_units_per_second_squared
+        .get("X")?;
+    let y = *settings
+        .max_acceleration_units_per_second_squared
+        .get("Y")?;
+    let travel = *settings
+        .motion_acceleration_units_per_second_squared
+        .get("T")?;
+    let values = [x, y, travel];
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return None;
+    }
+    values.into_iter().reduce(f64::min)
 }
 
 fn workspace_scan_estimate(
@@ -3073,19 +3186,31 @@ fn workspace_scan_estimate(
         artifact_quota_bytes,
         top_profile,
         park_pose,
+        park_feed_mm_per_min,
         start_pose,
         feed_mm_per_min,
+        xy_acceleration_mm_per_s2,
     } = context;
     let mut sequence = plan.tiles.iter().collect::<Vec<_>>();
     sequence.sort_by_key(|tile| tile.capture_order);
     let mut prior = start_pose;
-    let mut travel_mm = 0.0;
+    let mut movement_seconds = 0.0;
     for tile in &sequence {
-        travel_mm +=
+        let distance_mm =
             (tile.nominal_pose.x_mm - prior.x_mm).hypot(tile.nominal_pose.y_mm - prior.y_mm);
+        movement_seconds += estimated_linear_motion_seconds(
+            distance_mm,
+            feed_mm_per_min,
+            xy_acceleration_mm_per_s2,
+        );
         prior = tile.nominal_pose;
     }
-    travel_mm += (park_pose.x_mm - prior.x_mm).hypot(park_pose.y_mm - prior.y_mm);
+    let park_distance_mm = (park_pose.x_mm - prior.x_mm).hypot(park_pose.y_mm - prior.y_mm);
+    movement_seconds += estimated_linear_motion_seconds(
+        park_distance_mm,
+        park_feed_mm_per_min,
+        xy_acceleration_mm_per_s2,
+    );
     let planned_tiles = plan.tiles.len() as u32;
     let planned_registrations = if mode == WorkspaceScanMode::Reconnaissance {
         0
@@ -3167,22 +3292,30 @@ fn workspace_scan_estimate(
         + parallax_bytes
         + height_product_bytes
         + seam_product_bytes;
-    let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
+    let movement_commands = planned_tiles.saturating_add(1);
+    movement_seconds += f64::from(movement_commands)
+        * if xy_acceleration_mm_per_s2.is_some() {
+            WORKSPACE_MOTION_COMMAND_OVERHEAD_SECONDS
+        } else {
+            WORKSPACE_FALLBACK_COMMAND_OVERHEAD_SECONDS
+        };
     let base_duration_seconds = if mode != WorkspaceScanMode::Precision {
-        let first_frames = top_profile.settle_frames + WORKSPACE_FRESH_FRAME_GUARD_FRAMES + 1;
-        let later_frames = WORKSPACE_FRESH_FRAME_GUARD_FRAMES + 1;
-        let capture_frames = u64::from(first_frames)
-            + u64::from(planned_tiles.saturating_sub(1)) * u64::from(later_frames);
+        let capture_seconds = f64::from(top_profile.settle_frames)
+            / f64::from(top_profile.frames_per_second)
+            + f64::from(planned_tiles)
+                * (camera_end_of_frame_guard(top_profile).as_secs_f64()
+                    + WORKSPACE_CAPTURE_PIPELINE_FRAMES / f64::from(top_profile.frames_per_second));
         (movement_seconds
-            + capture_frames as f64 / f64::from(top_profile.frames_per_second)
+            + capture_seconds
+            + WORKSPACE_CAMERA_OPEN_SECONDS
             + if mode == WorkspaceScanMode::Reconnaissance {
-                f64::from(planned_tiles.saturating_sub(1)) * RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS
+                f64::from(planned_tiles) * WORKSPACE_RECONSTRUCTION_SECONDS_PER_TILE
             } else {
                 f64::from(planned_registrations)
                     * ESTIMATED_REGISTRATION_SECONDS
                     * (surface_models.len() + usize::from(surface_models.len() > 1)) as f64
             }
-            + 20.0)
+            + WORKSPACE_FIXED_OVERHEAD_SECONDS)
             .ceil() as u64
     } else {
         (f64::from(planned_tiles) * 5.3).ceil() as u64
@@ -3216,7 +3349,7 @@ fn workspace_scan_estimate(
         overlap_fraction: plan.overlap_fraction,
         output_mm_per_pixel: plan.output_mm_per_pixel,
         feed_mm_per_min,
-        capture_settle_frames: WORKSPACE_FRESH_FRAME_GUARD_FRAMES,
+        capture_settle_frames: WORKSPACE_UNKNOWN_TIMESTAMP_GUARD_FRAMES,
         rows: plan.rows,
         columns: plan.columns,
         planned_tiles,
@@ -3443,6 +3576,9 @@ async fn execute_workspace_scan_locked(
         "capture_sequence_gaps": timing.capture_sequence_gaps,
         "camera_fourcc": timing.camera_fourcc,
         "camera_interval": timing.camera_interval,
+        "camera_timestamp_sources": timing.camera_timestamp_sources,
+        "end_of_frame_guard_ms": camera_end_of_frame_guard(&top_profile).as_secs_f64() * 1_000.0,
+        "unknown_source_guard_ms": camera_frame_period(&top_profile).as_secs_f64() * 1_000.0,
         "total_elapsed_ms": elapsed_ms(operation_started),
         "lights_enable_ms": timing.lights_enable_ms,
         "camera_open_ms": timing.camera_open_ms,
@@ -3750,13 +3886,10 @@ async fn capture_and_build_precision_workspace_scan(
         timing.tile_motion_ms.push(elapsed_ms(motion_started));
         let (_, planned) = motion_result?;
         record_workspace_motion_correction(timing, &planned, false);
-        let guard = Duration::from_secs_f64(
-            f64::from(WORKSPACE_FRESH_FRAME_GUARD_FRAMES) / f64::from(config.frames_per_second),
+        let fresh_after = camera_freshness_boundary(
+            top_profile,
+            monotonic_timestamp().map_err(|error| error.to_string())?,
         );
-        let fresh_after = monotonic_timestamp()
-            .map_err(|error| error.to_string())?
-            .checked_add(guard)
-            .ok_or_else(|| "camera freshness boundary overflow".to_string())?;
         let settle_frames = if capture_index == 0 {
             top_profile.settle_frames
         } else {
@@ -3937,15 +4070,10 @@ async fn capture_and_build_workspace_survey(
         timing.tile_motion_ms.push(elapsed_ms(motion_started));
         let (_, planned) = motion_result?;
         record_workspace_motion_correction(timing, &planned, false);
-        let guard = Duration::from_secs_f64(
-            f64::from(WORKSPACE_FRESH_FRAME_GUARD_FRAMES) / f64::from(config.frames_per_second),
-        );
-        let fresh_after = Some(
-            monotonic_timestamp()
-                .map_err(|error| error.to_string())?
-                .checked_add(guard)
-                .ok_or_else(|| "camera freshness boundary overflow".to_string())?,
-        );
+        let fresh_after = Some(camera_freshness_boundary(
+            top_profile,
+            monotonic_timestamp().map_err(|error| error.to_string())?,
+        ));
         let settle_frames = if capture_index == 0 {
             top_profile.settle_frames
         } else {
@@ -4594,7 +4722,7 @@ async fn capture_persistent_workspace_frame(
     control_updates: &[CameraControlUpdate],
     settle_frames: u32,
     reopen_settle_frames: u32,
-    fresh_after: Option<Duration>,
+    fresh_after: Option<CaptureFreshnessBoundary>,
 ) -> Result<velocitypnp_vision::CapturedGrayFrame, String> {
     let mut last_error = String::new();
     for attempt in 1..=MAX_CAMERA_CAPTURE_ATTEMPTS {
@@ -4622,10 +4750,10 @@ async fn capture_persistent_workspace_frame(
         };
         let requested_fresh_after = (attempt == 1).then_some(fresh_after).flatten();
         match tokio::task::spawn_blocking(move || {
-            let capture = if let Some(not_before) = requested_fresh_after {
+            let capture = if let Some(boundary) = requested_fresh_after {
                 active.capture_fresh_after(
-                    not_before,
-                    requested_settle_frames,
+                    boundary,
+                    requested_settle_frames.max(WORKSPACE_INVALID_TIMESTAMP_SETTLE_FRAMES),
                     WORKSPACE_MAX_FRESH_CAPTURE_FRAMES,
                 )
             } else {
@@ -5449,6 +5577,8 @@ async fn start_workspace_refinement_batch(
             installed_geometry.as_ref(),
             Some(&refinement),
             start_pose,
+            motion_planner.maximum_controller_margin_mm(),
+            controller_xy_acceleration_mm_per_s2(&status),
         )?;
         validate_workspace_motion_plan(
             &state.profile,
@@ -15096,6 +15226,46 @@ fn camera_capture_config(profile: &CameraProfile, device_path: String) -> V4l2Ca
     config
 }
 
+fn camera_frame_period(profile: &CameraProfile) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(profile.frames_per_second))
+}
+
+fn camera_end_of_frame_guard(profile: &CameraProfile) -> Duration {
+    let manual_exposure = profile.controls.iter().any(|control| {
+        control.id == CAMERA_EXPOSURE_AUTO_CONTROL_ID
+            && control.value == CameraProfileControlValue::Integer(CAMERA_MANUAL_EXPOSURE_MODE)
+    });
+    let exposure = profile.controls.iter().find_map(|control| {
+        if control.id != CAMERA_EXPOSURE_ABSOLUTE_CONTROL_ID {
+            return None;
+        }
+        match control.value {
+            CameraProfileControlValue::Integer(value) if value > 0 => u64::try_from(value)
+                .ok()?
+                .checked_mul(100)
+                .map(Duration::from_micros),
+            _ => None,
+        }
+    });
+    if manual_exposure {
+        exposure.unwrap_or_else(|| camera_frame_period(profile))
+    } else {
+        camera_frame_period(profile)
+    }
+}
+
+fn camera_freshness_boundary(
+    profile: &CameraProfile,
+    exposure_started_after: Duration,
+) -> CaptureFreshnessBoundary {
+    let end_of_frame_exposure = camera_end_of_frame_guard(profile);
+    CaptureFreshnessBoundary {
+        exposure_started_after,
+        end_of_frame_exposure,
+        unknown_source_guard: camera_frame_period(profile).max(end_of_frame_exposure),
+    }
+}
+
 fn camera_path_for_role(role: CameraRole) -> ApiResult<String> {
     let device = discover_linux_devices()
         .map_err(ApiError::internal)?
@@ -15835,7 +16005,8 @@ async fn capture_scoped_profiled_frames(
                 }
             }
         };
-        let fresh_after = monotonic_timestamp().map_err(ApiError::internal)?;
+        let fresh_after =
+            camera_freshness_boundary(profile, monotonic_timestamp().map_err(ApiError::internal)?);
         let settle_frames = profile.settle_frames;
         let started = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
@@ -15880,7 +16051,7 @@ fn capture_scoped_frames(
     sample_count: u32,
     newly_opened: bool,
     settle_frames: u32,
-    fresh_after: Duration,
+    fresh_after: CaptureFreshnessBoundary,
 ) -> anyhow::Result<(Vec<GrayFrame>, u32)> {
     let first = if newly_opened {
         capture.capture(settle_frames)?
@@ -31259,6 +31430,63 @@ mod tests {
     }
 
     #[test]
+    fn workspace_motion_estimate_models_acceleration() {
+        assert!((estimated_linear_motion_seconds(10.0, 600.0, Some(100.0)) - 1.1).abs() < 1e-9);
+        assert!((estimated_linear_motion_seconds(0.25, 600.0, Some(100.0)) - 0.1).abs() < 1e-9);
+        assert!((estimated_linear_motion_seconds(10.0, 600.0, None) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn manual_camera_exposure_sets_the_end_of_frame_guard() {
+        let mut profile = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.2", CameraRole::TopCamera);
+        assert_eq!(
+            camera_end_of_frame_guard(&profile),
+            Duration::from_millis(20)
+        );
+        profile
+            .controls
+            .iter_mut()
+            .find(|control| control.id == CAMERA_EXPOSURE_ABSOLUTE_CONTROL_ID)
+            .unwrap()
+            .value = CameraProfileControlValue::Integer(400);
+        assert_eq!(
+            camera_end_of_frame_guard(&profile),
+            Duration::from_millis(40)
+        );
+
+        profile
+            .controls
+            .iter_mut()
+            .find(|control| control.id == CAMERA_EXPOSURE_AUTO_CONTROL_ID)
+            .unwrap()
+            .value = CameraProfileControlValue::Integer(3);
+        assert_eq!(
+            camera_end_of_frame_guard(&profile),
+            camera_frame_period(&profile)
+        );
+    }
+
+    #[test]
+    fn calibrated_margin_insets_camera_coverage() {
+        let region = WorkspaceScanRegion {
+            x_min_mm: -8.0,
+            x_max_mm: 441.0,
+            y_min_mm: 84.0,
+            y_max_mm: 326.0,
+        };
+
+        assert_eq!(
+            inset_workspace_region(region, [0.064, 0.04]).unwrap(),
+            WorkspaceScanRegion {
+                x_min_mm: -7.936,
+                x_max_mm: 440.936,
+                y_min_mm: 84.04,
+                y_max_mm: 325.96,
+            }
+        );
+    }
+
+    #[test]
     fn workspace_capture_timing_records_per_tile_camera_evidence() {
         let mut timing = WorkspaceScanTiming::default();
         for (sequence, discarded) in [(41, 3), (45, 2), (46, 0)] {
@@ -31275,6 +31503,7 @@ mod tests {
                     sequence,
                     settle_frames: discarded,
                     timestamp_monotonic: true,
+                    timestamp_source: velocitypnp_vision::CaptureTimestampSource::EndOfFrame,
                     fresh_after_boundary: true,
                 },
             );
@@ -31285,6 +31514,10 @@ mod tests {
         assert_eq!(timing.capture_sequence_gaps, [4, 1]);
         assert_eq!(timing.camera_fourcc.as_deref(), Some("YUYV"));
         assert_eq!(timing.camera_interval, Some([1, 10]));
+        assert_eq!(
+            timing.camera_timestamp_sources,
+            BTreeSet::from(["end_of_frame".into()])
+        );
     }
 
     #[test]
@@ -32929,7 +33162,7 @@ mod tests {
             overlap_fraction: DEFAULT_SURVEY_OVERLAP,
             output_mm_per_pixel: DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL,
             feed_mm_per_min: 1_200.0,
-            capture_settle_frames: WORKSPACE_FRESH_FRAME_GUARD_FRAMES,
+            capture_settle_frames: WORKSPACE_UNKNOWN_TIMESTAMP_GUARD_FRAMES,
             discarded_capture_frames: 0,
             timestamp_fresh_frames: 0,
             frame_width_px: 1280,
@@ -34240,6 +34473,8 @@ mod tests {
             None,
             None,
             state.profile.home_pose,
+            [0.0, 0.0],
+            None,
         )
         .unwrap();
 
@@ -34307,6 +34542,8 @@ mod tests {
             None,
             Some(&refinement),
             state.profile.home_pose,
+            [0.0, 0.0],
+            None,
         )
         .unwrap();
 

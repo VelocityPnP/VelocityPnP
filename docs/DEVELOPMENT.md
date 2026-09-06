@@ -127,9 +127,13 @@ profile's default XY feed. Layered surveys with
 `transient_sources` have a 12,000-tile limit. An installed-plate scan uses at
 least 60 percent overlap so that each surface has enough shared image area for
 reliable reconstruction. All scan modes hold one V4L2 stream open across
-moves. After each move, they accept a frame whose monotonic timestamp is at
-least one frame period newer than the motion boundary. A camera without valid
-monotonic timestamps uses the validated four-frame fallback.
+moves. After each move, they use the V4L2 timestamp source to require an
+exposure that started after motion stopped. A start-of-exposure timestamp must
+be newer than the motion boundary. An end-of-frame timestamp must be newer by
+the configured manual exposure time. An unknown timestamp source keeps a full
+frame-period guard. A camera without valid monotonic timestamps uses the
+validated four-frame fallback.
+
 Each mosaic layer retains two full camera rows. Height matching can retain up
 to three preceding rows for wider-baseline pairs. The system registers and
 renders each requested height layer and measures parallax. The height analysis
@@ -140,7 +144,11 @@ instead of total tile count.
 `feed_mm_per_min` can request a slower feed, but cannot exceed the validated
 clear-XY limit. A physical scan also requires direction-response holdout
 evidence for its exact scan and datum-return feeds. Scan tiles and the final
-datum return use the calibrated direction correction.
+datum return use the calibrated direction correction. They also reserve the
+largest possible X/Y controller correction at the machine bounds. The
+connected estimate uses the controller's X/Y and travel acceleration limits
+plus measured command overhead. Thus, short scan moves are not estimated as
+constant-speed travel.
 
 Artifact retention can be `full_sources`, `transient_sources`, `thumbnails`,
 or `mosaic_only`. `transient_sources` is for installed-plate surveys. It keeps

@@ -32,7 +32,15 @@ paths:
       parameters:
         - { name: role, in: path, required: true, schema: { type: string, enum: [top_camera, bottom_camera] } }
       responses:
-        "200": { description: Settled 1280x720 grayscale PNG, content: { image/png: { schema: { type: string, format: binary } } } }
+        "200":
+          description: Settled 1280x720 grayscale PNG
+          headers:
+            x-velocitypnp-frame-timestamp-source:
+              description: V4L2 capture timestamp source
+              schema: { type: string, enum: [end_of_frame, start_of_exposure, unknown] }
+          content:
+            image/png:
+              schema: { type: string, format: binary }
   /cameras/{role}/controls:
     get:
       operationId: getCameraControls
