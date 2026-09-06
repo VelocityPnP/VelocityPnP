@@ -35,6 +35,7 @@ opencv = { version = "=0.99.1", default-features = false, features = [
     "calib3d",
     "clang-runtime",
     "features2d",
+    "imgcodecs",
     "imgproc",
 ] }
 png = "0.17"

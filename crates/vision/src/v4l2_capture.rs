@@ -13,9 +13,14 @@ use v4l::io::traits::CaptureStream;
 use v4l::prelude::MmapStream;
 use v4l::video::Capture;
 use v4l::{Device, Format, FourCC, Fraction};
+use velocitypnp_domain::CameraPixelFormat;
 
 fn yuyv() -> FourCC {
     FourCC::new(b"YUYV")
+}
+
+fn mjpg() -> FourCC {
+    FourCC::new(b"MJPG")
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +28,7 @@ pub struct V4l2CaptureConfig {
     pub device: PathBuf,
     pub width: u32,
     pub height: u32,
+    pub pixel_format: CameraPixelFormat,
     pub frames_per_second: u32,
     pub settle_frames: u32,
     pub timeout: Duration,
@@ -34,6 +40,7 @@ impl V4l2CaptureConfig {
             device: device.into(),
             width: 1280,
             height: 720,
+            pixel_format: CameraPixelFormat::Yuyv,
             frames_per_second: 10,
             settle_frames: 5,
             timeout: Duration::from_secs(3),
@@ -381,7 +388,9 @@ fn validate_capture_config(config: &V4l2CaptureConfig) -> Result<()> {
         config.width > 0 && config.height > 0,
         "camera dimensions must be non-zero"
     );
-    ensure!(config.width % 2 == 0, "YUYV capture width must be even");
+    if config.pixel_format == CameraPixelFormat::Yuyv {
+        ensure!(config.width % 2 == 0, "YUYV capture width must be even");
+    }
     ensure!(
         config.frames_per_second > 0,
         "camera frame rate must be non-zero"
@@ -401,16 +410,20 @@ fn persistent_capture_worker(
     let setup = (|| -> Result<_> {
         let device = Device::with_path(&config.device)
             .with_context(|| format!("opening camera {}", config.device.display()))?;
+        let requested_fourcc = capture_fourcc(config.pixel_format);
         let format = device
-            .set_format(&Format::new(config.width, config.height, yuyv()))
+            .set_format(&Format::new(config.width, config.height, requested_fourcc))
             .context("setting camera capture format")?;
-        if format.fourcc != yuyv() || format.width != config.width || format.height != config.height
+        if format.fourcc != requested_fourcc
+            || format.width != config.width
+            || format.height != config.height
         {
             bail!(
-                "camera negotiated {} {}x{} instead of YUYV {}x{}",
+                "camera negotiated {} {}x{} instead of {} {}x{}",
                 format.fourcc,
                 format.width,
                 format.height,
+                requested_fourcc,
                 config.width,
                 config.height
             );
@@ -420,9 +433,7 @@ fn persistent_capture_worker(
         let parameters = device
             .set_params(&parameters)
             .context("setting camera frame rate")?;
-        if parameters.interval.numerator == 0 || parameters.interval.denominator == 0 {
-            bail!("camera returned an invalid frame interval");
-        }
+        validate_frame_interval(parameters.interval, config.frames_per_second)?;
         Ok((device, format, parameters))
     })();
     let (device, format, parameters) = match setup {
@@ -446,76 +457,130 @@ fn persistent_capture_worker(
         return;
     }
 
-    while let Ok(request) = requests.recv() {
-        let (settle_frames, freshness, frame_limit, response) = match request {
-            PersistentCaptureRequest::Capture {
-                settle_frames,
-                response,
-            } => (
-                settle_frames,
-                None,
-                settle_frames.saturating_add(1),
-                response,
-            ),
-            PersistentCaptureRequest::CaptureFreshAfter {
-                not_before,
-                fallback_settle_frames,
-                maximum_frames,
-                response,
-            } => (
-                fallback_settle_frames,
-                Some(not_before),
-                maximum_frames,
-                response,
-            ),
-            PersistentCaptureRequest::Stop => break,
-        };
-        let capture = (|| -> Result<CapturedGrayFrame> {
-            let mut captured = None;
-            for index in 0..frame_limit {
-                let (buffer, metadata) = stream.next().context("capturing camera frame")?;
-                let timestamp_fresh = freshness.and_then(|not_before| {
-                    frame_is_fresh_after(
-                        metadata.flags,
-                        metadata.timestamp.sec,
-                        metadata.timestamp.usec,
-                        not_before,
-                    )
-                });
-                let accepted = timestamp_fresh.unwrap_or(index >= settle_frames);
-                if !accepted {
-                    continue;
+    let mut pending = None;
+    loop {
+        if pending.is_none() {
+            match requests.try_recv() {
+                Ok(PersistentCaptureRequest::Stop) | Err(mpsc::TryRecvError::Disconnected) => {
+                    break;
                 }
-                let used = (metadata.bytesused as usize).min(buffer.len());
-                captured = Some(CapturedGrayFrame {
-                    frame: yuyv_to_gray(
-                        &buffer[..used],
-                        format.width,
-                        format.height,
-                        format.stride,
-                    )?,
-                    metadata: CaptureMetadata {
-                        device: config.device.clone(),
-                        width: format.width,
-                        height: format.height,
-                        fourcc: format.fourcc.to_string(),
-                        stride: format.stride,
-                        interval_numerator: parameters.interval.numerator,
-                        interval_denominator: parameters.interval.denominator,
-                        sequence: metadata.sequence,
-                        settle_frames: index,
-                        timestamp_monotonic: metadata
-                            .flags
-                            .contains(BufferFlags::TIMESTAMP_MONOTONIC),
-                        fresh_after_boundary: timestamp_fresh == Some(true),
-                    },
-                });
+                Ok(request) => pending = pending_capture(request),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        let request_was_pending = pending.is_some();
+        let (buffer, metadata) = match stream.next() {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Some(pending) = pending.take() {
+                    let _ = pending
+                        .response
+                        .send(Err(format!("capturing camera frame: {error}")));
+                }
                 break;
             }
-            captured.context("persistent camera returned no frame after the freshness boundary")
-        })()
-        .map_err(|error| format!("{error:#}"));
-        let _ = response.send(capture);
+        };
+
+        if pending.is_none() {
+            match requests.try_recv() {
+                Ok(PersistentCaptureRequest::Stop) | Err(mpsc::TryRecvError::Disconnected) => {
+                    break;
+                }
+                Ok(request) => pending = pending_capture(request),
+                Err(mpsc::TryRecvError::Empty) => continue,
+            }
+        }
+        let Some(active) = pending.as_mut() else {
+            continue;
+        };
+        if !request_was_pending && active.freshness.is_none() {
+            continue;
+        }
+
+        let index = active.assessed_frames;
+        active.assessed_frames = active.assessed_frames.saturating_add(1);
+        let timestamp_fresh = active.freshness.and_then(|not_before| {
+            frame_is_fresh_after(
+                metadata.flags,
+                metadata.timestamp.sec,
+                metadata.timestamp.usec,
+                not_before,
+            )
+        });
+        let accepted = timestamp_fresh.unwrap_or(index >= active.settle_frames);
+        if accepted {
+            let used = (metadata.bytesused as usize).min(buffer.len());
+            let capture = capture_to_gray(
+                &buffer[..used],
+                format.width,
+                format.height,
+                format.stride,
+                config.pixel_format,
+            )
+            .map(|frame| CapturedGrayFrame {
+                frame,
+                metadata: CaptureMetadata {
+                    device: config.device.clone(),
+                    width: format.width,
+                    height: format.height,
+                    fourcc: format.fourcc.to_string(),
+                    stride: format.stride,
+                    interval_numerator: parameters.interval.numerator,
+                    interval_denominator: parameters.interval.denominator,
+                    sequence: metadata.sequence,
+                    settle_frames: index,
+                    timestamp_monotonic: metadata.flags.contains(BufferFlags::TIMESTAMP_MONOTONIC),
+                    fresh_after_boundary: timestamp_fresh == Some(true),
+                },
+            })
+            .map_err(|error| format!("{error:#}"));
+            if let Some(pending) = pending.take() {
+                let _ = pending.response.send(capture);
+            }
+        } else if active.assessed_frames >= active.frame_limit {
+            if let Some(pending) = pending.take() {
+                let _ = pending.response.send(Err(
+                    "persistent camera returned no frame after the freshness boundary".into(),
+                ));
+            }
+        }
+    }
+}
+
+struct PendingCapture {
+    settle_frames: u32,
+    freshness: Option<Duration>,
+    frame_limit: u32,
+    assessed_frames: u32,
+    response: mpsc::SyncSender<Result<CapturedGrayFrame, String>>,
+}
+
+fn pending_capture(request: PersistentCaptureRequest) -> Option<PendingCapture> {
+    match request {
+        PersistentCaptureRequest::Capture {
+            settle_frames,
+            response,
+        } => Some(PendingCapture {
+            settle_frames,
+            freshness: None,
+            frame_limit: settle_frames.saturating_add(1),
+            assessed_frames: 0,
+            response,
+        }),
+        PersistentCaptureRequest::CaptureFreshAfter {
+            not_before,
+            fallback_settle_frames,
+            maximum_frames,
+            response,
+        } => Some(PendingCapture {
+            settle_frames: fallback_settle_frames,
+            freshness: Some(not_before),
+            frame_limit: maximum_frames,
+            assessed_frames: 0,
+            response,
+        }),
+        PersistentCaptureRequest::Stop => None,
     }
 }
 
@@ -550,15 +615,20 @@ pub fn capture_gray_frames(
 
     let device = Device::with_path(&config.device)
         .with_context(|| format!("opening camera {}", config.device.display()))?;
+    let requested_fourcc = capture_fourcc(config.pixel_format);
     let format = device
-        .set_format(&Format::new(config.width, config.height, yuyv()))
+        .set_format(&Format::new(config.width, config.height, requested_fourcc))
         .context("setting camera capture format")?;
-    if format.fourcc != yuyv() || format.width != config.width || format.height != config.height {
+    if format.fourcc != requested_fourcc
+        || format.width != config.width
+        || format.height != config.height
+    {
         bail!(
-            "camera negotiated {} {}x{} instead of YUYV {}x{}",
+            "camera negotiated {} {}x{} instead of {} {}x{}",
             format.fourcc,
             format.width,
             format.height,
+            requested_fourcc,
             config.width,
             config.height
         );
@@ -569,9 +639,7 @@ pub fn capture_gray_frames(
     let parameters = device
         .set_params(&parameters)
         .context("setting camera frame rate")?;
-    if parameters.interval.numerator == 0 || parameters.interval.denominator == 0 {
-        bail!("camera returned an invalid frame interval");
-    }
+    validate_frame_interval(parameters.interval, config.frames_per_second)?;
 
     let mut stream = MmapStream::with_buffers(&device, Type::VideoCapture, 4)
         .context("allocating camera capture buffers")?;
@@ -589,7 +657,13 @@ pub fn capture_gray_frames(
         }
         let used = (metadata.bytesused as usize).min(buffer.len());
         captures.push(CapturedGrayFrame {
-            frame: yuyv_to_gray(&buffer[..used], format.width, format.height, format.stride)?,
+            frame: capture_to_gray(
+                &buffer[..used],
+                format.width,
+                format.height,
+                format.stride,
+                config.pixel_format,
+            )?,
             metadata: CaptureMetadata {
                 device: config.device.clone(),
                 width: format.width,
@@ -606,6 +680,74 @@ pub fn capture_gray_frames(
         });
     }
     Ok(captures)
+}
+
+fn capture_fourcc(pixel_format: CameraPixelFormat) -> FourCC {
+    match pixel_format {
+        CameraPixelFormat::Yuyv => yuyv(),
+        CameraPixelFormat::Mjpeg => mjpg(),
+    }
+}
+
+fn validate_frame_interval(interval: Fraction, frames_per_second: u32) -> Result<()> {
+    ensure!(
+        interval.numerator > 0 && interval.denominator > 0,
+        "camera returned an invalid frame interval"
+    );
+    ensure!(
+        u64::from(interval.denominator)
+            == u64::from(interval.numerator) * u64::from(frames_per_second),
+        "camera negotiated {}/{} second frames instead of 1/{frames_per_second}",
+        interval.numerator,
+        interval.denominator
+    );
+    Ok(())
+}
+
+fn capture_to_gray(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    pixel_format: CameraPixelFormat,
+) -> Result<GrayFrame> {
+    match pixel_format {
+        CameraPixelFormat::Yuyv => yuyv_to_gray(buffer, width, height, stride),
+        CameraPixelFormat::Mjpeg => mjpeg_to_gray(buffer, width, height),
+    }
+}
+
+fn mjpeg_to_gray(buffer: &[u8], width: u32, height: u32) -> Result<GrayFrame> {
+    use opencv::prelude::*;
+
+    ensure!(!buffer.is_empty(), "MJPEG frame is empty");
+    let encoded = opencv::core::Vector::from_slice(buffer);
+    let frame = opencv::imgcodecs::imdecode(&encoded, opencv::imgcodecs::IMREAD_GRAYSCALE)
+        .context("decoding MJPEG camera frame")?;
+    ensure!(!frame.empty(), "MJPEG decoder returned an empty frame");
+    ensure!(
+        frame.cols() == width as i32 && frame.rows() == height as i32,
+        "MJPEG frame is {}x{} instead of {width}x{height}",
+        frame.cols(),
+        frame.rows()
+    );
+    ensure!(
+        frame.is_continuous(),
+        "MJPEG grayscale frame is not contiguous"
+    );
+    let pixels = frame
+        .data_bytes()
+        .context("reading decoded MJPEG grayscale pixels")?
+        .to_vec();
+    ensure!(
+        pixels.len() == width as usize * height as usize,
+        "MJPEG grayscale frame has an invalid pixel count"
+    );
+    Ok(GrayFrame {
+        width,
+        height,
+        pixels,
+    })
 }
 
 fn yuyv_to_gray(buffer: &[u8], width: u32, height: u32, stride: u32) -> Result<GrayFrame> {
@@ -677,6 +819,25 @@ mod tests {
     #[test]
     fn rejects_truncated_yuyv_frame() {
         assert!(yuyv_to_gray(&[0; 7], 4, 1, 8).is_err());
+    }
+
+    #[test]
+    fn decodes_mjpeg_to_a_gray_frame() {
+        let source =
+            opencv::core::Mat::from_slice_2d(&[&[10_u8, 20, 30, 40], &[50_u8, 60, 70, 80]])
+                .unwrap();
+        let mut encoded = opencv::core::Vector::new();
+        opencv::imgcodecs::imencode(
+            ".jpg",
+            &source,
+            &mut encoded,
+            &opencv::core::Vector::<i32>::new(),
+        )
+        .unwrap();
+
+        let frame = mjpeg_to_gray(encoded.as_slice(), 4, 2).unwrap();
+        assert_eq!((frame.width, frame.height), (4, 2));
+        assert_eq!(frame.pixels.len(), 8);
     }
 
     #[test]

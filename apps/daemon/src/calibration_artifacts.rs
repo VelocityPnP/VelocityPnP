@@ -9,13 +9,14 @@ use velocitypnp_domain::{
     lumen_calibration_artifacts, BottomCameraMappingReport, CalibrationArtifact,
     CalibrationArtifactDefinition, CalibrationArtifactId, CalibrationArtifactKind,
     CalibrationArtifactPlan, CalibrationPlanAction, CalibrationPlanItem, CalibrationSnapshot,
-    CalibrationStepId, CameraProfile, CameraRole, HeadFeatureCenterReport, NozzleHeightModel,
-    NozzleRunoutReport, VacuumProbeReport, VacuumSensorCharacterizationReport,
+    CalibrationStepId, CameraPixelFormat, CameraProfile, CameraRole, HeadFeatureCenterReport,
+    NozzleHeightModel, NozzleRunoutReport, VacuumProbeReport, VacuumSensorCharacterizationReport,
 };
 use velocitypnp_vision::calibrate_camera_ray_transfer;
 
 const MIGRATION_VERSION: &str = "legacy_snapshot.v1";
 const CAMERA_CALIBRATION_FINGERPRINT_SETTLE_FRAMES: u32 = 60;
+const CAMERA_CALIBRATION_FINGERPRINT_FRAMES_PER_SECOND: u32 = 10;
 
 pub fn reconcile_snapshot_artifacts(
     state: &AppState,
@@ -1048,9 +1049,11 @@ fn camera_profile(
 }
 
 fn camera_calibration_input_profile(mut profile: CameraProfile) -> CameraProfile {
-    // Frame settling changes capture latency. It does not change camera
-    // controls, image geometry, or the calibration target measurement.
+    // Settling, frame cadence, and transport encoding change capture latency.
+    // They do not change image dimensions, controls, or camera geometry.
     profile.settle_frames = CAMERA_CALIBRATION_FINGERPRINT_SETTLE_FRAMES;
+    profile.frames_per_second = CAMERA_CALIBRATION_FINGERPRINT_FRAMES_PER_SECOND;
+    profile.pixel_format = CameraPixelFormat::Yuyv;
     profile
 }
 
@@ -1280,7 +1283,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn camera_settling_does_not_change_the_calibration_fingerprint() {
+    async fn camera_transport_settings_do_not_change_the_calibration_fingerprint() {
         let state = state();
         let before = expected_inputs(
             &state,
@@ -1290,6 +1293,8 @@ mod tests {
         .unwrap();
         let mut profile = CameraProfile::initial_lumenpnp(&state.profile.id, CameraRole::TopCamera);
         profile.settle_frames = 42;
+        profile.frames_per_second = 30;
+        profile.pixel_format = CameraPixelFormat::Mjpeg;
         state.store.put_camera_profile(&profile).unwrap();
 
         let after = expected_inputs(

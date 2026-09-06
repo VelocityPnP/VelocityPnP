@@ -120,6 +120,15 @@ paths:
                   description: >-
                     Overrides the stored discard count for this diagnostic
                     capture only.
+                pixel_format:
+                  type: [string, "null"]
+                  enum: [yuyv, mjpeg, null]
+                  description: Uses this pixel format for this diagnostic only.
+                frames_per_second:
+                  type: [integer, "null"]
+                  minimum: 1
+                  maximum: 240
+                  description: Uses this frame rate for this diagnostic only.
       responses:
         "200":
           description: Applied controls and reproducibility report
@@ -130,12 +139,14 @@ paths:
                 required:
                   - role
                   - profile
+                  - temporary_capture_override
                   - controls
                   - discarded_settle_frames
                   - report
                 properties:
                   role: { $ref: "#/components/schemas/CameraRole" }
                   profile: { $ref: "#/components/schemas/CameraProfile" }
+                  temporary_capture_override: { type: boolean }
                   controls: { type: array, items: { type: object } }
                   discarded_settle_frames: { type: integer, minimum: 0 }
                   report: { $ref: "#/components/schemas/CameraReproducibilityReport" }
@@ -1795,6 +1806,10 @@ components:
         role: { $ref: "#/components/schemas/CameraRole" }
         width: { type: integer, minimum: 2 }
         height: { type: integer, minimum: 1 }
+        pixel_format:
+          type: string
+          enum: [yuyv, mjpeg]
+          default: yuyv
         frames_per_second: { type: integer, minimum: 1 }
         settle_frames: { type: integer, minimum: 0, maximum: 120 }
         controls:

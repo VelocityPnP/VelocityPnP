@@ -1830,18 +1830,21 @@ wget -qO- http://127.0.0.1:4080/api/v1/cameras/top_camera/controls
 wget -qO- http://127.0.0.1:4080/api/v1/cameras/top_camera/profile
 ```
 
-Snapshots use the stable role assigned during discovery, discard five settling
-frames, and return 1280x720 grayscale PNGs from native YUYV capture.
+Snapshots use the stable role assigned during discovery and return 1280x720
+grayscale PNGs. They use the stored transport format, frame rate, and settling
+count.
 Camera control updates use `PUT` on the role-scoped controls endpoint. The
 daemon validates IDs, types, ranges, steps, menu values, and writability before
 applying values in request order, so automatic mode can be disabled before its
 manual value is set.
 
 Role-scoped profiles persist capture format, ordered controls, ring-light use,
-and reproducibility thresholds in SQLite. A missing profile resolves to the
-V3.0.2 seed: 1280x720 YUYV at 10 frames per second, 60 settling frames,
-manual exposure 200, manual 4600 K white balance, and zero gain. Update a
-profile with `PUT /api/v1/cameras/{role}/profile`.
+and reproducibility thresholds in SQLite. A missing top-camera profile uses
+1280x720 MJPEG at 30 frames per second with no initial discard. A missing
+bottom-camera profile uses 1280x720 YUYV at 10 frames per second and discards
+20 initial frames. Both seeds use manual exposure 200, manual 4600 K white
+balance, and zero gain. Update a profile with
+`PUT /api/v1/cameras/{role}/profile`.
 
 After homing and acquiring a control lease, a bounded 30-frame check applies
 the profile once, turns on the configured lights, opens one capture stream,
@@ -1859,6 +1862,11 @@ The top-camera metric tracks the bright center island of the LumenPnP datum;
 the bottom-camera metric tracks the dark nozzle bore. Thresholds are
 provisional until both attached-camera runs pass and are recorded in the
 hardware evidence log.
+
+The reproducibility request can set `pixel_format` and
+`frames_per_second` for one diagnostic capture. These values do not change the
+stored profile. The response reports the tested profile and whether it used a
+temporary capture override.
 
 Build the UI with `npm run build`, then serve it from the daemon using
 `--web-dir web/dist`. The Vite development server is loopback-only and proxies
@@ -2004,6 +2012,17 @@ uses a fresh frame; the final correction distance must pass the profile limit
 in millimetres before the profile-defined XY-only coordinate reset is sent.
 Pixel error remains diagnostic evidence. Z and both nozzle angles are never
 included in that reset.
+
+After a calibrated operation parks at the datum, check its return without an
+additional move:
+
+```bash
+velocitypnp camera-return-check --lease "$VELOCITYPNP_LEASE"
+```
+
+This command captures at the current corrected pose and applies the 0.05 mm
+return gate. Do not use a plain `visual-home` call for this check. Its default
+behavior first moves to the nominal seed pose.
 
 Visual X/Y alone does not authorize precision motion. After coarse `G28`, use
 the validated datum-board contact artifact to establish the complete session

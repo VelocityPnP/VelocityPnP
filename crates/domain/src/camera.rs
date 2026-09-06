@@ -8,6 +8,20 @@ pub enum CameraRole {
     BottomCamera,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraPixelFormat {
+    #[default]
+    Yuyv,
+    Mjpeg,
+}
+
+impl CameraPixelFormat {
+    pub const fn is_yuyv(&self) -> bool {
+        matches!(self, Self::Yuyv)
+    }
+}
+
 impl CameraRole {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -56,6 +70,8 @@ pub struct CameraProfile {
     pub role: CameraRole,
     pub width: u32,
     pub height: u32,
+    #[serde(default, skip_serializing_if = "CameraPixelFormat::is_yuyv")]
+    pub pixel_format: CameraPixelFormat,
     pub frames_per_second: u32,
     pub settle_frames: u32,
     pub controls: Vec<CameraProfileControl>,
@@ -65,16 +81,17 @@ pub struct CameraProfile {
 
 impl CameraProfile {
     pub fn initial_lumenpnp(machine_profile_id: impl Into<String>, role: CameraRole) -> Self {
-        let settle_frames = match role {
-            CameraRole::TopCamera => 0,
-            CameraRole::BottomCamera => 20,
+        let (pixel_format, frames_per_second, settle_frames) = match role {
+            CameraRole::TopCamera => (CameraPixelFormat::Mjpeg, 30, 0),
+            CameraRole::BottomCamera => (CameraPixelFormat::Yuyv, 10, 20),
         };
         Self {
             machine_profile_id: machine_profile_id.into(),
             role,
             width: 1280,
             height: 720,
-            frames_per_second: 10,
+            pixel_format,
+            frames_per_second,
             settle_frames,
             controls: vec![
                 CameraProfileControl {
@@ -120,7 +137,7 @@ impl CameraProfile {
         if self.machine_profile_id.trim().is_empty()
             || self.width == 0
             || self.height == 0
-            || self.width % 2 != 0
+            || (self.pixel_format == CameraPixelFormat::Yuyv && self.width % 2 != 0)
             || self.frames_per_second == 0
             || self.settle_frames > 120
             || self.controls.is_empty()
@@ -161,6 +178,8 @@ mod tests {
         let profile = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.2", CameraRole::TopCamera);
         assert!(profile.validate().is_ok());
         assert_eq!(profile.settle_frames, 0);
+        assert_eq!(profile.pixel_format, CameraPixelFormat::Mjpeg);
+        assert_eq!(profile.frames_per_second, 30);
         assert_eq!(profile.controls[0].id, 10_094_849);
         assert_eq!(profile.controls[2].id, 10_094_850);
         assert_eq!(profile.controls[3].id, 9_963_788);
@@ -168,5 +187,21 @@ mod tests {
 
         let bottom = CameraProfile::initial_lumenpnp("lumenpnp-v3.0.2", CameraRole::BottomCamera);
         assert_eq!(bottom.settle_frames, 20);
+        assert_eq!(bottom.pixel_format, CameraPixelFormat::Yuyv);
+        assert_eq!(bottom.frames_per_second, 10);
+    }
+
+    #[test]
+    fn legacy_yuyv_format_stays_out_of_stored_profile_json() {
+        let mut profile =
+            CameraProfile::initial_lumenpnp("lumenpnp-v3.0.2", CameraRole::BottomCamera);
+        let legacy = serde_json::to_value(&profile).unwrap();
+        assert!(legacy.get("pixel_format").is_none());
+
+        profile.pixel_format = CameraPixelFormat::Mjpeg;
+        assert_eq!(
+            serde_json::to_value(profile).unwrap()["pixel_format"],
+            "mjpeg"
+        );
     }
 }

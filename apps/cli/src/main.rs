@@ -119,6 +119,13 @@ enum Command {
         #[arg(long)]
         current_pose: bool,
     },
+    /// Observe a datum return without moving to the nominal seed first.
+    CameraReturnCheck {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value_t = 0.05)]
+        tolerance_mm: f64,
+    },
     EmergencyStop,
     ImportBoard {
         pcb: PathBuf,
@@ -711,6 +718,10 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::CameraReturnCheck {
+            lease,
+            tolerance_mm,
+        } => run_camera_return_check(&client, base, lease, tolerance_mm).await?,
         Command::EmergencyStop => {
             run_operation(
                 &client,
@@ -2117,6 +2128,42 @@ async fn observe_visual_home(client: &Client, base: &str, lease: Uuid) -> Result
     .await
 }
 
+async fn run_camera_return_check(
+    client: &Client,
+    base: &str,
+    lease: Uuid,
+    tolerance_mm: f64,
+) -> Result<Value> {
+    if !tolerance_mm.is_finite() || tolerance_mm <= 0.0 {
+        bail!("camera return tolerance must be finite and positive");
+    }
+    let status_value = get(client, &format!("{base}/machine/status")).await?;
+    let status: MachineStatus = serde_json::from_value(status_value["machine"].clone())
+        .context("machine status response did not contain a valid machine")?;
+    if status.state != MachineState::Ready || !status.homed {
+        bail!("camera return check requires a homed ready machine");
+    }
+    let pose = status
+        .pose
+        .context("camera return check requires a known pose")?;
+    let observation = observe_visual_home(client, base, lease).await?;
+    let correction = visual_correction(&observation)?;
+    let return_error_mm = correction[0].hypot(correction[1]);
+    let observation_valid = visual_observation_valid(&observation);
+    Ok(json!({
+        "kind": "camera_return_check",
+        "passed": observation_valid && return_error_mm <= tolerance_mm,
+        "tolerance_mm": tolerance_mm,
+        "return_error_mm": return_error_mm,
+        "correction_x_mm": correction[0],
+        "correction_y_mm": correction[1],
+        "observation_valid": observation_valid,
+        "observed_pose": pose,
+        "moved_before_capture": false,
+        "observation": observation["initial"],
+    }))
+}
+
 fn visual_correction(observation: &Value) -> Result<[f64; 2]> {
     let initial = observation
         .get("initial")
@@ -2613,6 +2660,28 @@ mod tests {
                 samples: 80,
                 repetitions: 5,
             } if role == "bottom_camera" && parsed_lease == lease
+        ));
+    }
+
+    #[test]
+    fn camera_return_check_cli_accepts_a_tolerance() {
+        let lease = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "camera-return-check",
+            "--lease",
+            &lease.to_string(),
+            "--tolerance-mm",
+            "0.04",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::CameraReturnCheck {
+                lease: parsed_lease,
+                tolerance_mm: 0.04,
+            } if parsed_lease == lease
         ));
     }
 

@@ -30,21 +30,21 @@ use velocitypnp_domain::{
     BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun, BoardSurfaceParallaxObservation,
     BottomCameraMappingReport, CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck,
     CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
-    CalibrationSnapshot, CalibrationStepId, CameraProfile, CameraProfileControlValue,
-    CameraRayTransferReport, CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport,
-    HeldPartAlignmentObservation, HeldPartAlignmentReport, HeldPartClass, HeldPartInspectionReport,
-    HeldPartModelPrediction, HeldPartRotationCapture, HeldPartShadowReport, InspectionReport,
-    InspectionStatus, InstalledGeometryCalibrationReport, InstalledPlateGeometryReport,
-    InstalledPlateHoleSample, InstalledPlateRegistrationReport, Job, JobExecutionRun,
-    JobExecutionStatus, JobExecutionStep, JobExecutionStepStatus, JogTarget, LinearAxis,
-    LocalXyAxisDirectionReport, LocalXyAxisEstimate, LocalXyCompensationHoldout,
-    LocalXyDirectionResponseReport, LocalXyDirectionResponseSample, LocalXyFeedDirectionReport,
-    MachineProfile, MachineState, NozzleHeightModel, NozzleHeightSample,
-    NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample, Operation,
-    OperationStatus, Part, PartOrientation, PlacementExecutionReport, PlacementExecutionRun,
-    PlacementExecutionStage, PlacementExecutionStageReport, PlacementOutcomeDisposition,
-    PlacementOutcomeRecord, PlacementPickupAttemptReport, PlacementProcessEstimate,
-    PlacementReleaseAttemptReport, PlacementVerificationClass,
+    CalibrationSnapshot, CalibrationStepId, CameraPixelFormat, CameraProfile,
+    CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
+    HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
+    HeldPartAlignmentReport, HeldPartClass, HeldPartInspectionReport, HeldPartModelPrediction,
+    HeldPartRotationCapture, HeldPartShadowReport, InspectionReport, InspectionStatus,
+    InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
+    InstalledPlateRegistrationReport, Job, JobExecutionRun, JobExecutionStatus, JobExecutionStep,
+    JobExecutionStepStatus, JogTarget, LinearAxis, LocalXyAxisDirectionReport, LocalXyAxisEstimate,
+    LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
+    LocalXyFeedDirectionReport, MachineProfile, MachineState, NozzleHeightModel,
+    NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample,
+    Operation, OperationStatus, Part, PartOrientation, PlacementExecutionReport,
+    PlacementExecutionRun, PlacementExecutionStage, PlacementExecutionStageReport,
+    PlacementOutcomeDisposition, PlacementOutcomeRecord, PlacementPickupAttemptReport,
+    PlacementProcessEstimate, PlacementReleaseAttemptReport, PlacementVerificationClass,
     PlacementVerificationComparisonReport, PlanarCameraCalibrationReport,
     PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
     SourceComponentClass, SourceComponentModelPrediction, SourceComponentShadowReport,
@@ -222,7 +222,7 @@ const MAX_WORKSPACE_ARTIFACT_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 const WORKSPACE_THUMBNAIL_WIDTH: u32 = 192;
 const WORKSPACE_THUMBNAIL_HEIGHT: u32 = 108;
 const WORKSPACE_PROGRESS_TILE_INTERVAL: u32 = 25;
-const WORKSPACE_SCAN_TIMING_ALGORITHM: &str = "workspace_scan_timing.v1";
+const WORKSPACE_SCAN_TIMING_ALGORITHM: &str = "workspace_scan_timing.v2";
 const CAMERA_TARGET_OPERATION_TIMING_ALGORITHM: &str = "camera_target_operation_timing.v1";
 const WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS: u32 = 512;
 const WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS: u32 = 2;
@@ -261,6 +261,11 @@ struct WorkspaceScanTiming {
     camera_open_ms: f64,
     tile_motion_ms: Vec<f64>,
     tile_capture_ms: Vec<f64>,
+    tile_discarded_capture_frames: Vec<u32>,
+    tile_capture_sequences: Vec<u32>,
+    capture_sequence_gaps: Vec<u32>,
+    camera_fourcc: Option<String>,
+    camera_interval: Option<[u32; 2]>,
     tile_artifact_ms: Vec<f64>,
     tile_mosaic_ms: Vec<f64>,
     progress_store_ms: Vec<f64>,
@@ -391,11 +396,29 @@ fn record_workspace_motion_correction(
     }
 }
 
+fn record_workspace_capture(
+    timing: &mut WorkspaceScanTiming,
+    metadata: &velocitypnp_vision::CaptureMetadata,
+) {
+    if let Some(previous) = timing.tile_capture_sequences.last() {
+        timing
+            .capture_sequence_gaps
+            .push(metadata.sequence.wrapping_sub(*previous));
+    }
+    timing
+        .tile_discarded_capture_frames
+        .push(metadata.settle_frames);
+    timing.tile_capture_sequences.push(metadata.sequence);
+    timing.camera_fourcc = Some(metadata.fourcc.clone());
+    timing.camera_interval = Some([metadata.interval_numerator, metadata.interval_denominator]);
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct ProfiledCameraSessionKey {
     device: PathBuf,
     width: u32,
     height: u32,
+    pixel_format: CameraPixelFormat,
     frames_per_second: u32,
     timeout: Duration,
     controls: Vec<CameraControlUpdate>,
@@ -1602,6 +1625,10 @@ struct CameraReproducibilityRequest {
     sample_count: u32,
     #[serde(default)]
     settle_frames: Option<u32>,
+    #[serde(default)]
+    pixel_format: Option<CameraPixelFormat>,
+    #[serde(default)]
+    frames_per_second: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -3411,6 +3438,11 @@ async fn execute_workspace_scan_locked(
         "feed_mm_per_min": scan.feed_mm_per_min,
         "configured_settle_frames": scan.capture_settle_frames,
         "discarded_capture_frames": scan.discarded_capture_frames,
+        "tile_discarded_capture_frames": timing.tile_discarded_capture_frames,
+        "tile_capture_sequences": timing.tile_capture_sequences,
+        "capture_sequence_gaps": timing.capture_sequence_gaps,
+        "camera_fourcc": timing.camera_fourcc,
+        "camera_interval": timing.camera_interval,
         "total_elapsed_ms": elapsed_ms(operation_started),
         "lights_enable_ms": timing.lights_enable_ms,
         "camera_open_ms": timing.camera_open_ms,
@@ -3742,6 +3774,7 @@ async fn capture_and_build_precision_workspace_scan(
         .await;
         timing.tile_capture_ms.push(elapsed_ms(capture_started));
         let capture = capture_result?;
+        record_workspace_capture(timing, &capture.metadata);
         scan.discarded_capture_frames = scan
             .discarded_capture_frames
             .saturating_add(capture.metadata.settle_frames);
@@ -3930,6 +3963,7 @@ async fn capture_and_build_workspace_survey(
         .await;
         timing.tile_capture_ms.push(elapsed_ms(capture_started));
         let capture = capture_result?;
+        record_workspace_capture(timing, &capture.metadata);
         scan.discarded_capture_frames = scan
             .discarded_capture_frames
             .saturating_add(capture.metadata.settle_frames);
@@ -14891,6 +14925,14 @@ async fn camera_reproducibility(
             "camera settle_frames must not exceed 120",
         ));
     }
+    if body
+        .frames_per_second
+        .is_some_and(|frames_per_second| !(1..=240).contains(&frames_per_second))
+    {
+        return Err(ApiError::bad_request(
+            "camera frames_per_second must be between 1 and 240",
+        ));
+    }
     let sample_count = body.sample_count;
     let status = state.machine.status();
     status
@@ -14902,6 +14944,16 @@ async fn camera_reproducibility(
         ));
     }
     let profile = stored_camera_profile(&state, role)?;
+    let mut tested_profile = profile.clone();
+    if let Some(pixel_format) = body.pixel_format {
+        tested_profile.pixel_format = pixel_format;
+    }
+    if let Some(frames_per_second) = body.frames_per_second {
+        tested_profile.frames_per_second = frames_per_second;
+    }
+    tested_profile
+        .validate()
+        .map_err(|message| ApiError::bad_request(message.to_string()))?;
 
     if profile.lighting_enabled {
         state
@@ -14910,11 +14962,12 @@ async fn camera_reproducibility(
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
-    let capture = capture_camera_reproducibility_report_with_settle(
+    let capture = capture_camera_reproducibility_report_with_profile(
         &state,
         role,
         sample_count,
         body.settle_frames,
+        tested_profile.clone(),
     )
     .await;
     let lights_off = if profile.lighting_enabled {
@@ -14928,9 +14981,10 @@ async fn camera_reproducibility(
     let (controls, report) = capture?;
     Ok(Json(json!({
         "role": role,
-        "profile": profile,
+        "profile": tested_profile,
+        "temporary_capture_override": tested_profile != profile,
         "controls": controls,
-        "discarded_settle_frames": body.settle_frames.unwrap_or(profile.settle_frames),
+        "discarded_settle_frames": body.settle_frames.unwrap_or(tested_profile.settle_frames),
         "report": report,
     })))
 }
@@ -14950,6 +15004,23 @@ async fn capture_camera_reproducibility_report_with_settle(
     settle_frames: Option<u32>,
 ) -> ApiResult<(Value, CameraReproducibilityReport)> {
     let profile = stored_camera_profile(state, role)?;
+    capture_camera_reproducibility_report_with_profile(
+        state,
+        role,
+        sample_count,
+        settle_frames,
+        profile,
+    )
+    .await
+}
+
+async fn capture_camera_reproducibility_report_with_profile(
+    state: &AppState,
+    role: CameraRole,
+    sample_count: u32,
+    settle_frames: Option<u32>,
+    profile: CameraProfile,
+) -> ApiResult<(Value, CameraReproducibilityReport)> {
     let device_path = camera_path_for_role(role)?;
     let mut config = camera_capture_config(&profile, device_path);
     if let Some(settle_frames) = settle_frames {
@@ -15019,6 +15090,7 @@ fn camera_capture_config(profile: &CameraProfile, device_path: String) -> V4l2Ca
     let mut config = V4l2CaptureConfig::lumenpnp(device_path);
     config.width = profile.width;
     config.height = profile.height;
+    config.pixel_format = profile.pixel_format;
     config.frames_per_second = profile.frames_per_second;
     config.settle_frames = profile.settle_frames;
     config
@@ -15716,6 +15788,7 @@ async fn capture_scoped_profiled_frames(
         device: config.device.clone(),
         width: config.width,
         height: config.height,
+        pixel_format: config.pixel_format,
         frames_per_second: config.frames_per_second,
         timeout: config.timeout,
         controls: controls.clone(),
@@ -31183,6 +31256,35 @@ mod tests {
         assert_eq!(summary["mean_ms"], 2.5);
         assert_eq!(summary["p95_ms"], 4.0);
         assert_eq!(summary["maximum_ms"], 4.0);
+    }
+
+    #[test]
+    fn workspace_capture_timing_records_per_tile_camera_evidence() {
+        let mut timing = WorkspaceScanTiming::default();
+        for (sequence, discarded) in [(41, 3), (45, 2), (46, 0)] {
+            record_workspace_capture(
+                &mut timing,
+                &velocitypnp_vision::CaptureMetadata {
+                    device: std::path::PathBuf::from("/dev/video4"),
+                    width: 1280,
+                    height: 720,
+                    fourcc: "YUYV".into(),
+                    stride: 2560,
+                    interval_numerator: 1,
+                    interval_denominator: 10,
+                    sequence,
+                    settle_frames: discarded,
+                    timestamp_monotonic: true,
+                    fresh_after_boundary: true,
+                },
+            );
+        }
+
+        assert_eq!(timing.tile_discarded_capture_frames, [3, 2, 0]);
+        assert_eq!(timing.tile_capture_sequences, [41, 45, 46]);
+        assert_eq!(timing.capture_sequence_gaps, [4, 1]);
+        assert_eq!(timing.camera_fourcc.as_deref(), Some("YUYV"));
+        assert_eq!(timing.camera_interval, Some([1, 10]));
     }
 
     #[test]

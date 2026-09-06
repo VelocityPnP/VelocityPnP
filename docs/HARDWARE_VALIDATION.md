@@ -3323,6 +3323,46 @@ final camera return error was 0.0335 mm. The machine ended ready, homed, and
 fault-free at safe Z with calibration
 `3b837434-a961-4e60-945a-18335b42d21f` active.
 
+### Top-camera transport qualification
+
+On 2026-09-06, continuous idle draining reduced the 10-tile scan's queued
+discard count from 36 to 19. It did not reduce capture time at 10 frames per
+second because the timestamp freshness boundary remained the limiting step.
+
+A 30-frame YUYV control and four independent MJPEG runs passed the stored
+luma, focus, target-detection, and center-jitter gates. All runs detected the
+datum in every frame. The MJPEG center differed from the YUYV center by about
+0.05 pixel. Its focus metric was about 45 percent lower, but paired stationary
+images showed that much of the higher YUYV score came from sensor noise.
+
+The stored top-camera profile changed to 1280x720 MJPEG at 30 frames per
+second with no initial discard. The bottom-camera profile stayed at 1280x720
+YUYV, 10 frames per second, and 20 initial discard frames. Ten-tile scan
+`b0755425-a2f0-4ba7-a209-e506d335e994` passed with full coverage and four of
+nine overlap registrations. It completed in 5.64 seconds, down from 7.40
+seconds for the 10-frame-per-second control. Camera capture decreased from
+3.34 to 1.78 seconds. The first capture took 0.903 second, and the later nine
+captures averaged 0.098 second.
+
+Non-consuming feeder source capture
+`82d173bf-21e9-4492-9f25-46442472d111` passed for four occupied and four empty
+views. Board registration `43c5874b-a8b8-4c61-ab8b-746e2b6e741b` passed in
+8.88 seconds with three fiducials, 0.0333 mm maximum residual, and 0.0268 mm
+RMS residual.
+
+The return measurements immediately after these operations used the default
+`visual-home` behavior. That call first moved from the corrected park pose to
+the nominal seed. These values are not valid return checks. The new
+`camera-return-check` command captures without that move. Its first physical
+use reported 0.0164 mm error at the current corrected pose and passed the
+0.05 mm gate. Use this command for all later return checks.
+
+Two stationary, order-bracketed camera comparisons used equal two-second
+settling. Cross-format mean absolute luma difference was 5.33 and 5.38. The
+YUYV repeat differed from itself by 5.04, while the MJPEG repeat differed by
+1.76. Visual review found a smoother MJPEG image with clear datum edges. It
+could not exclude some loss of low-contrast detail.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
