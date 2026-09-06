@@ -15,10 +15,10 @@
   "home_pose": {"x_mm": 0.0, "y_mm": 0.0, "z_mm": 31.5, "rotation_deg": 0.0},
   "safe_z_mm": 31.5,
   "default_feed_mm_per_min": 1200.0,
-  "maximum_feed_mm_per_min": 12000.0,
+  "maximum_feed_mm_per_min": 23000.0,
   "transit_motion": {
-    "clear_xy_feed_mm_per_min": 12000.0,
-    "carried_xy_feed_mm_per_min": 12000.0,
+    "clear_xy_feed_mm_per_min": 23000.0,
+    "carried_xy_feed_mm_per_min": 23000.0,
     "clear_z_feed_mm_per_min": 1200.0,
     "carried_z_feed_mm_per_min": 1200.0,
     "precision_z_approach_mm": 2.0
@@ -214,7 +214,9 @@
       3000.0,
       6000.0,
       9000.0,
-      12000.0
+      12000.0,
+      18000.0,
+      23000.0
     ],
     "minimum_sample_pairs": 3,
     "maximum_sample_pairs": 5,

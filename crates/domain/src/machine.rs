@@ -1407,7 +1407,7 @@ mod tests {
         assert_eq!(direction_response.approach_distances_mm, [5.0, 25.0]);
         assert_eq!(
             direction_response.approach_feeds_mm_per_min,
-            [300.0, 1_200.0, 3_000.0, 6_000.0, 9_000.0, 12_000.0]
+            [300.0, 1_200.0, 3_000.0, 6_000.0, 9_000.0, 12_000.0, 18_000.0, 23_000.0,]
         );
         assert_eq!(direction_response.minimum_sample_pairs, 3);
         assert_eq!(direction_response.maximum_sample_pairs, 5);

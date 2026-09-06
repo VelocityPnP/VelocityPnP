@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::{multipart, Client, Response};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -83,6 +83,9 @@ enum Command {
         feeds: Vec<f64>,
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=20))]
         cycles: u32,
+        /// Axis or axes to exercise.
+        #[arg(long, value_enum, default_value = "xy")]
+        axis: MotionSweepAxis,
         #[arg(long, default_value_t = 150.0)]
         x_excursion_mm: f64,
         #[arg(long, default_value_t = 100.0)]
@@ -643,6 +646,7 @@ async fn main() -> Result<()> {
             lease,
             feeds,
             cycles,
+            axis,
             x_excursion_mm,
             y_excursion_mm,
             return_tolerance_mm,
@@ -659,6 +663,7 @@ async fn main() -> Result<()> {
                 lease,
                 feeds,
                 cycles,
+                axis,
                 x_excursion_mm,
                 y_excursion_mm,
                 return_tolerance_mm,
@@ -1663,7 +1668,25 @@ const DEFAULT_MOTION_SWEEP_FEEDS: [f64; 5] = [1_200.0, 3_000.0, 6_000.0, 9_000.0
 const MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN: f64 = 1_200.0;
 const MOTION_SWEEP_BASELINE_SAMPLES: usize = 3;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum MotionSweepAxis {
+    Xy,
+    X,
+    Y,
+}
+
+impl MotionSweepAxis {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Xy => "xy",
+            Self::X => "x",
+            Self::Y => "y",
+        }
+    }
+}
+
 struct MotionSweepPlan {
+    axis: MotionSweepAxis,
     feeds: Vec<f64>,
     seed: Pose,
     low: Pose,
@@ -1677,6 +1700,7 @@ async fn run_motion_sweep(
     lease: Uuid,
     feeds: Vec<f64>,
     cycles: u32,
+    axis: MotionSweepAxis,
     x_excursion_mm: f64,
     y_excursion_mm: f64,
     return_tolerance_mm: f64,
@@ -1693,6 +1717,7 @@ async fn run_motion_sweep(
         &status,
         &profile,
         feeds,
+        axis,
         x_excursion_mm,
         y_excursion_mm,
         return_tolerance_mm,
@@ -1763,19 +1788,79 @@ async fn run_motion_sweep(
         let mut return_errors = Vec::with_capacity(cycles as usize);
         let mut level_passed = true;
         for cycle in 1..=cycles {
-            let outbound = timed_jog(client, base, lease, plan.seed, plan.low, *feed)
-                .await
-                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, outbound move"))?;
-            let traverse = timed_jog(client, base, lease, plan.low, plan.high, *feed)
-                .await
-                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, traverse move"))?;
-            let returning = timed_jog(client, base, lease, plan.high, plan.seed, *feed)
-                .await
-                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, return move"))?;
-            let observation = observe_visual_home(client, base, lease)
-                .await
-                .with_context(|| format!("feed {feed:.0}, cycle {cycle}, return observation"))?;
-            let correction = visual_correction(&observation)?;
+            let mut moves = Vec::with_capacity(3);
+            let mut motion_error = None;
+            for (stage, from, target) in [
+                ("outbound", plan.seed, plan.low),
+                ("traverse", plan.low, plan.high),
+                ("return", plan.high, plan.seed),
+            ] {
+                match timed_jog(client, base, lease, from, target, *feed).await {
+                    Ok(motion) => moves.push(motion),
+                    Err(error) => {
+                        motion_error = Some((stage, format!("{error:#}")));
+                        break;
+                    }
+                }
+            }
+            if let Some((stage, error)) = motion_error {
+                passed = false;
+                level_passed = false;
+                stopped_early = true;
+                stop_reason = Some(format!(
+                    "feed {feed:.0}, cycle {cycle}: {stage} move failed: {error}"
+                ));
+                samples.push(json!({
+                    "cycle": cycle,
+                    "moves": moves,
+                    "failed_stage": stage,
+                    "motion_error": error,
+                    "passed": false,
+                }));
+                break;
+            }
+            let observation = match observe_visual_home(client, base, lease).await {
+                Ok(observation) => observation,
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    passed = false;
+                    level_passed = false;
+                    stopped_early = true;
+                    stop_reason = Some(format!(
+                        "feed {feed:.0}, cycle {cycle}: return observation failed: {error}"
+                    ));
+                    samples.push(json!({
+                        "cycle": cycle,
+                        "moves": moves,
+                        "failed_stage": "return_observation",
+                        "observation_error": error,
+                        "observation_valid": false,
+                        "passed": false,
+                    }));
+                    break;
+                }
+            };
+            let correction = match visual_correction(&observation) {
+                Ok(correction) => correction,
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    passed = false;
+                    level_passed = false;
+                    stopped_early = true;
+                    stop_reason = Some(format!(
+                        "feed {feed:.0}, cycle {cycle}: invalid return result: {error}"
+                    ));
+                    samples.push(json!({
+                        "cycle": cycle,
+                        "moves": moves,
+                        "failed_stage": "return_result",
+                        "observation_error": error,
+                        "observation_valid": false,
+                        "passed": false,
+                    }));
+                    break;
+                }
+            };
             let error_x_mm = correction[0] - baseline_correction[0];
             let error_y_mm = correction[1] - baseline_correction[1];
             let return_error_mm = error_x_mm.hypot(error_y_mm);
@@ -1784,7 +1869,7 @@ async fn run_motion_sweep(
             return_errors.push(return_error_mm);
             samples.push(json!({
                 "cycle": cycle,
-                "moves": [outbound, traverse, returning],
+                "moves": moves,
                 "observed_correction_x_mm": correction[0],
                 "observed_correction_y_mm": correction[1],
                 "return_error_x_mm": error_x_mm,
@@ -1809,8 +1894,10 @@ async fn run_motion_sweep(
                 break;
             }
         }
-        let mean_return_error_mm = return_errors.iter().sum::<f64>() / return_errors.len() as f64;
-        let max_return_error_mm = return_errors.iter().copied().fold(0.0_f64, f64::max);
+        let mean_return_error_mm = (!return_errors.is_empty())
+            .then(|| return_errors.iter().sum::<f64>() / return_errors.len() as f64);
+        let max_return_error_mm = (!return_errors.is_empty())
+            .then(|| return_errors.iter().copied().fold(0.0_f64, f64::max));
         levels.push(json!({
             "feed_mm_per_min": feed,
             "passed": level_passed && return_errors.len() == cycles as usize,
@@ -1826,6 +1913,7 @@ async fn run_motion_sweep(
     Ok(json!({
         "kind": "clear_xy_motion_sweep",
         "profile_id": profile.id,
+        "axis": plan.axis.as_str(),
         "passed": passed,
         "stopped_early": stopped_early,
         "stop_reason": stop_reason,
@@ -1856,6 +1944,7 @@ fn motion_sweep_plan(
     status: &MachineStatus,
     profile: &MachineProfile,
     feeds: Vec<f64>,
+    axis: MotionSweepAxis,
     x_excursion_mm: f64,
     y_excursion_mm: f64,
     return_tolerance_mm: f64,
@@ -1869,12 +1958,17 @@ fn motion_sweep_plan(
     if !profile.accepts_profile_id(&status.profile_id) {
         bail!("machine status and active profile do not match");
     }
-    if !x_excursion_mm.is_finite()
-        || !y_excursion_mm.is_finite()
-        || x_excursion_mm <= 0.0
-        || y_excursion_mm <= 0.0
+    let selected_excursions = match axis {
+        MotionSweepAxis::Xy => [Some(x_excursion_mm), Some(y_excursion_mm)],
+        MotionSweepAxis::X => [Some(x_excursion_mm), None],
+        MotionSweepAxis::Y => [None, Some(y_excursion_mm)],
+    };
+    if selected_excursions
+        .into_iter()
+        .flatten()
+        .any(|excursion| !excursion.is_finite() || excursion <= 0.0)
     {
-        bail!("motion-sweep excursions must be finite and positive");
+        bail!("selected motion-sweep excursions must be finite and positive");
     }
     if !return_tolerance_mm.is_finite() || return_tolerance_mm <= 0.0 {
         bail!("motion-sweep return tolerance must be finite and positive");
@@ -1903,12 +1997,14 @@ fn motion_sweep_plan(
         .controller
         .as_ref()
         .context("motion sweep requires recorded controller settings")?;
-    for axis in ["X", "Y"] {
+    for axis_letter in ["X", "Y"] {
         let axis_limit = controller
             .settings
             .max_feed_units_per_second
-            .get(axis)
-            .with_context(|| format!("controller settings do not include the {axis} feed limit"))?;
+            .get(axis_letter)
+            .with_context(|| {
+                format!("controller settings do not include the {axis_letter} feed limit")
+            })?;
         let highest_feed = feeds
             .last()
             .copied()
@@ -1916,7 +2012,7 @@ fn motion_sweep_plan(
             .max(MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN);
         if highest_feed / 60.0 > *axis_limit {
             bail!(
-                "requested feed {highest_feed:.0} mm/min exceeds controller {axis} limit of {:.0} mm/min",
+                "requested feed {highest_feed:.0} mm/min exceeds controller {axis_letter} limit of {:.0} mm/min",
                 axis_limit * 60.0
             );
         }
@@ -1938,6 +2034,11 @@ fn motion_sweep_plan(
     if (seed.z_mm - profile.safe_z_mm).abs() > 1e-6 {
         bail!("motion-sweep seed must be at the configured safe Z");
     }
+    let (x_excursion_mm, y_excursion_mm) = match axis {
+        MotionSweepAxis::Xy => (x_excursion_mm, y_excursion_mm),
+        MotionSweepAxis::X => (x_excursion_mm, 0.0),
+        MotionSweepAxis::Y => (0.0, y_excursion_mm),
+    };
     let low = Pose {
         x_mm: seed.x_mm - x_excursion_mm,
         y_mm: seed.y_mm - y_excursion_mm,
@@ -1952,6 +2053,7 @@ fn motion_sweep_plan(
         bail!("motion-sweep points are outside the active machine bounds");
     }
     Ok(MotionSweepPlan {
+        axis,
         feeds,
         seed,
         low,
@@ -2359,13 +2461,71 @@ mod tests {
             .insert("Y".into(), 500.0);
         status.controller = Some(controller);
 
-        let plan = motion_sweep_plan(&status, &profile, Vec::new(), 150.0, 100.0, 0.05)
-            .expect("default sweep plan");
+        let plan = motion_sweep_plan(
+            &status,
+            &profile,
+            Vec::new(),
+            MotionSweepAxis::Xy,
+            150.0,
+            100.0,
+            0.05,
+        )
+        .expect("default sweep plan");
 
         assert_eq!(plan.feeds, DEFAULT_MOTION_SWEEP_FEEDS);
         assert!(profile.bounds.contains(plan.low));
         assert!(profile.bounds.contains(plan.high));
         assert_eq!(plan.seed.z_mm, profile.safe_z_mm);
+    }
+
+    #[test]
+    fn motion_sweep_can_isolate_each_linear_axis() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let mut status = MachineStatus {
+            state: MachineState::Ready,
+            simulated: false,
+            profile_id: profile.id.clone(),
+            pose: Some(profile.home_pose),
+            homed: true,
+            ..MachineStatus::default()
+        };
+        let mut controller = velocitypnp_domain::ControllerConnection::default();
+        controller
+            .settings
+            .max_feed_units_per_second
+            .insert("X".into(), 500.0);
+        controller
+            .settings
+            .max_feed_units_per_second
+            .insert("Y".into(), 500.0);
+        status.controller = Some(controller);
+
+        let x = motion_sweep_plan(
+            &status,
+            &profile,
+            vec![12_000.0],
+            MotionSweepAxis::X,
+            150.0,
+            100.0,
+            0.05,
+        )
+        .expect("X-only sweep plan");
+        let y = motion_sweep_plan(
+            &status,
+            &profile,
+            vec![12_000.0],
+            MotionSweepAxis::Y,
+            150.0,
+            100.0,
+            0.05,
+        )
+        .expect("Y-only sweep plan");
+
+        assert_eq!(x.low.y_mm, x.seed.y_mm);
+        assert_eq!(x.high.y_mm, x.seed.y_mm);
+        assert_eq!(y.low.x_mm, y.seed.x_mm);
+        assert_eq!(y.high.x_mm, y.seed.x_mm);
     }
 
     #[test]
@@ -2380,6 +2540,8 @@ mod tests {
             "1200",
             "6000",
             "12000",
+            "--axis",
+            "y",
             "--confirm-safety-checks",
         ])
         .unwrap();
@@ -2389,6 +2551,7 @@ mod tests {
             Command::MotionSweep {
                 lease: parsed_lease,
                 feeds,
+                axis: MotionSweepAxis::Y,
                 confirm_safety_checks: true,
                 ..
             } if parsed_lease == lease && feeds == vec![1_200.0, 6_000.0, 12_000.0]

@@ -31945,8 +31945,8 @@ mod tests {
             benchmark_cycles: Vec::new(),
             report: Some(StripFeederPickupQualificationReport {
                 algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
-                clear_xy_feed_mm_per_min: 12_000.0,
-                carried_xy_feed_mm_per_min: 12_000.0,
+                clear_xy_feed_mm_per_min: 23_000.0,
+                carried_xy_feed_mm_per_min: 23_000.0,
                 clear_z_feed_mm_per_min: 1_200.0,
                 carried_z_feed_mm_per_min: 1_200.0,
                 precision_z_approach_mm: 2.0,
