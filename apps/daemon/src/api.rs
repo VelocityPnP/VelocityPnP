@@ -253,6 +253,7 @@ const BOARD_REGISTRATION_MAX_RESIDUAL_MM: f64 = 0.15;
 const BOARD_REGISTRATION_APPROACH_MM: f64 = 1.0;
 const FINE_HOME_MAX_Z_CORRECTION_MM: f64 = 0.5;
 const STRIP_FEEDER_PICKUP_TIMING_ALGORITHM: &str = "strip_feeder_pickup_timing.v1";
+const VACUUM_OPERATION_TIMING_ALGORITHM: &str = "vacuum_operation_timing.v1";
 
 #[derive(Default)]
 struct WorkspaceScanTiming {
@@ -266,6 +267,41 @@ struct WorkspaceScanTiming {
     mosaic_finalize_ms: f64,
     park_ms: f64,
     lights_disable_ms: f64,
+}
+
+#[derive(Default)]
+struct VacuumOperationTiming {
+    establish_off_state_ms: f64,
+    visual_home_ms: f64,
+    rotation_reference_ms: f64,
+    tip_measurement_ms: f64,
+    target_centering_ms: f64,
+    probe_xy_transit_ms: f64,
+    probe_z_approach_ms: f64,
+    vacuum_setup_ms: f64,
+    contact_search_ms: f64,
+    vacuum_cleanup_ms: f64,
+    fine_z_reset_ms: f64,
+    restore_ms: f64,
+}
+
+impl VacuumOperationTiming {
+    fn json(&self) -> Value {
+        json!({
+            "establish_off_state_ms": self.establish_off_state_ms,
+            "visual_home_ms": self.visual_home_ms,
+            "rotation_reference_ms": self.rotation_reference_ms,
+            "tip_measurement_ms": self.tip_measurement_ms,
+            "target_centering_ms": self.target_centering_ms,
+            "probe_xy_transit_ms": self.probe_xy_transit_ms,
+            "probe_z_approach_ms": self.probe_z_approach_ms,
+            "vacuum_setup_ms": self.vacuum_setup_ms,
+            "contact_search_ms": self.contact_search_ms,
+            "vacuum_cleanup_ms": self.vacuum_cleanup_ms,
+            "fine_z_reset_ms": self.fine_z_reset_ms,
+            "restore_ms": self.restore_ms,
+        })
+    }
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -10534,6 +10570,7 @@ async fn execute_physical_strip_feeder_pickup(
         prepared.lease_id,
         nozzle_id,
         &prepared.head_reference,
+        None,
     )
     .await?;
     let bottom_pose = state
@@ -10621,6 +10658,7 @@ async fn execute_physical_strip_feeder_pickup(
         pickup_head_y_mm,
         search,
         Some(&prepared.vacuum_characterization),
+        None,
     )
     .await;
     let (open_nozzle_raw_values, pickup_samples, contact) = match descent {
@@ -10974,7 +11012,7 @@ async fn execute_physical_strip_feeder_pickup(
     } else {
         None
     };
-    restore_level_visual_home(state, prepared.lease_id).await?;
+    restore_level_visual_home(state, prepared.lease_id, None).await?;
     if !verified_release.released {
         findings.push("post-release bottom vision did not confirm a clear nozzle".into());
     }
@@ -12022,7 +12060,7 @@ async fn lift_and_restore_after_pickup(state: &AppState, lease_id: Uuid) -> Resu
         )
         .await?;
     }
-    restore_level_visual_home(state, lease_id).await
+    restore_level_visual_home(state, lease_id, None).await
 }
 
 fn update_registration_after_pickup(
@@ -15119,9 +15157,15 @@ async fn approach_visual_datum_from_negative_xy(
         .as_ref()
         .ok_or_else(|| "active profile has no local XY direction response".to_string())?;
     let away = negative_xy_approach_start(target, profile.datum_approach_distance_mm);
+    let away_feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        state.machine.status().pose,
+        away,
+        profile.datum_approach_feed_mm_per_min,
+    );
     state
         .machine
-        .jog(lease_id, away, profile.datum_approach_feed_mm_per_min)
+        .jog(lease_id, away, away_feed_mm_per_min)
         .await
         .map_err(|error| error.to_string())?;
     state
@@ -15798,6 +15842,7 @@ struct PreparedVacuumProbe {
     search: VacuumProbeSearch,
     mode: VacuumOperationMode,
     reference_contact_controller_z_mm: Option<f64>,
+    motion_planner: Option<MotionPlanner>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15815,6 +15860,64 @@ impl VacuumOperationMode {
     fn fine_homes(self) -> bool {
         self == Self::FineHome
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CalibrationProbe => "calibration_probe",
+            Self::Characterization => "characterization",
+            Self::FineHome => "fine_home",
+        }
+    }
+}
+
+struct CalibratedMotionSequence {
+    planner: MotionPlanner,
+    state: MotionState,
+}
+
+impl CalibratedMotionSequence {
+    fn new(planner: MotionPlanner, controller_pose: Pose) -> Result<Self, String> {
+        let state = planner
+            .initial_state(controller_pose)
+            .map_err(|error| error.to_string())?;
+        Ok(Self { planner, state })
+    }
+
+    fn apply_z_coordinate_reset(&mut self, controller_pose: Pose) {
+        self.state.logical_pose.z_mm = controller_pose.z_mm;
+        self.state.logical_pose.rotation_deg = controller_pose.rotation_deg;
+        self.state.controller_pose = controller_pose;
+    }
+}
+
+async fn execute_vacuum_motion(
+    state: &AppState,
+    lease_id: Uuid,
+    calibrated: Option<&mut CalibratedMotionSequence>,
+    target: JogTarget,
+    feed_mm_per_min: f64,
+) -> Result<Pose, String> {
+    let Some(calibrated) = calibrated else {
+        return state
+            .machine
+            .jog(lease_id, target, feed_mm_per_min)
+            .await
+            .map_err(|error| error.to_string());
+    };
+    let logical_target = target
+        .resolve(calibrated.state.logical_pose)
+        .ok_or_else(|| "vacuum motion target is invalid".to_string())?;
+    execute_job_motion(
+        &state.machine,
+        lease_id,
+        &calibrated.planner,
+        &mut calibrated.state,
+        logical_target,
+        feed_mm_per_min,
+        MotionMode::Calibrated,
+    )
+    .await?;
+    Ok(calibrated.state.logical_pose)
 }
 
 struct CalibratedHeadReference {
@@ -16252,6 +16355,18 @@ async fn start_vacuum_operation(
             .put_calibration(&snapshot)
             .map_err(ApiError::internal)?;
     }
+    let motion_planner = if mode.fine_homes() {
+        Some(MotionPlanner::new(
+            state.profile.bounds,
+            Some(motion_calibration_from_snapshot(
+                &state,
+                &snapshot,
+                "fine home",
+            )?),
+        ))
+    } else {
+        None
+    };
     let task_state = state.clone();
     let prepared = PreparedVacuumProbe {
         calibration_id,
@@ -16268,25 +16383,74 @@ async fn start_vacuum_operation(
         reference_contact_controller_z_mm: prior_contact
             .as_ref()
             .and_then(|report| report.contact_controller_z_mm),
+        motion_planner,
     };
     let operation_kind = match mode {
         VacuumOperationMode::CalibrationProbe => "calibration.vacuum_probe",
         VacuumOperationMode::Characterization => "calibration.vacuum_characterization",
         VacuumOperationMode::FineHome => "machine.fine_home",
     };
-    spawn_operation(state, operation_kind, async move {
-        if task_state.machine.status().simulated {
-            execute_vacuum_probe(task_state, prepared).await
-        } else {
-            let operation_state = task_state.clone();
-            let (result, _camera_timing) = with_profiled_camera_reuse(
-                &task_state,
-                execute_vacuum_probe(operation_state, prepared),
-            )
-            .await;
-            result
-        }
-    })
+    spawn_operation(
+        state,
+        operation_kind,
+        execute_vacuum_probe_task(task_state, prepared),
+    )
+}
+
+async fn execute_vacuum_probe_task(
+    state: AppState,
+    prepared: PreparedVacuumProbe,
+) -> Result<Option<String>, String> {
+    let task_started = Instant::now();
+    let calibration_id = prepared.calibration_id;
+    let nozzle_id = prepared.nozzle_id.clone();
+    let mode = prepared.mode;
+    let simulated = state.machine.status().simulated;
+    let mut timing = VacuumOperationTiming::default();
+    let (result, camera_timing) = if simulated {
+        (
+            execute_vacuum_probe(state.clone(), prepared, &mut timing).await,
+            json!({}),
+        )
+    } else {
+        let operation_state = state.clone();
+        with_profiled_camera_reuse(
+            &state,
+            execute_vacuum_probe(operation_state, prepared, &mut timing),
+        )
+        .await
+    };
+    if let Err(error) = state
+        .machine
+        .record_operation_event(
+            "operation.vacuum_timing".into(),
+            json!({
+                "algorithm_version": VACUUM_OPERATION_TIMING_ALGORITHM,
+                "calibration_id": calibration_id,
+                "nozzle_id": nozzle_id,
+                "mode": mode.as_str(),
+                "simulated": simulated,
+                "succeeded": result.is_ok(),
+                "total_elapsed_ms": elapsed_ms(task_started),
+                "clear_xy_feed_mm_per_min": state
+                    .profile
+                    .transit_motion
+                    .clear_xy_feed_mm_per_min,
+                "phases": timing.json(),
+                "cameras": camera_timing,
+            }),
+        )
+        .await
+    {
+        tracing::warn!(
+            %error,
+            %calibration_id,
+            %nozzle_id,
+            mode = mode.as_str(),
+            "failed to record vacuum-operation timing",
+        );
+    }
+    result
 }
 
 fn calibrated_head_reference(
@@ -16425,6 +16589,7 @@ fn has_calibrated_working_plane_transfer(
 async fn execute_vacuum_probe(
     state: AppState,
     prepared: PreparedVacuumProbe,
+    timing: &mut VacuumOperationTiming,
 ) -> Result<Option<String>, String> {
     let PreparedVacuumProbe {
         calibration_id,
@@ -16439,14 +16604,16 @@ async fn execute_vacuum_probe(
         search,
         mode,
         reference_contact_controller_z_mm,
+        motion_planner,
     } = prepared;
     let characterize = mode.characterizes();
-    state
-        .machine
-        .disable_actuator(sensor_id.clone())
-        .await
+    let phase_started = Instant::now();
+    let establish_off_state = state.machine.disable_actuator(sensor_id.clone()).await;
+    timing.establish_off_state_ms = elapsed_ms(phase_started);
+    establish_off_state
         .map_err(|error| format!("vacuum probe could not establish the off state: {error}"))?;
-    execute_visual_home(
+    let phase_started = Instant::now();
+    let visual_home = execute_visual_home(
         &state,
         VisualHomingRequest {
             lease_id,
@@ -16454,33 +16621,55 @@ async fn execute_vacuum_probe(
             move_to_seed: true,
         },
     )
-    .await
-    .map_err(|error| error.message)?;
+    .await;
+    timing.visual_home_ms = elapsed_ms(phase_started);
+    let visual_home = visual_home.map_err(|error| error.message)?;
+    let mut calibrated_motion = match motion_planner {
+        Some(planner) => Some(CalibratedMotionSequence::new(
+            planner,
+            visual_home
+                .final_pose
+                .ok_or_else(|| "fine home did not return a visual datum pose".to_string())?,
+        )?),
+        None => None,
+    };
     let visual = state.profile.visual_homing.as_ref().unwrap();
     let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
     let probe = state.profile.vacuum_calibration.as_ref().unwrap();
     let characterization_profile = state.profile.vacuum_characterization.as_ref();
+    let phase_started = Instant::now();
     let controller_angle_deg = state
         .machine
         .calibration_rotation_reference(lease_id, nozzle_id.clone())
-        .await
-        .map_err(|error| error.to_string())?;
+        .await;
+    timing.rotation_reference_ms = elapsed_ms(phase_started);
+    let controller_angle_deg = controller_angle_deg.map_err(|error| error.to_string())?;
     let [runout_correction_x_mm, runout_correction_y_mm] = geometry
         .runout_correction_at(controller_angle_deg)
         .ok_or_else(|| "calibrated nozzle runout correction is invalid".to_string())?;
-    let current_tip_offset =
-        match measure_current_tip_offset(&state, lease_id, &nozzle_id, &head_reference).await {
-            Ok(offset) => offset,
-            Err(error) => {
-                let restore_result = restore_level_visual_home(&state, lease_id).await;
-                let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
-                return Err(append_vacuum_probe_cleanup_errors(
-                    error,
-                    restore_result,
-                    vacuum_off_result,
-                ));
-            }
-        };
+    let phase_started = Instant::now();
+    let current_tip_offset = measure_current_tip_offset(
+        &state,
+        lease_id,
+        &nozzle_id,
+        &head_reference,
+        calibrated_motion.as_mut(),
+    )
+    .await;
+    timing.tip_measurement_ms = elapsed_ms(phase_started);
+    let current_tip_offset = match current_tip_offset {
+        Ok(offset) => offset,
+        Err(error) => {
+            let restore_result =
+                restore_level_visual_home(&state, lease_id, calibrated_motion.as_mut()).await;
+            let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
+            return Err(append_vacuum_probe_cleanup_errors(
+                error,
+                restore_result,
+                vacuum_off_result,
+            ));
+        }
+    };
     let model_tip_offset_x_mm = geometry.head_offset_x_mm - runout_correction_x_mm;
     let model_tip_offset_y_mm = geometry.head_offset_y_mm - runout_correction_y_mm;
     let tip_offset_model_error_mm = (current_tip_offset.x_mm - model_tip_offset_x_mm)
@@ -16492,32 +16681,40 @@ async fn execute_vacuum_probe(
     let [height_correction_x_mm, height_correction_y_mm] = height_correction.unwrap_or([0.0, 0.0]);
     let nominal_surface_x_mm = visual.fiducial_x_mm + probe.target_offset_x_mm;
     let nominal_surface_y_mm = visual.fiducial_y_mm + probe.target_offset_y_mm;
-    let target = match center_vacuum_target(
+    let phase_started = Instant::now();
+    let target = center_vacuum_target(
         &state,
         lease_id,
         nominal_surface_x_mm,
         nominal_surface_y_mm,
         head_reference.top_camera_working_plane_mapping,
+        calibrated_motion.as_mut(),
     )
-    .await
-    {
+    .await;
+    timing.target_centering_ms = elapsed_ms(phase_started);
+    let target = match target {
         Ok(target) => target,
         Err(error) => {
-            let restore_result = state
-                .machine
-                .jog(
-                    lease_id,
-                    JogTarget {
-                        x_mm: visual.fiducial_x_mm,
-                        y_mm: visual.fiducial_y_mm,
-                        z_mm: z_kinematics.level_controller_z_mm,
-                        rotation_deg: None,
-                    },
-                    probe.xy_feed_mm_per_min,
-                )
-                .await
-                .map(|_| ())
-                .map_err(|restore_error| restore_error.to_string());
+            let restore_feed_mm_per_min = if calibrated_motion.is_some() {
+                state.profile.transit_motion.clear_xy_feed_mm_per_min
+            } else {
+                probe.xy_feed_mm_per_min
+            };
+            let restore_result = execute_vacuum_motion(
+                &state,
+                lease_id,
+                calibrated_motion.as_mut(),
+                JogTarget {
+                    x_mm: visual.fiducial_x_mm,
+                    y_mm: visual.fiducial_y_mm,
+                    z_mm: z_kinematics.level_controller_z_mm,
+                    rotation_deg: None,
+                },
+                restore_feed_mm_per_min,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|restore_error| restore_error.to_string());
             let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
             return Err(append_vacuum_probe_cleanup_errors(
                 error,
@@ -16538,20 +16735,26 @@ async fn execute_vacuum_probe(
         return_head_y_mm: visual.fiducial_y_mm,
         approach_controller_z_mm,
         level_controller_z_mm: z_kinematics.level_controller_z_mm,
-        xy_feed_mm_per_min: probe.xy_feed_mm_per_min,
+        xy_feed_mm_per_min: if calibrated_motion.is_some() {
+            state.profile.transit_motion.clear_xy_feed_mm_per_min
+        } else {
+            probe.xy_feed_mm_per_min
+        },
         z_approach_feed_mm_per_min: probe.z_approach_feed_mm_per_min,
     };
     // Keep both nozzles level for lateral motion. Lower only the selected
     // nozzle after its calibrated tip is over the clear datum-board cell.
-    if let Err(error) = state
-        .machine
-        .jog(
-            lease_id,
-            motion.level_probe_target(),
-            motion.xy_feed_mm_per_min,
-        )
-        .await
-    {
+    let phase_started = Instant::now();
+    let probe_xy_transit = execute_vacuum_motion(
+        &state,
+        lease_id,
+        calibrated_motion.as_mut(),
+        motion.level_probe_target(),
+        motion.xy_feed_mm_per_min,
+    )
+    .await;
+    timing.probe_xy_transit_ms = elapsed_ms(phase_started);
+    if let Err(error) = probe_xy_transit {
         // A failed move faults the driver and makes the position uncertain.
         // Do not add another motion. Both nozzles are still level.
         let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
@@ -16561,15 +16764,17 @@ async fn execute_vacuum_probe(
             vacuum_off_result,
         ));
     }
-    if let Err(error) = state
-        .machine
-        .jog(
-            lease_id,
-            motion.approach_probe_target(),
-            motion.z_approach_feed_mm_per_min,
-        )
-        .await
-    {
+    let phase_started = Instant::now();
+    let probe_z_approach = execute_vacuum_motion(
+        &state,
+        lease_id,
+        calibrated_motion.as_mut(),
+        motion.approach_probe_target(),
+        motion.z_approach_feed_mm_per_min,
+    )
+    .await;
+    timing.probe_z_approach_ms = elapsed_ms(phase_started);
+    if let Err(error) = probe_z_approach {
         // The head did not move laterally while a nozzle was below level. A
         // driver fault makes the partial Z position uncertain, so do not add
         // another motion here.
@@ -16580,6 +16785,7 @@ async fn execute_vacuum_probe(
             vacuum_off_result,
         ));
     }
+    let phase_started = Instant::now();
     let setup_result: Result<Vec<i64>, String> = async {
         let off_baseline =
             collect_sensor_values(&state, lease_id, &sensor_id, probe.baseline_sample_count)
@@ -16593,11 +16799,14 @@ async fn execute_vacuum_probe(
         Ok(off_baseline)
     }
     .await;
+    timing.vacuum_setup_ms = elapsed_ms(phase_started);
     let off_baseline_raw_values = match setup_result {
         Ok(values) => values,
         Err(error) => {
             let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
-            let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+            let restore_result =
+                restore_after_vacuum_probe(&state, lease_id, motion, calibrated_motion.as_mut())
+                    .await;
             return Err(append_vacuum_probe_cleanup_errors(
                 error,
                 restore_result,
@@ -16605,15 +16814,27 @@ async fn execute_vacuum_probe(
             ));
         }
     };
+    let phase_started = Instant::now();
     let probe_result = execute_vacuum_probe_descent(
-        &state, lease_id, &nozzle_id, &sensor_id, head_x_mm, head_y_mm, search, None,
+        &state,
+        lease_id,
+        &nozzle_id,
+        &sensor_id,
+        head_x_mm,
+        head_y_mm,
+        search,
+        None,
+        calibrated_motion.as_mut(),
     )
     .await;
+    timing.contact_search_ms = elapsed_ms(phase_started);
     let (open_nozzle_raw_values, samples, contact) = match probe_result {
         Ok(result) => result,
         Err(error) => {
             let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
-            let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+            let restore_result =
+                restore_after_vacuum_probe(&state, lease_id, motion, calibrated_motion.as_mut())
+                    .await;
             return Err(append_vacuum_probe_cleanup_errors(
                 error,
                 restore_result,
@@ -16641,8 +16862,13 @@ async fn execute_vacuum_probe(
                     Err(error) => {
                         let vacuum_off_result =
                             state.machine.disable_actuator(sensor_id.clone()).await;
-                        let restore_result =
-                            restore_after_vacuum_probe(&state, lease_id, motion).await;
+                        let restore_result = restore_after_vacuum_probe(
+                            &state,
+                            lease_id,
+                            motion,
+                            calibrated_motion.as_mut(),
+                        )
+                        .await;
                         return Err(append_vacuum_probe_cleanup_errors(
                             error,
                             restore_result,
@@ -16653,7 +16879,13 @@ async fn execute_vacuum_probe(
             }
             Err(error) => {
                 let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
-                let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+                let restore_result = restore_after_vacuum_probe(
+                    &state,
+                    lease_id,
+                    motion,
+                    calibrated_motion.as_mut(),
+                )
+                .await;
                 return Err(append_vacuum_probe_cleanup_errors(
                     error,
                     restore_result,
@@ -16676,7 +16908,13 @@ async fn execute_vacuum_probe(
                 let correction_mm = reference_z_mm - contact.controller_z_mm;
                 if correction_mm.abs() > FINE_HOME_MAX_Z_CORRECTION_MM {
                     let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
-                    let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+                    let restore_result = restore_after_vacuum_probe(
+                        &state,
+                        lease_id,
+                        motion,
+                        calibrated_motion.as_mut(),
+                    )
+                    .await;
                     return Err(append_vacuum_probe_cleanup_errors(
                         format!(
                             "fine Z correction {correction_mm:.3} mm exceeds the {FINE_HOME_MAX_Z_CORRECTION_MM:.3} mm bound",
@@ -16689,7 +16927,13 @@ async fn execute_vacuum_probe(
             }
             Err(error) => {
                 let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
-                let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+                let restore_result = restore_after_vacuum_probe(
+                    &state,
+                    lease_id,
+                    motion,
+                    calibrated_motion.as_mut(),
+                )
+                .await;
                 return Err(append_vacuum_probe_cleanup_errors(
                     error,
                     restore_result,
@@ -16702,6 +16946,7 @@ async fn execute_vacuum_probe(
     };
     // Stop vacuum before any retract or lateral return. This bounds pump-on
     // time and prevents a sealed reference board from being lifted.
+    let phase_started = Instant::now();
     let vacuum_off_result = state.machine.disable_actuator(sensor_id.clone()).await;
     let release_raw_values = if characterize && vacuum_off_result.is_ok() {
         collect_sensor_values(
@@ -16714,11 +16959,13 @@ async fn execute_vacuum_probe(
     } else {
         Ok(Vec::new())
     };
+    timing.vacuum_cleanup_ms = elapsed_ms(phase_started);
     vacuum_off_result
         .as_ref()
         .map_err(|error| format!("vacuum probe cleanup failed: {error}"))?;
     if let Some((reference_z_mm, _, _)) = fine_home_contact {
-        state
+        let phase_started = Instant::now();
+        let reset_pose = state
             .machine
             .apply_fine_z_homing_offset(
                 lease_id,
@@ -16728,8 +16975,15 @@ async fn execute_vacuum_probe(
             )
             .await
             .map_err(|error| format!("fine Z coordinate reset failed: {error}"))?;
+        timing.fine_z_reset_ms = elapsed_ms(phase_started);
+        if let Some(calibrated) = &mut calibrated_motion {
+            calibrated.apply_z_coordinate_reset(reset_pose);
+        }
     }
-    let restore_result = restore_after_vacuum_probe(&state, lease_id, motion).await;
+    let phase_started = Instant::now();
+    let restore_result =
+        restore_after_vacuum_probe(&state, lease_id, motion, calibrated_motion.as_mut()).await;
+    timing.restore_ms = elapsed_ms(phase_started);
     restore_result.map_err(|error| format!("vacuum probe restore failed: {error}"))?;
     let release_raw_values =
         release_raw_values.map_err(|error| format!("vacuum release sampling failed: {error}"))?;
@@ -16842,6 +17096,7 @@ async fn measure_current_tip_offset(
     lease_id: Uuid,
     nozzle_id: &str,
     reference: &CalibratedHeadReference,
+    mut calibrated: Option<&mut CalibratedMotionSequence>,
 ) -> Result<CurrentTipOffset, String> {
     let bottom = state.profile.bottom_vision.as_ref().unwrap();
     let nozzle = bottom
@@ -16860,11 +17115,15 @@ async fn measure_current_tip_offset(
         seed_target,
         bottom.feed_mm_per_min,
     );
-    let seed_pose = state
-        .machine
-        .jog(lease_id, seed_target, seed_feed_mm_per_min)
-        .await
-        .map_err(|error| error.to_string())?;
+    let seed_pose = execute_vacuum_motion(
+        state,
+        lease_id,
+        calibrated.as_deref_mut(),
+        seed_target,
+        seed_feed_mm_per_min,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if camera_profile.lighting_enabled {
         state
             .machine
@@ -16881,6 +17140,7 @@ async fn measure_current_tip_offset(
         &camera_path,
         reference.bottom_camera_mapping,
         seed_pose,
+        calibrated,
     )
     .await
     .map_err(calibration_stop_message);
@@ -16910,7 +17170,11 @@ fn calibration_stop_message(error: CalibrationStop) -> String {
     }
 }
 
-async fn restore_level_visual_home(state: &AppState, lease_id: Uuid) -> Result<(), String> {
+async fn restore_level_visual_home(
+    state: &AppState,
+    lease_id: Uuid,
+    calibrated: Option<&mut CalibratedMotionSequence>,
+) -> Result<(), String> {
     let visual = state.profile.visual_homing.as_ref().unwrap();
     let level_controller_z_mm = state
         .profile
@@ -16930,9 +17194,7 @@ async fn restore_level_visual_home(state: &AppState, lease_id: Uuid) -> Result<(
         target,
         visual.feed_mm_per_min,
     );
-    state
-        .machine
-        .jog(lease_id, target, feed_mm_per_min)
+    execute_vacuum_motion(state, lease_id, calibrated, target, feed_mm_per_min)
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -16944,6 +17206,7 @@ async fn center_vacuum_target(
     nominal_x_mm: f64,
     nominal_y_mm: f64,
     pixel_error_to_machine_mm: [[f64; 2]; 2],
+    mut calibrated: Option<&mut CalibratedMotionSequence>,
 ) -> Result<VacuumTargetCenter, String> {
     let visual = state.profile.visual_homing.as_ref().unwrap();
     if visual.camera_role != CameraRole::TopCamera {
@@ -16953,25 +17216,30 @@ async fn center_vacuum_target(
     let camera_profile =
         stored_camera_profile(state, visual.camera_role).map_err(|error| error.message)?;
     let camera_path = camera_path_for_role(visual.camera_role).map_err(|error| error.message)?;
-    let seed_pose = state
-        .machine
-        .jog(
-            lease_id,
-            JogTarget {
-                x_mm: nominal_x_mm,
-                y_mm: nominal_y_mm,
-                z_mm: state
-                    .profile
-                    .z_kinematics
-                    .as_ref()
-                    .unwrap()
-                    .level_controller_z_mm,
-                rotation_deg: None,
-            },
-            probe.xy_feed_mm_per_min,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    let seed_feed_mm_per_min = if calibrated.is_some() {
+        state.profile.transit_motion.clear_xy_feed_mm_per_min
+    } else {
+        probe.xy_feed_mm_per_min
+    };
+    let seed_pose = execute_vacuum_motion(
+        state,
+        lease_id,
+        calibrated.as_deref_mut(),
+        JogTarget {
+            x_mm: nominal_x_mm,
+            y_mm: nominal_y_mm,
+            z_mm: state
+                .profile
+                .z_kinematics
+                .as_ref()
+                .unwrap()
+                .level_controller_z_mm,
+            rotation_deg: None,
+        },
+        seed_feed_mm_per_min,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if camera_profile.lighting_enabled {
         state
             .machine
@@ -16986,6 +17254,7 @@ async fn center_vacuum_target(
         &camera_profile,
         &camera_path,
         pixel_error_to_machine_mm,
+        calibrated,
     )
     .await;
     let lights_off = if camera_profile.lighting_enabled {
@@ -17010,6 +17279,7 @@ async fn run_vacuum_target_centering(
     camera_profile: &CameraProfile,
     camera_path: &str,
     pixel_error_to_machine_mm: [[f64; 2]; 2],
+    mut calibrated: Option<&mut CalibratedMotionSequence>,
 ) -> Result<VacuumTargetCenter, String> {
     let visual = state.profile.visual_homing.as_ref().unwrap();
     let probe = state.profile.vacuum_calibration.as_ref().unwrap();
@@ -17082,11 +17352,15 @@ async fn run_vacuum_target_centering(
                 cumulative_correction, probe.target_max_center_error_mm,
             ));
         }
-        pose = state
-            .machine
-            .jog(lease_id, target, probe.xy_feed_mm_per_min)
-            .await
-            .map_err(|error| error.to_string())?;
+        pose = execute_vacuum_motion(
+            state,
+            lease_id,
+            calibrated.as_deref_mut(),
+            target,
+            probe.xy_feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     }
     Err("vacuum target centering ended without a result".into())
 }
@@ -17120,15 +17394,20 @@ async fn restore_after_vacuum_probe(
     state: &AppState,
     lease_id: Uuid,
     motion: VacuumProbeMotion,
+    mut calibrated: Option<&mut CalibratedMotionSequence>,
 ) -> Result<(), String> {
     // Lift vertically, leave the datum area while lifted, and only then level
     // the coupled nozzles. This prevents a nozzle from scraping the board.
     for (target, feed_mm_per_min) in motion.restore_targets() {
-        state
-            .machine
-            .jog(lease_id, target, feed_mm_per_min)
-            .await
-            .map_err(|error| error.to_string())?;
+        execute_vacuum_motion(
+            state,
+            lease_id,
+            calibrated.as_deref_mut(),
+            target,
+            feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -17157,6 +17436,7 @@ async fn execute_vacuum_probe_descent(
     head_y_mm: f64,
     search: VacuumProbeSearch,
     calibrated_acquisition: Option<&VacuumSensorCharacterizationReport>,
+    mut calibrated_motion: Option<&mut CalibratedMotionSequence>,
 ) -> Result<(Vec<i64>, Vec<VacuumProbeSample>, Option<VacuumProbeSample>), String> {
     let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
     let probe = state.profile.vacuum_calibration.as_ref().unwrap();
@@ -17181,20 +17461,20 @@ async fn execute_vacuum_probe_descent(
         } else {
             probe.z_feed_mm_per_min
         };
-        state
-            .machine
-            .jog(
-                lease_id,
-                JogTarget {
-                    x_mm: head_x_mm,
-                    y_mm: head_y_mm,
-                    z_mm: controller_z_mm,
-                    rotation_deg: None,
-                },
-                feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        execute_vacuum_motion(
+            state,
+            lease_id,
+            calibrated_motion.as_deref_mut(),
+            JogTarget {
+                x_mm: head_x_mm,
+                y_mm: head_y_mm,
+                z_mm: controller_z_mm,
+                rotation_deg: None,
+            },
+            feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let raw_values =
             collect_sensor_values(state, lease_id, sensor_id, probe.step_sample_count).await?;
@@ -20538,6 +20818,7 @@ async fn measure_bottom_planar_camera(
         device_path,
         seed_mapping,
         seed_pose,
+        None,
     )
     .await?;
     let reference =
@@ -23094,6 +23375,7 @@ async fn measure_nozzle_runout(
         device_path,
         pixel_error_to_machine_mm,
         seed_pose,
+        None,
     )
     .await?;
     let reference_angle = state
@@ -23321,6 +23603,7 @@ async fn measure_nozzle_height_model(
         device_path,
         reference_mapping.pixel_error_to_machine_mm,
         seed_pose,
+        None,
     )
     .await?;
     let reference =
@@ -23750,6 +24033,7 @@ async fn center_nozzle_for_runout(
     device_path: &str,
     pixel_error_to_machine_mm: [[f64; 2]; 2],
     mut pose: Pose,
+    mut calibrated: Option<&mut CalibratedMotionSequence>,
 ) -> Result<Pose, CalibrationStop> {
     let geometry = &bottom.head_geometry;
     for correction_count in 0..=geometry.max_centering_corrections {
@@ -23773,20 +24057,20 @@ async fn center_nozzle_for_runout(
                 nozzle.nozzle_id, correction.distance_mm, geometry.verification_limit_mm,
             )));
         }
-        pose = state
-            .machine
-            .jog(
-                lease_id,
-                JogTarget {
-                    x_mm: pose.x_mm + correction.x_mm,
-                    y_mm: pose.y_mm + correction.y_mm,
-                    z_mm: pose.z_mm,
-                    rotation_deg: None,
-                },
-                bottom.feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
+        pose = execute_vacuum_motion(
+            state,
+            lease_id,
+            calibrated.as_deref_mut(),
+            JogTarget {
+                x_mm: pose.x_mm + correction.x_mm,
+                y_mm: pose.y_mm + correction.y_mm,
+                z_mm: pose.z_mm,
+                rotation_deg: None,
+            },
+            bottom.feed_mm_per_min,
+        )
+        .await
+        .map_err(|error| CalibrationStop::Failed(error.to_string()))?;
     }
     Err(CalibrationStop::Failed(
         "nozzle centering ended without a result".into(),
@@ -28805,6 +29089,7 @@ async fn acquire_physical_placement_part(
         prepared.lease_id,
         nozzle_id,
         &prepared.head_reference,
+        None,
     )
     .await?;
     let bottom_pose = state
@@ -29062,6 +29347,7 @@ async fn acquire_physical_placement_part(
             pickup_head[1],
             search,
             Some(&prepared.vacuum_characterization),
+            None,
         )
         .await
         {
@@ -30187,14 +30473,29 @@ fn load_job_motion_calibration(
     }
     let changed = crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)
         .map_err(ApiError::bad_request)?;
+    let calibration = motion_calibration_from_snapshot(state, &snapshot, "job motion")?;
+    if changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    Ok(calibration)
+}
+
+fn motion_calibration_from_snapshot(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    purpose: &str,
+) -> ApiResult<MotionCalibration> {
     if !crate::calibration_artifacts::artifact_tree_is_current(
         state,
-        &snapshot,
+        snapshot,
         CalibrationArtifactId::LocalXyDirectionResponse,
     ) {
-        return Err(ApiError::bad_request(
-            "job motion requires a current local XY direction-response artifact",
-        ));
+        return Err(ApiError::bad_request(format!(
+            "{purpose} requires a current local XY direction-response artifact",
+        )));
     }
     let artifact = snapshot
         .artifacts
@@ -30203,7 +30504,7 @@ fn load_job_motion_calibration(
     let artifact_fingerprint = artifact.fingerprint.clone();
     let report: LocalXyDirectionResponseReport = serde_json::from_value(
         crate::calibration_artifacts::artifact_result_value(
-            &snapshot,
+            snapshot,
             CalibrationArtifactId::LocalXyDirectionResponse,
         )
         .map_err(ApiError::bad_request)?,
@@ -30219,12 +30520,6 @@ fn load_job_motion_calibration(
         &report,
     )
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    if changed {
-        state
-            .store
-            .put_calibration(&snapshot)
-            .map_err(ApiError::internal)?;
-    }
     Ok(calibration)
 }
 
@@ -32232,13 +32527,14 @@ mod tests {
     fn test_direction_sample(
         axis: LinearAxis,
         side: ApproachSide,
+        feed_mm_per_min: f64,
     ) -> LocalXyDirectionResponseSample {
         LocalXyDirectionResponseSample {
             axis,
             approach_side: side,
             pair: 1,
             approach_distance_mm: 1.0,
-            feed_mm_per_min: 300.0,
+            feed_mm_per_min,
             commanded_x_mm: 10.0,
             commanded_y_mm: 10.0,
             observed_x_px: 320.0,
@@ -32254,24 +32550,25 @@ mod tests {
         negative: [f64; 2],
         positive: [f64; 2],
     ) -> LocalXyAxisDirectionReport {
-        let estimate = LocalXyAxisEstimate {
-            axis,
-            sample_pairs: 3,
-            negative_mean_correction_x_mm: negative[0],
-            negative_mean_correction_y_mm: negative[1],
-            positive_mean_correction_x_mm: positive[0],
-            positive_mean_correction_y_mm: positive[1],
-            direction_gap_x_mm: 0.0,
-            direction_gap_y_mm: 0.0,
-            primary_axis_gap_mm: 0.05,
-            cross_axis_gap_mm: 0.01,
-            primary_axis_confidence_interval_95_mm: 0.01,
-            effect_resolved: true,
-        };
-        LocalXyAxisDirectionReport {
-            axis,
-            feeds: vec![LocalXyFeedDirectionReport {
-                feed_mm_per_min: 300.0,
+        let feed_report = |feed_mm_per_min: f64, scale: f64| {
+            let negative = [negative[0] * scale, negative[1] * scale];
+            let positive = [positive[0] * scale, positive[1] * scale];
+            let estimate = LocalXyAxisEstimate {
+                axis,
+                sample_pairs: 3,
+                negative_mean_correction_x_mm: negative[0],
+                negative_mean_correction_y_mm: negative[1],
+                positive_mean_correction_x_mm: positive[0],
+                positive_mean_correction_y_mm: positive[1],
+                direction_gap_x_mm: 0.0,
+                direction_gap_y_mm: 0.0,
+                primary_axis_gap_mm: 0.05,
+                cross_axis_gap_mm: 0.01,
+                primary_axis_confidence_interval_95_mm: 0.01,
+                effect_resolved: true,
+            };
+            LocalXyFeedDirectionReport {
+                feed_mm_per_min,
                 estimate,
                 stopping_reason: "test fixture".into(),
                 holdout: LocalXyCompensationHoldout {
@@ -32281,8 +32578,16 @@ mod tests {
                     positive_residual_y_mm: 0.0,
                     direction_gap_mm: 0.01,
                     improved: true,
-                    negative_sample: test_direction_sample(axis, ApproachSide::Negative),
-                    positive_sample: test_direction_sample(axis, ApproachSide::Positive),
+                    negative_sample: test_direction_sample(
+                        axis,
+                        ApproachSide::Negative,
+                        feed_mm_per_min,
+                    ),
+                    positive_sample: test_direction_sample(
+                        axis,
+                        ApproachSide::Positive,
+                        feed_mm_per_min,
+                    ),
                 },
                 compensation_enabled: true,
                 qualified: true,
@@ -32290,7 +32595,11 @@ mod tests {
                 applied_negative_compensation_y_mm: negative[1],
                 applied_positive_compensation_x_mm: positive[0],
                 applied_positive_compensation_y_mm: positive[1],
-            }],
+            }
+        };
+        LocalXyAxisDirectionReport {
+            axis,
+            feeds: vec![feed_report(300.0, 1.0), feed_report(12_000.0, 2.0)],
         }
     }
 
@@ -32776,6 +33085,100 @@ mod tests {
         assert_eq!(motion_state.logical_pose, vertical_target);
         assert_eq!(vertical.controller_target.x_mm, 9.936);
         assert_eq!(vertical.controller_target.y_mm, 9.97);
+    }
+
+    #[tokio::test]
+    async fn fine_home_motion_sequence_tracks_calibrated_transit_and_corrections() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        state.machine.complete_preflight(true).await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("fine-home motion test".into(), 60)
+            .await
+            .unwrap();
+        let home = state.machine.home(lease.id, true).await.unwrap();
+        let calibration = MotionCalibration::from_local_direction_response(
+            Uuid::new_v4(),
+            "0".repeat(64),
+            &test_direction_report(),
+        )
+        .unwrap();
+        let planner = MotionPlanner::new(state.profile.bounds, Some(calibration));
+        let mut calibrated = CalibratedMotionSequence::new(planner, home).unwrap();
+        let transit_target = JogTarget {
+            x_mm: 20.0,
+            y_mm: 20.0,
+            z_mm: 31.5,
+            rotation_deg: None,
+        };
+
+        let logical_pose = execute_vacuum_motion(
+            &state,
+            lease.id,
+            Some(&mut calibrated),
+            transit_target,
+            12_000.0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(logical_pose.x_mm, 20.0);
+        assert_eq!(logical_pose.y_mm, 20.0);
+        assert_eq!(calibrated.state.controller_pose.x_mm, 20.032);
+        assert_eq!(calibrated.state.controller_pose.y_mm, 20.015);
+
+        let correction_target = JogTarget {
+            x_mm: 20.1,
+            y_mm: 19.9,
+            z_mm: 31.5,
+            rotation_deg: None,
+        };
+        execute_vacuum_motion(
+            &state,
+            lease.id,
+            Some(&mut calibrated),
+            correction_target,
+            300.0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calibrated.state.logical_pose.x_mm, 20.1);
+        assert_eq!(calibrated.state.logical_pose.y_mm, 19.9);
+        assert_eq!(calibrated.state.controller_pose.x_mm, 20.096);
+        assert_eq!(calibrated.state.controller_pose.y_mm, 19.86);
+
+        let vertical_target = JogTarget {
+            x_mm: 20.1,
+            y_mm: 19.9,
+            z_mm: 20.0,
+            rotation_deg: None,
+        };
+        execute_vacuum_motion(
+            &state,
+            lease.id,
+            Some(&mut calibrated),
+            vertical_target,
+            300.0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calibrated.state.controller_pose.x_mm, 20.096);
+        assert_eq!(calibrated.state.controller_pose.y_mm, 19.86);
+        assert_eq!(calibrated.state.logical_pose.z_mm, 20.0);
+
+        let reset_pose = Pose {
+            z_mm: 19.8,
+            ..calibrated.state.controller_pose
+        };
+        calibrated.apply_z_coordinate_reset(reset_pose);
+
+        assert_eq!(calibrated.state.logical_pose.x_mm, 20.1);
+        assert_eq!(calibrated.state.logical_pose.y_mm, 19.9);
+        assert_eq!(calibrated.state.logical_pose.z_mm, 19.8);
+        assert_eq!(calibrated.state.controller_pose, reset_pose);
     }
 
     #[tokio::test]
