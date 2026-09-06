@@ -15046,8 +15046,9 @@ fn z_approach_waypoint(
     target_z_mm: f64,
     approach_distance_mm: f64,
 ) -> Option<f64> {
-    (current_z_mm > target_z_mm + approach_distance_mm)
-        .then_some(target_z_mm + approach_distance_mm)
+    let travel_mm = target_z_mm - current_z_mm;
+    (travel_mm.abs() > approach_distance_mm)
+        .then_some(target_z_mm - travel_mm.signum() * approach_distance_mm)
 }
 
 async fn run_visual_homing(
@@ -15920,6 +15921,53 @@ async fn execute_vacuum_motion(
     Ok(calibrated.state.logical_pose)
 }
 
+async fn approach_vacuum_z_with_slow_finish(
+    state: &AppState,
+    lease_id: Uuid,
+    mut calibrated: Option<&mut CalibratedMotionSequence>,
+    target_z_mm: f64,
+    transit_feed_mm_per_min: f64,
+    approach_feed_mm_per_min: f64,
+    approach_distance_mm: f64,
+) -> Result<Pose, String> {
+    let current = calibrated.as_ref().map_or_else(
+        || {
+            state
+                .machine
+                .status()
+                .pose
+                .ok_or_else(|| "vacuum Z approach has no trusted pose".to_string())
+        },
+        |calibrated| Ok(calibrated.state.logical_pose),
+    )?;
+    let target = |z_mm| JogTarget {
+        x_mm: current.x_mm,
+        y_mm: current.y_mm,
+        z_mm,
+        rotation_deg: None,
+    };
+    if let Some(waypoint_z_mm) =
+        z_approach_waypoint(current.z_mm, target_z_mm, approach_distance_mm)
+    {
+        execute_vacuum_motion(
+            state,
+            lease_id,
+            calibrated.as_deref_mut(),
+            target(waypoint_z_mm),
+            transit_feed_mm_per_min,
+        )
+        .await?;
+    }
+    execute_vacuum_motion(
+        state,
+        lease_id,
+        calibrated,
+        target(target_z_mm),
+        approach_feed_mm_per_min,
+    )
+    .await
+}
+
 struct CalibratedHeadReference {
     top_camera_controller_x_mm: f64,
     top_camera_controller_y_mm: f64,
@@ -15962,6 +16010,7 @@ struct VacuumProbeMotion {
     level_controller_z_mm: f64,
     xy_feed_mm_per_min: f64,
     z_approach_feed_mm_per_min: f64,
+    z_retract_feed_mm_per_min: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -16054,7 +16103,7 @@ impl VacuumProbeMotion {
 
     fn restore_targets(self) -> [(JogTarget, f64); 2] {
         [
-            (self.level_probe_target(), self.z_approach_feed_mm_per_min),
+            (self.level_probe_target(), self.z_retract_feed_mm_per_min),
             (self.level_return_target(), self.xy_feed_mm_per_min),
         ]
     }
@@ -16741,6 +16790,11 @@ async fn execute_vacuum_probe(
             probe.xy_feed_mm_per_min
         },
         z_approach_feed_mm_per_min: probe.z_approach_feed_mm_per_min,
+        z_retract_feed_mm_per_min: if calibrated_motion.is_some() {
+            state.profile.transit_motion.clear_z_feed_mm_per_min
+        } else {
+            probe.z_approach_feed_mm_per_min
+        },
     };
     // Keep both nozzles level for lateral motion. Lower only the selected
     // nozzle after its calibrated tip is over the clear datum-board cell.
@@ -16765,14 +16819,27 @@ async fn execute_vacuum_probe(
         ));
     }
     let phase_started = Instant::now();
-    let probe_z_approach = execute_vacuum_motion(
-        &state,
-        lease_id,
-        calibrated_motion.as_mut(),
-        motion.approach_probe_target(),
-        motion.z_approach_feed_mm_per_min,
-    )
-    .await;
+    let probe_z_approach = if calibrated_motion.is_some() {
+        approach_vacuum_z_with_slow_finish(
+            &state,
+            lease_id,
+            calibrated_motion.as_mut(),
+            motion.approach_controller_z_mm,
+            state.profile.transit_motion.clear_z_feed_mm_per_min,
+            motion.z_approach_feed_mm_per_min,
+            state.profile.transit_motion.precision_z_approach_mm,
+        )
+        .await
+    } else {
+        execute_vacuum_motion(
+            &state,
+            lease_id,
+            None,
+            motion.approach_probe_target(),
+            motion.z_approach_feed_mm_per_min,
+        )
+        .await
+    };
     timing.probe_z_approach_ms = elapsed_ms(phase_started);
     if let Err(error) = probe_z_approach {
         // The head did not move laterally while a nozzle was below level. A
@@ -30730,7 +30797,8 @@ mod tests {
     fn long_z_approach_keeps_a_slow_final_segment() {
         assert_eq!(z_approach_waypoint(31.5, 4.0, 2.0), Some(6.0));
         assert_eq!(z_approach_waypoint(5.5, 4.0, 2.0), None);
-        assert_eq!(z_approach_waypoint(4.0, 31.5, 2.0), None);
+        assert_eq!(z_approach_waypoint(4.0, 31.5, 2.0), Some(29.5));
+        assert_eq!(z_approach_waypoint(30.0, 31.5, 2.0), None);
     }
 
     #[test]
@@ -36701,6 +36769,7 @@ mod tests {
             level_controller_z_mm: 31.5,
             xy_feed_mm_per_min: 300.0,
             z_approach_feed_mm_per_min: 300.0,
+            z_retract_feed_mm_per_min: 1200.0,
         };
 
         assert_eq!(
@@ -36715,7 +36784,7 @@ mod tests {
         assert_eq!(motion.approach_probe_target().z_mm, 5.0);
         let restore = motion.restore_targets();
         assert_eq!(restore[0].0, motion.level_probe_target());
-        assert_eq!(restore[0].1, 300.0);
+        assert_eq!(restore[0].1, 1200.0);
         assert_eq!(restore[1].0, motion.level_return_target());
     }
 
