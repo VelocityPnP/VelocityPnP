@@ -1989,7 +1989,8 @@ components:
           exclusiveMinimum: 0
           description: >-
             Optional XY feed. It cannot exceed the active machine profile's
-            validated default feed.
+            validated clear-XY feed. Physical scans require direction-response
+            holdout evidence for this exact feed.
         max_tiles: { type: integer, minimum: 1, maximum: 12000 }
         artifact_quota_bytes:
           type: integer

@@ -3277,6 +3277,52 @@ The next planned work is a measured motion-performance pass and an independent
 web-interface audit. `docs/HANDOFF.md` records the entry state, commands, code
 locations, and safety boundaries for both sessions.
 
+### Calibrated camera-path speed qualification
+
+On 2026-09-06, one 10-tile survey found that workspace scanning selected the
+qualified clear-XY feed but still used raw jogs. Scan
+`ec329d06-c8bb-4d42-aa62-b9f92b8a0f38` completed at 1,200 mm/min in 10.78
+seconds. Its raw 23,000 mm/min datum park returned with 0.0531 mm camera error.
+This exceeded the agreed 0.05 mm stop limit, so no higher rate ran on that
+build.
+
+The workspace and shared camera-target paths now use the calibrated motion
+planner. Physical scan admission rejects a scan or park feed without exact
+direction-response holdout evidence. Timing records include the corrected-move
+count, maximum correction magnitude, and datum-park correction. The tested
+park arrival applied X=-0.0460 mm and Y=+0.0123 mm. The same path now covers
+survey, reconnaissance, precision, and refinement scans. Precision scans use
+the profile's qualified 1,200 mm/min default instead of the unqualified 600
+mm/min installed-geometry feed.
+
+The corrected scan repeated the same X200 through X280 mm and Y180 through
+Y181 mm row at five exact feeds:
+
+| Feed (mm/min) | Scan ID | Total (s) | Motion (s) | Capture (s) | Return (mm) | Registrations |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1,200 | `66310294-5b7c-4bf8-aae4-ba9bb2c4eae2` | 10.98 | 5.46 | 4.31 | 0.0173 | 4/9 |
+| 6,000 | `ab4f00c5-d15d-4c0f-a08a-de69d45cbd1d` | 7.67 | 2.77 | 3.71 | 0.0172 | 4/9 |
+| 12,000 | `6f37c8b0-f232-455b-9415-e9dc26d9a54b` | 7.65 | 2.75 | 3.71 | 0.0163 | 3/9 |
+| 18,000 | `d4f53ad9-b2bc-47f6-aacd-3218083d12e2` | 7.65 | 2.75 | 3.71 | 0.0162 | 4/9 |
+| 23,000 | `34e3ffb4-e739-4de7-b167-9b1c38ca44c5` | 7.65 | 2.75 | 3.71 | 0.0173 | 4/9 |
+
+Each corrected scan captured 10 of 10 timestamp-fresh frames, reached 100
+percent mosaic coverage, and applied direction correction to all 11 moves.
+Each discarded 37 queued frames. The low-texture row accepted three or four
+of nine registrations. Calibrated placement filled the other seams without a
+coverage gap. The final 23,000 mm/min scan opened the camera in 0.186 seconds,
+used 1.609 seconds for its first capture, averaged 0.233 seconds for each later
+capture, and parked in 0.566 seconds. Motion did not improve above 6,000
+mm/min because these short tile steps were acceleration-bound.
+
+Live 1206 feeder holdout `dd69b919-fc97-4c36-8392-88a958177b8b` then checked
+the shared camera-target path without a pickup or placement. It passed in
+10.82 seconds. One top-camera session served seven captures and 17 frames. The
+camera was open for 0.186 seconds and active capture used 3.50 seconds. The
+final camera return error was 0.0335 mm. The machine ended ready, homed, and
+fault-free at safe Z with calibration
+`3b837434-a961-4e60-945a-18335b42d21f` active.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

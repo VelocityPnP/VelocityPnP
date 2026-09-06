@@ -121,12 +121,15 @@ wget -qO- --method=POST \
 
 `precision` mode keeps the original calibrated-resolution behavior. It stores
 full source tiles by default and has a 64-tile limit. `survey` mode defaults to
-0.10 mm/pixel, 30 percent overlap, the machine profile's validated default XY
-feed, a 4,096-tile limit, and `mosaic_only` retention. Layered surveys with
+0.10 mm/pixel, 30 percent overlap, the machine profile's validated clear-XY
+feed, a 4,096-tile limit, and `mosaic_only` retention. Precision mode uses the
+profile's default XY feed. Layered surveys with
 `transient_sources` have a 12,000-tile limit. An installed-plate scan uses at
 least 60 percent overlap so that each surface has enough shared image area for
-reliable reconstruction. It discards four queued frames after each completed
-move before it accepts a capture. It holds one V4L2 stream open across moves.
+reliable reconstruction. All scan modes hold one V4L2 stream open across
+moves. After each move, they accept a frame whose monotonic timestamp is at
+least one frame period newer than the motion boundary. A camera without valid
+monotonic timestamps uses the validated four-frame fallback.
 Each mosaic layer retains two full camera rows. Height matching can retain up
 to three preceding rows for wider-baseline pairs. The system registers and
 renders each requested height layer and measures parallax. The height analysis
@@ -134,8 +137,10 @@ also compares wider non-adjacent tile pairs that still have at least 20 percent
 overlap. This keeps a useful parallax baseline when capture overlap is high.
 Memory use is bounded by height layers and a small number of camera rows
 instead of total tile count.
-`feed_mm_per_min` can request a slower feed, but cannot exceed the profile
-limit.
+`feed_mm_per_min` can request a slower feed, but cannot exceed the validated
+clear-XY limit. A physical scan also requires direction-response holdout
+evidence for its exact scan and datum-return feeds. Scan tiles and the final
+datum return use the calibrated direction correction.
 
 Artifact retention can be `full_sources`, `transient_sources`, `thumbnails`,
 or `mosaic_only`. `transient_sources` is for installed-plate surveys. It keeps
@@ -158,11 +163,8 @@ offline reconstruction.
 `reconnaissance` mode requires the `installed_plates` region preset. It makes
 one installed-plate-plane mosaic at 0.20 mm/pixel with 10 percent overlap and
 `mosaic_only` retention by default. It uses calibrated placement without tile
-registration or parallax analysis. After each move completes, it accepts a
-frame whose monotonic V4L2 timestamp is at least one frame period newer than
-the motion boundary. A camera without monotonic timestamps uses the validated
-four-frame fallback. The scan report records actual discarded frames in
-`discarded_capture_frames` and timestamp-selected captures in
+registration or parallax analysis. The scan report records actual discarded
+frames in `discarded_capture_frames` and timestamp-selected captures in
 `timestamp_fresh_frames`. Its estimate includes the serialized motion-control
 and capture-dispatch cost measured on the attached V3.0.2 machine.
 

@@ -200,16 +200,15 @@ const WORKSPACE_REFINEMENT_COMPOSITE_ALGORITHM: &str = "workspace_refinement_com
 const MAX_CHUNKED_WORKSPACE_SURVEY_TILES: u32 = 12_000;
 const MAX_WORKSPACE_MOSAIC_PIXELS: usize = 25_000_000;
 const MAX_WORKSPACE_SURVEY_PIXELS: usize = 12_000_000;
-const WORKSPACE_PRECISION_SETTLE_FRAMES: u32 = 5;
-// Persistent capture allocates four V4L2 buffers. Discard all four after each
-// move so that the accepted frame was exposed at the completed pose.
-const WORKSPACE_SURVEY_SETTLE_FRAMES: u32 = 4;
+// A reused profiled-camera capture can discard the four queued V4L2 buffers
+// while it waits for a frame exposed after the motion boundary.
+const PROFILED_CAMERA_FRESH_FRAME_SETTLE_LIMIT: u32 = 4;
 const RECONNAISSANCE_OVERLAP: f64 = 0.10;
 const MIN_RECONNAISSANCE_OVERLAP: f64 = 0.10;
 const MIN_WORKSPACE_OVERLAP: f64 = 0.20;
 const RECONNAISSANCE_OUTPUT_MM_PER_PIXEL: f64 = 0.20;
-const RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES: u32 = 1;
-const RECONNAISSANCE_MAX_FRESH_CAPTURE_FRAMES: u32 = 32;
+const WORKSPACE_FRESH_FRAME_GUARD_FRAMES: u32 = 1;
+const WORKSPACE_MAX_FRESH_CAPTURE_FRAMES: u32 = 32;
 // Account for the serialized jog completion and fresh-capture dispatch that
 // are not part of ideal feed time. This was measured on a LumenPnP V3.0.2.
 const RECONNAISSANCE_CONTROL_OVERHEAD_SECONDS: f64 = 0.20;
@@ -224,6 +223,7 @@ const WORKSPACE_THUMBNAIL_WIDTH: u32 = 192;
 const WORKSPACE_THUMBNAIL_HEIGHT: u32 = 108;
 const WORKSPACE_PROGRESS_TILE_INTERVAL: u32 = 25;
 const WORKSPACE_SCAN_TIMING_ALGORITHM: &str = "workspace_scan_timing.v1";
+const CAMERA_TARGET_OPERATION_TIMING_ALGORITHM: &str = "camera_target_operation_timing.v1";
 const WORKSPACE_HEIGHT_CHUNK_PIXEL_ROWS: u32 = 512;
 const WORKSPACE_HEIGHT_CHUNK_HALO_PIXEL_ROWS: u32 = 2;
 const ESTIMATED_REGISTRATION_SECONDS: f64 = 0.12;
@@ -266,6 +266,9 @@ struct WorkspaceScanTiming {
     progress_store_ms: Vec<f64>,
     mosaic_finalize_ms: f64,
     park_ms: f64,
+    corrected_moves: u32,
+    maximum_direction_correction_mm: f64,
+    park_direction_correction_mm: Option<[f64; 2]>,
     lights_disable_ms: f64,
 }
 
@@ -308,6 +311,44 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
 }
 
+async fn record_camera_target_operation_timing(
+    state: &AppState,
+    operation_id: Uuid,
+    mode: &str,
+    simulated: bool,
+    succeeded: bool,
+    total_elapsed_ms: f64,
+    camera_timing: Value,
+) {
+    if let Err(error) = state
+        .machine
+        .record_operation_event(
+            "operation.camera_target_timing".into(),
+            json!({
+                "algorithm_version": CAMERA_TARGET_OPERATION_TIMING_ALGORITHM,
+                "operation_id": operation_id,
+                "mode": mode,
+                "simulated": simulated,
+                "succeeded": succeeded,
+                "total_elapsed_ms": total_elapsed_ms,
+                "clear_xy_feed_mm_per_min": state
+                    .profile
+                    .transit_motion
+                    .clear_xy_feed_mm_per_min,
+                "cameras": camera_timing,
+            }),
+        )
+        .await
+    {
+        tracing::warn!(
+            %error,
+            %operation_id,
+            %mode,
+            "failed to record camera-target timing",
+        );
+    }
+}
+
 fn workspace_timing_distribution(samples: &[f64]) -> Value {
     if samples.is_empty() {
         return json!({
@@ -329,6 +370,25 @@ fn workspace_timing_distribution(samples: &[f64]) -> Value {
         "p95_ms": ordered[p95_index],
         "maximum_ms": ordered[ordered.len() - 1],
     })
+}
+
+fn record_workspace_motion_correction(
+    timing: &mut WorkspaceScanTiming,
+    planned: &PlannedMotion,
+    park: bool,
+) {
+    let correction = [
+        planned.correction.local_direction_x_mm,
+        planned.correction.local_direction_y_mm,
+    ];
+    let magnitude = correction[0].hypot(correction[1]);
+    if planned.correction.applied() {
+        timing.corrected_moves = timing.corrected_moves.saturating_add(1);
+    }
+    timing.maximum_direction_correction_mm = timing.maximum_direction_correction_mm.max(magnitude);
+    if park {
+        timing.park_direction_correction_mm = Some(correction);
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -2173,6 +2233,23 @@ async fn start_workspace_scan(
         refinement.as_ref(),
         current_pose,
     )?;
+    let motion_calibration = if status.simulated {
+        None
+    } else {
+        Some(load_motion_calibration(
+            &state,
+            body.specification.calibration_id,
+            "workspace scan motion",
+        )?)
+    };
+    let motion_planner = MotionPlanner::new(state.profile.bounds, motion_calibration);
+    validate_workspace_motion_plan(
+        &state.profile,
+        &motion_planner,
+        current_pose,
+        &plan,
+        estimate.feed_mm_per_min,
+    )?;
     state
         .machine
         .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
@@ -2216,6 +2293,7 @@ async fn start_workspace_scan(
             installed_camera_model,
             top_profile,
             top_path,
+            motion_planner,
             body.lease_id,
         ),
     );
@@ -2877,23 +2955,71 @@ fn workspace_scan_feed(
     mode: WorkspaceScanMode,
     requested: Option<f64>,
 ) -> ApiResult<f64> {
+    let maximum = profile.transit_motion.clear_xy_feed_mm_per_min;
     let default = if mode != WorkspaceScanMode::Precision {
-        profile.default_feed_mm_per_min
+        maximum
     } else {
-        profile
-            .installed_geometry_calibration
-            .as_ref()
-            .map(|installed| installed.feed_mm_per_min)
-            .unwrap_or(profile.default_feed_mm_per_min)
+        profile.default_feed_mm_per_min
     };
     let feed = requested.unwrap_or(default);
-    if !feed.is_finite() || feed <= 0.0 || feed > profile.default_feed_mm_per_min {
+    if !feed.is_finite() || feed <= 0.0 || feed > maximum {
         return Err(ApiError::bad_request(format!(
-            "workspace feed must be above zero and no greater than {} mm/min",
-            profile.default_feed_mm_per_min
+            "workspace feed must be above zero and no greater than {maximum} mm/min",
         )));
     }
     Ok(feed)
+}
+
+fn validate_workspace_motion_plan(
+    profile: &MachineProfile,
+    planner: &MotionPlanner,
+    current_pose: Pose,
+    plan: &WorkspaceScanPlan,
+    feed_mm_per_min: f64,
+) -> ApiResult<()> {
+    let mut motion = planner
+        .initial_state(current_pose)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
+    capture_sequence.sort_by_key(|tile| tile.capture_order);
+    for tile in capture_sequence {
+        let planned = planner
+            .plan(
+                &motion,
+                tile.nominal_pose,
+                feed_mm_per_min,
+                MotionMode::Calibrated,
+            )
+            .map_err(|error| {
+                ApiError::bad_request(format!(
+                    "workspace scan feed lacks direction-response evidence: {error}"
+                ))
+            })?;
+        planner
+            .commit(&mut motion, &planned, planned.controller_target)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    }
+    let visual = profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let park_target = visual
+        .seed_pose
+        .resolve(motion.logical_pose)
+        .ok_or_else(|| ApiError::bad_request("workspace datum park target is invalid"))?;
+    planner
+        .plan(
+            &motion,
+            park_target,
+            profile.transit_motion.clear_xy_feed_mm_per_min,
+            MotionMode::Calibrated,
+        )
+        .map_err(|error| {
+            ApiError::bad_request(format!(
+                "workspace datum park lacks direction-response evidence: {error}"
+            ))
+        })?;
+    Ok(())
 }
 
 struct WorkspaceScanEstimateContext<'a> {
@@ -3016,12 +3142,8 @@ fn workspace_scan_estimate(
         + seam_product_bytes;
     let movement_seconds = travel_mm / feed_mm_per_min * 60.0;
     let base_duration_seconds = if mode != WorkspaceScanMode::Precision {
-        let first_frames = top_profile.settle_frames + 1;
-        let later_frames = if mode == WorkspaceScanMode::Reconnaissance {
-            RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES + 1
-        } else {
-            WORKSPACE_SURVEY_SETTLE_FRAMES + 1
-        };
+        let first_frames = top_profile.settle_frames + WORKSPACE_FRESH_FRAME_GUARD_FRAMES + 1;
+        let later_frames = WORKSPACE_FRESH_FRAME_GUARD_FRAMES + 1;
         let capture_frames = u64::from(first_frames)
             + u64::from(planned_tiles.saturating_sub(1)) * u64::from(later_frames);
         (movement_seconds
@@ -3067,13 +3189,7 @@ fn workspace_scan_estimate(
         overlap_fraction: plan.overlap_fraction,
         output_mm_per_pixel: plan.output_mm_per_pixel,
         feed_mm_per_min,
-        capture_settle_frames: if mode == WorkspaceScanMode::Reconnaissance {
-            RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES
-        } else if mode != WorkspaceScanMode::Precision {
-            WORKSPACE_SURVEY_SETTLE_FRAMES
-        } else {
-            WORKSPACE_PRECISION_SETTLE_FRAMES
-        },
+        capture_settle_frames: WORKSPACE_FRESH_FRAME_GUARD_FRAMES,
         rows: plan.rows,
         columns: plan.columns,
         planned_tiles,
@@ -3148,6 +3264,7 @@ async fn execute_workspace_scan(
     installed_camera_model: Option<PlanarCameraModel>,
     top_profile: CameraProfile,
     top_path: String,
+    motion_planner: MotionPlanner,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
     let motion_lock = state.workspace_scan_motion_lock.clone();
@@ -3160,6 +3277,7 @@ async fn execute_workspace_scan(
         installed_camera_model,
         top_profile,
         top_path,
+        motion_planner,
         lease_id,
     )
     .await
@@ -3174,6 +3292,7 @@ async fn execute_workspace_scan_locked(
     installed_camera_model: Option<PlanarCameraModel>,
     top_profile: CameraProfile,
     top_path: String,
+    motion_planner: MotionPlanner,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
     let operation_started = Instant::now();
@@ -3191,6 +3310,12 @@ async fn execute_workspace_scan_locked(
         .ok_or_else(|| "active profile does not define visual homing".to_string())?
         .clone();
     let use_lights = top_profile.lighting_enabled;
+    let controller_pose = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "workspace scan lost the machine pose".to_string())?;
+    let mut motion = CalibratedMotionSequence::new(motion_planner, controller_pose)?;
 
     let result = capture_and_build_workspace_scan(
         &state,
@@ -3203,6 +3328,7 @@ async fn execute_workspace_scan_locked(
         lease_id,
         use_lights,
         &mut timing,
+        &mut motion,
     )
     .await;
 
@@ -3213,10 +3339,17 @@ async fn execute_workspace_scan_locked(
         visual.seed_pose,
         visual.feed_mm_per_min,
     );
-    let park = state
-        .machine
-        .jog(lease_id, visual.seed_pose, park_feed_mm_per_min)
-        .await;
+    let park = execute_calibrated_motion(
+        &state,
+        lease_id,
+        &mut motion,
+        visual.seed_pose,
+        park_feed_mm_per_min,
+    )
+    .await;
+    if let Ok((_, planned)) = &park {
+        record_workspace_motion_correction(&mut timing, planned, true);
+    }
     timing.park_ms = elapsed_ms(park_started);
     let lights_disable_started = Instant::now();
     let lights_off = if use_lights {
@@ -3292,6 +3425,9 @@ async fn execute_workspace_scan_locked(
         "progress_store": workspace_timing_distribution(&timing.progress_store_ms),
         "mosaic_finalize_ms": timing.mosaic_finalize_ms,
         "park_ms": timing.park_ms,
+        "corrected_moves": timing.corrected_moves,
+        "maximum_direction_correction_mm": timing.maximum_direction_correction_mm,
+        "park_direction_correction_mm": timing.park_direction_correction_mm,
         "lights_disable_ms": timing.lights_disable_ms,
     });
     if let Err(error) = state
@@ -3313,6 +3449,7 @@ async fn execute_workspace_refinement_batch(
     installed_camera_model: Option<PlanarCameraModel>,
     top_profile: CameraProfile,
     top_path: String,
+    motion_planner: MotionPlanner,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
     let motion_lock = state.workspace_scan_motion_lock.clone();
@@ -3382,6 +3519,7 @@ async fn execute_workspace_refinement_batch(
             installed_camera_model.clone(),
             top_profile.clone(),
             top_path.clone(),
+            motion_planner.clone(),
             lease_id,
         )
         .await;
@@ -3502,6 +3640,7 @@ async fn capture_and_build_workspace_scan(
     lease_id: Uuid,
     use_lights: bool,
     timing: &mut WorkspaceScanTiming,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<String, String> {
     if scan.mode != WorkspaceScanMode::Precision {
         return capture_and_build_workspace_survey(
@@ -3515,6 +3654,7 @@ async fn capture_and_build_workspace_scan(
             lease_id,
             use_lights,
             timing,
+            motion,
         )
         .await;
     }
@@ -3529,6 +3669,7 @@ async fn capture_and_build_workspace_scan(
         lease_id,
         use_lights,
         timing,
+        motion,
     )
     .await
 }
@@ -3545,6 +3686,7 @@ async fn capture_and_build_precision_workspace_scan(
     lease_id: Uuid,
     use_lights: bool,
     timing: &mut WorkspaceScanTiming,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<String, String> {
     if use_lights {
         let started = Instant::now();
@@ -3552,31 +3694,61 @@ async fn capture_and_build_precision_workspace_scan(
         timing.lights_enable_ms += elapsed_ms(started);
         result.map_err(|error| error.to_string())?;
     }
+    let _capture_guard = state.camera_capture_lock.lock().await;
+    let updates = profile_control_updates(top_profile);
+    let config = camera_capture_config(top_profile, top_path.to_owned());
+    let camera_open_started = Instant::now();
+    let camera_open = open_persistent_workspace_camera_with_retry(&config, &updates).await;
+    timing.camera_open_ms += elapsed_ms(camera_open_started);
+    let mut session = Some(camera_open?);
     let mut frames = vec![None; plan.tiles.len()];
     let feed_mm_per_min = scan.feed_mm_per_min;
     let mut capture_sequence = plan.tiles.iter().collect::<Vec<_>>();
     capture_sequence.sort_by_key(|tile| tile.capture_order);
     for (capture_index, tile) in capture_sequence.into_iter().enumerate() {
         let motion_started = Instant::now();
-        let motion_result = state
-            .machine
-            .jog(lease_id, tile.nominal_pose.into(), feed_mm_per_min)
-            .await;
+        let motion_result = execute_calibrated_motion(
+            state,
+            lease_id,
+            motion,
+            tile.nominal_pose.into(),
+            feed_mm_per_min,
+        )
+        .await;
         timing.tile_motion_ms.push(elapsed_ms(motion_started));
-        motion_result.map_err(|error| error.to_string())?;
-        let mut capture_profile = top_profile.clone();
-        if capture_index > 0 {
-            capture_profile.settle_frames = capture_profile
-                .settle_frames
-                .min(WORKSPACE_PRECISION_SETTLE_FRAMES);
-        }
+        let (_, planned) = motion_result?;
+        record_workspace_motion_correction(timing, &planned, false);
+        let guard = Duration::from_secs_f64(
+            f64::from(WORKSPACE_FRESH_FRAME_GUARD_FRAMES) / f64::from(config.frames_per_second),
+        );
+        let fresh_after = monotonic_timestamp()
+            .map_err(|error| error.to_string())?
+            .checked_add(guard)
+            .ok_or_else(|| "camera freshness boundary overflow".to_string())?;
+        let settle_frames = if capture_index == 0 {
+            top_profile.settle_frames
+        } else {
+            0
+        };
         let capture_started = Instant::now();
-        let capture_result = capture_profiled_frames(state, &capture_profile, top_path, 1).await;
+        let capture_result = capture_persistent_workspace_frame(
+            &mut session,
+            &config,
+            &updates,
+            settle_frames,
+            top_profile.settle_frames,
+            Some(fresh_after),
+        )
+        .await;
         timing.tile_capture_ms.push(elapsed_ms(capture_started));
-        let frame = capture_result
-            .map_err(|error| error.message)?
-            .pop()
-            .ok_or_else(|| "top camera returned no workspace frame".to_string())?;
+        let capture = capture_result?;
+        scan.discarded_capture_frames = scan
+            .discarded_capture_frames
+            .saturating_add(capture.metadata.settle_frames);
+        if capture.metadata.fresh_after_boundary {
+            scan.timestamp_fresh_frames = scan.timestamp_fresh_frames.saturating_add(1);
+        }
+        let frame = capture.frame;
         let artifact_started = Instant::now();
         persist_workspace_tile_artifact(state, scan, tile, &frame, None)?;
         timing.tile_artifact_ms.push(elapsed_ms(artifact_started));
@@ -3594,6 +3766,7 @@ async fn capture_and_build_precision_workspace_scan(
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| "workspace scan did not capture every planned tile".to_string())?;
+    drop(session.take());
     let build_plan = plan.clone();
     let parallax_working_model = camera_model.clone();
     let parallax_installed_model = installed_camera_model.cloned();
@@ -3658,6 +3831,7 @@ async fn capture_and_build_workspace_survey(
     lease_id: Uuid,
     use_lights: bool,
     timing: &mut WorkspaceScanTiming,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<String, String> {
     if use_lights {
         let started = Instant::now();
@@ -3719,32 +3893,30 @@ async fn capture_and_build_workspace_survey(
                 .map_err(|error| error.to_string())?;
         }
         let motion_started = Instant::now();
-        let motion_result = state
-            .machine
-            .jog(lease_id, tile.nominal_pose.into(), feed_mm_per_min)
-            .await;
+        let motion_result = execute_calibrated_motion(
+            state,
+            lease_id,
+            motion,
+            tile.nominal_pose.into(),
+            feed_mm_per_min,
+        )
+        .await;
         timing.tile_motion_ms.push(elapsed_ms(motion_started));
-        motion_result.map_err(|error| error.to_string())?;
-        let fresh_after = if scan.mode == WorkspaceScanMode::Reconnaissance && capture_index > 0 {
-            let guard = Duration::from_secs_f64(
-                f64::from(RECONNAISSANCE_FRESH_FRAME_GUARD_FRAMES)
-                    / f64::from(config.frames_per_second),
-            );
-            Some(
-                monotonic_timestamp()
-                    .map_err(|error| error.to_string())?
-                    .checked_add(guard)
-                    .ok_or_else(|| "camera freshness boundary overflow".to_string())?,
-            )
-        } else {
-            None
-        };
+        let (_, planned) = motion_result?;
+        record_workspace_motion_correction(timing, &planned, false);
+        let guard = Duration::from_secs_f64(
+            f64::from(WORKSPACE_FRESH_FRAME_GUARD_FRAMES) / f64::from(config.frames_per_second),
+        );
+        let fresh_after = Some(
+            monotonic_timestamp()
+                .map_err(|error| error.to_string())?
+                .checked_add(guard)
+                .ok_or_else(|| "camera freshness boundary overflow".to_string())?,
+        );
         let settle_frames = if capture_index == 0 {
             top_profile.settle_frames
         } else {
-            top_profile
-                .settle_frames
-                .min(WORKSPACE_SURVEY_SETTLE_FRAMES)
+            0
         };
         let capture_started = Instant::now();
         let capture_result = capture_persistent_workspace_frame(
@@ -4420,7 +4592,7 @@ async fn capture_persistent_workspace_frame(
                 active.capture_fresh_after(
                     not_before,
                     requested_settle_frames,
-                    RECONNAISSANCE_MAX_FRESH_CAPTURE_FRAMES,
+                    WORKSPACE_MAX_FRESH_CAPTURE_FRAMES,
                 )
             } else {
                 active.capture(requested_settle_frames)
@@ -5178,6 +5350,16 @@ async fn start_workspace_refinement_batch(
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) = load_workspace_camera_model(&state, body.calibration_id)?;
+    let motion_calibration = if status.simulated {
+        None
+    } else {
+        Some(load_motion_calibration(
+            &state,
+            body.calibration_id,
+            "workspace refinement motion",
+        )?)
+    };
+    let motion_planner = MotionPlanner::new(state.profile.bounds, motion_calibration);
     let (camera_model, surface_model, installed_camera_model, installed_geometry) =
         select_workspace_surface_models(
             &state,
@@ -5233,6 +5415,13 @@ async fn start_workspace_refinement_batch(
             installed_geometry.as_ref(),
             Some(&refinement),
             start_pose,
+        )?;
+        validate_workspace_motion_plan(
+            &state.profile,
+            &motion_planner,
+            start_pose,
+            &plan,
+            estimate.feed_mm_per_min,
         )?;
         let operation = Operation::pending("vision.workspace_refinement");
         let scan = pending_workspace_scan(
@@ -5318,6 +5507,7 @@ async fn start_workspace_refinement_batch(
             installed_camera_model,
             top_profile,
             top_path,
+            motion_planner,
             body.lease_id,
         ),
     );
@@ -7587,20 +7777,53 @@ async fn execute_strip_feeder_source_capture_task(
     visual: VisualHomingProfile,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
+    let task_started = Instant::now();
+    let operation_id = run.operation_id;
+    let simulated = state.machine.status().simulated;
     run.status = OperationStatus::Running;
     run.updated_at = Utc::now();
     state
         .store
         .put_strip_feeder_source_capture(&run)
         .map_err(|error| error.to_string())?;
-    let result = execute_strip_feeder_source_capture(
+    let (result, camera_timing) = if simulated {
+        (
+            execute_strip_feeder_source_capture(
+                &state,
+                &mut run,
+                targets,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                lease_id,
+            )
+            .await,
+            json!({}),
+        )
+    } else {
+        let operation_state = state.clone();
+        with_profiled_camera_reuse(
+            &state,
+            execute_strip_feeder_source_capture(
+                &operation_state,
+                &mut run,
+                targets,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                lease_id,
+            ),
+        )
+        .await
+    };
+    record_camera_target_operation_timing(
         &state,
-        &mut run,
-        targets,
-        &camera_profile,
-        &camera_path,
-        &visual,
-        lease_id,
+        operation_id,
+        "strip_feeder_source_capture",
+        simulated,
+        result.is_ok(),
+        elapsed_ms(task_started),
+        camera_timing,
     )
     .await;
     match result {
@@ -7662,6 +7885,11 @@ async fn execute_strip_feeder_source_capture(
             error.message
         )
     })?;
+    let mut motion = operation_motion_sequence(
+        state,
+        run.calibration_id,
+        "strip feeder source capture motion",
+    )?;
     if camera_profile.lighting_enabled {
         state
             .machine
@@ -7677,12 +7905,23 @@ async fn execute_strip_feeder_source_capture(
         camera_path,
         visual,
         lease_id,
+        &mut motion,
     )
     .await;
-    let return_result = state
-        .machine
-        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
-        .await;
+    let return_feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        Some(motion.state.logical_pose),
+        visual.seed_pose,
+        visual.feed_mm_per_min,
+    );
+    let return_result = execute_calibrated_motion(
+        state,
+        lease_id,
+        &mut motion,
+        visual.seed_pose,
+        return_feed_mm_per_min,
+    )
+    .await;
     let lights_result = if camera_profile.lighting_enabled {
         state.machine.disable_actuator("lights".into()).await
     } else {
@@ -7708,6 +7947,7 @@ async fn capture_inventory_source_targets(
     camera_path: &str,
     visual: &VisualHomingProfile,
     lease_id: Uuid,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<(), String> {
     for target in targets {
         state
@@ -7722,7 +7962,7 @@ async fn capture_inventory_source_targets(
             rotation_deg: 0.0,
         };
         let camera_pose =
-            jog_board_registration_target(state, lease_id, requested_pose, visual).await?;
+            jog_board_registration_target(state, lease_id, requested_pose, visual, motion).await?;
         let frame = capture_profiled_frame(state, camera_profile, camera_path)
             .await
             .map_err(|error| error.message)?;
@@ -8348,21 +8588,55 @@ async fn execute_strip_feeder_live_holdout_task(
     visual: VisualHomingProfile,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
+    let task_started = Instant::now();
+    let operation_id = run.operation_id;
+    let simulated = state.machine.status().simulated;
     run.status = OperationStatus::Running;
     run.updated_at = Utc::now();
     state
         .store
         .put_strip_feeder_live_holdout(&run)
         .map_err(|error| error.to_string())?;
-    let result = execute_strip_feeder_live_holdout(
+    let (result, camera_timing) = if simulated {
+        (
+            execute_strip_feeder_live_holdout(
+                &state,
+                &run,
+                &registration,
+                &camera_model,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                lease_id,
+            )
+            .await,
+            json!({}),
+        )
+    } else {
+        let operation_state = state.clone();
+        with_profiled_camera_reuse(
+            &state,
+            execute_strip_feeder_live_holdout(
+                &operation_state,
+                &run,
+                &registration,
+                &camera_model,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                lease_id,
+            ),
+        )
+        .await
+    };
+    record_camera_target_operation_timing(
         &state,
-        &run,
-        &registration,
-        &camera_model,
-        &camera_profile,
-        &camera_path,
-        &visual,
-        lease_id,
+        operation_id,
+        "strip_feeder_live_holdout",
+        simulated,
+        result.is_ok(),
+        elapsed_ms(task_started),
+        camera_timing,
     )
     .await;
     match result {
@@ -8572,6 +8846,11 @@ async fn execute_strip_feeder_live_holdout(
             error.message
         )
     })?;
+    let mut motion = operation_motion_sequence(
+        state,
+        run.calibration_id,
+        "strip feeder live holdout motion",
+    )?;
     if camera_profile.lighting_enabled {
         state
             .machine
@@ -8588,12 +8867,23 @@ async fn execute_strip_feeder_live_holdout(
         camera_path,
         visual,
         lease_id,
+        &mut motion,
     )
     .await;
-    let return_result = state
-        .machine
-        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
-        .await;
+    let return_feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        Some(motion.state.logical_pose),
+        visual.seed_pose,
+        visual.feed_mm_per_min,
+    );
+    let return_result = execute_calibrated_motion(
+        state,
+        lease_id,
+        &mut motion,
+        visual.seed_pose,
+        return_feed_mm_per_min,
+    )
+    .await;
     let lights_result = if camera_profile.lighting_enabled {
         state.machine.disable_actuator("lights".into()).await
     } else {
@@ -8618,6 +8908,7 @@ async fn measure_strip_feeder_live_holdout(
     camera_path: &str,
     visual: &VisualHomingProfile,
     lease_id: Uuid,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<velocitypnp_domain::StripFeederLiveHoldoutReport, String> {
     let targets = strip_feeder_holdout_capture_targets(
         registration,
@@ -8633,7 +8924,8 @@ async fn measure_strip_feeder_live_holdout(
     let mut frames = Vec::with_capacity(targets.len() * run.sample_count as usize);
     let mut camera_poses = Vec::with_capacity(frames.capacity());
     for target in targets {
-        let measured_pose = jog_board_registration_target(state, lease_id, target, visual).await?;
+        let measured_pose =
+            jog_board_registration_target(state, lease_id, target, visual, motion).await?;
         let captured =
             capture_profiled_frames(state, camera_profile, camera_path, run.sample_count)
                 .await
@@ -12984,22 +13276,57 @@ async fn execute_board_registration_task(
     visual: VisualHomingProfile,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
+    let task_started = Instant::now();
+    let operation_id = run.operation_id;
+    let simulated = state.machine.status().simulated;
     run.status = OperationStatus::Running;
     run.updated_at = Utc::now();
     state
         .store
         .put_board_registration(&run)
         .map_err(|error| error.to_string())?;
-    let result = execute_board_registration(
+    let (result, camera_timing) = if simulated {
+        (
+            execute_board_registration(
+                &state,
+                &mut run,
+                &board,
+                &design_match,
+                &camera_model,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                lease_id,
+            )
+            .await,
+            json!({}),
+        )
+    } else {
+        let operation_state = state.clone();
+        with_profiled_camera_reuse(
+            &state,
+            execute_board_registration(
+                &operation_state,
+                &mut run,
+                &board,
+                &design_match,
+                &camera_model,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                lease_id,
+            ),
+        )
+        .await
+    };
+    record_camera_target_operation_timing(
         &state,
-        &mut run,
-        &board,
-        &design_match,
-        &camera_model,
-        &camera_profile,
-        &camera_path,
-        &visual,
-        lease_id,
+        operation_id,
+        "board_registration",
+        simulated,
+        result.is_ok(),
+        elapsed_ms(task_started),
+        camera_timing,
     )
     .await;
     match result {
@@ -13055,6 +13382,8 @@ async fn execute_board_registration(
             error.message
         )
     })?;
+    let mut motion =
+        operation_motion_sequence(state, run.calibration_id, "board registration motion")?;
     if camera_profile.lighting_enabled {
         state
             .machine
@@ -13072,12 +13401,23 @@ async fn execute_board_registration(
         camera_path,
         visual,
         lease_id,
+        &mut motion,
     )
     .await;
-    let return_result = state
-        .machine
-        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
-        .await;
+    let return_feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        Some(motion.state.logical_pose),
+        visual.seed_pose,
+        visual.feed_mm_per_min,
+    );
+    let return_result = execute_calibrated_motion(
+        state,
+        lease_id,
+        &mut motion,
+        visual.seed_pose,
+        return_feed_mm_per_min,
+    )
+    .await;
     let lights_result = if camera_profile.lighting_enabled {
         state.machine.disable_actuator("lights".into()).await
     } else {
@@ -13103,6 +13443,7 @@ async fn measure_board_registration(
     camera_path: &str,
     visual: &VisualHomingProfile,
     lease_id: Uuid,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<String, String> {
     let bounds = board
         .outline_bounds
@@ -13147,6 +13488,7 @@ async fn measure_board_registration(
                 visual,
                 lease_id,
                 run.sample_count,
+                motion,
             )
             .await
             {
@@ -13240,6 +13582,7 @@ async fn observe_board_fiducial(
     visual: &VisualHomingProfile,
     lease_id: Uuid,
     sample_count: u32,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<BoardRegistrationFiducialObservation, String> {
     let predicted = seed_transform.apply(fiducial.pose.x_mm, fiducial.pose.y_mm);
     let target = Pose {
@@ -13259,7 +13602,8 @@ async fn observe_board_fiducial(
         .renew_lease(lease_id, 900)
         .await
         .map_err(|error| error.to_string())?;
-    let measured_pose = jog_board_registration_target(state, lease_id, target, visual).await?;
+    let measured_pose =
+        jog_board_registration_target(state, lease_id, target, visual, motion).await?;
     let scale_mm_per_px = camera_model
         .local_mm_per_pixel(camera_model.center_x_px, camera_model.center_y_px)
         .ok_or_else(|| "top-camera model has no local center scale".to_string())?;
@@ -13370,6 +13714,7 @@ async fn jog_board_registration_target(
     lease_id: Uuid,
     target: Pose,
     visual: &VisualHomingProfile,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<Pose, String> {
     let approach = Pose {
         x_mm: target.x_mm - BOARD_REGISTRATION_APPROACH_MM,
@@ -13377,35 +13722,41 @@ async fn jog_board_registration_target(
         ..target
     };
     if state.profile.bounds.contains(approach) {
-        state
-            .machine
-            .jog(
-                lease_id,
-                JogTarget {
-                    x_mm: approach.x_mm,
-                    y_mm: approach.y_mm,
-                    z_mm: approach.z_mm,
-                    rotation_deg: None,
-                },
-                visual.feed_mm_per_min,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    state
-        .machine
-        .jog(
-            lease_id,
-            JogTarget {
-                x_mm: target.x_mm,
-                y_mm: target.y_mm,
-                z_mm: target.z_mm,
-                rotation_deg: None,
-            },
+        let approach_target = JogTarget {
+            x_mm: approach.x_mm,
+            y_mm: approach.y_mm,
+            z_mm: approach.z_mm,
+            rotation_deg: None,
+        };
+        let approach_feed_mm_per_min = safe_level_xy_feed(
+            &state.profile,
+            Some(motion.state.logical_pose),
+            approach_target,
             visual.feed_mm_per_min,
+        );
+        execute_calibrated_motion(
+            state,
+            lease_id,
+            motion,
+            approach_target,
+            approach_feed_mm_per_min,
         )
-        .await
-        .map_err(|error| error.to_string())
+        .await?;
+    }
+    execute_calibrated_motion(
+        state,
+        lease_id,
+        motion,
+        JogTarget {
+            x_mm: target.x_mm,
+            y_mm: target.y_mm,
+            z_mm: target.z_mm,
+            rotation_deg: None,
+        },
+        visual.feed_mm_per_min,
+    )
+    .await
+    .map(|(pose, _)| pose)
 }
 
 fn normalize_angle_deg(angle_deg: f64) -> f64 {
@@ -13668,25 +14019,63 @@ async fn execute_board_surface_measurement_task(
     plate_depth_mm: f64,
     lease_id: Uuid,
 ) -> Result<Option<String>, String> {
+    let task_started = Instant::now();
+    let operation_id = run.operation_id;
+    let simulated = state.machine.status().simulated;
     run.status = OperationStatus::Running;
     run.updated_at = Utc::now();
     state
         .store
         .put_board_surface_measurement(&run)
         .map_err(|error| error.to_string())?;
-    let result = execute_board_surface_measurement(
+    let (result, camera_timing) = if simulated {
+        (
+            execute_board_surface_measurement(
+                &state,
+                &run,
+                &registration,
+                &board,
+                &working_camera_model,
+                &installed_camera_model,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                reference_contact_nozzle_z_mm,
+                plate_depth_mm,
+                lease_id,
+            )
+            .await,
+            json!({}),
+        )
+    } else {
+        let operation_state = state.clone();
+        with_profiled_camera_reuse(
+            &state,
+            execute_board_surface_measurement(
+                &operation_state,
+                &run,
+                &registration,
+                &board,
+                &working_camera_model,
+                &installed_camera_model,
+                &camera_profile,
+                &camera_path,
+                &visual,
+                reference_contact_nozzle_z_mm,
+                plate_depth_mm,
+                lease_id,
+            ),
+        )
+        .await
+    };
+    record_camera_target_operation_timing(
         &state,
-        &run,
-        &registration,
-        &board,
-        &working_camera_model,
-        &installed_camera_model,
-        &camera_profile,
-        &camera_path,
-        &visual,
-        reference_contact_nozzle_z_mm,
-        plate_depth_mm,
-        lease_id,
+        operation_id,
+        "board_surface_measurement",
+        simulated,
+        result.is_ok(),
+        elapsed_ms(task_started),
+        camera_timing,
     )
     .await;
     match result {
@@ -13777,6 +14166,11 @@ async fn execute_board_surface_measurement(
             error.message
         )
     })?;
+    let mut motion = operation_motion_sequence(
+        state,
+        run.calibration_id,
+        "board surface measurement motion",
+    )?;
     if camera_profile.lighting_enabled {
         state
             .machine
@@ -13797,12 +14191,23 @@ async fn execute_board_surface_measurement(
         reference_contact_nozzle_z_mm,
         plate_depth_mm,
         lease_id,
+        &mut motion,
     )
     .await;
-    let return_result = state
-        .machine
-        .jog(lease_id, visual.seed_pose, visual.feed_mm_per_min)
-        .await;
+    let return_feed_mm_per_min = safe_level_xy_feed(
+        &state.profile,
+        Some(motion.state.logical_pose),
+        visual.seed_pose,
+        visual.feed_mm_per_min,
+    );
+    let return_result = execute_calibrated_motion(
+        state,
+        lease_id,
+        &mut motion,
+        visual.seed_pose,
+        return_feed_mm_per_min,
+    )
+    .await;
     let lights_result = if camera_profile.lighting_enabled {
         state.machine.disable_actuator("lights".into()).await
     } else {
@@ -13831,6 +14236,7 @@ async fn measure_board_surface(
     reference_contact_nozzle_z_mm: f64,
     plate_depth_mm: f64,
     lease_id: Uuid,
+    motion: &mut CalibratedMotionSequence,
 ) -> Result<BoardSurfaceMeasurementReport, String> {
     let transform = registration
         .design_to_machine
@@ -13878,7 +14284,7 @@ async fn measure_board_surface(
                 .await
                 .map_err(|error| error.to_string())?;
             let measured_pose =
-                jog_board_registration_target(state, lease_id, target, visual).await?;
+                jog_board_registration_target(state, lease_id, target, visual, motion).await?;
             let scale_mm_per_px = working_camera_model
                 .local_mm_per_pixel(expected_pixel[0], expected_pixel[1])
                 .ok_or_else(|| "top-camera model has no local surface-view scale".to_string())?;
@@ -15408,7 +15814,7 @@ fn capture_scoped_frames(
     } else {
         capture.capture_fresh_after(
             fresh_after,
-            WORKSPACE_SURVEY_SETTLE_FRAMES,
+            PROFILED_CAMERA_FRESH_FRAME_SETTLE_LIMIT,
             PROFILED_CAMERA_MAX_FRESH_CAPTURE_FRAMES,
         )?
     };
@@ -15891,6 +16297,53 @@ impl CalibratedMotionSequence {
     }
 }
 
+fn operation_motion_sequence(
+    state: &AppState,
+    calibration_id: Uuid,
+    purpose: &str,
+) -> Result<CalibratedMotionSequence, String> {
+    let calibration = if state.machine.status().simulated {
+        None
+    } else {
+        Some(
+            load_motion_calibration(state, calibration_id, purpose)
+                .map_err(|error| error.message)?,
+        )
+    };
+    let controller_pose = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| format!("{purpose} lost the machine pose"))?;
+    CalibratedMotionSequence::new(
+        MotionPlanner::new(state.profile.bounds, calibration),
+        controller_pose,
+    )
+}
+
+async fn execute_calibrated_motion(
+    state: &AppState,
+    lease_id: Uuid,
+    calibrated: &mut CalibratedMotionSequence,
+    target: JogTarget,
+    feed_mm_per_min: f64,
+) -> Result<(Pose, PlannedMotion), String> {
+    let logical_target = target
+        .resolve(calibrated.state.logical_pose)
+        .ok_or_else(|| "calibrated motion target is invalid".to_string())?;
+    let planned = execute_job_motion(
+        &state.machine,
+        lease_id,
+        &calibrated.planner,
+        &mut calibrated.state,
+        logical_target,
+        feed_mm_per_min,
+        MotionMode::Calibrated,
+    )
+    .await?;
+    Ok((calibrated.state.logical_pose, planned))
+}
+
 async fn execute_vacuum_motion(
     state: &AppState,
     lease_id: Uuid,
@@ -15905,20 +16358,9 @@ async fn execute_vacuum_motion(
             .await
             .map_err(|error| error.to_string());
     };
-    let logical_target = target
-        .resolve(calibrated.state.logical_pose)
-        .ok_or_else(|| "vacuum motion target is invalid".to_string())?;
-    execute_job_motion(
-        &state.machine,
-        lease_id,
-        &calibrated.planner,
-        &mut calibrated.state,
-        logical_target,
-        feed_mm_per_min,
-        MotionMode::Calibrated,
-    )
-    .await?;
-    Ok(calibrated.state.logical_pose)
+    execute_calibrated_motion(state, lease_id, calibrated, target, feed_mm_per_min)
+        .await
+        .map(|(pose, _)| pose)
 }
 
 async fn approach_vacuum_z_with_slow_finish(
@@ -30528,6 +30970,14 @@ fn load_job_motion_calibration(
     state: &AppState,
     calibration_id: Uuid,
 ) -> ApiResult<MotionCalibration> {
+    load_motion_calibration(state, calibration_id, "job motion")
+}
+
+fn load_motion_calibration(
+    state: &AppState,
+    calibration_id: Uuid,
+    purpose: &str,
+) -> ApiResult<MotionCalibration> {
     let mut snapshot = state
         .store
         .get_calibration(calibration_id)
@@ -30540,7 +30990,7 @@ fn load_job_motion_calibration(
     }
     let changed = crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)
         .map_err(ApiError::bad_request)?;
-    let calibration = motion_calibration_from_snapshot(state, &snapshot, "job motion")?;
+    let calibration = motion_calibration_from_snapshot(state, &snapshot, purpose)?;
     if changed {
         state
             .store
@@ -32377,7 +32827,7 @@ mod tests {
             overlap_fraction: DEFAULT_SURVEY_OVERLAP,
             output_mm_per_pixel: DEFAULT_SURVEY_OUTPUT_MM_PER_PIXEL,
             feed_mm_per_min: 1_200.0,
-            capture_settle_frames: WORKSPACE_SURVEY_SETTLE_FRAMES,
+            capture_settle_frames: WORKSPACE_FRESH_FRAME_GUARD_FRAMES,
             discarded_capture_frames: 0,
             timestamp_fresh_frames: 0,
             frame_width_px: 1280,
@@ -33568,23 +34018,78 @@ mod tests {
 
         assert_eq!(
             workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, None).unwrap(),
-            1_200.0
+            23_000.0
         );
         assert_eq!(
             workspace_scan_feed(&state.profile, WorkspaceScanMode::Precision, None).unwrap(),
-            600.0
+            1_200.0
         );
         assert_eq!(
             workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, Some(900.0)).unwrap(),
             900.0
         );
         assert!(
-            workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, Some(1_201.0)).is_err()
+            workspace_scan_feed(&state.profile, WorkspaceScanMode::Survey, Some(23_001.0)).is_err()
         );
         assert_eq!(
             workspace_scan_feed(&state.profile, WorkspaceScanMode::Reconnaissance, None).unwrap(),
-            1_200.0
+            23_000.0
         );
+    }
+
+    #[test]
+    fn workspace_motion_requires_direction_evidence_for_scan_and_park_feeds() {
+        let mut profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        profile.transit_motion.clear_xy_feed_mm_per_min = 12_000.0;
+        let calibration = MotionCalibration::from_local_direction_response(
+            Uuid::new_v4(),
+            "0".repeat(64),
+            &test_direction_report(),
+        )
+        .unwrap();
+        let planner = MotionPlanner::new(profile.bounds, Some(calibration));
+        let start = profile.home_pose;
+        let plan = WorkspaceScanPlan {
+            region: WorkspaceScanRegion {
+                x_min_mm: 10.0,
+                x_max_mm: 11.0,
+                y_min_mm: 10.0,
+                y_max_mm: 11.0,
+            },
+            overlap_fraction: 0.3,
+            output_mm_per_pixel: 0.1,
+            frame_width_px: 10,
+            frame_height_px: 10,
+            usable_pixel_bounds: velocitypnp_domain::WorkspacePixelBounds {
+                left: 0,
+                top: 0,
+                right: 10,
+                bottom: 10,
+            },
+            rows: 1,
+            columns: 1,
+            tiles: vec![velocitypnp_domain::WorkspaceScanTile {
+                index: 0,
+                row: 0,
+                column: 0,
+                capture_order: 0,
+                nominal_pose: Pose {
+                    x_mm: 10.5,
+                    y_mm: 10.5,
+                    z_mm: profile.safe_z_mm,
+                    rotation_deg: start.rotation_deg,
+                },
+                placement_correction_x_mm: 0.0,
+                placement_correction_y_mm: 0.0,
+                artifact_name: String::new(),
+            }],
+        };
+
+        validate_workspace_motion_plan(&profile, &planner, start, &plan, 12_000.0).unwrap();
+        let error =
+            validate_workspace_motion_plan(&profile, &planner, start, &plan, 6_000.0).unwrap_err();
+        assert!(error.message.contains("lacks direction-response evidence"));
     }
 
     #[tokio::test]
