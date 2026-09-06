@@ -111,8 +111,15 @@ paths:
                 sample_count:
                   type: integer
                   minimum: 1
-                  maximum: 60
+                  maximum: 120
                   default: 30
+                settle_frames:
+                  type: [integer, "null"]
+                  minimum: 0
+                  maximum: 120
+                  description: >-
+                    Overrides the stored discard count for this diagnostic
+                    capture only.
       responses:
         "200":
           description: Applied controls and reproducibility report
@@ -120,11 +127,17 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [role, profile, controls, report]
+                required:
+                  - role
+                  - profile
+                  - controls
+                  - discarded_settle_frames
+                  - report
                 properties:
                   role: { $ref: "#/components/schemas/CameraRole" }
                   profile: { $ref: "#/components/schemas/CameraProfile" }
                   controls: { type: array, items: { type: object } }
+                  discarded_settle_frames: { type: integer, minimum: 0 }
                   report: { $ref: "#/components/schemas/CameraReproducibilityReport" }
   /workspace-scans:
     get:
@@ -1206,6 +1219,14 @@ paths:
                 lease_id: { type: string, format: uuid }
                 nozzle_id: { type: string }
                 pocket_index: { type: [integer, "null"], minimum: 0 }
+                cycle_count:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                  default: 1
+                  description: >-
+                    Repeats one pickup-return benchmark while the pocket
+                    reservation and camera streams stay active.
                 fallback_drop_surface_machine_mm:
                   oneOf:
                     - { $ref: "#/components/schemas/Point2d" }
@@ -3451,6 +3472,28 @@ components:
         passed: { type: boolean }
         artifact_names: { type: array, items: { type: string } }
         findings: { type: array, items: { type: string } }
+    StripFeederPickupBenchmarkCycle:
+      type: object
+      required:
+        - cycle_index
+        - elapsed_ms
+        - passed
+        - camera_timing
+        - pickup_nozzle_z_mm
+        - held_median_raw_value
+        - bottom_centering_residual_mm
+        - return_center_shift_mm
+        - message
+      properties:
+        cycle_index: { type: integer, minimum: 1 }
+        elapsed_ms: { type: number, minimum: 0 }
+        passed: { type: boolean }
+        camera_timing: { type: object, additionalProperties: true }
+        pickup_nozzle_z_mm: { type: [number, "null"] }
+        held_median_raw_value: { type: [number, "null"] }
+        bottom_centering_residual_mm: { type: [number, "null"] }
+        return_center_shift_mm: { type: [number, "null"] }
+        message: { type: string }
     StripFeederPickupQualificationRun:
       type: object
       required:
@@ -3466,6 +3509,8 @@ components:
         - pocket_index
         - fallback_drop_surface_machine_mm
         - rotation_capture_offsets_deg
+        - requested_cycle_count
+        - benchmark_cycles
         - report
         - message
       properties:
@@ -3488,6 +3533,14 @@ components:
           maxItems: 12
           uniqueItems: true
           items: { type: number }
+        requested_cycle_count:
+          type: integer
+          minimum: 1
+          maximum: 5
+        benchmark_cycles:
+          type: array
+          maxItems: 5
+          items: { $ref: "#/components/schemas/StripFeederPickupBenchmarkCycle" }
         report:
           oneOf:
             - { $ref: "#/components/schemas/StripFeederPickupQualificationReport" }

@@ -1129,7 +1129,25 @@ pub struct StripFeederPickupQualificationReport {
     pub findings: Vec<String>,
 }
 
-/// Persistent operation state for a pickup qualification cycle.
+/// Timing and gate results from one cycle in a repeated pickup benchmark.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederPickupBenchmarkCycle {
+    pub cycle_index: u32,
+    pub elapsed_ms: f64,
+    pub passed: bool,
+    pub camera_timing: serde_json::Value,
+    pub pickup_nozzle_z_mm: Option<f64>,
+    pub held_median_raw_value: Option<f64>,
+    pub bottom_centering_residual_mm: Option<f64>,
+    pub return_center_shift_mm: Option<f64>,
+    pub message: String,
+}
+
+fn default_pickup_benchmark_cycle_count() -> u32 {
+    1
+}
+
+/// Persistent operation state for one or more pickup-return cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StripFeederPickupQualificationRun {
     pub id: Uuid,
@@ -1147,6 +1165,10 @@ pub struct StripFeederPickupQualificationRun {
     pub fallback_drop_surface_machine_mm: Option<[f64; 2]>,
     #[serde(default)]
     pub rotation_capture_offsets_deg: Vec<f64>,
+    #[serde(default = "default_pickup_benchmark_cycle_count")]
+    pub requested_cycle_count: u32,
+    #[serde(default)]
+    pub benchmark_cycles: Vec<StripFeederPickupBenchmarkCycle>,
     #[serde(default)]
     pub report: Option<StripFeederPickupQualificationReport>,
     #[serde(default)]

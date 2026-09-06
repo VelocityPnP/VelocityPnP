@@ -49,21 +49,22 @@ use velocitypnp_domain::{
     PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
     SourceComponentClass, SourceComponentModelPrediction, SourceComponentShadowReport,
     StripFeederInventoryLane, StripFeederInventoryReport, StripFeederInventorySummary,
-    StripFeederLiveHoldoutRun, StripFeederPickupDisposition, StripFeederPickupQualificationReport,
-    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
-    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
-    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
-    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
-    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
-    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
-    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
-    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
-    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
-    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
-    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
-    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
-    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
-    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
+    StripFeederLiveHoldoutRun, StripFeederPickupBenchmarkCycle, StripFeederPickupDisposition,
+    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
+    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
+    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
+    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
+    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
+    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
+    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
+    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
+    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
+    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
+    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
+    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
+    WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -309,7 +310,7 @@ struct ScopedProfiledCamera {
     capture: Arc<PersistentGrayCapture>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ProfiledCameraTiming {
     open_count: u32,
     open_failure_count: u32,
@@ -329,27 +330,43 @@ struct ProfiledCaptureContext {
 
 impl ProfiledCaptureContext {
     fn timing_json(&self) -> Value {
-        Value::Object(
-            self.timing
-                .iter()
-                .map(|(role, timing)| {
-                    (
-                        role.clone(),
-                        json!({
-                            "open_count": timing.open_count,
-                            "open_failure_count": timing.open_failure_count,
-                            "capture_count": timing.capture_count,
-                            "capture_failure_count": timing.capture_failure_count,
-                            "captured_frames": timing.captured_frames,
-                            "discarded_frames": timing.discarded_frames,
-                            "open_ms": timing.open_ms,
-                            "capture_ms": timing.capture_ms,
-                        }),
-                    )
-                })
-                .collect(),
-        )
+        profiled_camera_timing_json(&self.timing, None)
     }
+}
+
+fn profiled_camera_timing_json(
+    timing: &BTreeMap<String, ProfiledCameraTiming>,
+    baseline: Option<&BTreeMap<String, ProfiledCameraTiming>>,
+) -> Value {
+    Value::Object(
+        timing
+            .iter()
+            .map(|(role, timing)| {
+                let baseline = baseline
+                    .and_then(|baseline| baseline.get(role))
+                    .cloned()
+                    .unwrap_or_default();
+                (
+                    role.clone(),
+                    json!({
+                        "open_count": timing.open_count.saturating_sub(baseline.open_count),
+                        "open_failure_count": timing.open_failure_count
+                            .saturating_sub(baseline.open_failure_count),
+                        "capture_count": timing.capture_count
+                            .saturating_sub(baseline.capture_count),
+                        "capture_failure_count": timing.capture_failure_count
+                            .saturating_sub(baseline.capture_failure_count),
+                        "captured_frames": timing.captured_frames
+                            .saturating_sub(baseline.captured_frames),
+                        "discarded_frames": timing.discarded_frames
+                            .saturating_sub(baseline.discarded_frames),
+                        "open_ms": (timing.open_ms - baseline.open_ms).max(0.0),
+                        "capture_ms": (timing.capture_ms - baseline.capture_ms).max(0.0),
+                    }),
+                )
+            })
+            .collect(),
+    )
 }
 
 tokio::task_local! {
@@ -1487,6 +1504,8 @@ struct CameraReproducibilityRequest {
     lease_id: Uuid,
     #[serde(default = "default_camera_sample_count")]
     sample_count: u32,
+    #[serde(default)]
+    settle_frames: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -8720,7 +8739,13 @@ struct StartStripFeederPickupQualificationRequest {
     fallback_drop_surface_machine_mm: Option<[f64; 2]>,
     #[serde(default)]
     rotation_capture_offsets_deg: Vec<f64>,
+    #[serde(default = "default_pickup_cycle_count")]
+    cycle_count: u32,
     confirmed_external_safety_checks: bool,
+}
+
+fn default_pickup_cycle_count() -> u32 {
+    1
 }
 
 #[derive(Debug, Serialize)]
@@ -9224,6 +9249,11 @@ async fn start_strip_feeder_pickup_qualification(
             "pickup qualification needs a nozzle ID",
         ));
     }
+    if !(1..=5).contains(&body.cycle_count) {
+        return Err(ApiError::bad_request(
+            "pickup qualification cycle_count must be between 1 and 5",
+        ));
+    }
     validate_held_part_rotation_capture_offsets(&body.rotation_capture_offsets_deg, &state.profile)
         .map_err(ApiError::bad_request)?;
     if body
@@ -9469,6 +9499,8 @@ async fn start_strip_feeder_pickup_qualification(
         pocket_index: selected_pocket.pocket_index,
         fallback_drop_surface_machine_mm: body.fallback_drop_surface_machine_mm,
         rotation_capture_offsets_deg: body.rotation_capture_offsets_deg.clone(),
+        requested_cycle_count: body.cycle_count,
+        benchmark_cycles: Vec::new(),
         report: None,
         message: None,
     };
@@ -9544,32 +9576,53 @@ async fn execute_strip_feeder_pickup_task(
         .put_strip_feeder_pickup_qualification(&prepared.run)
         .map_err(|error| error.to_string())?;
     let simulated = state.machine.status().simulated;
-    let (result, camera_timing, physical_execution_ms) = if simulated {
-        (
-            execute_simulated_strip_feeder_pickup(&state, &prepared).await,
-            json!({}),
-            None,
-        )
+    let (mut result, benchmark_cycles, camera_timing, physical_execution_ms) = if simulated {
+        let (result, cycles) = execute_simulated_pickup_benchmark(&state, &prepared).await;
+        (result, cycles, json!({}), None)
     } else {
         let physical_started = Instant::now();
-        let (result, camera_timing) = with_profiled_camera_reuse(
+        let ((result, cycles), camera_timing) = with_profiled_camera_reuse(
             &state,
-            execute_physical_strip_feeder_pickup(&state, &prepared),
+            execute_physical_pickup_benchmark(&state, &prepared),
         )
         .await;
-        (result, camera_timing, Some(elapsed_ms(physical_started)))
+        (
+            result,
+            cycles,
+            camera_timing,
+            Some(elapsed_ms(physical_started)),
+        )
     };
+    prepared.run.benchmark_cycles = benchmark_cycles;
+    if prepared.run.requested_cycle_count > 1 {
+        if let Ok(report) = &mut result {
+            report.findings.push(format!(
+                "the benchmark completed {} of {} requested cycles; retained artifacts are from the final cycle",
+                prepared.run.benchmark_cycles.len(),
+                prepared.run.requested_cycle_count,
+            ));
+        }
+    }
     let outcome = match result {
         Ok(report) => {
             let passed = report.passed;
             let message = if passed {
-                format!(
-                    "Pickup qualification passed at nozzle Z{:.3}; bottom vision and verified return passed",
-                    report.pickup_nozzle_z_mm.unwrap_or_default(),
-                )
+                if prepared.run.requested_cycle_count > 1 {
+                    format!(
+                        "Pickup benchmark passed {} cycles at nozzle Z{:.3}; every recorded cycle passed",
+                        prepared.run.benchmark_cycles.len(),
+                        report.pickup_nozzle_z_mm.unwrap_or_default(),
+                    )
+                } else {
+                    format!(
+                        "Pickup qualification passed at nozzle Z{:.3}; bottom vision and verified return passed",
+                        report.pickup_nozzle_z_mm.unwrap_or_default(),
+                    )
+                }
             } else {
                 format!(
-                    "Pickup qualification did not pass: {}",
+                    "Pickup qualification stopped after {} cycles: {}",
+                    prepared.run.benchmark_cycles.len(),
                     report.findings.join("; ")
                 )
             };
@@ -9646,6 +9699,8 @@ async fn execute_strip_feeder_pickup_task(
         "qualification_id": prepared.run.id,
         "simulated": simulated,
         "succeeded": outcome.is_ok(),
+        "requested_cycle_count": prepared.run.requested_cycle_count,
+        "completed_cycle_count": prepared.run.benchmark_cycles.len(),
         "clear_xy_feed_mm_per_min": prepared.clear_xy_feed_mm_per_min,
         "carried_xy_feed_mm_per_min": prepared.carried_xy_feed_mm_per_min,
         "clear_z_feed_mm_per_min": prepared.clear_z_feed_mm_per_min,
@@ -9670,6 +9725,138 @@ async fn execute_strip_feeder_pickup_task(
         );
     }
     outcome
+}
+
+async fn execute_simulated_pickup_benchmark(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+) -> (
+    Result<StripFeederPickupQualificationReport, String>,
+    Vec<StripFeederPickupBenchmarkCycle>,
+) {
+    let mut cycles = Vec::new();
+    let mut final_result = None;
+    for cycle_index in 0..prepared.run.requested_cycle_count {
+        let started = Instant::now();
+        let result = execute_simulated_strip_feeder_pickup(state, prepared).await;
+        cycles.push(summarize_pickup_benchmark_cycle(
+            cycle_index + 1,
+            elapsed_ms(started),
+            json!({}),
+            &result,
+        ));
+        if let Err(error) = persist_pickup_benchmark_progress(state, prepared, &cycles) {
+            return (Err(error), cycles);
+        }
+        let stop = !matches!(&result, Ok(report) if report.passed);
+        final_result = Some(result);
+        if stop {
+            break;
+        }
+    }
+    (
+        final_result.unwrap_or_else(|| Err("pickup benchmark ran no cycles".into())),
+        cycles,
+    )
+}
+
+async fn execute_physical_pickup_benchmark(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+) -> (
+    Result<StripFeederPickupQualificationReport, String>,
+    Vec<StripFeederPickupBenchmarkCycle>,
+) {
+    let mut cycles = Vec::new();
+    let mut final_result = None;
+    for cycle_index in 0..prepared.run.requested_cycle_count {
+        let started = Instant::now();
+        let (result, camera_timing) = with_profiled_camera_reuse(
+            state,
+            execute_physical_strip_feeder_pickup(state, prepared),
+        )
+        .await;
+        cycles.push(summarize_pickup_benchmark_cycle(
+            cycle_index + 1,
+            elapsed_ms(started),
+            camera_timing,
+            &result,
+        ));
+        if let Err(error) = persist_pickup_benchmark_progress(state, prepared, &cycles) {
+            return (Err(error), cycles);
+        }
+        let stop = !matches!(&result, Ok(report) if report.passed);
+        final_result = Some(result);
+        if stop {
+            break;
+        }
+    }
+    (
+        final_result.unwrap_or_else(|| Err("pickup benchmark ran no cycles".into())),
+        cycles,
+    )
+}
+
+fn persist_pickup_benchmark_progress(
+    state: &AppState,
+    prepared: &PreparedStripFeederPickup,
+    cycles: &[StripFeederPickupBenchmarkCycle],
+) -> Result<(), String> {
+    let mut run = prepared.run.clone();
+    run.status = OperationStatus::Running;
+    run.benchmark_cycles = cycles.to_vec();
+    run.message = Some(format!(
+        "completed {} of {} pickup benchmark cycles",
+        cycles.len(),
+        run.requested_cycle_count,
+    ));
+    run.updated_at = Utc::now();
+    state
+        .store
+        .put_strip_feeder_pickup_qualification(&run)
+        .map_err(|error| error.to_string())
+}
+
+fn summarize_pickup_benchmark_cycle(
+    cycle_index: u32,
+    elapsed_ms: f64,
+    camera_timing: Value,
+    result: &Result<StripFeederPickupQualificationReport, String>,
+) -> StripFeederPickupBenchmarkCycle {
+    match result {
+        Ok(report) => StripFeederPickupBenchmarkCycle {
+            cycle_index,
+            elapsed_ms,
+            passed: report.passed,
+            camera_timing,
+            pickup_nozzle_z_mm: report.pickup_nozzle_z_mm,
+            held_median_raw_value: report.held_median_raw_value,
+            bottom_centering_residual_mm: report
+                .alignment
+                .as_ref()
+                .and_then(|alignment| alignment.final_centering_residual_mm),
+            return_center_shift_mm: report
+                .return_verification
+                .as_ref()
+                .and_then(|verification| verification.return_center_shift_mm),
+            message: if report.passed {
+                "vacuum, bottom vision, release, and pocket return passed".into()
+            } else {
+                report.findings.join("; ")
+            },
+        },
+        Err(error) => StripFeederPickupBenchmarkCycle {
+            cycle_index,
+            elapsed_ms,
+            passed: false,
+            camera_timing,
+            pickup_nozzle_z_mm: None,
+            held_median_raw_value: None,
+            bottom_centering_residual_mm: None,
+            return_center_shift_mm: None,
+            message: error.clone(),
+        },
+    }
 }
 
 fn settle_registration_after_pickup(
@@ -14250,9 +14437,14 @@ async fn camera_reproducibility(
     Json(body): Json<CameraReproducibilityRequest>,
 ) -> ApiResult<Json<Value>> {
     let role = parse_camera_role(&role)?;
-    if !(1..=60).contains(&body.sample_count) {
+    if !(1..=120).contains(&body.sample_count) {
         return Err(ApiError::bad_request(
-            "camera sample_count must be between 1 and 60",
+            "camera sample_count must be between 1 and 120",
+        ));
+    }
+    if body.settle_frames.is_some_and(|frames| frames > 120) {
+        return Err(ApiError::bad_request(
+            "camera settle_frames must not exceed 120",
         ));
     }
     let sample_count = body.sample_count;
@@ -14274,7 +14466,13 @@ async fn camera_reproducibility(
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
-    let capture = capture_camera_reproducibility_report(&state, role, sample_count).await;
+    let capture = capture_camera_reproducibility_report_with_settle(
+        &state,
+        role,
+        sample_count,
+        body.settle_frames,
+    )
+    .await;
     let lights_off = if profile.lighting_enabled {
         state.machine.disable_actuator("lights".into()).await
     } else {
@@ -14288,6 +14486,7 @@ async fn camera_reproducibility(
         "role": role,
         "profile": profile,
         "controls": controls,
+        "discarded_settle_frames": body.settle_frames.unwrap_or(profile.settle_frames),
         "report": report,
     })))
 }
@@ -14297,9 +14496,21 @@ async fn capture_camera_reproducibility_report(
     role: CameraRole,
     sample_count: u32,
 ) -> ApiResult<(Value, CameraReproducibilityReport)> {
+    capture_camera_reproducibility_report_with_settle(state, role, sample_count, None).await
+}
+
+async fn capture_camera_reproducibility_report_with_settle(
+    state: &AppState,
+    role: CameraRole,
+    sample_count: u32,
+    settle_frames: Option<u32>,
+) -> ApiResult<(Value, CameraReproducibilityReport)> {
     let profile = stored_camera_profile(state, role)?;
     let device_path = camera_path_for_role(role)?;
-    let config = camera_capture_config(&profile, device_path);
+    let mut config = camera_capture_config(&profile, device_path);
+    if let Some(settle_frames) = settle_frames {
+        config.settle_frames = settle_frames;
+    }
     let updates = profile_control_updates(&profile);
     let thresholds = profile.thresholds.clone();
     let _capture_guard = state.camera_capture_lock.lock().await;
@@ -15022,8 +15233,9 @@ async fn with_profiled_camera_reuse<T>(
     operation: impl Future<Output = T>,
 ) -> (T, Value) {
     if let Ok(context) = PROFILED_CAPTURE_CONTEXT.try_with(Arc::clone) {
+        let baseline = context.lock().await.timing.clone();
         let result = operation.await;
-        let timing = context.lock().await.timing_json();
+        let timing = profiled_camera_timing_json(&context.lock().await.timing, Some(&baseline));
         return (result, timing);
     }
     let _capture_guard = state.camera_capture_lock.lock().await;
@@ -25767,6 +25979,8 @@ fn prepare_retained_part_physical_context(
         pocket_index,
         fallback_drop_surface_machine_mm: None,
         rotation_capture_offsets_deg: Vec::new(),
+        requested_cycle_count: 1,
+        benchmark_cycles: Vec::new(),
         report: None,
         message: None,
     };
@@ -26178,6 +26392,8 @@ fn prepare_physical_placement_pickup(
         pocket_index: selected_pocket_index,
         fallback_drop_surface_machine_mm: None,
         rotation_capture_offsets_deg: Vec::new(),
+        requested_cycle_count: 1,
+        benchmark_cycles: Vec::new(),
         report: None,
         message: None,
     };
@@ -30262,12 +30478,23 @@ mod tests {
         let (value, timing) = PROFILED_CAPTURE_CONTEXT
             .scope(
                 context,
-                with_profiled_camera_reuse(&state, async { 42_u32 }),
+                with_profiled_camera_reuse(&state, async {
+                    let context = PROFILED_CAPTURE_CONTEXT.with(Arc::clone);
+                    context
+                        .lock()
+                        .await
+                        .timing
+                        .entry("top_camera".into())
+                        .or_default()
+                        .capture_count += 2;
+                    42_u32
+                }),
             )
             .await;
 
         assert_eq!(value, 42);
-        assert_eq!(timing["top_camera"]["open_count"], 1);
+        assert_eq!(timing["top_camera"]["open_count"], 0);
+        assert_eq!(timing["top_camera"]["capture_count"], 2);
     }
 
     fn held_part_report(width_mm: f64, length_mm: f64) -> HeldPartInspectionReport {
@@ -31351,6 +31578,8 @@ mod tests {
             pocket_index,
             fallback_drop_surface_machine_mm: None,
             rotation_capture_offsets_deg: Vec::new(),
+            requested_cycle_count: 1,
+            benchmark_cycles: Vec::new(),
             report: Some(StripFeederPickupQualificationReport {
                 algorithm_version: STRIP_FEEDER_PICKUP_ALGORITHM.into(),
                 clear_xy_feed_mm_per_min: 12_000.0,
@@ -31412,6 +31641,27 @@ mod tests {
             }),
             message: None,
         }
+    }
+
+    #[test]
+    fn pickup_benchmark_cycle_keeps_gate_and_camera_evidence() {
+        let registration = test_pickup_registration(Utc::now());
+        let report =
+            test_pickup_qualification(&registration, 10, OperationStatus::Succeeded, Utc::now())
+                .report
+                .unwrap();
+        let camera_timing = json!({
+            "top_camera": {"open_count": 0, "capture_count": 4}
+        });
+
+        let cycle =
+            summarize_pickup_benchmark_cycle(3, 28_500.0, camera_timing.clone(), &Ok(report));
+
+        assert_eq!(cycle.cycle_index, 3);
+        assert_eq!(cycle.elapsed_ms, 28_500.0);
+        assert!(cycle.passed);
+        assert_eq!(cycle.camera_timing, camera_timing);
+        assert_eq!(cycle.return_center_shift_mm, Some(0.0));
     }
 
     fn test_passed_placement_report(feeder_id: Uuid) -> PlacementExecutionReport {
@@ -34017,6 +34267,8 @@ mod tests {
             pocket_index: 0,
             fallback_drop_surface_machine_mm: None,
             rotation_capture_offsets_deg: Vec::new(),
+            requested_cycle_count: 1,
+            benchmark_cycles: Vec::new(),
             report: None,
             message: None,
         };
@@ -34729,6 +34981,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn camera_reproducibility_rejects_excessive_settling_override() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/cameras/top_camera/reproducibility")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "sample_count": 80,
+                            "settle_frames": 121,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("settle_frames"));
+    }
+
+    #[tokio::test]
     async fn sensor_read_is_leased_and_profile_scoped() {
         let state = test_state();
         state.machine.connect().await.unwrap();
@@ -34943,6 +35225,39 @@ mod tests {
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("tape is fixed and uncovered"));
         assert!(message.contains("fallback drop target"));
+    }
+
+    #[tokio::test]
+    async fn strip_feeder_pickup_rejects_too_many_benchmark_cycles() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/strip-feeder-registrations/{}/pickup-qualifications",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "cycle_count": 6,
+                            "confirmed_external_safety_checks": true,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cycle_count"));
     }
 
     #[tokio::test]

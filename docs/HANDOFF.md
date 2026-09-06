@@ -7,14 +7,16 @@ vision session. Verify live state again before each new session.
 
 - The release physical daemon listens on `127.0.0.1:4080` and uses
   `velocitypnp.db`.
-- It contains the physically tested pickup-return changes. It was started
-  before the final job-level camera scope and PCB split-Z changes. Restart it
-  before a physical production test.
+- It contains the physically tested repeated pickup benchmark and camera
+  settling diagnostics. Its stored settle counts are 0 top-camera frames and
+  20 bottom-camera frames.
 - After the last pickup-return run, the API reported the machine ready, homed,
   fault-free, and at
   X220.131, Y190.271, Z31.500. Its calibration revision was
   `3b837434-a961-4e60-945a-18335b42d21f`.
-- The last control lease expired. Acquire a new lease before more motion.
+- Control lease `58e62f8c-2b06-4282-ad0a-3b6fa36cc27d` was active during the
+  camera tests. Do not assume that it remains active. Acquire a new lease
+  before more motion.
 - Do not infer that the machine is safe from this document. Get a new operator
   confirmation before motion.
 - The daemon reports all three learned models as ready.
@@ -95,14 +97,21 @@ contact stays at 60 mm/min, and the last 2 mm of each release approach stays
 at 300 mm/min. The 300 mm/min time decreased from 87.34 to 3.84 seconds. Total
 motion now uses 20.31 seconds.
 
-One camera session per role stays open for a full physical operation. The
-first capture on each camera keeps its 60-frame warm-up. Later captures only
-wait for a fresh frame. Camera open and capture use 18.38 seconds. Other work
-uses about 6.11 seconds. A continuous job also shares the camera sessions
-across its placement steps, so the two long warm-ups occur once per job run.
-The PCB placement and recovery paths use the same split Z approach. These
-production-path changes have automated test coverage but no physical
-multi-part test.
+One camera session per role stays open for a full physical operation. Ten of
+ten top-camera 80-frame cold-start runs passed with no initial discard. Five
+bottom-camera runs needed at most 12 discarded frames before the remaining
+series passed. The stored and source defaults now discard 0 top-camera frames
+and 20 bottom-camera frames.
+
+Pickup benchmark `089f2c58-36b2-4448-b15f-3e657be71245` passed five cycles
+with the old 60-frame values. Its first cycle took 44.90 seconds and later
+cycles took 29.69 to 30.18 seconds. Validation benchmark
+`204fc507-ace9-4f15-894e-bff640d062df` passed five cycles with the new values.
+Its first cycle took 34.85 seconds and later cycles took 29.77 to 30.08
+seconds. The reduced settling removed 100 cold frames and 10.05 seconds. A
+continuous job also shares camera sessions across placement steps. The PCB
+placement and recovery paths use the same split Z approach. These production
+paths have automated coverage but no physical multi-part placement test.
 
 The scan used 5.46 seconds for tile motion and 11.06 seconds for its final
 300 mm/min park. The first capture waited 7.51 seconds after motion. Later
@@ -117,9 +126,9 @@ light control. Actuator and sensor events include elapsed time. Pickup runs add
 `operation.job_execution_timing` with aggregate camera timing.
 
 Defer a normal guarded placement until a board-compatible component is
-available. Next, measure a multi-part job to confirm that camera warm-up is
-amortized. Then run a separate camera stability test before any reduction of
-the first 60-frame warm-up. Use emergency stop only for an actual emergency.
+available. The next camera work is to reduce repeated capture count or sample
+count with gate-specific evidence. Do not infer PCB placement timing from the
+1206 pickup-return benchmark. Use emergency stop only for an actual emergency.
 
 The main code locations are:
 

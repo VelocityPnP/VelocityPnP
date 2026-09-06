@@ -42,6 +42,16 @@ enum Command {
         #[arg(long, default_value_t = 3600)]
         seconds: u32,
     },
+    /// Capture repeated cold camera frame series without a warm-up discard.
+    CameraSettling {
+        role: String,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value_t = 80, value_parser = clap::value_parser!(u32).range(1..=120))]
+        samples: u32,
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=10))]
+        repetitions: u32,
+    },
     Home {
         #[arg(long, env = "VELOCITYPNP_LEASE")]
         lease: Uuid,
@@ -197,6 +207,9 @@ enum Command {
         nozzle: String,
         #[arg(long)]
         pocket: Option<u32>,
+        /// Repeat one returned part while one camera scope stays open.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=5))]
+        cycles: u32,
         /// Fallback surface X. Supply this with --drop-y.
         #[arg(long, requires = "drop_y")]
         drop_x: Option<f64>,
@@ -552,6 +565,35 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::CameraSettling {
+            role,
+            lease,
+            samples,
+            repetitions,
+        } => {
+            let mut runs = Vec::with_capacity(repetitions as usize);
+            for _ in 0..repetitions {
+                runs.push(
+                    post(
+                        &client,
+                        &format!("{base}/cameras/{role}/reproducibility"),
+                        Some(json!({
+                            "lease_id": lease,
+                            "sample_count": samples,
+                            "settle_frames": 0,
+                        })),
+                    )
+                    .await?,
+                );
+            }
+            json!({
+                "role": role,
+                "repetitions": repetitions,
+                "samples_per_repetition": samples,
+                "discarded_settle_frames": 0,
+                "runs": runs,
+            })
+        }
         Command::Home {
             lease,
             confirm_safety_checks,
@@ -867,6 +909,7 @@ async fn main() -> Result<()> {
             lease,
             nozzle,
             pocket,
+            cycles,
             drop_x,
             drop_y,
             rotation_capture_offsets,
@@ -879,6 +922,7 @@ async fn main() -> Result<()> {
                     "lease_id": lease,
                     "nozzle_id": nozzle,
                     "pocket_index": pocket,
+                    "cycle_count": cycles,
                     "fallback_drop_surface_machine_mm": drop_x.zip(drop_y).map(|(x, y)| [x, y]),
                     "rotation_capture_offsets_deg": rotation_capture_offsets,
                     "confirmed_external_safety_checks": confirm_safety_checks,
@@ -2348,6 +2392,64 @@ mod tests {
                 confirm_safety_checks: true,
                 ..
             } if parsed_lease == lease && feeds == vec![1_200.0, 6_000.0, 12_000.0]
+        ));
+    }
+
+    #[test]
+    fn pickup_benchmark_cli_accepts_five_cycles() {
+        let lease = Uuid::new_v4();
+        let registration = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "qualify-strip-feeder-pickup",
+            &registration.to_string(),
+            "--lease",
+            &lease.to_string(),
+            "--pocket",
+            "10",
+            "--cycles",
+            "5",
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::QualifyStripFeederPickup {
+                registration: parsed_registration,
+                lease: parsed_lease,
+                pocket: Some(10),
+                cycles: 5,
+                confirm_safety_checks: true,
+                ..
+            } if parsed_registration == registration && parsed_lease == lease
+        ));
+    }
+
+    #[test]
+    fn camera_settling_cli_accepts_a_cold_capture_plan() {
+        let lease = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "camera-settling",
+            "bottom_camera",
+            "--lease",
+            &lease.to_string(),
+            "--samples",
+            "80",
+            "--repetitions",
+            "5",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::CameraSettling {
+                role,
+                lease: parsed_lease,
+                samples: 80,
+                repetitions: 5,
+            } if role == "bottom_camera" && parsed_lease == lease
         ));
     }
 

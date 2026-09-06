@@ -15,6 +15,7 @@ use velocitypnp_domain::{
 use velocitypnp_vision::calibrate_camera_ray_transfer;
 
 const MIGRATION_VERSION: &str = "legacy_snapshot.v1";
+const CAMERA_CALIBRATION_FINGERPRINT_SETTLE_FRAMES: u32 = 60;
 
 pub fn reconcile_snapshot_artifacts(
     state: &AppState,
@@ -790,8 +791,14 @@ fn expected_inputs(
 ) -> Result<BTreeMap<String, String>, String> {
     use CalibrationArtifactId::*;
     let mut inputs = BTreeMap::new();
-    let top_profile = || camera_profile(state, profile_id, CameraRole::TopCamera);
-    let bottom_profile = || camera_profile(state, profile_id, CameraRole::BottomCamera);
+    let top_profile = || {
+        camera_profile(state, profile_id, CameraRole::TopCamera)
+            .map(camera_calibration_input_profile)
+    };
+    let bottom_profile = || {
+        camera_profile(state, profile_id, CameraRole::BottomCamera)
+            .map(camera_calibration_input_profile)
+    };
     let visual = || {
         state
             .profile
@@ -1040,6 +1047,13 @@ fn camera_profile(
     Ok(CameraProfile::initial_lumenpnp(profile_id, role))
 }
 
+fn camera_calibration_input_profile(mut profile: CameraProfile) -> CameraProfile {
+    // Frame settling changes capture latency. It does not change camera
+    // controls, image geometry, or the calibration target measurement.
+    profile.settle_frames = CAMERA_CALIBRATION_FINGERPRINT_SETTLE_FRAMES;
+    profile
+}
+
 fn artifact_result<T: serde::de::DeserializeOwned>(
     snapshot: &CalibrationSnapshot,
     id: CalibrationArtifactId,
@@ -1263,6 +1277,29 @@ mod tests {
             inputs.get("top_camera_profile").map(String::as_str),
             Some("1834e6e1608819495cab353bb0c9916dcb081b4f48808a0e56dbdccce8b20831"),
         );
+    }
+
+    #[tokio::test]
+    async fn camera_settling_does_not_change_the_calibration_fingerprint() {
+        let state = state();
+        let before = expected_inputs(
+            &state,
+            &state.profile.id,
+            CalibrationArtifactId::TopCameraReproducibility,
+        )
+        .unwrap();
+        let mut profile = CameraProfile::initial_lumenpnp(&state.profile.id, CameraRole::TopCamera);
+        profile.settle_frames = 42;
+        state.store.put_camera_profile(&profile).unwrap();
+
+        let after = expected_inputs(
+            &state,
+            &state.profile.id,
+            CalibrationArtifactId::TopCameraReproducibility,
+        )
+        .unwrap();
+
+        assert_eq!(before, after);
     }
 
     #[tokio::test]

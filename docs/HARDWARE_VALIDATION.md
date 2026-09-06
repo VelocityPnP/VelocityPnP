@@ -3192,6 +3192,45 @@ Fine-home operation `756bb45f-ae15-484f-a456-756561e25543` also used one
 camera scope. It passed in 75.8 seconds, compared with 106.3 seconds before
 the reuse change. Its contact and datum correction rules did not change.
 
+### Camera settling and repeated pickup benchmark
+
+On 2026-09-05, fine-home operation
+`82db7ccf-3515-4d01-8cc0-a301f8ab8ab1` passed with N2 in 76.0 seconds. It
+reset the observed datum contact from Z59.300 to the calibrated Z59.100.
+
+Pickup benchmark `089f2c58-36b2-4448-b15f-3e657be71245` then reused the
+same camera streams for five guarded pickup-return cycles. All five cycles
+passed. The cycle times were 44.90, 29.69, 30.18, 30.17, and 29.80 seconds.
+The first cycle used 18.34 seconds for camera open and capture. The next four
+cycles used 3.61 to 3.71 seconds. The part returned to feeder 1 pocket 10
+after every cycle.
+
+Ten top-camera cold-start runs captured 80 frames each with no initial
+discard. All ten runs passed the stored luma, focus, target-detection, and
+center-jitter gates. In the retained five-run summary, luma variation was
+1.50 to 1.95 percent against the 5 percent limit. Target detection was 100
+percent.
+
+Five bottom-camera cold-start runs also captured 80 frames each with no
+initial discard. One full run passed. The other four needed 7, 8, 12, and 12
+discarded frames before the remaining frame series passed all stored gates.
+Only luma settling exceeded a gate. Target detection was 100 percent, and
+center jitter stayed below 0.19 pixels against the 0.50-pixel limit.
+
+The stored and default settle counts are now 0 top-camera frames and 20
+bottom-camera frames. The 20-frame value includes an eight-frame margin above
+the worst observed bottom-camera result. Validation benchmark
+`204fc507-ace9-4f15-894e-bff640d062df` passed all five pickup-return cycles
+with these values. The cycle times were 34.85, 29.77, 30.08, 29.79, and 30.07
+seconds. The cold cycle discarded 100 fewer frames and was 10.05 seconds
+faster than the control cold cycle. Its measured camera time decreased from
+18.34 to 8.32 seconds.
+
+Across the validation benchmark, bottom centering residuals were 0.0390 to
+0.0488 mm. Return center shifts were 0.0135 to 0.0832 mm. All results passed
+their configured gates. These pickup-return tests do not validate PCB
+placement.
+
 One-row survey `c8277770-ca0f-4f45-a291-420371e224a7`, operation
 `ebd0feb4-65ce-4ae4-adde-6c6bdf995086`, then measured the scan path. It
 covered X200 through X280 mm and Y180 through Y181 mm. It captured all 10
