@@ -251,7 +251,15 @@ X220.123 Y190.234 Z31.500. The machine is ready, homed, and fault-free with
 the same calibration active. A no-move camera return then passed at 0.02347
 mm.
 
-The next motion task is a spatial holdout. Observe fixed plate holes from
-multiple approach quadrants at several workspace positions. Do not change
-acceleration during that test. The qualification data and attached surface
-are in `datasets/motion-model-qualification-2026-09-06`.
+The fixed-hole spatial holdout is complete. Its bracketed-reference procedure
+passed six of six locations and 72 of 72 returns. RMS was 0.01866 mm, p95 was
+0.03377 mm, and maximum error was 0.04889 mm. It took 386.45 seconds. The test
+kept acceleration at 1,000 mm/s2 and did not change the motion surface.
+
+The test directly covered 50 mm by 50 mm paths at fixed-hole centers from
+X54.902-X340.386 and Y99.929-Y310.308. The datum matrix supplies distance
+coverage. The narrow right edge beyond X340 mm still lacks a fixed-hole
+endpoint test. After loading the final binary, coarse and fine home passed
+again. A no-move datum check passed at 0.02719 mm. The machine is ready,
+homed, and fault-free at X220.124 Y190.234 Z31.500. Qualification data is in
+`datasets/motion-model-qualification-2026-09-06`.

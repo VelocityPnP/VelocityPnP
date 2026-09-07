@@ -1324,6 +1324,10 @@ pub fn router(state: AppState) -> Router {
             post(attach_planar_xy_direction_response),
         )
         .route(
+            "/api/v1/calibrations/{id}/xy-spatial-holdout",
+            post(start_xy_spatial_holdout),
+        )
+        .route(
             "/api/v1/calibrations/{id}/installed-geometry-runs",
             post(start_installed_geometry_run),
         )
@@ -1332,6 +1336,10 @@ pub fn router(state: AppState) -> Router {
             post(record_nozzle_height_observation),
         )
         .route("/api/v1/calibration-runs/{id}", get(get_calibration_run))
+        .route(
+            "/api/v1/operations/{id}/artifacts/{name}",
+            get(get_calibration_artifact),
+        )
         .route(
             "/api/v1/calibration-runs/{id}/artifacts/{name}",
             get(get_calibration_artifact),
@@ -19241,6 +19249,992 @@ async fn attach_planar_xy_direction_response(
         "recomputed_artifacts": recomputed,
         "production_ready": snapshot.production_ready,
     })))
+}
+
+const XY_SPATIAL_HOLDOUT_ARTIFACT: &str = "xy-spatial-holdout.json";
+const XY_SPATIAL_HOLDOUT_ALGORITHM: &str = "xy_spatial_holdout.v2";
+const XY_SPATIAL_SAFETY_GUARD_MM: f64 = 0.25;
+
+#[derive(Debug, Deserialize)]
+struct StartXySpatialHoldoutRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+    #[serde(default = "default_xy_spatial_locations_per_plate")]
+    locations_per_plate: u32,
+    #[serde(default = "default_xy_spatial_samples_per_quadrant")]
+    samples_per_quadrant: u32,
+    #[serde(default = "default_xy_spatial_offset_mm")]
+    offset_x_mm: f64,
+    #[serde(default = "default_xy_spatial_offset_mm")]
+    offset_y_mm: f64,
+}
+
+fn default_xy_spatial_locations_per_plate() -> u32 {
+    3
+}
+
+fn default_xy_spatial_samples_per_quadrant() -> u32 {
+    3
+}
+
+fn default_xy_spatial_offset_mm() -> f64 {
+    50.0
+}
+
+#[derive(Clone, Debug)]
+struct XySpatialHoldoutTarget {
+    plate_id: String,
+    column: u32,
+    row: u32,
+    nominal_x_mm: f64,
+    nominal_y_mm: f64,
+    target_x_mm: f64,
+    target_y_mm: f64,
+    pixel_error_to_machine_mm: [[f64; 2]; 2],
+}
+
+fn farthest_spatial_order(mut targets: Vec<XySpatialHoldoutTarget>) -> Vec<XySpatialHoldoutTarget> {
+    if targets.is_empty() {
+        return targets;
+    }
+    targets.sort_by(|left, right| {
+        (left.target_x_mm + left.target_y_mm)
+            .total_cmp(&(right.target_x_mm + right.target_y_mm))
+            .then_with(|| left.column.cmp(&right.column))
+            .then_with(|| left.row.cmp(&right.row))
+    });
+    let mut ordered = vec![targets.remove(0)];
+    while !targets.is_empty() {
+        let next = targets
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| {
+                let separation = |target: &XySpatialHoldoutTarget| {
+                    ordered
+                        .iter()
+                        .map(|selected| {
+                            (target.target_x_mm - selected.target_x_mm)
+                                .hypot(target.target_y_mm - selected.target_y_mm)
+                        })
+                        .fold(f64::INFINITY, f64::min)
+                };
+                separation(left)
+                    .total_cmp(&separation(right))
+                    .then_with(|| right.column.cmp(&left.column))
+                    .then_with(|| right.row.cmp(&left.row))
+            })
+            .map(|(index, _)| index)
+            .unwrap();
+        ordered.push(targets.remove(next));
+    }
+    ordered
+}
+
+fn xy_spatial_holdout_targets(
+    profile: &MachineProfile,
+    geometry: &InstalledPlateGeometryReport,
+    offset_x_mm: f64,
+    offset_y_mm: f64,
+) -> Result<Vec<XySpatialHoldoutTarget>, String> {
+    let installed = profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| "active profile has no installed plate geometry".to_string())?;
+    let mut selected = Vec::new();
+    for plate in &installed.plates {
+        let fit = geometry
+            .plates
+            .iter()
+            .find(|fit| fit.plate_id == plate.id && fit.passed)
+            .ok_or_else(|| format!("installed plate {} has no passing fit", plate.id))?;
+        let mapping = geometry
+            .registrations
+            .iter()
+            .find(|registration| registration.plate_id == plate.id && registration.passed)
+            .and_then(|registration| registration.pixel_error_to_machine_mm)
+            .ok_or_else(|| format!("installed plate {} has no local camera map", plate.id))?;
+        let mut seen = BTreeSet::new();
+        let mut candidates = Vec::new();
+        for sample in geometry.samples.iter().filter(|sample| {
+            sample.plate_id == plate.id
+                && sample.observed_center_x_mm.is_some()
+                && sample.observed_center_y_mm.is_some()
+        }) {
+            if !seen.insert((sample.column, sample.row)) {
+                continue;
+            }
+            let target = fit.model.apply(sample.nominal_x_mm, sample.nominal_y_mm);
+            let all_quadrants_reachable = [-1.0, 1.0].into_iter().all(|x_sign| {
+                [-1.0, 1.0].into_iter().all(|y_sign| {
+                    profile.bounds.contains(Pose {
+                        x_mm: target[0] + x_sign * offset_x_mm,
+                        y_mm: target[1] + y_sign * offset_y_mm,
+                        z_mm: profile.safe_z_mm,
+                        rotation_deg: 0.0,
+                    })
+                })
+            });
+            if all_quadrants_reachable {
+                candidates.push(XySpatialHoldoutTarget {
+                    plate_id: plate.id.clone(),
+                    column: sample.column,
+                    row: sample.row,
+                    nominal_x_mm: sample.nominal_x_mm,
+                    nominal_y_mm: sample.nominal_y_mm,
+                    target_x_mm: target[0],
+                    target_y_mm: target[1],
+                    pixel_error_to_machine_mm: mapping,
+                });
+            }
+        }
+        selected.extend(farthest_spatial_order(candidates));
+    }
+    Ok(selected)
+}
+
+async fn start_xy_spatial_holdout(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartXySpatialHoldoutRequest>,
+) -> ApiResult<(StatusCode, Json<Operation>)> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "XY spatial holdout requires confirmation that the plates are secure, both nozzles are level, the envelope is clear, and power isolation is reachable",
+        ));
+    }
+    if !(1..=4).contains(&body.locations_per_plate)
+        || !(2..=5).contains(&body.samples_per_quadrant)
+        || !body.offset_x_mm.is_finite()
+        || !body.offset_y_mm.is_finite()
+        || body.offset_x_mm <= 0.0
+        || body.offset_y_mm <= 0.0
+    {
+        return Err(ApiError::bad_request(
+            "XY spatial holdout needs 1-4 locations per plate, 2-5 samples, and positive finite offsets",
+        ));
+    }
+    let admission_guard = state
+        .workspace_scan_admission_lock
+        .clone()
+        .lock_owned()
+        .await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    ensure_no_active_placement_executions(&state)?;
+    ensure_no_active_job_executions(&state)?;
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.simulated
+        || status.state != MachineState::Ready
+        || !status.homed
+        || status.pose.is_none()
+    {
+        return Err(ApiError::bad_request(
+            "XY spatial holdout requires a physical, homed, ready machine",
+        ));
+    }
+    if status.calibration_revision != Some(calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "XY spatial holdout requires fine XYZ homing with calibration {calibration_id}",
+        )));
+    }
+    let (snapshot, camera_model) = load_workspace_camera_model(&state, calibration_id)?;
+    if !crate::calibration_artifacts::artifact_tree_is_current(
+        &state,
+        &snapshot,
+        CalibrationArtifactId::InstalledPlateGeometry,
+    ) {
+        return Err(ApiError::bad_request(
+            "XY spatial holdout requires current installed plate geometry",
+        ));
+    }
+    let geometry: InstalledPlateGeometryReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(
+            &snapshot,
+            CalibrationArtifactId::InstalledPlateGeometry,
+        )
+        .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|error| {
+        ApiError::bad_request(format!("installed plate geometry is invalid: {error}"))
+    })?;
+    if !geometry.passed {
+        return Err(ApiError::bad_request(
+            "XY spatial holdout requires passing installed plate geometry",
+        ));
+    }
+    let direction_report: LocalXyDirectionResponseReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(
+            &snapshot,
+            CalibrationArtifactId::LocalXyDirectionResponse,
+        )
+        .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|error| ApiError::bad_request(format!("local XY response is invalid: {error}")))?;
+    let surface_report = direction_report
+        .planar_surfaces
+        .iter()
+        .filter(|surface| surface.passed)
+        .max_by(|left, right| left.feed_mm_per_min.total_cmp(&right.feed_mm_per_min))
+        .ok_or_else(|| ApiError::bad_request("XY spatial holdout requires a planar surface"))?;
+    let surface = PlanarXyMotionSurface::from_report(surface_report)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if !surface.supports(body.offset_x_mm, body.offset_y_mm) {
+        return Err(ApiError::bad_request(
+            "XY spatial holdout offsets are outside the planar response surface",
+        ));
+    }
+    let common_feed_is_qualified = |feed_mm_per_min: f64| {
+        [LinearAxis::X, LinearAxis::Y].into_iter().all(|axis| {
+            direction_report
+                .axes
+                .iter()
+                .find(|report| report.axis == axis)
+                .is_some_and(|report| {
+                    report.feeds.iter().any(|feed| {
+                        feed.qualified && (feed.feed_mm_per_min - feed_mm_per_min).abs() < 1e-6
+                    })
+                })
+        })
+    };
+    let transit_feed_mm_per_min = direction_report
+        .axes
+        .first()
+        .into_iter()
+        .flat_map(|axis| &axis.feeds)
+        .filter(|feed| {
+            feed.feed_mm_per_min < surface.feed_mm_per_min()
+                && common_feed_is_qualified(feed.feed_mm_per_min)
+        })
+        .map(|feed| feed.feed_mm_per_min)
+        .max_by(f64::total_cmp)
+        .ok_or_else(|| ApiError::bad_request("XY spatial holdout has no transfer feed"))?;
+    let targets = xy_spatial_holdout_targets(
+        &state.profile,
+        &geometry,
+        body.offset_x_mm,
+        body.offset_y_mm,
+    )
+    .map_err(ApiError::bad_request)?;
+    for plate in state
+        .profile
+        .installed_geometry_calibration
+        .as_ref()
+        .unwrap()
+        .plates
+        .iter()
+    {
+        if targets
+            .iter()
+            .filter(|target| target.plate_id == plate.id)
+            .count()
+            < body.locations_per_plate as usize
+        {
+            return Err(ApiError::bad_request(format!(
+                "installed plate {} lacks enough reachable known holes",
+                plate.id
+            )));
+        }
+    }
+    let motion_calibration =
+        motion_calibration_from_snapshot(&state, &snapshot, "XY spatial holdout")?;
+    let camera_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let camera_path = camera_path_for_role(CameraRole::TopCamera)?;
+    let installed_profile = state
+        .profile
+        .installed_geometry_calibration
+        .as_ref()
+        .unwrap()
+        .clone();
+    let visual = state.profile.visual_homing.as_ref().unwrap().clone();
+    state
+        .machine
+        .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let operation = Operation::pending("calibration.xy_spatial_holdout");
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(ApiError::internal)?;
+    let returned = operation.clone();
+    let task_state = state.clone();
+    let operation_id = operation.id;
+    spawn_prepared_operation(state, operation, async move {
+        let _admission_guard = admission_guard;
+        execute_xy_spatial_holdout(
+            task_state,
+            operation_id,
+            calibration_id,
+            body,
+            targets,
+            camera_model,
+            camera_profile,
+            camera_path,
+            installed_profile,
+            visual,
+            motion_calibration,
+            surface.feed_mm_per_min(),
+            transit_feed_mm_per_min,
+        )
+        .await
+    });
+    Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+async fn capture_xy_spatial_hole(
+    state: &AppState,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    camera_model: &PlanarCameraModel,
+    installed_profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+    mapping: [[f64; 2]; 2],
+) -> Result<FiducialDetection, String> {
+    let scale = plate_plane_mm_per_pixel(mapping)
+        .ok_or_else(|| "installed plate camera scale is invalid".to_string())?;
+    let hole_diameter_px = installed_profile.plate_hole_diameter_mm / scale;
+    let pad_diameter_px = installed_profile.plate_pad_diameter_mm / scale;
+    let diameter_tolerance_px = installed_profile.plate_diameter_tolerance_mm / scale;
+    let hole_tolerance_px = diameter_tolerance_px.max(hole_diameter_px * 0.2);
+    let pad_tolerance_px = diameter_tolerance_px.max(pad_diameter_px * 0.2);
+    let search_radius_px = installed_profile.plate_search_radius_mm / scale;
+    let sample_count = installed_profile.top_camera_sweep.samples_per_position;
+    let frames = capture_profiled_frames(state, camera_profile, camera_path, sample_count)
+        .await
+        .map_err(|error| error.message)?;
+    let detections = frames
+        .iter()
+        .filter_map(|frame| {
+            detect_installed_plate_hole(
+                frame,
+                camera_model.center_x_px,
+                camera_model.center_y_px,
+                search_radius_px,
+                hole_diameter_px,
+                hole_tolerance_px,
+                pad_diameter_px,
+                pad_tolerance_px,
+            )
+        })
+        .collect::<Vec<_>>();
+    if detections.len() != sample_count as usize {
+        return Err(format!(
+            "unambiguous plate hole detected in {} of {} frames",
+            detections.len(),
+            sample_count
+        ));
+    }
+    mean_fiducial_detection(&detections)
+        .ok_or_else(|| "plate-hole detections did not form a stable mean".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_xy_spatial_holdout_core(
+    state: &AppState,
+    calibration_id: Uuid,
+    request: &StartXySpatialHoldoutRequest,
+    targets: &[XySpatialHoldoutTarget],
+    camera_model: &PlanarCameraModel,
+    camera_profile: &CameraProfile,
+    camera_path: &str,
+    installed_profile: &velocitypnp_domain::InstalledGeometryCalibrationProfile,
+    visual: &VisualHomingProfile,
+    motion_calibration: MotionCalibration,
+    surface_feed_mm_per_min: f64,
+    transit_feed_mm_per_min: f64,
+) -> Result<Value, String> {
+    let started = Instant::now();
+    let response_limit_mm = state
+        .profile
+        .local_xy_direction_response
+        .as_ref()
+        .ok_or_else(|| "active profile has no local XY direction response".to_string())?
+        .maximum_holdout_error_mm;
+    let reference_feed_mm_per_min = state
+        .profile
+        .local_xy_direction_response
+        .as_ref()
+        .unwrap()
+        .datum_approach_feed_mm_per_min;
+    let reference_approach_mm = state
+        .profile
+        .local_xy_direction_response
+        .as_ref()
+        .unwrap()
+        .datum_approach_distance_mm;
+    let controller_pose = state
+        .machine
+        .status()
+        .pose
+        .ok_or_else(|| "XY spatial holdout lost the machine pose".to_string())?;
+    let mut motion = CalibratedMotionSequence::new(
+        MotionPlanner::new(state.profile.bounds, Some(motion_calibration)),
+        controller_pose,
+    )?;
+    let mut locations = Vec::new();
+    let mut response_errors = Vec::new();
+    let mut tested_locations = 0_u32;
+    let mut completed_locations = 0_u32;
+    let mut passed_locations = 0_u32;
+    let mut attempted_locations = 0_u32;
+    let mut stopped_early = false;
+    let mut stop_reason = None;
+
+    'plates: for plate in &installed_profile.plates {
+        let mut plate_locations = 0_u32;
+        let maximum_attempts = request.locations_per_plate.saturating_mul(3);
+        for target in targets
+            .iter()
+            .filter(|target| target.plate_id == plate.id)
+            .take(maximum_attempts as usize)
+        {
+            if plate_locations >= request.locations_per_plate {
+                break;
+            }
+            attempted_locations += 1;
+            state
+                .machine
+                .renew_lease(request.lease_id, CALIBRATION_LEASE_SECONDS)
+                .await
+                .map_err(|error| error.to_string())?;
+            let rotation_deg = motion.state.logical_pose.rotation_deg;
+            let target_pose = Pose {
+                x_mm: target.target_x_mm,
+                y_mm: target.target_y_mm,
+                z_mm: state.profile.safe_z_mm,
+                rotation_deg,
+            };
+            let reference_away = Pose {
+                x_mm: target_pose.x_mm - reference_approach_mm,
+                y_mm: target_pose.y_mm - reference_approach_mm,
+                ..target_pose
+            };
+            let transfer_started = Instant::now();
+            if let Err(error) = execute_calibrated_motion(
+                state,
+                request.lease_id,
+                &mut motion,
+                reference_away.into(),
+                transit_feed_mm_per_min,
+            )
+            .await
+            {
+                stopped_early = true;
+                stop_reason = Some(format!(
+                    "transfer to {} hole {},{} failed: {error}",
+                    target.plate_id, target.column, target.row
+                ));
+                break 'plates;
+            }
+            if let Err(error) = execute_calibrated_motion(
+                state,
+                request.lease_id,
+                &mut motion,
+                target_pose.into(),
+                reference_feed_mm_per_min,
+            )
+            .await
+            {
+                stopped_early = true;
+                stop_reason = Some(format!(
+                    "reference approach to {} hole {},{} failed: {error}",
+                    target.plate_id, target.column, target.row
+                ));
+                break 'plates;
+            }
+            let transfer_elapsed_ms = elapsed_ms(transfer_started);
+            let reference_capture_started = Instant::now();
+            let reference_result = capture_xy_spatial_hole(
+                state,
+                camera_profile,
+                camera_path,
+                camera_model,
+                installed_profile,
+                target.pixel_error_to_machine_mm,
+            )
+            .await;
+            let reference_capture_elapsed_ms = elapsed_ms(reference_capture_started);
+            let mut reference = match reference_result {
+                Ok(reference) => reference,
+                Err(error) => {
+                    locations.push(json!({
+                        "plate_id": target.plate_id,
+                        "column": target.column,
+                        "row": target.row,
+                        "nominal_x_mm": target.nominal_x_mm,
+                        "nominal_y_mm": target.nominal_y_mm,
+                        "target_x_mm": target.target_x_mm,
+                        "target_y_mm": target.target_y_mm,
+                        "reference_valid": false,
+                        "reference_error": error,
+                        "transfer_elapsed_ms": transfer_elapsed_ms,
+                        "reference_capture_elapsed_ms": reference_capture_elapsed_ms,
+                        "passed": false,
+                        "samples": [],
+                    }));
+                    continue;
+                }
+            };
+            let initial_reference = reference;
+            plate_locations += 1;
+            tested_locations += 1;
+            let mut samples = Vec::new();
+            let mut location_errors = Vec::new();
+            for (x_sign, y_sign) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                let x_approach = if x_sign < 0.0 {
+                    ApproachSide::Negative
+                } else {
+                    ApproachSide::Positive
+                };
+                let y_approach = if y_sign < 0.0 {
+                    ApproachSide::Negative
+                } else {
+                    ApproachSide::Positive
+                };
+                let away = Pose {
+                    x_mm: target_pose.x_mm + x_sign * request.offset_x_mm,
+                    y_mm: target_pose.y_mm + y_sign * request.offset_y_mm,
+                    ..target_pose
+                };
+                for sample_index in 1..=request.samples_per_quadrant {
+                    let outbound_started = Instant::now();
+                    let outbound = match execute_calibrated_motion(
+                        state,
+                        request.lease_id,
+                        &mut motion,
+                        away.into(),
+                        surface_feed_mm_per_min,
+                    )
+                    .await
+                    {
+                        Ok((_, planned)) => planned,
+                        Err(error) => {
+                            stopped_early = true;
+                            stop_reason = Some(format!(
+                                "{} hole {},{} {:?}/{:?} sample {} outbound failed: {error}",
+                                target.plate_id,
+                                target.column,
+                                target.row,
+                                x_approach,
+                                y_approach,
+                                sample_index
+                            ));
+                            break;
+                        }
+                    };
+                    let outbound_elapsed_ms = elapsed_ms(outbound_started);
+                    let return_started = Instant::now();
+                    let returned = match execute_calibrated_motion(
+                        state,
+                        request.lease_id,
+                        &mut motion,
+                        target_pose.into(),
+                        surface_feed_mm_per_min,
+                    )
+                    .await
+                    {
+                        Ok((_, planned)) => planned,
+                        Err(error) => {
+                            stopped_early = true;
+                            stop_reason = Some(format!(
+                                "{} hole {},{} {:?}/{:?} sample {} return failed: {error}",
+                                target.plate_id,
+                                target.column,
+                                target.row,
+                                x_approach,
+                                y_approach,
+                                sample_index
+                            ));
+                            break;
+                        }
+                    };
+                    let return_elapsed_ms = elapsed_ms(return_started);
+                    let capture_started = Instant::now();
+                    let observed = capture_xy_spatial_hole(
+                        state,
+                        camera_profile,
+                        camera_path,
+                        camera_model,
+                        installed_profile,
+                        target.pixel_error_to_machine_mm,
+                    )
+                    .await;
+                    let capture_elapsed_ms = elapsed_ms(capture_started);
+                    let paired_reference_motion_started = Instant::now();
+                    let paired_reference_motion = async {
+                        execute_calibrated_motion(
+                            state,
+                            request.lease_id,
+                            &mut motion,
+                            reference_away.into(),
+                            reference_feed_mm_per_min,
+                        )
+                        .await?;
+                        execute_calibrated_motion(
+                            state,
+                            request.lease_id,
+                            &mut motion,
+                            target_pose.into(),
+                            reference_feed_mm_per_min,
+                        )
+                        .await?;
+                        Ok::<(), String>(())
+                    }
+                    .await;
+                    let paired_reference_motion_elapsed_ms =
+                        elapsed_ms(paired_reference_motion_started);
+                    if let Err(error) = paired_reference_motion {
+                        stopped_early = true;
+                        stop_reason = Some(format!(
+                            "{} hole {},{} paired reference move failed: {error}",
+                            target.plate_id, target.column, target.row
+                        ));
+                        samples.push(json!({
+                            "sample": sample_index,
+                            "x_approach": x_approach,
+                            "y_approach": y_approach,
+                            "outbound_elapsed_ms": outbound_elapsed_ms,
+                            "return_elapsed_ms": return_elapsed_ms,
+                            "capture_elapsed_ms": capture_elapsed_ms,
+                            "paired_reference_motion_elapsed_ms": paired_reference_motion_elapsed_ms,
+                            "paired_reference_error": error,
+                            "passed": false,
+                        }));
+                        break;
+                    }
+                    let paired_reference_capture_started = Instant::now();
+                    let next_reference = capture_xy_spatial_hole(
+                        state,
+                        camera_profile,
+                        camera_path,
+                        camera_model,
+                        installed_profile,
+                        target.pixel_error_to_machine_mm,
+                    )
+                    .await;
+                    let paired_reference_capture_elapsed_ms =
+                        elapsed_ms(paired_reference_capture_started);
+                    let next_reference = match next_reference {
+                        Ok(reference) => reference,
+                        Err(error) => {
+                            stopped_early = true;
+                            stop_reason = Some(format!(
+                                "{} hole {},{} paired reference capture failed: {error}",
+                                target.plate_id, target.column, target.row
+                            ));
+                            samples.push(json!({
+                                "sample": sample_index,
+                                "x_approach": x_approach,
+                                "y_approach": y_approach,
+                                "outbound_elapsed_ms": outbound_elapsed_ms,
+                                "return_elapsed_ms": return_elapsed_ms,
+                                "capture_elapsed_ms": capture_elapsed_ms,
+                                "paired_reference_motion_elapsed_ms": paired_reference_motion_elapsed_ms,
+                                "paired_reference_capture_elapsed_ms": paired_reference_capture_elapsed_ms,
+                                "paired_reference_error": error,
+                                "passed": false,
+                            }));
+                            break;
+                        }
+                    };
+                    let bracketed_reference =
+                        mean_fiducial_detection(&[reference, next_reference]).unwrap();
+                    match observed {
+                        Ok(observed) => {
+                            let response = plate_pixel_correction(
+                                target.pixel_error_to_machine_mm,
+                                observed,
+                                bracketed_reference.x_px,
+                                bracketed_reference.y_px,
+                            );
+                            let response_mm = response[0].hypot(response[1]);
+                            let sample_passed = response_mm <= response_limit_mm;
+                            response_errors.push(response_mm);
+                            location_errors.push(response_mm);
+                            samples.push(json!({
+                                "sample": sample_index,
+                                "x_approach": x_approach,
+                                "y_approach": y_approach,
+                                "outbound_elapsed_ms": outbound_elapsed_ms,
+                                "return_elapsed_ms": return_elapsed_ms,
+                                "capture_elapsed_ms": capture_elapsed_ms,
+                                "paired_reference_motion_elapsed_ms": paired_reference_motion_elapsed_ms,
+                                "paired_reference_capture_elapsed_ms": paired_reference_capture_elapsed_ms,
+                                "outbound_correction": outbound.correction,
+                                "return_correction": returned.correction,
+                                "return_controller_target": returned.controller_target,
+                                "target": fiducial_observation(observed),
+                                "reference_before": fiducial_observation(reference),
+                                "reference_after": fiducial_observation(next_reference),
+                                "bracketed_reference": fiducial_observation(bracketed_reference),
+                                "response_x_mm": response[0],
+                                "response_y_mm": response[1],
+                                "response_mm": response_mm,
+                                "passed": sample_passed,
+                            }));
+                            if response_mm > XY_SPATIAL_SAFETY_GUARD_MM {
+                                stopped_early = true;
+                                stop_reason = Some(format!(
+                                    "{} hole {},{} response {:.4}mm exceeded the {:.4}mm safety guard",
+                                    target.plate_id,
+                                    target.column,
+                                    target.row,
+                                    response_mm,
+                                    XY_SPATIAL_SAFETY_GUARD_MM
+                                ));
+                                break;
+                            }
+                        }
+                        Err(error) => samples.push(json!({
+                            "sample": sample_index,
+                            "x_approach": x_approach,
+                            "y_approach": y_approach,
+                            "outbound_elapsed_ms": outbound_elapsed_ms,
+                            "return_elapsed_ms": return_elapsed_ms,
+                            "capture_elapsed_ms": capture_elapsed_ms,
+                            "paired_reference_motion_elapsed_ms": paired_reference_motion_elapsed_ms,
+                            "paired_reference_capture_elapsed_ms": paired_reference_capture_elapsed_ms,
+                            "outbound_correction": outbound.correction,
+                            "return_correction": returned.correction,
+                            "return_controller_target": returned.controller_target,
+                            "reference_before": fiducial_observation(reference),
+                            "reference_after": fiducial_observation(next_reference),
+                            "bracketed_reference": fiducial_observation(bracketed_reference),
+                            "observation_error": error,
+                            "passed": false,
+                        })),
+                    }
+                    reference = next_reference;
+                }
+                if stopped_early {
+                    break;
+                }
+            }
+            let expected_samples = 4 * request.samples_per_quadrant as usize;
+            let residuals = summarize_residuals(location_errors.iter().copied());
+            let location_complete =
+                samples.len() == expected_samples && location_errors.len() == expected_samples;
+            let location_passed = location_complete
+                && location_errors
+                    .iter()
+                    .all(|error| *error <= response_limit_mm);
+            completed_locations += location_complete as u32;
+            passed_locations += location_passed as u32;
+            locations.push(json!({
+                "plate_id": target.plate_id,
+                "column": target.column,
+                "row": target.row,
+                "nominal_x_mm": target.nominal_x_mm,
+                "nominal_y_mm": target.nominal_y_mm,
+                "target_x_mm": target.target_x_mm,
+                "target_y_mm": target.target_y_mm,
+                "reference_valid": true,
+                "initial_reference_target": fiducial_observation(initial_reference),
+                "final_reference_target": fiducial_observation(reference),
+                "transfer_elapsed_ms": transfer_elapsed_ms,
+                "reference_capture_elapsed_ms": reference_capture_elapsed_ms,
+                "residuals": residuals,
+                "passed": location_passed,
+                "samples": samples,
+            }));
+            if stopped_early {
+                break 'plates;
+            }
+        }
+    }
+    let park_started = Instant::now();
+    let park = if state.machine.status().state == MachineState::Ready {
+        execute_calibrated_motion(
+            state,
+            request.lease_id,
+            &mut motion,
+            visual.seed_pose,
+            transit_feed_mm_per_min,
+        )
+        .await
+        .map(|(_, planned)| {
+            json!({
+                "succeeded": true,
+                "correction": planned.correction,
+                "controller_target": planned.controller_target,
+                "elapsed_ms": elapsed_ms(park_started),
+            })
+        })
+        .unwrap_or_else(|error| {
+            json!({
+                "succeeded": false,
+                "error": error,
+                "elapsed_ms": elapsed_ms(park_started),
+            })
+        })
+    } else {
+        json!({
+            "succeeded": false,
+            "error": "machine was not ready for the datum park",
+            "elapsed_ms": elapsed_ms(park_started),
+        })
+    };
+    let expected_locations = request.locations_per_plate * installed_profile.plates.len() as u32;
+    let expected_samples = expected_locations * 4 * request.samples_per_quadrant;
+    let residuals = summarize_residuals(response_errors.iter().copied());
+    let passed = !stopped_early
+        && passed_locations == expected_locations
+        && response_errors.len() == expected_samples as usize
+        && response_errors
+            .iter()
+            .all(|error| *error <= response_limit_mm);
+    Ok(json!({
+        "kind": "xy_spatial_holdout",
+        "algorithm_version": XY_SPATIAL_HOLDOUT_ALGORITHM,
+        "calibration_id": calibration_id,
+        "surface_feed_mm_per_min": surface_feed_mm_per_min,
+        "transit_feed_mm_per_min": transit_feed_mm_per_min,
+        "reference_feed_mm_per_min": reference_feed_mm_per_min,
+        "offset_x_mm": request.offset_x_mm,
+        "offset_y_mm": request.offset_y_mm,
+        "locations_per_plate": request.locations_per_plate,
+        "samples_per_quadrant": request.samples_per_quadrant,
+        "response_limit_mm": response_limit_mm,
+        "safety_guard_mm": XY_SPATIAL_SAFETY_GUARD_MM,
+        "expected_location_count": expected_locations,
+        "attempted_location_count": attempted_locations,
+        "tested_location_count": tested_locations,
+        "completed_location_count": completed_locations,
+        "passed_location_count": passed_locations,
+        "expected_sample_count": expected_samples,
+        "valid_sample_count": response_errors.len(),
+        "residuals": residuals,
+        "passed": passed,
+        "stopped_early": stopped_early,
+        "stop_reason": stop_reason,
+        "park": park,
+        "locations": locations,
+        "measurement_elapsed_ms": elapsed_ms(started),
+        "observed_at": Utc::now(),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_xy_spatial_holdout(
+    state: AppState,
+    operation_id: Uuid,
+    calibration_id: Uuid,
+    request: StartXySpatialHoldoutRequest,
+    targets: Vec<XySpatialHoldoutTarget>,
+    camera_model: PlanarCameraModel,
+    camera_profile: CameraProfile,
+    camera_path: String,
+    installed_profile: velocitypnp_domain::InstalledGeometryCalibrationProfile,
+    visual: VisualHomingProfile,
+    motion_calibration: MotionCalibration,
+    surface_feed_mm_per_min: f64,
+    transit_feed_mm_per_min: f64,
+) -> Result<Option<String>, String> {
+    let operation_started = Instant::now();
+    if camera_profile.lighting_enabled {
+        state
+            .machine
+            .actuate(request.lease_id, "lights".into(), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let core_state = state.clone();
+    let (result, camera_timing) = with_profiled_camera_reuse(
+        &state,
+        execute_xy_spatial_holdout_core(
+            &core_state,
+            calibration_id,
+            &request,
+            &targets,
+            &camera_model,
+            &camera_profile,
+            &camera_path,
+            &installed_profile,
+            &visual,
+            motion_calibration,
+            surface_feed_mm_per_min,
+            transit_feed_mm_per_min,
+        ),
+    )
+    .await;
+    let lights_off = if camera_profile.lighting_enabled {
+        state.machine.disable_actuator("lights".into()).await
+    } else {
+        Ok(())
+    };
+    let restore = if state.machine.status().state == MachineState::Ready {
+        execute_visual_home(
+            &state,
+            VisualHomingRequest {
+                lease_id: request.lease_id,
+                apply_offset: true,
+                move_to_seed: true,
+            },
+        )
+        .await
+        .map(|result| serde_json::to_value(result).unwrap_or(Value::Null))
+        .map_err(|error| error.message)
+    } else {
+        Err("machine was not ready for visual datum restoration".to_string())
+    };
+    let mut report = match result {
+        Ok(report) => report,
+        Err(error) => json!({
+            "kind": "xy_spatial_holdout",
+            "algorithm_version": XY_SPATIAL_HOLDOUT_ALGORITHM,
+            "calibration_id": calibration_id,
+            "passed": false,
+            "stopped_early": true,
+            "stop_reason": error,
+            "observed_at": Utc::now(),
+        }),
+    };
+    report["camera_timing"] = camera_timing;
+    report["lights_disable"] = match lights_off {
+        Ok(()) => json!({"succeeded": true}),
+        Err(error) => json!({"succeeded": false, "error": error.to_string()}),
+    };
+    report["restore_alignment"] = match restore {
+        Ok(value) => json!({"succeeded": true, "result": value}),
+        Err(error) => json!({"succeeded": false, "error": error}),
+    };
+    report["total_elapsed_ms"] = json!(elapsed_ms(operation_started));
+    let encoded = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
+    state
+        .store
+        .put_calibration_artifact(
+            operation_id,
+            XY_SPATIAL_HOLDOUT_ARTIFACT,
+            "application/json",
+            &encoded,
+        )
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = state
+        .machine
+        .record_operation_event(
+            "operation.xy_spatial_holdout".into(),
+            json!({
+                "operation_id": operation_id,
+                "calibration_id": calibration_id,
+                "passed": report["passed"],
+                "residuals": report["residuals"],
+                "completed_location_count": report["completed_location_count"],
+                "valid_sample_count": report["valid_sample_count"],
+                "total_elapsed_ms": report["total_elapsed_ms"],
+            }),
+        )
+        .await
+    {
+        tracing::warn!(%error, %operation_id, "failed to record XY spatial holdout timing");
+    }
+    Ok(Some(format!(
+        "XY spatial holdout completed; report is /api/v1/operations/{operation_id}/artifacts/{XY_SPATIAL_HOLDOUT_ARTIFACT}"
+    )))
 }
 
 #[derive(Deserialize)]
@@ -37358,6 +38352,36 @@ mod tests {
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("installed plate hardware is secure"));
         assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn xy_spatial_holdout_requires_safety_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/xy-spatial-holdout",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "confirmed_external_safety_checks": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("plates are secure"));
+        assert!(message.contains("envelope is clear"));
     }
 
     #[test]

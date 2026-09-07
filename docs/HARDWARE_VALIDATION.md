@@ -3493,6 +3493,41 @@ use at the datum, the FTP board, and a short scan region. It does not prove
 that the same surface is spatially invariant over the complete workspace.
 Use fixed plate holes or other absolute visual references for that check.
 
+### Planar XY spatial holdout
+
+On 2026-09-07, the spatial runner tested the active 23,000 mm/min surface
+against six fixed plate holes. Three staging-plate targets and three
+build-plate targets covered X54.902-X340.386 and Y99.929-Y310.308. Each target
+used 50 mm X and 50 mm Y excursions in all four approach quadrants, with three
+repeats. The resulting paths covered more of the travel envelope than the
+target centers alone.
+
+The first full run used one slow reference before all 12 returns at each
+location. It recorded five of 72 samples slightly above 0.05 mm. Maximum error
+was 0.05150 mm and p95 was 0.05060 mm. Slow-reference drift reached 3.39 pixels
+within one location, so this run was not accepted as motion evidence.
+
+Version 2 bracketed every fast return with 300 mm/min negative-X/negative-Y
+references. All six locations and all 72 returns passed. RMS residual was
+0.01866 mm, p95 was 0.03377 mm, and maximum residual was 0.04889 mm. Seven
+samples exceeded 0.03 mm, one exceeded 0.04 mm, and none exceeded 0.05 mm.
+All 150 camera capture groups succeeded. The run took 386.45 seconds.
+
+The test kept controller acceleration at 1,000 mm/s2 and did not change the
+motion surface. The final datum park and visual restoration passed. The
+machine ended ready, homed, and fault-free at X220.130 Y190.270 Z31.500.
+
+This result supports use of one direction-and-distance surface across the
+tested workspace. It directly tests 50 mm by 50 mm paths. The prior datum
+grid and interpolation holdout supply the evidence for other distances. The
+fixed-hole endpoints do not include the narrow right edge beyond X340 mm.
+Do not tighten the 0.05 mm limit from this result.
+
+The retained summary is
+`datasets/motion-model-qualification-2026-09-06/spatial-holdout-23000-summary.json`.
+The full v2 report is operation artifact
+`e7b09783-d945-40b5-805c-0295bba0c825/xy-spatial-holdout.json`.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

@@ -1,0 +1,142 @@
+{
+  "algorithm_version": "xy_spatial_holdout.v2",
+  "source_operation_id": "e7b09783-d945-40b5-805c-0295bba0c825",
+  "calibration_id": "3b837434-a961-4e60-945a-18335b42d21f",
+  "surface_feed_mm_per_min": 23000.0,
+  "transit_feed_mm_per_min": 18000.0,
+  "reference_feed_mm_per_min": 300.0,
+  "offset_x_mm": 50.0,
+  "offset_y_mm": 50.0,
+  "locations_per_plate": 3,
+  "samples_per_quadrant": 3,
+  "expected_location_count": 6,
+  "completed_location_count": 6,
+  "passed_location_count": 6,
+  "expected_sample_count": 72,
+  "valid_sample_count": 72,
+  "response_limit_mm": 0.05,
+  "safety_guard_mm": 0.25,
+  "residuals": {
+    "sample_count": 72,
+    "rms_mm": 0.018660569034794804,
+    "p95_mm": 0.03376858405613571,
+    "max_mm": 0.048888093227366744
+  },
+  "mean_residual_mm": 0.0161136181843856,
+  "samples_above_0_03_mm": 7,
+  "samples_above_0_04_mm": 1,
+  "samples_above_0_05_mm": 0,
+  "measurement_elapsed_ms": 381780.13410300005,
+  "total_elapsed_ms": 386453.046847,
+  "camera": {
+    "capture_groups": 150,
+    "captured_frames": 450,
+    "capture_failure_count": 0,
+    "camera_open_count": 1,
+    "camera_open_ms": 187.381333,
+    "camera_capture_ms": 29414.189071
+  },
+  "locations": [
+    {
+      "plate_id": "staging_plate",
+      "column": 9,
+      "row": 3,
+      "target_x_mm": 70.01329085699187,
+      "target_y_mm": 144.48205460946554,
+      "maximum_residual_mm": 0.0365087162864071,
+      "passed": true
+    },
+    {
+      "plate_id": "staging_plate",
+      "column": 27,
+      "row": 3,
+      "target_x_mm": 340.3859765903189,
+      "target_y_mm": 145.32005269070441,
+      "maximum_residual_mm": 0.027400987306517764,
+      "passed": true
+    },
+    {
+      "plate_id": "staging_plate",
+      "column": 18,
+      "row": 6,
+      "target_x_mm": 205.22913681648578,
+      "target_y_mm": 99.92941140926162,
+      "maximum_residual_mm": 0.019791863844515922,
+      "passed": true
+    },
+    {
+      "plate_id": "build_plate",
+      "column": 8,
+      "row": 4,
+      "target_x_mm": 54.9015837858513,
+      "target_y_mm": 249.54012341013583,
+      "maximum_residual_mm": 0.048888093227366744,
+      "passed": true
+    },
+    {
+      "plate_id": "build_plate",
+      "column": 24,
+      "row": 0,
+      "target_x_mm": 295.2463767670257,
+      "target_y_mm": 310.30774514298315,
+      "maximum_residual_mm": 0.032092161970961534,
+      "passed": true
+    },
+    {
+      "plate_id": "build_plate",
+      "column": 18,
+      "row": 6,
+      "target_x_mm": 205.08056533045269,
+      "target_y_mm": 219.9599614385574,
+      "maximum_residual_mm": 0.01791295457547852,
+      "passed": true
+    }
+  ],
+  "quadrants": [
+    {
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "sample_count": 18,
+      "mean_residual_mm": 0.010265869967515148,
+      "maximum_residual_mm": 0.02104529606668591
+    },
+    {
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "sample_count": 18,
+      "mean_residual_mm": 0.015127377949151331,
+      "maximum_residual_mm": 0.03020162062186702
+    },
+    {
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "sample_count": 18,
+      "mean_residual_mm": 0.018823120759333782,
+      "maximum_residual_mm": 0.0365087162864071
+    },
+    {
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "sample_count": 18,
+      "mean_residual_mm": 0.02023810406154213,
+      "maximum_residual_mm": 0.048888093227366744
+    }
+  ],
+  "unbracketed_trial": {
+    "algorithm_version": "xy_spatial_holdout.v1",
+    "source_operation_id": "cd361e9e-1183-4fb3-bf03-40eebaad780f",
+    "sample_count": 72,
+    "rms_mm": 0.029577655903089285,
+    "p95_mm": 0.05060337029859323,
+    "maximum_residual_mm": 0.05150136643024692,
+    "samples_above_limit": 5,
+    "accepted_for_qualification": false,
+    "reason": "One reference before each location allowed slow camera and detection drift to enter the result. The v2 procedure brackets every fast return with slow references."
+  },
+  "park_succeeded": true,
+  "restore_alignment_succeeded": true,
+  "restore_initial_error_mm": 0.022154635845385743,
+  "restore_verification_error_mm": 0.026753917544395663,
+  "stopped_early": false,
+  "passed": true
+}

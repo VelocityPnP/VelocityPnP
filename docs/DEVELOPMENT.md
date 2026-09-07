@@ -2109,6 +2109,23 @@ velocitypnp attach-xy-planar-response CALIBRATION_UUID SURFACE.json \
   --lease "$VELOCITYPNP_LEASE" --confirm-safety-checks
 ```
 
+Test spatial invariance against known installed-plate holes after activation:
+
+```bash
+velocitypnp xy-spatial-holdout CALIBRATION_UUID \
+  --lease "$VELOCITYPNP_LEASE" \
+  --locations-per-plate 3 --samples 3 \
+  --offset-x-mm 50 --offset-y-mm 50 \
+  --confirm-safety-checks
+```
+
+The runner selects separated, previously detected holes on each plate. It
+uses a 300 mm/min negative-X/negative-Y reference at each hole. Every fast
+return is bracketed by slow references, so camera and detector drift do not
+appear as motion error. The report is retained as an operation artifact.
+The 0.05 mm qualification limit records a failed sample but does not stop the
+run. A 0.25 mm response, invalid motion, or a machine fault stops the run.
+
 The planar model applies only to two-axis moves at its exact feed and within
 its measured X/Y distance range. It uses bilinear interpolation. Single-axis
 moves, unmeasured feeds, and distances below the first grid node keep the prior

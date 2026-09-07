@@ -598,6 +598,19 @@ paths:
       responses:
         "200": { description: Operation, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /operations/{id}/artifacts/{name}:
+    get:
+      operationId: getOperationArtifact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Retained operation artifact
+          content:
+            application/json: { schema: { type: object } }
+            image/png: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /events:
     get:
       operationId: streamEvents
@@ -925,6 +938,35 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+  /calibrations/{id}/xy-spatial-holdout:
+    post:
+      operationId: startXySpatialHoldout
+      description: >-
+        Tests the active planar XY response at fixed installed-plate holes.
+        Each location gets a slow negative-X/negative-Y reference followed by
+        repeated four-quadrant returns at the qualified surface feed.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lease_id, confirmed_external_safety_checks]
+              properties:
+                lease_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+                locations_per_plate:
+                  { type: integer, minimum: 1, maximum: 4, default: 3 }
+                samples_per_quadrant:
+                  { type: integer, minimum: 2, maximum: 5, default: 3 }
+                offset_x_mm:
+                  { type: number, exclusiveMinimum: 0, default: 50 }
+                offset_y_mm:
+                  { type: number, exclusiveMinimum: 0, default: 50 }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
   /calibrations/{id}/installed-geometry-runs:
     post:
       operationId: startInstalledGeometryRun

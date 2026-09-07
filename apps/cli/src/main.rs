@@ -534,6 +534,24 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    /// Test planar XY response against fixed installed-plate holes.
+    XySpatialHoldout {
+        calibration: Uuid,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=4))]
+        locations_per_plate: u32,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(2..=5))]
+        samples: u32,
+        #[arg(long, default_value_t = 50.0)]
+        offset_x_mm: f64,
+        #[arg(long, default_value_t = 50.0)]
+        offset_y_mm: f64,
+        /// Confirm level nozzles, secure plates, a clear envelope, and
+        /// reachable power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
     CalibrateInstalledGeometry {
         calibration: Uuid,
         #[arg(long, env = "VELOCITYPNP_LEASE")]
@@ -1713,6 +1731,44 @@ async fn main() -> Result<()> {
                     "confirmed_external_safety_checks": true,
                     "surface": surface,
                 })),
+            )
+            .await?
+        }
+        Command::XySpatialHoldout {
+            calibration,
+            lease,
+            locations_per_plate,
+            samples,
+            offset_x_mm,
+            offset_y_mm,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "XY spatial holdout requires --confirm-safety-checks after inspecting the level nozzles, secure plates, clear envelope, and power isolation"
+                );
+            }
+            let started = post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/xy-spatial-holdout"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                    "locations_per_plate": locations_per_plate,
+                    "samples_per_quadrant": samples,
+                    "offset_x_mm": offset_x_mm,
+                    "offset_y_mm": offset_y_mm,
+                })),
+            )
+            .await?;
+            let operation_id = started["id"]
+                .as_str()
+                .context("XY spatial holdout response had no operation ID")?
+                .to_owned();
+            run_operation(&client, base, started).await?;
+            get(
+                &client,
+                &format!("{base}/operations/{operation_id}/artifacts/xy-spatial-holdout.json"),
             )
             .await?
         }
@@ -3341,6 +3397,42 @@ mod tests {
                 lease: parsed_lease,
                 confirm_safety_checks: true,
                 ..
+            } if parsed_calibration == calibration && parsed_lease == lease
+        ));
+    }
+
+    #[test]
+    fn xy_spatial_holdout_cli_accepts_a_bounded_plan() {
+        let lease = Uuid::new_v4();
+        let calibration = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "xy-spatial-holdout",
+            &calibration.to_string(),
+            "--lease",
+            &lease.to_string(),
+            "--locations-per-plate",
+            "3",
+            "--samples",
+            "3",
+            "--offset-x-mm",
+            "50",
+            "--offset-y-mm",
+            "50",
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::XySpatialHoldout {
+                calibration: parsed_calibration,
+                lease: parsed_lease,
+                locations_per_plate: 3,
+                samples: 3,
+                offset_x_mm: 50.0,
+                offset_y_mm: 50.0,
+                confirm_safety_checks: true,
             } if parsed_calibration == calibration && parsed_lease == lease
         ));
     }
