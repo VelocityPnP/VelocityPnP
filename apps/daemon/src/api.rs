@@ -20409,13 +20409,14 @@ async fn start_calibration_run(
         ));
     }
     validate_calibration_targets(&state.profile, &config)?;
+    validate_full_calibration_profile(&state.profile)?;
     state
         .machine
         .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let operation = Operation::pending("calibration.initial_machine");
+    let operation = Operation::pending("calibration.full_machine");
     let now = Utc::now();
     let run = AutomatedCalibrationRun {
         id: Uuid::new_v4(),
@@ -20459,6 +20460,63 @@ async fn start_calibration_run(
         execute_calibration_run(task_state, run_id, lease_id).await
     });
     Ok((StatusCode::ACCEPTED, Json(returned)))
+}
+
+fn validate_full_calibration_profile(profile: &MachineProfile) -> ApiResult<()> {
+    for capability in [
+        "local_xy_direction_response",
+        "installed_geometry_calibration",
+        "vacuum_probe_calibration",
+        "vacuum_sensor_characterization",
+    ] {
+        if !profile
+            .capabilities
+            .get(capability)
+            .copied()
+            .unwrap_or(false)
+        {
+            return Err(ApiError::bad_request(format!(
+                "active profile does not permit the full calibration stage {capability}",
+            )));
+        }
+    }
+    let direction = profile
+        .local_xy_direction_response
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define local XY direction response")
+        })?;
+    direction.validate().map_err(ApiError::bad_request)?;
+    if direction
+        .approach_feeds_mm_per_min
+        .iter()
+        .chain(std::iter::once(&direction.datum_approach_feed_mm_per_min))
+        .any(|feed| *feed > profile.maximum_feed_mm_per_min)
+    {
+        return Err(ApiError::bad_request(
+            "local XY direction-response feed exceeds the active profile limit",
+        ));
+    }
+    profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile has no installed geometry calibration")
+        })?
+        .validate()
+        .map_err(ApiError::bad_request)?;
+    let vacuum = profile.vacuum_calibration.as_ref().ok_or_else(|| {
+        ApiError::bad_request("active profile does not define vacuum calibration")
+    })?;
+    vacuum.validate().map_err(ApiError::bad_request)?;
+    profile
+        .vacuum_characterization
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define vacuum characterization")
+        })?
+        .validate(vacuum.minimum_signal_delta_counts)
+        .map_err(ApiError::bad_request)
 }
 
 #[derive(Deserialize)]
@@ -21548,6 +21606,62 @@ fn initial_calibration_checks(device_evidence: Value) -> Vec<CalibrationCheck> {
             CalibrationCheckStatus::Pending,
             "Waiting for safe height-specific bottom-camera mapping probes",
         ),
+        calibration_check(
+            "local_xy_direction_response",
+            "X/Y direction response",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for backlash-like response measurements at each configured speed",
+        ),
+        calibration_check(
+            "top_camera_planar_model",
+            "Top-camera planar model",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for the installed-datum sweep",
+        ),
+        calibration_check(
+            "bottom_camera_planar_model",
+            "Bottom-camera planar model",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for the installed-tip sweep",
+        ),
+        calibration_check(
+            "installed_plate_geometry",
+            "Installed-plate geometry",
+            CalibrationCheckSource::Vision,
+            CalibrationCheckStatus::Pending,
+            "Waiting for installed-plate hole measurements",
+        ),
+        calibration_check(
+            "vacuum_contact_N1",
+            "N1 vacuum contact",
+            CalibrationCheckSource::Controller,
+            CalibrationCheckStatus::Pending,
+            "Waiting for a bounded datum contact search",
+        ),
+        calibration_check(
+            "vacuum_contact_N2",
+            "N2 vacuum contact",
+            CalibrationCheckSource::Controller,
+            CalibrationCheckStatus::Pending,
+            "Waiting for a bounded datum contact search",
+        ),
+        calibration_check(
+            "vacuum_characterization_N1",
+            "N1 vacuum sensor characterization",
+            CalibrationCheckSource::Controller,
+            CalibrationCheckStatus::Pending,
+            "Waiting for pump-off, open, sealed, and release samples",
+        ),
+        calibration_check(
+            "vacuum_characterization_N2",
+            "N2 vacuum sensor characterization",
+            CalibrationCheckSource::Controller,
+            CalibrationCheckStatus::Pending,
+            "Waiting for pump-off, open, sealed, and release samples",
+        ),
     ]
 }
 
@@ -22013,16 +22127,286 @@ async fn execute_calibration_run(
     if let Err(error) = record_head_geometry_steps(&state, &run, &geometry_report) {
         return fail_calibration_run(&state, &mut run, error);
     }
+
+    if let Err(error) = execute_full_xy_direction_response(&state, &mut run, lease_id).await {
+        return reject_calibration_run(&state, &mut run, error);
+    }
+
+    if let Err(error) = refresh_calibration_lease(&state, lease_id).await {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    if let Err(error) = execute_visual_home_with_limit(
+        &state,
+        VisualHomingRequest {
+            lease_id,
+            apply_offset: true,
+            move_to_seed: true,
+        },
+        Some(run.config.visual_homing_p95_limit_mm),
+    )
+    .await
+    {
+        return fail_calibration_run(&state, &mut run, error.message);
+    }
+    if let Err(error) = state.machine.actuate(lease_id, "lights".into(), true).await {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let installed_result = execute_installed_geometry_calibration(&state, &mut run, lease_id).await;
+    let lights_off = state.machine.disable_actuator("lights".into()).await;
+    if let Err(error) = lights_off {
+        return fail_calibration_run(&state, &mut run, error.to_string());
+    }
+    let installed_report = match installed_result {
+        Ok(report) => report,
+        Err(CalibrationStop::Rejected(message)) => {
+            return reject_calibration_run(&state, &mut run, message)
+        }
+        Err(CalibrationStop::Failed(message)) => {
+            return fail_calibration_run(&state, &mut run, message)
+        }
+    };
+    run.installed_geometry_report = Some(installed_report.clone());
+    if let Err(error) = persist_installed_geometry_results(&state, &run, &installed_report) {
+        return fail_calibration_run(&state, &mut run, error);
+    }
+    if !installed_report.passed {
+        return reject_calibration_run(
+            &state,
+            &mut run,
+            "installed targets did not provide qualified coverage for all requested models".into(),
+        );
+    }
+
+    for nozzle_id in ["N1", "N2"] {
+        if let Err(error) = execute_full_vacuum_stage(
+            &state,
+            &mut run,
+            lease_id,
+            nozzle_id,
+            VacuumOperationMode::CalibrationProbe,
+        )
+        .await
+        {
+            return reject_calibration_run(&state, &mut run, error);
+        }
+    }
+    for nozzle_id in ["N1", "N2"] {
+        if let Err(error) = execute_full_vacuum_stage(
+            &state,
+            &mut run,
+            lease_id,
+            nozzle_id,
+            VacuumOperationMode::Characterization,
+        )
+        .await
+        {
+            return reject_calibration_run(&state, &mut run, error);
+        }
+    }
+
     run.phase = CalibrationRunPhase::Complete;
     run.status = CalibrationRunStatus::Succeeded;
     run.failure = None;
     persist_calibration_run(&state, &mut run)?;
     Ok(Some(format!(
-        "Initial machine calibration passed {} visual-homing cycles, {} nozzle runout fits, and {} height models",
+        "Full machine calibration passed {} visual-homing cycles, {} nozzle runout fits, {} height models, X/Y direction response, installed geometry, and both vacuum sensor characterizations",
         run.config.visual_homing_sample_count,
         geometry_report.nozzles.len(),
         geometry_report.nozzle_height_models.len(),
     )))
+}
+
+async fn execute_full_xy_direction_response(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+) -> Result<(), String> {
+    set_run_phase(state, run, CalibrationRunPhase::LocalXyDirectionResponse)?;
+    update_run_check(
+        run,
+        "local_xy_direction_response",
+        CalibrationCheckStatus::Pending,
+        "Measuring backlash-like endpoint shifts from both directions and at each speed",
+        Value::Null,
+    );
+    persist_calibration_run(state, run)?;
+    refresh_calibration_lease(state, lease_id).await?;
+
+    let result = start_local_xy_direction_response(
+        State(state.clone()),
+        Path(run.calibration_id),
+        Json(StartLocalXyDirectionResponseRequest {
+            lease_id,
+            confirmed_external_safety_checks: true,
+        }),
+    )
+    .await
+    .map_err(|error| error.message)
+    .map(|(_, Json(operation))| operation);
+    let result = match result {
+        Ok(operation) => wait_for_nested_operation(state, operation.id).await,
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(message) => {
+            let snapshot = state
+                .store
+                .get_calibration(run.calibration_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "calibration snapshot not found".to_string())?;
+            let evidence = snapshot
+                .values
+                .get(CalibrationStepId::LocalXyDirectionResponse.as_str())
+                .cloned()
+                .unwrap_or(Value::Null);
+            update_run_check(
+                run,
+                "local_xy_direction_response",
+                CalibrationCheckStatus::Passed,
+                message
+                    .as_deref()
+                    .unwrap_or("X/Y direction response passed"),
+                evidence,
+            );
+            persist_calibration_run(state, run)
+        }
+        Err(error) => {
+            update_run_check(
+                run,
+                "local_xy_direction_response",
+                CalibrationCheckStatus::Failed,
+                &error,
+                Value::Null,
+            );
+            persist_calibration_run(state, run)?;
+            Err(error)
+        }
+    }
+}
+
+async fn execute_full_vacuum_stage(
+    state: &AppState,
+    run: &mut AutomatedCalibrationRun,
+    lease_id: Uuid,
+    nozzle_id: &str,
+    mode: VacuumOperationMode,
+) -> Result<(), String> {
+    let (phase, check_id, running_message, values_key) = match mode {
+        VacuumOperationMode::CalibrationProbe => (
+            CalibrationRunPhase::VacuumContactCalibration,
+            format!("vacuum_contact_{nozzle_id}"),
+            format!("Searching for {nozzle_id} contact in the bounded datum interval"),
+            "vacuum_probe",
+        ),
+        VacuumOperationMode::Characterization => (
+            CalibrationRunPhase::VacuumSensorCharacterization,
+            format!("vacuum_characterization_{nozzle_id}"),
+            format!("Sampling {nozzle_id} pump-off, open, sealed, and release states"),
+            CalibrationStepId::VacuumSensorCharacterization.as_str(),
+        ),
+        VacuumOperationMode::FineHome => {
+            return Err("fine home is not a full-calibration stage".into())
+        }
+    };
+    set_run_phase(state, run, phase)?;
+    update_run_check(
+        run,
+        &check_id,
+        CalibrationCheckStatus::Pending,
+        &running_message,
+        Value::Null,
+    );
+    persist_calibration_run(state, run)?;
+    refresh_calibration_lease(state, lease_id).await?;
+
+    let stage_result: Result<(Option<String>, Value), String> = async {
+        let (_, Json(operation)) = start_vacuum_operation(
+            state.clone(),
+            run.calibration_id,
+            StartVacuumProbeRequest {
+                lease_id,
+                nozzle_id: nozzle_id.into(),
+                confirmed_external_safety_checks: true,
+            },
+            mode,
+        )
+        .await
+        .map_err(|error| error.message)?;
+        let message = wait_for_nested_operation(state, operation.id).await?;
+        let snapshot = state
+            .store
+            .get_calibration(run.calibration_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "calibration snapshot not found".to_string())?;
+        let evidence = snapshot
+            .values
+            .get(values_key)
+            .and_then(|reports| reports.get(nozzle_id))
+            .cloned()
+            .ok_or_else(|| format!("{nozzle_id} calibration did not store a report"))?;
+        Ok((message, evidence))
+    }
+    .await;
+    let (message, evidence) = match stage_result {
+        Ok(result) => result,
+        Err(error) => {
+            update_run_check(
+                run,
+                &check_id,
+                CalibrationCheckStatus::Failed,
+                &error,
+                Value::Null,
+            );
+            persist_calibration_run(state, run)?;
+            return Err(error);
+        }
+    };
+    if evidence.get("passed").and_then(Value::as_bool) != Some(true) {
+        let error = format!("{nozzle_id} calibration did not pass");
+        update_run_check(
+            run,
+            &check_id,
+            CalibrationCheckStatus::Failed,
+            &error,
+            evidence,
+        );
+        persist_calibration_run(state, run)?;
+        return Err(error);
+    }
+    update_run_check(
+        run,
+        &check_id,
+        CalibrationCheckStatus::Passed,
+        message
+            .as_deref()
+            .unwrap_or("Vacuum calibration stage passed"),
+        evidence,
+    );
+    persist_calibration_run(state, run)
+}
+
+async fn wait_for_nested_operation(
+    state: &AppState,
+    operation_id: Uuid,
+) -> Result<Option<String>, String> {
+    loop {
+        let operation = state
+            .store
+            .get_operation(operation_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "calibration sub-operation disappeared from storage".to_string())?;
+        match operation.status {
+            OperationStatus::Pending | OperationStatus::Running => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            OperationStatus::Succeeded => return Ok(operation.message),
+            OperationStatus::Failed | OperationStatus::Cancelled => {
+                return Err(operation
+                    .message
+                    .unwrap_or_else(|| "calibration sub-operation failed".into()))
+            }
+        }
+    }
 }
 
 async fn execute_head_geometry_run(
@@ -34572,6 +34956,28 @@ mod tests {
             initial_correction_mean_mm: 0.7,
             initial_correction_max_mm: 0.9,
             passed: true,
+        }
+    }
+
+    #[test]
+    fn full_calibration_tracks_every_automated_stage() {
+        let checks = initial_calibration_checks(json!({}));
+        let check_ids = checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for required in [
+            "local_xy_direction_response",
+            "top_camera_planar_model",
+            "bottom_camera_planar_model",
+            "installed_plate_geometry",
+            "vacuum_contact_N1",
+            "vacuum_contact_N2",
+            "vacuum_characterization_N1",
+            "vacuum_characterization_N2",
+        ] {
+            assert!(check_ids.contains(required), "missing {required}");
         }
     }
 

@@ -388,6 +388,44 @@ p { line-height: 1.5; }
 .run-heading strong { color: var(--green); font: 11px var(--mono); text-transform: uppercase; }
 .run-heading span { color: var(--muted); font-size: 10px; }
 .calibration-run > p { color: var(--muted); font-size: 11px; }
+.calibration-current {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin: 12px 0;
+  border: 1px solid #397258;
+  border-radius: 7px;
+  padding: 11px;
+  background: #12241c;
+}
+.calibration-current small, .calibration-current strong,
+.calibration-current div > span { display: block; }
+.calibration-current small {
+  color: var(--green);
+  font: 9px var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.calibration-current strong { margin-top: 3px; font-size: 12px; }
+.calibration-current div > span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.activity-indicator {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #64e3a43d;
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: activity-spin .9s linear infinite;
+}
+@keyframes activity-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .activity-indicator { animation: none; }
+}
 .calibration-checks { display: grid; gap: 6px; margin: 12px 0; }
 .calibration-checks > div {
   display: grid;
@@ -407,6 +445,12 @@ p { line-height: 1.5; }
 .calibration-checks .check-passed > span { color: var(--green); }
 .calibration-checks .check-failed { border-color: #7d453f; }
 .calibration-checks .check-failed > span { color: #f28d82; }
+.calibration-checks .check-current {
+  border-color: #397258;
+  background: #12241c;
+  box-shadow: inset 2px 0 var(--green);
+}
+.calibration-checks .check-current > span { color: var(--green); }
 .run-result { margin-top: 12px; border: 1px solid #20372d; border-radius: 7px; padding: 12px; background: #101d18; }
 .run-result p { margin-bottom: 9px; font-size: 12px; line-height: 1.5; }
 .run-result p:last-child { margin-bottom: 0; }

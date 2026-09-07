@@ -3,11 +3,11 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { attachedMachineDevices, currentCalibrationCheck } from "./App";
 import { api } from "./api";
 import type {
-  AutomatedCalibrationRun, CalibrationSnapshot, ControlLease, MachineStatus,
-  Operation,
+  AutomatedCalibrationRun, CalibrationArtifact, CalibrationSnapshot,
+  ControlLease, Device, MachineStatus, Operation,
 } from "./types";
 
 const controlLease: ControlLease = {
@@ -58,6 +58,19 @@ function operation(kind: string): Operation {
     kind,
     status: "succeeded",
     message: null,
+  };
+}
+
+function calibrationArtifact(): CalibrationArtifact {
+  return {
+    kind: "captured",
+    recorded_at: "2026-09-07T18:00:00Z",
+    source_run_id: null,
+    algorithm_version: "test",
+    input_fingerprints: {},
+    dependency_fingerprints: {},
+    fingerprint: "test-fingerprint",
+    value: {},
   };
 }
 
@@ -133,11 +146,12 @@ describe("machine bootstrap action states", () => {
     ["preflight", machineStatus({ state: "preflight" }), "Confirm workspace clear"],
     ["an unhomed machine without a lease", machineStatus({ state: "unhomed" }), "Acquire 15 min lease"],
     ["an unhomed leased machine", machineStatus({ state: "unhomed", control_lease: controlLease }), "Home machine"],
-    ["a coarse-homed machine", machineStatus({ state: "ready", homed: true, control_lease: controlLease }), "Continue to fine-home XYZ"],
+    ["a coarse-homed machine", machineStatus({ state: "ready", homed: true, control_lease: controlLease }), "Set up precision calibration"],
   ])("offers the next action for %s", async (_name, status, expectedAction) => {
     mockBrowserServices();
     vi.spyOn(api, "status").mockResolvedValue(status);
     vi.spyOn(api, "devices").mockResolvedValue([]);
+    vi.spyOn(api, "calibrations").mockResolvedValue([]);
 
     render(<App />);
 
@@ -180,7 +194,7 @@ describe("machine bootstrap journey", () => {
     vi.spyOn(api, "acquireOrRenewLease").mockResolvedValue(controlLease);
     vi.spyOn(api, "calibrationRun").mockResolvedValue(run);
     const startCalibration = vi.spyOn(api, "startCalibration")
-      .mockResolvedValue({ run, operation: operation("calibration.initial_machine") });
+      .mockResolvedValue({ run, operation: operation("calibration.full_machine") });
 
     render(<App />);
     await user.click(await enabledButton("Connect simulator"));
@@ -188,10 +202,10 @@ describe("machine bootstrap journey", () => {
     await user.click(await enabledButton("Acquire 15 min lease"));
     await user.click(await enabledButton("Home machine"));
     await user.click(await screen.findByRole("button", { name: "Start homing" }));
-    await user.click(await enabledButton("Continue to fine-home XYZ"));
+    await user.click(await enabledButton("Set up precision calibration"));
     await user.click(await enabledButton("Create calibration"));
-    await user.click(await enabledButton("Run initial calibration"));
-    await user.click(await screen.findByRole("button", { name: "Start calibration" }));
+    await user.click(await enabledButton("Run full calibration"));
+    await user.click(await screen.findByRole("button", { name: "Start full calibration" }));
 
     await waitFor(() => expect(startCalibration).toHaveBeenCalledWith(
       snapshot.id, controlLease.id,
@@ -213,7 +227,7 @@ describe("machine bootstrap journey", () => {
     mockCalibrationApi([child, parent], [calibrationRun(child.id)]);
 
     render(<App />);
-    await user.click(await enabledButton("Continue to fine-home XYZ"));
+    await user.click(await enabledButton("Set up precision calibration"));
 
     await enabledButton("Run full calibration again");
     expect((await screen.findByRole("button", {
@@ -222,8 +236,7 @@ describe("machine bootstrap journey", () => {
     expect((screen.getByRole("button", {
       name: "New revision",
     }) as HTMLButtonElement).disabled).toBe(true);
-    expect(await screen.findByText(/This revision cannot reuse its parent/))
-      .toBeTruthy();
+    expect(screen.queryByText(/This revision cannot reuse its parent/)).toBeNull();
     expect(screen.getByText(
       "Top-camera reproducibility did not meet its profile thresholds.",
     )).toBeTruthy();
@@ -252,12 +265,98 @@ describe("machine bootstrap journey", () => {
       .mockResolvedValue({ run, operation: operation("calibration.head_geometry") });
 
     render(<App />);
-    await user.click(await enabledButton("Continue to fine-home XYZ"));
+    await user.click(await enabledButton("Set up precision calibration"));
     await user.click(await enabledButton("Recalibrate head geometry"));
     await user.click(await screen.findByRole("button", { name: "Start recalibration" }));
 
     await waitFor(() => expect(startHeadGeometry).toHaveBeenCalledWith(
       child.id, controlLease.id,
     ));
+  });
+
+  it("fine-homes directly from a compatible stored calibration", async () => {
+    mockBrowserServices();
+    const user = userEvent.setup();
+    const status = machineStatus({
+      state: "ready", homed: true, control_lease: controlLease,
+    });
+    const snapshot = calibrationSnapshot(
+      "precision-ready",
+      null,
+      ["local_xy_direction_response", "nozzle_height_model"],
+      { vacuum_probe: { N2: { passed: true } } },
+    );
+    snapshot.artifacts = {
+      local_xy_direction_response: calibrationArtifact(),
+      runtime_tip_transform_n2: calibrationArtifact(),
+      vacuum_contact_n2: calibrationArtifact(),
+    };
+    vi.spyOn(api, "status").mockResolvedValue(status);
+    vi.spyOn(api, "devices").mockResolvedValue([]);
+    vi.spyOn(api, "calibrations").mockResolvedValue([snapshot]);
+    vi.spyOn(api, "acquireOrRenewLease").mockResolvedValue(controlLease);
+    const fineHome = vi.spyOn(api, "fineHome")
+      .mockResolvedValue(operation("machine.fine_home"));
+
+    render(<App />);
+    await user.click(await enabledButton("Fine-home XYZ"));
+    await user.click(await screen.findByRole("button", {
+      name: "Start fine homing",
+    }));
+
+    await waitFor(() => expect(fineHome).toHaveBeenCalledWith(
+      snapshot.id, controlLease.id,
+    ));
+  });
+});
+
+describe("machine device display", () => {
+  it("keeps one capture node per configured machine camera", () => {
+    const device = (overrides: Partial<Device>): Device => ({
+      kind: "camera",
+      path: "/dev/video0",
+      stable_path: null,
+      vendor_id: null,
+      product_id: null,
+      serial: null,
+      product: "Camera",
+      capture_capable: true,
+      suggested_role: null,
+      ...overrides,
+    });
+    const visible = attachedMachineDevices([
+      device({ path: "/dev/video0", product: "Laptop webcam" }),
+      device({ path: "/dev/video2", suggested_role: "bottom_camera" }),
+      device({ path: "/dev/video3", capture_capable: false, suggested_role: "bottom_camera" }),
+      device({ path: "/dev/video4", suggested_role: "top_camera" }),
+      device({ path: "/dev/video5", capture_capable: false, suggested_role: "top_camera" }),
+      device({ kind: "serial_controller", path: "/dev/ttyACM0" }),
+    ]);
+
+    expect(visible.map((value) => value.path)).toEqual([
+      "/dev/video2", "/dev/video4", "/dev/ttyACM0",
+    ]);
+  });
+});
+
+describe("calibration progress", () => {
+  it("selects the active check instead of a waiting check", () => {
+    const run = calibrationRun("calibration", "running");
+    run.checks = [
+      {
+        id: "coarse_homing", title: "Coarse home", source: "controller",
+        status: "passed", message: "Complete", evidence: null,
+      },
+      {
+        id: "top_camera", title: "Top camera", source: "vision",
+        status: "pending", message: "Measured 12 of 30 frames", evidence: null,
+      },
+      {
+        id: "tooling_N1", title: "N1 tooling", source: "vision",
+        status: "pending", message: "Waiting for measurement", evidence: null,
+      },
+    ];
+
+    expect(currentCalibrationCheck(run)?.id).toBe("top_camera");
   });
 });

@@ -32,6 +32,37 @@ export function canSeedHeadGeometryRevision(
   return report?.passed === true;
 }
 
+export function attachedMachineDevices(devices: Device[]): Device[] {
+  return devices.filter((device) => device.kind === "serial_controller"
+    || (device.kind === "camera"
+      && device.capture_capable === true
+      && ["top_camera", "bottom_camera"].includes(device.suggested_role ?? "")));
+}
+
+export function fineHomeCalibration(
+  status: Pick<MachineStatus, "profile_id" | "calibration_revision">,
+  snapshots: CalibrationSnapshot[],
+): CalibrationSnapshot | null {
+  const compatible = snapshots.filter((snapshot) => snapshot.profile_id === status.profile_id
+    && Boolean(snapshot.artifacts.local_xy_direction_response)
+    && Boolean(snapshot.artifacts.runtime_tip_transform_n2)
+    && Boolean(snapshot.artifacts.vacuum_contact_n2)
+    && snapshot.values.vacuum_probe?.N2?.passed === true);
+  return compatible.find((snapshot) => snapshot.id === status.calibration_revision)
+    ?? compatible[0]
+    ?? null;
+}
+
+export function currentCalibrationCheck(
+  run: AutomatedCalibrationRun | null,
+): AutomatedCalibrationRun["checks"][number] | null {
+  if (!run || !["pending", "running"].includes(run.status)) return null;
+  const pending = run.checks.filter((check) => check.status === "pending");
+  return pending.find((check) => !check.message.startsWith("Waiting"))
+    ?? pending[0]
+    ?? null;
+}
+
 export function canStartJob(
   status: Pick<MachineStatus, "state" | "homed" | "calibration_revision">,
   busy: boolean,
@@ -65,6 +96,7 @@ function AppContent() {
   const [tab, setTab] = useState<Tab>("machine");
   const [status, setStatus] = useState<MachineStatus | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [calibrations, setCalibrations] = useState<CalibrationSnapshot[]>([]);
   const [events, setEvents] = useState<MachineEvent[]>([]);
   const [error, setErrorState] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -96,6 +128,12 @@ function AppContent() {
     }
     return () => { window.clearInterval(timer); source.close(); };
   }, [refresh]);
+
+  useEffect(() => {
+    if (tab !== "machine") return;
+    void api.calibrations().then(setCalibrations).catch((reason) =>
+      setError(reason instanceof Error ? reason.message : String(reason)));
+  }, [tab, setError]);
 
   const run = async (task: () => Promise<unknown>) => {
     setBusy(true);
@@ -130,7 +168,7 @@ function AppContent() {
         </header>
         {error && <div className="alert" role="alert"><span>!</span>{error}<button onClick={() => setError(null)}>Dismiss</button></div>}
         {!status && (tab === "machine" || tab === "calibration" || tab === "jobs") && <section className="card loading-card"><p className="eyebrow">Machine service</p><h2>Loading status…</h2><p>Waiting for the VelocityPnP daemon.</p></section>}
-        {tab === "machine" && status && <MachinePanel status={status} devices={devices} events={events} busy={busy} run={run} openCalibration={() => setTab("calibration")} />}
+        {tab === "machine" && status && <MachinePanel status={status} devices={devices} calibrations={calibrations} events={events} busy={busy} run={run} openCalibration={() => setTab("calibration")} />}
         {tab === "calibration" && status && <CalibrationPanel status={status} devices={devices} setError={setError} />}
         {tab === "boards" && <BoardsPanel status={status} setError={setError} />}
         {tab === "jobs" && status && <JobsPanel status={status} setError={setError} />}
@@ -276,8 +314,9 @@ function JobsPanel({ status, setError }: {
   </div>;
 }
 
-function MachinePanel({ status, devices, events, busy, run, openCalibration }: {
-  status: MachineStatus; devices: Device[]; events: MachineEvent[]; busy: boolean;
+function MachinePanel({ status, devices, calibrations, events, busy, run, openCalibration }: {
+  status: MachineStatus; devices: Device[]; calibrations: CalibrationSnapshot[];
+  events: MachineEvent[]; busy: boolean;
   run: (task: () => Promise<unknown>) => Promise<void>;
   openCalibration: () => void;
 }) {
@@ -285,6 +324,8 @@ function MachinePanel({ status, devices, events, busy, run, openCalibration }: {
   const [readings, setReadings] = useState<Record<string, SensorReading>>({});
   const lease = status.control_lease;
   const pose = status.pose ?? EMPTY_POSE;
+  const attachedDevices = attachedMachineDevices(devices);
+  const fineHomeSnapshot = fineHomeCalibration(status, calibrations);
   const controllerSettings = status.controller?.settings;
   const xyFeedLimit = controllerSettings
     ? Math.min(
@@ -319,6 +360,25 @@ function MachinePanel({ status, devices, events, busy, run, openCalibration }: {
     }) === null) return;
     void machineAction(() => api.home(lease.id));
   };
+  const fineHome = async () => {
+    if (!fineHomeSnapshot) {
+      openCalibration();
+      return;
+    }
+    if (await requestDialog({
+      title: "Fine-home XYZ?",
+      message: "Confirm the datum PCB is fixed, the sealing target and nozzle tips are clean, both nozzles are level, the travel envelope is clear, and power isolation is within reach. The machine will refine X/Y against the datum and reproduce the stored N2 contact for Z.",
+      confirmLabel: "Start fine homing",
+    }) === null) return;
+    void run(async () => {
+      const activeLease = await api.acquireOrRenewLease(
+        "VelocityPnP fine home", 900,
+      );
+      await waitForOperation(await api.fineHome(
+        fineHomeSnapshot.id, activeLease.id,
+      ));
+    });
+  };
   const readSensor = (sensorId: string) => {
     if (!lease) return;
     void run(async () => {
@@ -341,16 +401,22 @@ function MachinePanel({ status, devices, events, busy, run, openCalibration }: {
         <SequenceStep number="3" title="Control lease" done={Boolean(lease)}>
           <button disabled={busy || !["unhomed", "ready"].includes(status.state) || Boolean(lease)} onClick={() => void run(api.lease)}>Acquire 15 min lease</button>
         </SequenceStep>
-        <SequenceStep number="4" title="Home machine" done={status.homed && Boolean(status.calibration_revision)}>
+        <SequenceStep number="4" title="Coarse home" done={status.homed}>
           <div className="sequence-action">
-            {!status.homed || status.calibration_revision
-              ? <button disabled={busy || !lease || !["unhomed", "ready"].includes(status.state)} onClick={() => void home()}>{status.homed ? "Home again" : "Home machine"}</button>
-              : <button disabled={busy} onClick={openCalibration}>Continue to fine-home XYZ</button>}
-            <small>{!status.homed
-              ? "First establish the controller axis references."
-              : status.calibration_revision
-                ? "Coarse and fine XYZ homing are complete."
-                : "Coarse home is complete. Fine-home XYZ against the datum is still required."}</small>
+            <button disabled={busy || !lease || !["unhomed", "ready"].includes(status.state)} onClick={() => void home()}>{status.homed ? "Home again" : "Home machine"}</button>
+            <small>{status.homed
+              ? "The controller axis references are established."
+              : "First establish the controller axis references."}</small>
+          </div>
+        </SequenceStep>
+        <SequenceStep number="5" title="Fine home" done={Boolean(status.calibration_revision)}>
+          <div className="sequence-action">
+            <button disabled={busy || !lease || status.state !== "ready" || !status.homed} onClick={() => void fineHome()}>{fineHomeSnapshot ? status.calibration_revision ? "Fine-home again" : "Fine-home XYZ" : "Set up precision calibration"}</button>
+            <small>{status.calibration_revision
+              ? "Fine XYZ home is active for this controller session."
+              : fineHomeSnapshot
+                ? "Use the stored machine calibration to refine X/Y and Z."
+                : "A full calibration must measure motion response and datum contact first."}</small>
           </div>
         </SequenceStep>
       </div>
@@ -371,8 +437,8 @@ function MachinePanel({ status, devices, events, busy, run, openCalibration }: {
     </section>
 
     <section className="card devices-card">
-      <div className="card-heading"><div><p className="eyebrow">Auto-detection</p><h2>Attached devices</h2></div><span className="count">{devices.length}</span></div>
-      <div className="device-list">{devices.map((device) => <div className="device" key={device.path}>
+      <div className="card-heading"><div><p className="eyebrow">Machine hardware</p><h2>Attached devices</h2></div><span className="count">{attachedDevices.length}</span></div>
+      <div className="device-list">{attachedDevices.map((device) => <div className="device" key={device.path}>
         <span className="device-icon">{device.kind === "camera" ? "◉" : "↯"}</span>
         <div><strong>{device.product ?? device.kind}</strong><small>{device.suggested_role ? pretty(device.suggested_role) : device.path}</small></div>
         <code>{device.vendor_id}:{device.product_id}</code>
@@ -463,9 +529,9 @@ function CalibrationPanel({ status, devices, setError }: {
   const start = async () => {
     if (!active) return;
     if (await requestDialog({
-      title: "Start automated calibration?",
-      message: "Confirm both nozzles are level, the travel envelope is clear, power isolation is within reach, and both nozzle tubes are seated, routed normally, and free of snags. The bottom camera will identify each tip before any rotation.",
-      confirmLabel: "Start calibration",
+      title: "Start full calibration?",
+      message: "Confirm both nozzles are level, the datum and installed plate hardware are fixed, the travel envelope is clear, power isolation is within reach, and both nozzle tubes are seated and free of snags. The machine will home, measure both cameras and nozzles, test X/Y response at several speeds, scan installed plates, probe both datum contacts, and characterize both vacuum sensors.",
+      confirmLabel: "Start full calibration",
     }) === null) return;
     setStarting(true); setError(null);
     try {
@@ -624,6 +690,7 @@ function CalibrationPanel({ status, devices, setError }: {
   };
 
   const runActive = Boolean(activeRun && ["pending", "running"].includes(activeRun.status));
+  const currentCheck = currentCalibrationCheck(activeRun);
   const machineReady = ["unhomed", "ready"].includes(status.state);
   const activeParent = active?.parent_id
     ? snapshots.find((snapshot) => snapshot.id === active.parent_id) ?? null
@@ -658,7 +725,7 @@ function CalibrationPanel({ status, devices, setError }: {
       {status.simulated && <div className="notice">Simulation can exercise the runner but can never mark a machine production-ready.</div>}
       {!active ? <button onClick={() => void createSnapshot()}>Create calibration</button> : <>
         <div className="button-cluster">
-          <button disabled={starting || runActive || !machineReady} onClick={() => void start()}>{runActive ? "Calibration running" : activeRun ? "Run full calibration again" : active.parent_id ? "Run full calibration" : "Run initial calibration"}</button>
+          <button disabled={starting || runActive || !machineReady} onClick={() => void start()}>{runActive ? "Full calibration running" : activeRun ? "Run full calibration again" : "Run full calibration"}</button>
           <button className="secondary" disabled={starting || runActive || !canRecalibrateHeadGeometry} onClick={() => void recalibrateHeadGeometry()}>Recalibrate head geometry</button>
           <button className="secondary" disabled={starting || runActive || !canCreateRevision} onClick={() => void createSnapshot()}>New revision</button>
           <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N1")}>Probe N1 vacuum</button>
@@ -672,10 +739,6 @@ function CalibrationPanel({ status, devices, setError }: {
           <button className="secondary" disabled={starting || runActive || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
         </div>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
-        {active.parent_id && !canSeedHeadGeometryRevision(activeParent) && <div className="notice">
-          This revision cannot reuse its parent. The parent did not complete coarse homing,
-          camera verification, and visual homing. Run the full calibration for this revision.
-        </div>}
       </>}
       {active && status.calibration_revision === active.id && <div className="notice">Fine XYZ home is active for this calibration revision.</div>}
       {artifactPlan && <div className="run-result">
@@ -706,12 +769,19 @@ function CalibrationPanel({ status, devices, setError }: {
       </div>}
       {activeRun && <div className="calibration-run">
         <div className="run-heading"><strong>{pretty(activeRun.status)}</strong><span>{pretty(activeRun.phase)}</span></div>
+        {currentCheck && <div className="calibration-current" role="status">
+          <span className="activity-indicator" aria-hidden="true" />
+          <div><small>Current step</small><strong>{currentCheck.title}</strong><span>{currentCheck.message}</span></div>
+        </div>}
         {activeRun.phase === "visual_homing_validation" && <p>{activeRun.visual_homing_samples.length} / {activeRun.config.visual_homing_sample_count} homing cycles measured</p>}
         {activeRun.phase === "head_geometry_calibration" && <p>Mapping cameras and measuring nozzle runout and Z-dependent axis shift</p>}
+        {activeRun.phase === "local_xy_direction_response" && <p>Measuring backlash-like return error from both directions and at each configured speed</p>}
         {activeRun.phase === "top_camera_planar_calibration" && <p>Measuring the top-camera image plane with the installed datum fiducial</p>}
         {activeRun.phase === "bottom_camera_planar_calibration" && <p>Measuring the bottom-camera image plane with the installed N1 tip</p>}
         {activeRun.phase === "installed_plate_geometry" && <p>Registering installed plates, then scanning candidate holes; occupied and ambiguous targets are skipped</p>}
-        <div className="calibration-checks">{activeRun.checks.map((check) => <div key={check.id} className={`check-${check.status}`}><span>{check.status === "passed" ? "✓" : check.status === "failed" ? "!" : "·"}</span><div><strong>{check.title}</strong><small>{check.message}</small></div></div>)}</div>
+        {activeRun.phase === "vacuum_contact_calibration" && <p>Finding a bounded contact reference for each nozzle</p>}
+        {activeRun.phase === "vacuum_sensor_characterization" && <p>Comparing pump-off, open, sealed, and release sensor distributions</p>}
+        <div className="calibration-checks">{activeRun.checks.map((check) => <div key={check.id} className={`check-${check.status} ${currentCheck?.id === check.id ? "check-current" : ""}`}><span>{check.status === "passed" ? "✓" : check.status === "failed" ? "!" : currentCheck?.id === check.id ? "↻" : "·"}</span><div><strong>{check.title}</strong><small>{check.message}</small></div></div>)}</div>
         {activeRun.visual_homing_report && <p className="run-result">Independent return p95 <strong>{activeRun.visual_homing_report.independent_return.p95_mm.toFixed(4)} mm</strong></p>}
         {activeRun.head_geometry_report && <div className="run-result">
           <p>Bottom camera <strong>{activeRun.head_geometry_report.top_camera_center.controller_x_mm.toFixed(3)}, {activeRun.head_geometry_report.top_camera_center.controller_y_mm.toFixed(3)} mm</strong></p>
