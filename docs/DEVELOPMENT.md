@@ -71,7 +71,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 cargo run -p velocitypnpd -- --database velocitypnp.db
 ```
 
-The daemon listens on `127.0.0.1:4080`. In another terminal:
+The daemon listens on `0.0.0.0:4080`. It has no user authentication, so use an
+isolated, trusted network or a host firewall. In another terminal:
 
 ```bash
 cargo run -p velocitypnp -- status
@@ -1877,8 +1878,8 @@ stored profile. The response reports the tested profile and whether it used a
 temporary capture override.
 
 Build the UI with `npm run build`, then serve it from the daemon using
-`--web-dir web/dist`. The Vite development server is loopback-only and proxies
-API calls to the daemon.
+`--web-dir web/dist`. The Vite development server listens on all IPv4
+interfaces at port `4081` and proxies API calls to the daemon on loopback.
 
 ## Physical hardware gate
 

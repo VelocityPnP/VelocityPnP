@@ -193,9 +193,11 @@ and the shared lights off before releasing serial. SIGINT and SIGTERM use this
 path. A process crash, `SIGKILL`, USB failure, controller failure, or loss of
 host power can bypass it, so physical power isolation remains mandatory.
 
-The v1 trusted-LAN model has no user authentication. Keep the daemon bound to
-loopback unless the network is isolated and trusted. The control lease prevents
-competing writers but is not an authentication mechanism.
+The v1 trusted-LAN model has no user authentication. The daemon listens on all
+IPv4 interfaces by default. Use an isolated, trusted network and a host
+firewall that admits only operator devices. Use `--listen 127.0.0.1:4080` when
+remote access is not required. The control lease prevents competing writers,
+but it is not an authentication mechanism.
 
 Starting an automated calibration authorizes that operation to refresh the
 same control lease to the actor's one-hour maximum at measurement checkpoints.

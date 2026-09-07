@@ -68,9 +68,12 @@ cargo run -p velocitypnpd -- --simulate --database velocitypnp.db
 cd web && npm install && npm run dev
 ```
 
-The API listens on `127.0.0.1:4080` by default. The development UI proxies
-`/api` to it. To serve a built UI from the daemon, run `npm run build` and pass
-`--web-dir web/dist`.
+The API listens on all IPv4 interfaces at port `4080` by default. The service
+has no user authentication. Use it only on an isolated, trusted network, and
+use the host firewall to limit access. The development UI proxies `/api` to
+the loopback address and listens on all IPv4 interfaces at port `4081`. To
+serve a built UI from the daemon, run `npm run build` and pass the generated
+`web/dist` directory with `--web-dir`.
 
 ```bash
 cargo run -p velocitypnp -- status

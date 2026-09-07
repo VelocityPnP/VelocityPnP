@@ -15720,7 +15720,8 @@ async fn run_visual_homing(
     device_path: &str,
     options: VisualHomingRunOptions,
 ) -> ApiResult<VisualHomingExecution> {
-    let initial_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
+    let initial_frame =
+        capture_visual_homing_frame(state, visual, camera_profile, device_path).await?;
     let initial = plan_visual_homing(&initial_frame, visual)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if !options.apply_offset {
@@ -15756,7 +15757,8 @@ async fn run_visual_homing(
             observation: verification,
             corrected_pose,
         });
-        let verification_frame = capture_profiled_frame(state, camera_profile, device_path).await?;
+        let verification_frame =
+            capture_visual_homing_frame(state, visual, camera_profile, device_path).await?;
         verification = plan_visual_homing(&verification_frame, visual)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
         if visual_verification_accepted(&verification, options.verification_limit_mm) {
@@ -15805,6 +15807,52 @@ async fn run_visual_homing(
             .local_xy_direction_response
             .as_ref()
             .map(|profile| profile.datum_approach_feed_mm_per_min),
+    })
+}
+
+async fn capture_visual_homing_frame(
+    state: &AppState,
+    visual: &VisualHomingProfile,
+    camera_profile: &CameraProfile,
+    device_path: &str,
+) -> ApiResult<GrayFrame> {
+    if state.machine.status().simulated {
+        return simulated_primary_datum_frame(camera_profile, visual).map_err(ApiError::internal);
+    }
+    capture_profiled_frame(state, camera_profile, device_path).await
+}
+
+fn simulated_primary_datum_frame(
+    camera_profile: &CameraProfile,
+    visual: &VisualHomingProfile,
+) -> Result<GrayFrame, String> {
+    let pixel_count = camera_profile
+        .width
+        .checked_mul(camera_profile.height)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| "simulated camera dimensions are too large".to_string())?;
+    let center_x = visual.frame_center_x_px.round() as i32;
+    let center_y = visual.frame_center_y_px.round() as i32;
+    let radius_px = 36i32;
+    if center_x - radius_px < 0
+        || center_y - radius_px < 0
+        || center_x + radius_px >= camera_profile.width as i32
+        || center_y + radius_px >= camera_profile.height as i32
+    {
+        return Err("Primary datum is outside the simulated camera frame".into());
+    }
+    let mut pixels = vec![24; pixel_count];
+    for y in center_y - radius_px..=center_y + radius_px {
+        for x in center_x - radius_px..=center_x + radius_px {
+            if (x - center_x).pow(2) + (y - center_y).pow(2) <= radius_px.pow(2) {
+                pixels[y as usize * camera_profile.width as usize + x as usize] = 230;
+            }
+        }
+    }
+    Ok(GrayFrame {
+        width: camera_profile.width,
+        height: camera_profile.height,
+        pixels,
     })
 }
 
@@ -37540,6 +37588,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn simulator_observes_primary_datum_without_a_camera() {
+        let state = test_state();
+        state.machine.connect().await.unwrap();
+        state.machine.complete_preflight(true).await.unwrap();
+        let lease = state
+            .machine
+            .acquire_lease("simulated visual home".into(), 60)
+            .await
+            .unwrap();
+        state.machine.home(lease.id, true).await.unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/machine/visual-home")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"lease_id": lease.id, "apply_offset": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["applied"], false);
+        assert_eq!(result["initial"]["accepted"], true);
+        assert_eq!(result["initial"]["error_radius_px"], 0.0);
     }
 
     #[tokio::test]

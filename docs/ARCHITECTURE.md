@@ -30,7 +30,8 @@ does not require a lease and revokes any active lease.
 
 Physical access has two startup gates: `--simulate=false` selects the Marlin
 driver and `--allow-hardware` acknowledges that physical access is intended.
-The daemon defaults to simulation and loopback networking.
+The daemon defaults to simulation and listens on all IPv4 interfaces. It has
+no user authentication and must run only on a trusted network.
 
 ## Coordinate frames
 

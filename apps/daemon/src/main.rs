@@ -35,7 +35,7 @@ struct Args {
     #[arg(long, default_value = "velocitypnp.db")]
     database: PathBuf,
 
-    #[arg(long, default_value = "127.0.0.1:4080")]
+    #[arg(long, default_value = "0.0.0.0:4080")]
     listen: SocketAddr,
 
     /// Directory with model-manifest.json and its source-component ONNX file.
@@ -155,5 +155,11 @@ mod tests {
     #[test]
     fn simulation_remains_the_default() {
         assert!(Args::try_parse_from(["velocitypnpd"]).unwrap().simulate);
+    }
+
+    #[test]
+    fn all_ipv4_interfaces_are_the_default() {
+        let args = Args::try_parse_from(["velocitypnpd"]).unwrap();
+        assert_eq!(args.listen, SocketAddr::from(([0, 0, 0, 0], 4080)));
     }
 }

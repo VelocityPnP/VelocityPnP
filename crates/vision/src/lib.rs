@@ -433,7 +433,7 @@ pub fn plan_visual_homing(
 ) -> anyhow::Result<VisualHomingPlan> {
     profile.validate().map_err(anyhow::Error::msg)?;
     let target = detect_camera_target(frame, profile.camera_role)
-        .ok_or_else(|| anyhow::anyhow!("primary datum target was not detected"))?;
+        .ok_or_else(|| anyhow::anyhow!("Primary datum target was not detected"))?;
     let error_x_px = target.x_px - profile.frame_center_x_px;
     let error_y_px = target.y_px - profile.frame_center_y_px;
     let error_radius_px = error_x_px.hypot(error_y_px);
