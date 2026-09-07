@@ -1286,7 +1286,8 @@ mod tests {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         assert!(profile.accepts_profile_id("lumenpnp-v3.0.2"));
-        assert!(profile.accepts_profile_id("lumenpnp-v3.0.4"));
+        assert!(profile.legacy_profile_ids.is_empty());
+        assert!(!profile.accepts_profile_id("lumenpnp-v3.0.3"));
         assert!(!profile.accepts_profile_id("lumenpnp-v3.1.0"));
     }
 

@@ -1268,17 +1268,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_profile_id_keeps_the_existing_camera_fingerprint() {
+    async fn current_profile_keeps_the_expected_camera_fingerprint() {
         let state = state();
         let inputs = expected_inputs(
             &state,
-            "lumenpnp-v3.0.4",
+            "lumenpnp-v3.0.2",
             CalibrationArtifactId::TopCameraReproducibility,
         )
         .unwrap();
         assert_eq!(
             inputs.get("top_camera_profile").map(String::as_str),
-            Some("1834e6e1608819495cab353bb0c9916dcb081b4f48808a0e56dbdccce8b20831"),
+            Some("9c4a86273c70843729583f7eeea5c766a0aa26dcd37113ef2ce83f8ef77975a4"),
         );
     }
 

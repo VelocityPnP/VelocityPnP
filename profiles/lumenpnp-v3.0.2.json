@@ -1,6 +1,6 @@
 {
   "id": "lumenpnp-v3.0.2",
-  "legacy_profile_ids": ["lumenpnp-v3.0.4"],
+  "legacy_profile_ids": [],
   "display_name": "LumenPnP V3.0.2",
   "mechanics_revision": "3.0.2",
   "controller_families": ["MARLIN_OPULO_LUMEN_REV4", "LumenPnP"],
