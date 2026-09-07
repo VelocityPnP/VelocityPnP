@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, waitForOperation } from "./api";
+import { api, formatErrorMessage, waitForOperation } from "./api";
 import { DialogProvider, useDialog } from "./Dialog";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
@@ -51,8 +51,11 @@ function AppContent() {
   const [status, setStatus] = useState<MachineStatus | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [events, setEvents] = useState<MachineEvent[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const setError = useCallback((value: string | null) => {
+    setErrorState(value === null ? null : formatErrorMessage(value));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -151,10 +154,7 @@ function JobsPanel({ status, setError }: {
     return () => window.clearInterval(timer);
   }, [load]);
   const lease = async (clientName: string) => {
-    const machine = await api.status();
-    return machine.control_lease
-      ? api.renewLease(machine.control_lease.id, 900)
-      : api.lease(clientName, 900);
+    return api.acquireOrRenewLease(clientName, 900);
   };
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true); setError(null);
@@ -454,9 +454,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 3600)
-        : await api.lease("VelocityPnP calibration", 3600);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP calibration", 3600,
+      );
       const started = await api.startCalibration(active.id, lease.id);
       setActiveRun(started.run);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -471,9 +471,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 3600)
-        : await api.lease("VelocityPnP head geometry", 3600);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP head geometry", 3600,
+      );
       const started = await api.startHeadGeometryCalibration(active.id, lease.id);
       setActiveRun(started.run);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -488,9 +488,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 900)
-        : await api.lease("VelocityPnP vacuum probe", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP vacuum probe", 900,
+      );
       await waitForOperation(await api.vacuumProbe(active.id, lease.id, nozzleId));
       const snapshot = await api.calibration(active.id);
       setActive(snapshot);
@@ -507,9 +507,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 900)
-        : await api.lease("VelocityPnP fine home", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP fine home", 900,
+      );
       await waitForOperation(await api.fineHome(active.id, lease.id));
       await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -524,9 +524,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 900)
-        : await api.lease("VelocityPnP vacuum characterization", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP vacuum characterization", 900,
+      );
       await waitForOperation(await api.characterizeVacuum(active.id, lease.id, nozzleId));
       const snapshot = await api.calibration(active.id);
       setActive(snapshot);
@@ -543,9 +543,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 900)
-        : await api.lease("VelocityPnP XY direction response", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP XY direction response", 900,
+      );
       await waitForOperation(await api.calibrateXyDirectionResponse(active.id, lease.id));
       const snapshot = await api.calibration(active.id);
       setActive(snapshot);
@@ -563,9 +563,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 3600)
-        : await api.lease("VelocityPnP installed geometry", 3600);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP installed geometry", 3600,
+      );
       const started = await api.startInstalledGeometryCalibration(active.id, lease.id);
       setActiveRun(started.run);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -599,9 +599,9 @@ function CalibrationPanel({ status, devices, setError }: {
     }) === null) return;
     setStarting(true); setError(null);
     try {
-      const lease = status.control_lease
-        ? await api.renewLease(status.control_lease.id, 3600)
-        : await api.lease("VelocityPnP targeted calibration", 3600);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP targeted calibration", 3600,
+      );
       const started = await api.startArtifactCalibration(active.id, lease.id, targets);
       setActiveRun(started.run);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -820,10 +820,9 @@ function BoardsPanel({ status, setError }: {
     }) === null) return;
     setRegistrationBusy(true); setError(null); setRegistration(null);
     try {
-      const machine = await api.status();
-      const lease = machine.control_lease
-        ? await api.renewLease(machine.control_lease.id, 900)
-        : await api.lease("VelocityPnP board registration", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP board registration", 900,
+      );
       const started = await api.startBoardRegistration(
         selectedScan, candidate.candidate_index, boardId, lease.id,
       );
@@ -883,10 +882,9 @@ function BoardsPanel({ status, setError }: {
     }) === null) return;
     setFeederVisionBusy(true); setError(null); setFeederHoldout(null);
     try {
-      const machine = await api.status();
-      const lease = machine.control_lease
-        ? await api.renewLease(machine.control_lease.id, 900)
-        : await api.lease("VelocityPnP strip feeder holdout", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP strip feeder holdout", 900,
+      );
       const started = await api.startStripFeederLiveHoldout(
         feederDraft.id, lease.id,
       );
@@ -913,10 +911,9 @@ function BoardsPanel({ status, setError }: {
     }) === null) return;
     setFeederVisionBusy(true); setError(null); setFeederPickup(null);
     try {
-      const machine = await api.status();
-      const lease = machine.control_lease
-        ? await api.renewLease(machine.control_lease.id, 900)
-        : await api.lease("VelocityPnP strip feeder pickup", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP strip feeder pickup", 900,
+      );
       const started = await api.startStripFeederPickupQualification(
         feederDraft.id, lease.id,
       );
@@ -950,10 +947,9 @@ function BoardsPanel({ status, setError }: {
     }) === null) return;
     setFeederVisionBusy(true); setError(null); setFeederPickupSequence([]);
     try {
-      const machine = await api.status();
-      const lease = machine.control_lease
-        ? await api.renewLease(machine.control_lease.id, 900)
-        : await api.lease("VelocityPnP feeder pickup sequence", 900);
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP feeder pickup sequence", 900,
+      );
       const completed: StripFeederPickupQualificationRun[] = [];
       for (const pocket of pockets) {
         const started = await api.startStripFeederPickupQualification(

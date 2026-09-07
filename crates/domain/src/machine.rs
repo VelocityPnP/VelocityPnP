@@ -111,6 +111,16 @@ pub enum SafetyError {
 }
 
 impl MachineStatus {
+    pub fn clear_expired_control_lease(&mut self, now: DateTime<Utc>) {
+        if self
+            .control_lease
+            .as_ref()
+            .is_some_and(|lease| lease.expires_at <= now)
+        {
+            self.control_lease = None;
+        }
+    }
+
     pub fn assert_lease(&self, lease_id: Uuid, now: DateTime<Utc>) -> Result<(), SafetyError> {
         match &self.control_lease {
             Some(lease) if lease.id == lease_id && lease.expires_at > now => Ok(()),
@@ -1216,6 +1226,34 @@ pub struct MachineEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_status_includes_only_an_active_control_lease() {
+        let now = Utc::now();
+        let mut status = MachineStatus {
+            control_lease: Some(ControlLease {
+                id: Uuid::new_v4(),
+                client_name: "test".into(),
+                acquired_at: now - chrono::Duration::minutes(2),
+                expires_at: now - chrono::Duration::minutes(1),
+            }),
+            ..MachineStatus::default()
+        };
+
+        status.clear_expired_control_lease(now);
+
+        assert!(status.control_lease.is_none());
+
+        status.control_lease = Some(ControlLease {
+            id: Uuid::new_v4(),
+            client_name: "test".into(),
+            acquired_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        });
+        status.clear_expired_control_lease(now);
+
+        assert!(status.control_lease.is_some());
+    }
 
     #[test]
     fn motion_only_allowed_when_ready_and_in_bounds() {

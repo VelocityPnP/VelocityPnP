@@ -12,9 +12,18 @@ import type {
 
 const BASE = "/api/v1";
 
+export function formatErrorMessage(message: string): string {
+  const trimmed = message.trim();
+  if (trimmed.length === 0) return "An unexpected error occurred.";
+  const capitalized = /^[a-z]/.test(trimmed)
+    ? `${trimmed[0].toUpperCase()}${trimmed.slice(1)}`
+    : trimmed;
+  return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
-    super(message);
+    super(formatErrorMessage(message));
   }
 }
 
@@ -41,6 +50,40 @@ function jsonPut<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+async function acquireLease(
+  clientName = "VelocityPnP web UI", durationSeconds = 900,
+): Promise<ControlLease> {
+  return (await jsonPost<{ lease: ControlLease }>("/control/lease", {
+    client_name: clientName,
+    duration_seconds: durationSeconds,
+  })).lease;
+}
+
+async function renewLease(
+  leaseId: string, durationSeconds = 3600,
+): Promise<ControlLease> {
+  return (await jsonPost<{ lease: ControlLease }>("/control/lease/renew", {
+    lease_id: leaseId,
+    duration_seconds: durationSeconds,
+  })).lease;
+}
+
+async function acquireOrRenewLease(
+  clientName = "VelocityPnP web UI", durationSeconds = 900,
+): Promise<ControlLease> {
+  const machine = (await request<{ machine: MachineStatus }>("/machine/status")).machine;
+  if (!machine.control_lease) return acquireLease(clientName, durationSeconds);
+  try {
+    return await renewLease(machine.control_lease.id, durationSeconds);
+  } catch (reason) {
+    const staleLease = reason instanceof ApiError
+      && reason.status === 400
+      && reason.message === "Control lease does not match.";
+    if (!staleLease) throw reason;
+    return acquireLease(clientName, durationSeconds);
+  }
 }
 
 export async function waitForOperation(operation: Operation): Promise<Operation> {
@@ -72,10 +115,9 @@ export const api = {
   connect: () => jsonPost<Operation>("/machine/connect"),
   disconnect: () => jsonPost<Operation>("/machine/disconnect"),
   preflight: () => jsonPost<Operation>("/machine/preflight", { confirmed: true }),
-  lease: async (clientName = "VelocityPnP web UI", durationSeconds = 900) =>
-    (await jsonPost<{ lease: ControlLease }>("/control/lease", { client_name: clientName, duration_seconds: durationSeconds })).lease,
-  renewLease: async (leaseId: string, durationSeconds = 3600) =>
-    (await jsonPost<{ lease: ControlLease }>("/control/lease/renew", { lease_id: leaseId, duration_seconds: durationSeconds })).lease,
+  lease: acquireLease,
+  renewLease,
+  acquireOrRenewLease,
   home: (leaseId: string) => jsonPost<Operation>("/machine/home", { lease_id: leaseId, confirmed: true }),
   jog: (leaseId: string, target: JogTarget, feed = 300) =>
     jsonPost<Operation>("/machine/jog", { lease_id: leaseId, target, feed_mm_per_min: feed }),

@@ -54,7 +54,9 @@ impl MachineHandle {
     }
 
     pub fn status(&self) -> MachineStatus {
-        self.status.borrow().clone()
+        let mut status = self.status.borrow().clone();
+        status.clear_expired_control_lease(Utc::now());
+        status
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<MachineEvent> {
