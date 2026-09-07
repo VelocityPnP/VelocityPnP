@@ -895,6 +895,36 @@ paths:
                 confirmed_external_safety_checks: { type: boolean }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
+  /calibrations/{id}/xy-planar-response:
+    post:
+      operationId: attachPlanarXyDirectionResponse
+      description: >-
+        Attaches one independently validated, four-quadrant XY response
+        surface to the active local direction-response calibration. The
+        surface feed must already have qualified X-only and Y-only evidence.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - lease_id
+                - confirmed_external_safety_checks
+                - surface
+              properties:
+                lease_id: { type: string, format: uuid }
+                confirmed_external_safety_checks: { type: boolean }
+                surface:
+                  $ref: "#/components/schemas/PlanarXyDirectionResponseSurface"
+      responses:
+        "200":
+          description: Planar XY response attached
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
   /calibrations/{id}/installed-geometry-runs:
     post:
       operationId: startInstalledGeometryRun
@@ -1940,6 +1970,61 @@ components:
         rotation_deg:
           type: number
           description: Omit to preserve the controller-reported primary-nozzle angle.
+    PlanarXyDirectionResponseNode:
+      type: object
+      required:
+        - x_approach
+        - y_approach
+        - x_distance_mm
+        - y_distance_mm
+        - correction_x_mm
+        - correction_y_mm
+        - validation_residual_x_mm
+        - validation_residual_y_mm
+        - validation_residual_mm
+        - qualified
+      properties:
+        x_approach: { type: string, enum: [negative, positive] }
+        y_approach: { type: string, enum: [negative, positive] }
+        x_distance_mm: { type: number, exclusiveMinimum: 0 }
+        y_distance_mm: { type: number, exclusiveMinimum: 0 }
+        correction_x_mm: { type: number }
+        correction_y_mm: { type: number }
+        validation_residual_x_mm: { type: number }
+        validation_residual_y_mm: { type: number }
+        validation_residual_mm: { type: number, minimum: 0 }
+        qualified: { type: boolean }
+    PlanarXyDirectionResponseSurface:
+      type: object
+      required:
+        - feed_mm_per_min
+        - x_distances_mm
+        - y_distances_mm
+        - nodes
+        - maximum_validation_residual_mm
+        - independent_validation_sample_count
+        - independent_validation_mean_residual_mm
+        - independent_validation_maximum_residual_mm
+        - passed
+      properties:
+        feed_mm_per_min: { type: number, exclusiveMinimum: 0 }
+        x_distances_mm:
+          type: array
+          minItems: 2
+          items: { type: number, exclusiveMinimum: 0 }
+        y_distances_mm:
+          type: array
+          minItems: 2
+          items: { type: number, exclusiveMinimum: 0 }
+        nodes:
+          type: array
+          minItems: 16
+          items: { $ref: "#/components/schemas/PlanarXyDirectionResponseNode" }
+        maximum_validation_residual_mm: { type: number, minimum: 0 }
+        independent_validation_sample_count: { type: integer, minimum: 1 }
+        independent_validation_mean_residual_mm: { type: number, minimum: 0 }
+        independent_validation_maximum_residual_mm: { type: number, minimum: 0 }
+        passed: { type: boolean }
     Residuals:
       type: object
       required: [sample_count, rms_mm, p95_mm, max_mm]

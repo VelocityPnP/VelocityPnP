@@ -46,25 +46,25 @@ use velocitypnp_domain::{
     PlacementOutcomeDisposition, PlacementOutcomeRecord, PlacementPickupAttemptReport,
     PlacementProcessEstimate, PlacementReleaseAttemptReport, PlacementVerificationClass,
     PlacementVerificationComparisonReport, PlanarCameraCalibrationReport,
-    PlanarCameraCalibrationSample, PlanarCameraModel, Pose, Residuals, SensorReading,
-    SourceComponentClass, SourceComponentModelPrediction, SourceComponentShadowReport,
-    StripFeederInventoryLane, StripFeederInventoryReport, StripFeederInventorySummary,
-    StripFeederLiveHoldoutRun, StripFeederPickupBenchmarkCycle, StripFeederPickupDisposition,
-    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
-    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
-    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
-    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
-    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
-    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
-    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
-    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
-    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
-    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
-    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
-    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
-    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
-    WorkspaceSurfaceModel,
+    PlanarCameraCalibrationSample, PlanarCameraModel, PlanarXyDirectionResponseSurface, Pose,
+    Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
+    SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
+    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupBenchmarkCycle,
+    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
+    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
+    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
+    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
+    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
+    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
+    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
+    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
+    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
+    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
+    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
+    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
+    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -74,7 +74,8 @@ use velocitypnp_model::{
 };
 use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::{
-    plan_job, MotionCalibration, MotionMode, MotionPlanner, MotionState, PlanStep, PlannedMotion,
+    plan_job, MotionCalibration, MotionMode, MotionPlanner, MotionState, PlanStep,
+    PlanarXyMotionSurface, PlannedMotion,
 };
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
@@ -1317,6 +1318,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/xy-direction-response",
             post(start_local_xy_direction_response),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/xy-planar-response",
+            post(attach_planar_xy_direction_response),
         )
         .route(
             "/api/v1/calibrations/{id}/installed-geometry-runs",
@@ -18764,6 +18769,7 @@ async fn measure_local_xy_direction_response(
         pixel_error_to_machine_mm: mapping,
         passed,
         axes,
+        planar_surfaces: vec![],
         samples,
         observed_at: Utc::now(),
     })
@@ -19085,6 +19091,156 @@ fn persist_local_xy_direction_response(
         .store
         .put_calibration(&snapshot)
         .map_err(|error| error.to_string())
+}
+
+#[derive(Deserialize)]
+struct AttachPlanarXyDirectionResponseRequest {
+    lease_id: Uuid,
+    confirmed_external_safety_checks: bool,
+    surface: PlanarXyDirectionResponseSurface,
+}
+
+async fn attach_planar_xy_direction_response(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<AttachPlanarXyDirectionResponseRequest>,
+) -> ApiResult<Json<Value>> {
+    if !body.confirmed_external_safety_checks {
+        return Err(ApiError::bad_request(
+            "planar XY response activation requires confirmation of the physical validation",
+        ));
+    }
+    let status = state.machine.status();
+    status
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status.state != MachineState::Ready || !status.homed {
+        return Err(ApiError::bad_request(
+            "planar XY response activation requires a homed ready machine",
+        ));
+    }
+    if status
+        .calibration_revision
+        .is_some_and(|revision| revision != calibration_id)
+    {
+        return Err(ApiError::bad_request(
+            "planar XY response activation conflicts with the active calibration",
+        ));
+    }
+    let profile = state
+        .profile
+        .local_xy_direction_response
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define local XY direction response")
+        })?;
+    if body.surface.independent_validation_sample_count < 20 {
+        return Err(ApiError::bad_request(
+            "planar XY response requires at least 20 independent validation samples",
+        ));
+    }
+    if body.surface.maximum_validation_residual_mm > profile.maximum_holdout_error_mm
+        || body.surface.independent_validation_maximum_residual_mm
+            > profile.maximum_holdout_error_mm
+    {
+        return Err(ApiError::bad_request(format!(
+            "planar XY response exceeds the {:.4}mm holdout limit",
+            profile.maximum_holdout_error_mm
+        )));
+    }
+    if !profile
+        .approach_feeds_mm_per_min
+        .iter()
+        .any(|feed| (feed - body.surface.feed_mm_per_min).abs() < 1e-6)
+    {
+        return Err(ApiError::bad_request(
+            "planar XY response feed is not in the direction-response profile",
+        ));
+    }
+    PlanarXyMotionSurface::from_report(&body.surface)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let mut report: LocalXyDirectionResponseReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(
+            &snapshot,
+            CalibrationArtifactId::LocalXyDirectionResponse,
+        )
+        .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored local direction response is invalid"))?;
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+        .map_err(ApiError::bad_request)?;
+    if !crate::calibration_artifacts::artifact_tree_is_current(
+        &state,
+        &snapshot,
+        CalibrationArtifactId::TopCameraWorkingPlaneMap,
+    ) {
+        return Err(ApiError::bad_request(
+            "planar XY response requires a current top-camera working-plane map",
+        ));
+    }
+    let axis_feed_is_qualified = |axis: LinearAxis| {
+        report
+            .axes
+            .iter()
+            .find(|item| item.axis == axis)
+            .and_then(|item| {
+                item.feeds
+                    .iter()
+                    .find(|feed| (feed.feed_mm_per_min - body.surface.feed_mm_per_min).abs() < 1e-6)
+            })
+            .is_some_and(|feed| feed.qualified)
+    };
+    if !axis_feed_is_qualified(LinearAxis::X) || !axis_feed_is_qualified(LinearAxis::Y) {
+        return Err(ApiError::bad_request(
+            "planar XY response requires qualified X and Y response at the same feed",
+        ));
+    }
+    report
+        .planar_surfaces
+        .retain(|surface| (surface.feed_mm_per_min - body.surface.feed_mm_per_min).abs() >= 1e-6);
+    report.planar_surfaces.push(body.surface);
+    let artifact_value = serde_json::to_value(&report).map_err(ApiError::internal)?;
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    snapshot.values.as_object_mut().unwrap().insert(
+        CalibrationStepId::LocalXyDirectionResponse.as_str().into(),
+        artifact_value.clone(),
+    );
+    let recomputed = crate::calibration_artifacts::record_captured_artifact(
+        &state,
+        &mut snapshot,
+        CalibrationArtifactId::LocalXyDirectionResponse,
+        None,
+        artifact_value,
+    )
+    .map_err(ApiError::bad_request)?;
+    snapshot
+        .completed_steps
+        .insert(CalibrationStepId::LocalXyDirectionResponse);
+    snapshot.production_ready =
+        calibration_is_production_ready(&snapshot, state.machine.status().simulated);
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "calibration_id": calibration_id,
+        "feed_mm_per_min": report.planar_surfaces.last().unwrap().feed_mm_per_min,
+        "planar_surface_count": report.planar_surfaces.len(),
+        "recomputed_artifacts": recomputed,
+        "production_ready": snapshot.production_ready,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -33471,6 +33627,7 @@ mod tests {
                 test_direction_axis(LinearAxis::X, [0.03, -0.005], [-0.03, 0.005]),
                 test_direction_axis(LinearAxis::Y, [0.002, 0.02], [-0.002, -0.02]),
             ],
+            planar_surfaces: vec![],
             samples: vec![],
             passed: true,
             observed_at: Utc::now(),

@@ -3435,6 +3435,64 @@ Normal disconnect `7bab1274-9eba-432e-9927-830c3f50ce4c` ended the final
 qualification. The machine was disconnected, unhomed, and fault-free. Vacuum
 and lights were off. No component moved.
 
+### Planar XY endpoint-response qualification
+
+On 2026-09-06, a no-placement diagnostic measured the top-camera endpoint
+response at the fixed datum. It kept the controller acceleration at 1,000
+mm/s2. It did not change Marlin settings.
+
+The first short-path run measured 32 conditions and 96 endpoint samples. It
+covered 25 mm X-only, Y-only, and diagonal returns at 1,200, 6,000, 12,000,
+and 23,000 mm/min. All conditions passed. The largest held-out repeat error
+was 0.0057 mm.
+
+The long-path run measured 36 conditions and 108 endpoint samples. It covered
+100/50, 50/100, and 200/100 mm XY returns at 6,000, 12,000, and 23,000
+mm/min in all four quadrants. The largest raw endpoint response was 0.0921
+mm. The largest held-out repeat error was 0.0081 mm.
+
+The 23,000 mm/min qualification then measured a complete response surface.
+Its X distances are 5, 25, 50, 100, and 200 mm. Its Y distances are 5, 25,
+50, 100, and 180 mm. The four quadrants give 100 grid nodes. Each node used
+two fit samples and one held-out sample. The largest node holdout was 0.0097
+mm.
+
+The surface uses bilinear interpolation for a two-axis move inside this grid.
+Single-axis moves, other feeds, and distances below the grid keep the prior
+axis-direction model. At 23,000 mm/min, a two-axis move beyond the maximum X
+or Y grid distance is rejected. The planar values are corrections relative to
+the controlled negative-X, negative-Y fine-home datum approach.
+
+An independent live holdout used nine distance pairs that were not surface
+nodes. It tested all four quadrants with three samples each, for 108 samples.
+All samples passed the 0.05 mm gate. Mean residual was 0.0178 mm, p95 was
+0.0369 mm, and the maximum was 0.04987 mm. The maximum is close to the gate.
+Repeated raw nodes in separate runs differed by up to 0.0323 mm, mainly in Y.
+The surface must not be treated as better than this observed repeatability.
+
+The active-planner holdout used FTP board registration
+`62ec0004-e386-4804-9942-bac84f9d9988`. Registration passed in 8.84 seconds
+with 0.0314 mm maximum fiducial residual. Its 223.97 mm final return used the
+same 200/100 geometry that had exposed the defect. The no-move datum error was
+0.0351 mm. The prior axis-additive return error was 0.0634 mm.
+
+Survey scan `d7b38974-8aeb-4285-bc90-bf551af14e62` then tested ten short
+camera moves and the final park through the active planner. It captured all
+ten frames with complete coverage and accepted five of nine overlap
+registrations. It completed in 5.343 seconds. The no-move datum return error
+was 0.00525 mm. The machine ended ready, homed, and fault-free at safe Z with
+calibration `3b837434-a961-4e60-945a-18335b42d21f` active.
+
+The retained qualification data is in
+`datasets/motion-model-qualification-2026-09-06`. It includes the raw short
+and long path reports, the full transit grid, the near-axis strips, the
+surface, and the independent interpolation holdout.
+
+This qualification shows path dependence at the datum and successful active
+use at the datum, the FTP board, and a short scan region. It does not prove
+that the same surface is spatially invariant over the complete workspace.
+Use fixed plate holes or other absolute visual references for that check.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)

@@ -1,0 +1,1264 @@
+{
+  "kind": "xy_motion_model_validation",
+  "profile_id": "lumenpnp-v3.0.2",
+  "calibration_revision": "3b837434-a961-4e60-945a-18335b42d21f",
+  "passed": true,
+  "stopped_early": false,
+  "stop_reason": null,
+  "samples_per_condition": 3,
+  "response_guard_mm": 0.25,
+  "surface_source": "datasets/motion-model-qualification-2026-09-06/surface-23000.json",
+  "requested_feeds_mm_per_min": [
+    23000
+  ],
+  "requested_offsets": [
+    {
+      "x_mm": 12,
+      "y_mm": 12
+    },
+    {
+      "x_mm": 12,
+      "y_mm": 40
+    },
+    {
+      "x_mm": 40,
+      "y_mm": 12
+    },
+    {
+      "x_mm": 40,
+      "y_mm": 40
+    },
+    {
+      "x_mm": 75,
+      "y_mm": 75
+    },
+    {
+      "x_mm": 150,
+      "y_mm": 75
+    },
+    {
+      "x_mm": 75,
+      "y_mm": 150
+    },
+    {
+      "x_mm": 150,
+      "y_mm": 150
+    },
+    {
+      "x_mm": 175,
+      "y_mm": 125
+    }
+  ],
+  "seed": {
+    "rotation_deg": 890.88,
+    "x_mm": 220.13,
+    "y_mm": 190.27,
+    "z_mm": 31.5
+  },
+  "baseline": {
+    "correction_x_mm": -0.006647368065459143,
+    "correction_y_mm": -0.0022545275305433958,
+    "max_pairwise_error_mm": 0.0027661554762073424
+  },
+  "end_baseline": {
+    "correction_x_mm": 0.017476419293306313,
+    "correction_y_mm": 0.009363764351923846,
+    "max_pairwise_error_mm": 0.002403647434240109
+  },
+  "conditions": [
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -12,
+      "y_offset_mm": -12,
+      "distance_mm": 16.97056274847714,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.002945606526285926,
+      "applied_correction_y_mm": 0.002370472238325136,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.004586090733662466,
+          "response_y_mm": -0.0039398221837422965,
+          "response_mm": 0.006046025724134214,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.0051188876669337685,
+          "response_y_mm": -0.0014350060976530865,
+          "response_mm": 0.00531622548872677,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.005168695582160496,
+          "response_y_mm": -0.00013024716653090972,
+          "response_mm": 0.005170336386100498,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -12,
+      "y_offset_mm": 12,
+      "distance_mm": 16.97056274847714,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.003455743820537021,
+      "applied_correction_y_mm": -0.053693852269711496,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0024905625700672685,
+          "response_y_mm": 0.0020203661250135447,
+          "response_mm": 0.0032069894285018034,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.0034310529547582915,
+          "response_y_mm": 0.004898304846041565,
+          "response_mm": 0.005980427638815629,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0036727156224468293,
+          "response_y_mm": 0.005908042137957802,
+          "response_mm": 0.006956565384386895,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 12,
+      "y_offset_mm": -12,
+      "distance_mm": 16.97056274847714,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.04366172275136408,
+      "applied_correction_y_mm": 0.002017146777655665,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0017975609545009463,
+          "response_y_mm": 0.003049943207339261,
+          "response_mm": 0.003540251255651391,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.0007515243511076923,
+          "response_y_mm": 0.004613648041122706,
+          "response_mm": 0.004674455807648974,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.00048112983178866687,
+          "response_y_mm": 0.005283675663018435,
+          "response_mm": 0.005305536205418854,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 12,
+      "y_offset_mm": 12,
+      "distance_mm": 16.97056274847714,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.04470455975020271,
+      "applied_correction_y_mm": -0.05452621642988421,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0044419152096103415,
+          "response_y_mm": 0.008655628625299859,
+          "response_mm": 0.00972884975875761,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.003297356684943465,
+          "response_y_mm": 0.0055181568335109215,
+          "response_mm": 0.0064282669473945024,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.0043385690622983015,
+          "response_y_mm": 0.006208727392675522,
+          "response_mm": 0.007574396170315582,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -12,
+      "y_offset_mm": -40,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.001859883685537487,
+      "applied_correction_y_mm": 0.005492760155599191,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0038007794183051763,
+          "response_y_mm": 0.0059114102085800185,
+          "response_mm": 0.007027851367289742,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.004043590931481421,
+          "response_y_mm": 0.006156743262587824,
+          "response_mm": 0.007365875047988484,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.004536271341956784,
+          "response_y_mm": 0.003924878889990642,
+          "response_mm": 0.005998535820427563,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -12,
+      "y_offset_mm": 40,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.001734229463756366,
+      "applied_correction_y_mm": -0.04176412840958801,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.00013636980809265,
+          "response_y_mm": 0.0047530685388306425,
+          "response_mm": 0.004755024422585113,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.00020428954909265315,
+          "response_y_mm": 0.0028629266325466717,
+          "response_mm": 0.0028702061116256975,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.00036286243856851596,
+          "response_y_mm": 0.0030497601427414882,
+          "response_mm": 0.003071271085003483,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 12,
+      "y_offset_mm": -40,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.04500311667302881,
+      "applied_correction_y_mm": 0.006322530447558157,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0000627671898311569,
+          "response_y_mm": 0.006374418303312664,
+          "response_mm": 0.006374727321676339,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.00015054812305006614,
+          "response_y_mm": 0.0012150903916350033,
+          "response_mm": 0.0012243812303353902,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0004977869018645605,
+          "response_y_mm": 0.0048053257747831275,
+          "response_mm": 0.0048310400124055046,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 12,
+      "y_offset_mm": 40,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.04674771724173984,
+      "applied_correction_y_mm": -0.0408647319241429,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.005775840297841585,
+          "response_y_mm": 0.003616413431880124,
+          "response_mm": 0.006814600300564497,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.007759365649419069,
+          "response_y_mm": 0.0011497947898708879,
+          "response_mm": 0.007844092257246778,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.007985788332699438,
+          "response_y_mm": 0.0012066916180005522,
+          "response_mm": 0.008076442283309605,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -40,
+      "y_offset_mm": -12,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.00751572954788964,
+      "applied_correction_y_mm": 0.013654621868541016,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0005345579480560319,
+          "response_y_mm": 0.01372099038505559,
+          "response_mm": 0.013731399395058679,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.00455237053445264,
+          "response_y_mm": 0.013458134328889506,
+          "response_mm": 0.01420723256293733,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0024109528197846413,
+          "response_y_mm": 0.015470211941154641,
+          "response_mm": 0.01565695216201005,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -40,
+      "y_offset_mm": 12,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.008045371808469001,
+      "applied_correction_y_mm": -0.05570808884778072,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0022278749216160867,
+          "response_y_mm": 0.010291054752637956,
+          "response_mm": 0.010529446072237521,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.0034081047988391328,
+          "response_y_mm": 0.009779265961645012,
+          "response_mm": 0.010356119981366528,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0022609137849997074,
+          "response_y_mm": 0.010098033856980215,
+          "response_mm": 0.01034804420747807,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 40,
+      "y_offset_mm": -12,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.04065249378379224,
+      "applied_correction_y_mm": 0.008648125105261825,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0008276613961146441,
+          "response_y_mm": 0.007349080857740734,
+          "response_mm": 0.007395540064135258,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0037469212434559284,
+          "response_y_mm": 0.0066619907141419734,
+          "response_mm": 0.007643398398616626,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.003759373222261845,
+          "response_y_mm": 0.003649808014303081,
+          "response_mm": 0.00523965509986396,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 40,
+      "y_offset_mm": 12,
+      "distance_mm": 41.7612260356422,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.041966742200892915,
+      "applied_correction_y_mm": -0.06412659486702893,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.004887189054043453,
+          "response_y_mm": 0.005402602883985908,
+          "response_mm": 0.007285103621227017,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.006900400660053854,
+          "response_y_mm": 0.004378080238540712,
+          "response_mm": 0.008172093724644398,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.006436251574927508,
+          "response_y_mm": 0.005137602500575346,
+          "response_mm": 0.008235307753185359,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -40,
+      "y_offset_mm": -40,
+      "distance_mm": 56.568542494923804,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.0040141207316766216,
+      "applied_correction_y_mm": 0.010400076467845581,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.005562097556374278,
+          "response_y_mm": 0.004644994421377306,
+          "response_mm": 0.007246578668671927,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0026085459695484167,
+          "response_y_mm": 0.007712656240815474,
+          "response_mm": 0.008141841214629353,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.002545051780411328,
+          "response_y_mm": 0.00856358742472314,
+          "response_mm": 0.00893377401470684,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -40,
+      "y_offset_mm": 40,
+      "distance_mm": 56.568542494923804,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.006498623501595357,
+      "applied_correction_y_mm": -0.04074175433411085,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.00041872724936782135,
+          "response_y_mm": 0.011069905967324954,
+          "response_mm": 0.011077822468101742,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.002382069391895672,
+          "response_y_mm": 0.012671002969623812,
+          "response_mm": 0.012892965944421853,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0030518591850169094,
+          "response_y_mm": 0.014624765913404492,
+          "response_mm": 0.014939799948695766,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 40,
+      "y_offset_mm": -40,
+      "distance_mm": 56.568542494923804,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.041535953552603824,
+      "applied_correction_y_mm": 0.012486621363879251,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0038275460150937425,
+          "response_y_mm": 0.011504174306147363,
+          "response_mm": 0.0121241962605313,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.005220883755024286,
+          "response_y_mm": 0.008348192331463708,
+          "response_mm": 0.00984631618355748,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.005736124857830837,
+          "response_y_mm": 0.011025753837845521,
+          "response_mm": 0.012428611188599878,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 40,
+      "y_offset_mm": 40,
+      "distance_mm": 56.568542494923804,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.04234585663421789,
+      "applied_correction_y_mm": -0.04642386273050322,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0037485950503504005,
+          "response_y_mm": 0.011140579819146245,
+          "response_mm": 0.011754338924766466,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0036912437230472135,
+          "response_y_mm": 0.010527900367324677,
+          "response_mm": 0.011156252344190253,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.0043331358052866855,
+          "response_y_mm": 0.010419515295033072,
+          "response_mm": 0.011284607431828792,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -75,
+      "y_offset_mm": -75,
+      "distance_mm": 106.06601717798213,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.0053072469452825795,
+      "applied_correction_y_mm": 0.008968542991034719,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0008412185964929205,
+          "response_y_mm": 0.009780306436290796,
+          "response_mm": 0.00981641699984453,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.0030228527425445414,
+          "response_y_mm": 0.011320134871384929,
+          "response_mm": 0.011716786769821073,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.003428384670751875,
+          "response_y_mm": 0.01064657050867903,
+          "response_mm": 0.011184957981455296,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -75,
+      "y_offset_mm": 75,
+      "distance_mm": 106.06601717798213,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.0071374917768041585,
+      "applied_correction_y_mm": -0.03765964753338444,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.00295988844017228,
+          "response_y_mm": 0.012076042799509145,
+          "response_mm": 0.012433493043945542,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.003158606394956793,
+          "response_y_mm": 0.01347252194379724,
+          "response_mm": 0.013837833713568034,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0036001430769646596,
+          "response_y_mm": 0.014111679490966499,
+          "response_mm": 0.014563671523018537,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 75,
+      "y_offset_mm": -75,
+      "distance_mm": 106.06601717798213,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.0439960945729939,
+      "applied_correction_y_mm": 0.009672350441443895,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0010615765902008325,
+          "response_y_mm": 0.0112640452428562,
+          "response_mm": 0.011313958639219688,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0004388331304936025,
+          "response_y_mm": 0.009917773680497663,
+          "response_mm": 0.009927477488969239,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.0025297403150983675,
+          "response_y_mm": 0.009658566249732862,
+          "response_mm": 0.009984362176038724,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 75,
+      "y_offset_mm": 75,
+      "distance_mm": 106.06601717798213,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.04608829501678173,
+      "applied_correction_y_mm": -0.06370180118344232,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.00650453474653648,
+          "response_y_mm": 0.013075885011512606,
+          "response_mm": 0.014604374040101835,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.004980969959402005,
+          "response_y_mm": 0.009235469823360706,
+          "response_mm": 0.010493043628741445,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.0071775131326979125,
+          "response_y_mm": 0.008492587373861306,
+          "response_mm": 0.011119385552840564,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -150,
+      "y_offset_mm": -75,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.004984106365469072,
+      "applied_correction_y_mm": -0.00023988229033154816,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.002112758579402455,
+          "response_y_mm": 0.01894939926135732,
+          "response_mm": 0.019066816230854274,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.002879417514259711,
+          "response_y_mm": 0.019135951949362438,
+          "response_mm": 0.019351374685787407,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0003790157058833161,
+          "response_y_mm": 0.01963513988781775,
+          "response_mm": 0.0196387976037098,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -150,
+      "y_offset_mm": 75,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.0024471011095251135,
+      "applied_correction_y_mm": -0.04030723223852828,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.003111820538973484,
+          "response_y_mm": 0.02794736553607103,
+          "response_mm": 0.028120075879583754,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.003229299883012317,
+          "response_y_mm": 0.03436782868695904,
+          "response_mm": 0.03451921242425134,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.004650558496533163,
+          "response_y_mm": 0.03263770221472933,
+          "response_mm": 0.032967367201325384,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 150,
+      "y_offset_mm": -75,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.044018589086526255,
+      "applied_correction_y_mm": -0.001709339917243929,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.00003397594830016615,
+          "response_y_mm": 0.031217326774085508,
+          "response_mm": 0.031217345263252268,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0024259441979529615,
+          "response_y_mm": 0.02893984814302312,
+          "response_mm": 0.029041350102789992,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.004496607116568247,
+          "response_y_mm": 0.026323197866949265,
+          "response_mm": 0.02670449815112305,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 150,
+      "y_offset_mm": 75,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.04602660673162097,
+      "applied_correction_y_mm": -0.08922885014242077,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0015972128568380204,
+          "response_y_mm": 0.033160219225263556,
+          "response_mm": 0.03319866304503221,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.005617831059166206,
+          "response_y_mm": 0.029610765024208688,
+          "response_mm": 0.030138968647387937,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.006134419618872,
+          "response_y_mm": 0.03005729174713295,
+          "response_mm": 0.030676895071579002,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -75,
+      "y_offset_mm": -150,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.002120360849882886,
+      "applied_correction_y_mm": 0.0009130982075133496,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0025874334337354374,
+          "response_y_mm": 0.015315504049283404,
+          "response_mm": 0.015532529609101935,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.00032072977722769763,
+          "response_y_mm": 0.017475061973965915,
+          "response_mm": 0.017478004994390808,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0004946731898834347,
+          "response_y_mm": 0.0194201196319259,
+          "response_mm": 0.019426418817762147,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -75,
+      "y_offset_mm": 150,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.004062382010965053,
+      "applied_correction_y_mm": -0.04260740041450894,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": 0.0022061040194286154,
+          "response_y_mm": 0.024979468883822766,
+          "response_mm": 0.025076697562925004,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": 0.0016428254399412827,
+          "response_y_mm": 0.02526043081935056,
+          "response_mm": 0.025313795460288325,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": 0.0017452558875377293,
+          "response_y_mm": 0.021959847512106046,
+          "response_mm": 0.022029090332284156,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 75,
+      "y_offset_mm": -150,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.04589994471473667,
+      "applied_correction_y_mm": 0.006332622817835475,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0069471357704093935,
+          "response_y_mm": 0.017969316451705145,
+          "response_mm": 0.01926548803311307,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0066884966231940375,
+          "response_y_mm": 0.013798396801760971,
+          "response_mm": 0.015334006044648784,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.007273568818314765,
+          "response_y_mm": 0.013606083249760616,
+          "response_mm": 0.015428230772002902,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 75,
+      "y_offset_mm": 150,
+      "distance_mm": 167.70509831248424,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.049438527439868055,
+      "applied_correction_y_mm": -0.06601004161731422,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.008359691278312452,
+          "response_y_mm": 0.018147784072104888,
+          "response_mm": 0.019980653267509477,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.00925692186543298,
+          "response_y_mm": 0.014278286867101697,
+          "response_mm": 0.017016464917308176,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.00833892770182194,
+          "response_y_mm": 0.015607971949898415,
+          "response_mm": 0.017695945965249472,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -150,
+      "y_offset_mm": -150,
+      "distance_mm": 212.13203435596427,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.0020661821280754658,
+      "applied_correction_y_mm": -0.01566516450264476,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.007587857938224105,
+          "response_y_mm": 0.024020843580266873,
+          "response_mm": 0.025190802178539667,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.006302689893536008,
+          "response_y_mm": 0.026848296952335572,
+          "response_mm": 0.02757816072791789,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.007671665315438873,
+          "response_y_mm": 0.028101146706607908,
+          "response_mm": 0.029129519304966368,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -150,
+      "y_offset_mm": 150,
+      "distance_mm": 212.13203435596427,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.00141289113826702,
+      "applied_correction_y_mm": -0.039009613813452325,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.005062682247472159,
+          "response_y_mm": 0.03063624046657663,
+          "response_mm": 0.031051730732195543,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.005726785873725247,
+          "response_y_mm": 0.03158975345083793,
+          "response_mm": 0.03210465074608702,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.007111616133207433,
+          "response_y_mm": 0.034268252179887805,
+          "response_mm": 0.03499840269913016,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 150,
+      "y_offset_mm": -150,
+      "distance_mm": 212.13203435596427,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.04547550388070735,
+      "applied_correction_y_mm": 0.006216940846180838,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.007382423329247509,
+          "response_y_mm": 0.030277901072545757,
+          "response_mm": 0.03116490762975378,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.008170486714545958,
+          "response_y_mm": 0.029941636906263478,
+          "response_mm": 0.031036405619515466,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.007388523361140392,
+          "response_y_mm": 0.02865329314950372,
+          "response_mm": 0.029590564134019382,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 150,
+      "y_offset_mm": 150,
+      "distance_mm": 212.13203435596427,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.049366567235875534,
+      "applied_correction_y_mm": -0.08344365233715248,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.010548534532930039,
+          "response_y_mm": 0.027383878075998198,
+          "response_mm": 0.029345329428608437,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.010011206071281784,
+          "response_y_mm": 0.028431501490027627,
+          "response_mm": 0.030142569963079003,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.010165156351859418,
+          "response_y_mm": 0.02077908557752672,
+          "response_mm": 0.023132245915516436,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -175,
+      "y_offset_mm": -125,
+      "distance_mm": 215.05813167606567,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.0019974736782600354,
+      "applied_correction_y_mm": -0.01688757109192196,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.007790062853048635,
+          "response_y_mm": 0.033874640141040524,
+          "response_mm": 0.03475883087705112,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.008800648552798614,
+          "response_y_mm": 0.03581127119582718,
+          "response_mm": 0.0368768024591471,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.008527281424854434,
+          "response_y_mm": 0.03626737895120788,
+          "response_mm": 0.03725637266950694,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -175,
+      "y_offset_mm": 125,
+      "distance_mm": 215.05813167606567,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.0002483958671766136,
+      "applied_correction_y_mm": -0.037251619070365026,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.00872459977144522,
+          "response_y_mm": 0.04643216665056185,
+          "response_mm": 0.047244732415767265,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.009938242229064257,
+          "response_y_mm": 0.0488693786902303,
+          "response_mm": 0.04986967848475356,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.010232064586614822,
+          "response_y_mm": 0.047791115525935055,
+          "response_mm": 0.04887418407419123,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 175,
+      "y_offset_mm": -125,
+      "distance_mm": 215.05813167606567,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "applied_correction_x_mm": -0.04350000854100365,
+      "applied_correction_y_mm": 0.0023057202139893595,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.010909309483447274,
+          "response_y_mm": 0.042483942029968295,
+          "response_mm": 0.043862265830795145,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.010184594286534229,
+          "response_y_mm": 0.03689306786226386,
+          "response_mm": 0.03827302466582583,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.0101510219022533,
+          "response_y_mm": 0.034407984739952914,
+          "response_mm": 0.0358741224216685,
+          "observation_valid": true
+        }
+      ]
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 175,
+      "y_offset_mm": 125,
+      "distance_mm": 215.05813167606567,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "applied_correction_x_mm": -0.04751486435934225,
+      "applied_correction_y_mm": -0.09076257097171013,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.007794241952977823,
+          "response_y_mm": 0.034067220819319545,
+          "response_mm": 0.03494747118138648,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.01006482677911822,
+          "response_y_mm": 0.02921128774237872,
+          "response_mm": 0.03089660288222154,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.011084447542275062,
+          "response_y_mm": 0.03167243046332419,
+          "response_mm": 0.03355604012352402,
+          "observation_valid": true
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "sample_count": 108,
+    "mean_residual_mm": 0.017766478147201538,
+    "maximum_residual_mm": 0.04986967848475356,
+    "passed": true
+  }
+}

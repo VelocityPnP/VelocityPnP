@@ -2075,12 +2075,46 @@ holdout must keep both its direction gap and each absolute residual at or below
 response. This permits correction of a speed-dependent common shift. The run
 saves the failed condition and stops before it tests another speed.
 
-The stored corrections are absolute camera residuals for each axis, approach
-side, and exact feed. The motion planner does not interpolate or extrapolate.
+The stored axis corrections are absolute camera residuals for each axis,
+approach side, and exact feed. The axis model does not interpolate or
+extrapolate.
 It subtracts the negative-X, negative-Y datum-feed correction that was present
 when fine home assigned the datum coordinates. Thus the fine-home approach has
 zero later correction, while another approach gets only its measured
 difference from that anchor.
+
+The axis capture does not measure a simultaneous X/Y return. Use the separate
+diagnostic to collect single-axis and four-quadrant path evidence without
+changing the active calibration:
+
+```bash
+velocitypnp motion-model-diagnostic \
+  --lease "$VELOCITYPNP_LEASE" \
+  --feed 23000 \
+  --offset 25,25 100,50 50,100 200,100 \
+  --confirm-safety-checks
+```
+
+A qualified planar surface must contain each X distance, Y distance, and
+quadrant exactly once. Every node must pass its held-out repeat. The surface
+also needs at least 20 independent live validation samples, with a maximum
+residual no greater than the profile's 0.05 mm limit. Validate interpolation
+at distances that are not grid nodes by adding `--surface SURFACE.json` to the
+diagnostic.
+
+Attach a passed surface only after review of that independent result:
+
+```bash
+velocitypnp attach-xy-planar-response CALIBRATION_UUID SURFACE.json \
+  --lease "$VELOCITYPNP_LEASE" --confirm-safety-checks
+```
+
+The planar model applies only to two-axis moves at its exact feed and within
+its measured X/Y distance range. It uses bilinear interpolation. Single-axis
+moves, unmeasured feeds, and distances below the first grid node keep the prior
+axis model. A two-axis move beyond the maximum measured X or Y distance is
+rejected at a surface feed. The planner reserves the largest correction from
+both models at controller bounds.
 
 This result is local to the homing datum. It does not establish full-bed scale,
 skew, or lens distortion. Calibrated job and strip-feeder transit use only

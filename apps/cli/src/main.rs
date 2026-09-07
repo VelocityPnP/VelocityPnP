@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use velocitypnp_domain::{
-    JogTarget, MachineProfile, MachineState, MachineStatus, Operation, OperationStatus, Pose,
+    ApproachSide, JogTarget, MachineProfile, MachineState, MachineStatus, Operation,
+    OperationStatus, PlanarXyDirectionResponseSurface, Pose,
 };
+use velocitypnp_planner::PlanarXyMotionSurface;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "VelocityPnP command-line client")]
@@ -92,6 +94,40 @@ enum Command {
         y_excursion_mm: f64,
         #[arg(long, default_value_t = 0.05)]
         return_tolerance_mm: f64,
+        /// Confirm level nozzles, a clear XY path at safe Z, and reachable
+        /// power isolation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
+    /// Measure endpoint response for single-axis and diagonal XY moves.
+    MotionModelDiagnostic {
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Ascending XY feed rates in mm/min.
+        #[arg(long = "feed", num_args = 1..)]
+        feeds: Vec<f64>,
+        /// Absolute X,Y excursion in mm. Repeat this option for each shape.
+        #[arg(
+            long = "offset",
+            num_args = 1..,
+            default_values = [
+                "25,0",
+                "0,25",
+                "25,25",
+                "100,50",
+                "50,100",
+                "200,100"
+            ]
+        )]
+        offsets: Vec<String>,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(2..=10))]
+        samples: u32,
+        /// Stop if an endpoint response exceeds this visual safety guard.
+        #[arg(long, default_value_t = 0.25)]
+        response_guard_mm: f64,
+        /// Apply one qualified response surface and measure residual error.
+        #[arg(long)]
+        surface: Option<PathBuf>,
         /// Confirm level nozzles, a clear XY path at safe Z, and reachable
         /// power isolation.
         #[arg(long)]
@@ -489,6 +525,15 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    AttachXyPlanarResponse {
+        calibration: Uuid,
+        surface: PathBuf,
+        #[arg(long, env = "VELOCITYPNP_LEASE")]
+        lease: Uuid,
+        /// Confirm that the surface has independent physical validation.
+        #[arg(long)]
+        confirm_safety_checks: bool,
+    },
     CalibrateInstalledGeometry {
         calibration: Uuid,
         #[arg(long, env = "VELOCITYPNP_LEASE")]
@@ -674,6 +719,32 @@ async fn main() -> Result<()> {
                 x_excursion_mm,
                 y_excursion_mm,
                 return_tolerance_mm,
+            )
+            .await?
+        }
+        Command::MotionModelDiagnostic {
+            lease,
+            feeds,
+            offsets,
+            samples,
+            response_guard_mm,
+            surface,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "motion-model diagnostic requires --confirm-safety-checks after inspecting the level nozzles, clear XY path at safe Z, and power isolation"
+                );
+            }
+            run_motion_model_diagnostic(
+                &client,
+                base,
+                lease,
+                feeds,
+                offsets,
+                samples,
+                response_guard_mm,
+                surface,
             )
             .await?
         }
@@ -1619,6 +1690,32 @@ async fn main() -> Result<()> {
             let snapshot = get(&client, &format!("{base}/calibrations/{calibration}")).await?;
             snapshot["values"]["local_xy_direction_response"].clone()
         }
+        Command::AttachXyPlanarResponse {
+            calibration,
+            surface,
+            lease,
+            confirm_safety_checks,
+        } => {
+            if !confirm_safety_checks {
+                bail!(
+                    "planar XY response activation requires --confirm-safety-checks after reviewing its independent physical validation"
+                );
+            }
+            let bytes = std::fs::read(&surface)
+                .with_context(|| format!("reading motion surface {}", surface.display()))?;
+            let surface: PlanarXyDirectionResponseSurface =
+                serde_json::from_slice(&bytes).context("motion surface file was invalid")?;
+            post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/xy-planar-response"),
+                Some(json!({
+                    "lease_id": lease,
+                    "confirmed_external_safety_checks": true,
+                    "surface": surface,
+                })),
+            )
+            .await?
+        }
         Command::CalibrateInstalledGeometry {
             calibration,
             lease,
@@ -1678,6 +1775,7 @@ async fn main() -> Result<()> {
 const DEFAULT_MOTION_SWEEP_FEEDS: [f64; 5] = [1_200.0, 3_000.0, 6_000.0, 9_000.0, 12_000.0];
 const MOTION_SWEEP_BASELINE_FEED_MM_PER_MIN: f64 = 1_200.0;
 const MOTION_SWEEP_BASELINE_SAMPLES: usize = 3;
+const DEFAULT_MOTION_MODEL_FEEDS: [f64; 4] = [1_200.0, 6_000.0, 12_000.0, 23_000.0];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum MotionSweepAxis {
@@ -1702,6 +1800,534 @@ struct MotionSweepPlan {
     seed: Pose,
     low: Pose,
     high: Pose,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MotionModelOffset {
+    x_mm: f64,
+    y_mm: f64,
+}
+
+struct MotionModelPlan {
+    feeds: Vec<f64>,
+    offsets: Vec<MotionModelOffset>,
+    seed: Pose,
+    response_guard_mm: f64,
+}
+
+fn parse_motion_model_offset(value: &str) -> Result<MotionModelOffset> {
+    let (x, y) = value
+        .split_once(',')
+        .context("motion-model offset must use the X,Y form")?;
+    let x_mm = x
+        .parse::<f64>()
+        .context("motion-model X offset is not a number")?;
+    let y_mm = y
+        .parse::<f64>()
+        .context("motion-model Y offset is not a number")?;
+    if !x_mm.is_finite()
+        || !y_mm.is_finite()
+        || x_mm < 0.0
+        || y_mm < 0.0
+        || (x_mm == 0.0 && y_mm == 0.0)
+    {
+        bail!("motion-model offsets must be finite, non-negative, and non-zero");
+    }
+    Ok(MotionModelOffset { x_mm, y_mm })
+}
+
+fn motion_model_plan(
+    status: &MachineStatus,
+    profile: &MachineProfile,
+    feeds: Vec<f64>,
+    offsets: Vec<String>,
+    response_guard_mm: f64,
+) -> Result<MotionModelPlan> {
+    if status.simulated {
+        bail!("motion-model diagnostic requires a physical machine");
+    }
+    if status.state != MachineState::Ready || !status.homed {
+        bail!("motion-model diagnostic requires a homed ready machine");
+    }
+    if !profile.accepts_profile_id(&status.profile_id) {
+        bail!("machine status and active profile do not match");
+    }
+    if !response_guard_mm.is_finite() || response_guard_mm <= 0.0 {
+        bail!("motion-model response guard must be finite and positive");
+    }
+    let visual = profile
+        .visual_homing
+        .as_ref()
+        .context("active profile does not define visual homing")?;
+    visual
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .context("active visual-homing profile is invalid")?;
+    if response_guard_mm > visual.max_correction_mm {
+        bail!(
+            "motion-model response guard exceeds the {:.3}mm visual safety bound",
+            visual.max_correction_mm
+        );
+    }
+    let current = status
+        .pose
+        .context("motion-model diagnostic requires a known pose")?;
+    let seed = visual
+        .seed_pose
+        .resolve(current)
+        .context("visual-homing seed pose is invalid")?;
+    if (seed.z_mm - profile.safe_z_mm).abs() > 1e-6 {
+        bail!("motion-model seed must be at the configured safe Z");
+    }
+    let feeds = if feeds.is_empty() {
+        DEFAULT_MOTION_MODEL_FEEDS.to_vec()
+    } else {
+        feeds
+    };
+    if feeds
+        .iter()
+        .any(|feed| !feed.is_finite() || *feed <= 0.0 || *feed > profile.maximum_feed_mm_per_min)
+    {
+        bail!(
+            "motion-model feeds must be positive and no more than the profile limit of {:.0} mm/min",
+            profile.maximum_feed_mm_per_min
+        );
+    }
+    if feeds.windows(2).any(|pair| pair[0] >= pair[1]) {
+        bail!("motion-model feeds must be in strictly ascending order");
+    }
+    let controller = status
+        .controller
+        .as_ref()
+        .context("motion-model diagnostic requires recorded controller settings")?;
+    for axis in ["X", "Y"] {
+        let limit = controller
+            .settings
+            .max_feed_units_per_second
+            .get(axis)
+            .with_context(|| format!("controller settings do not include the {axis} feed limit"))?;
+        if feeds.last().copied().unwrap() / 60.0 > *limit {
+            bail!(
+                "requested feed {:.0} mm/min exceeds controller {axis} limit of {:.0} mm/min",
+                feeds.last().unwrap(),
+                limit * 60.0
+            );
+        }
+    }
+    let offsets = offsets
+        .iter()
+        .map(|value| parse_motion_model_offset(value))
+        .collect::<Result<Vec<_>>>()?;
+    if offsets.is_empty() {
+        bail!("motion-model diagnostic requires at least one offset");
+    }
+    for offset in &offsets {
+        let x_signs: &[f64] = if offset.x_mm == 0.0 {
+            &[0.0]
+        } else {
+            &[-1.0, 1.0]
+        };
+        let y_signs: &[f64] = if offset.y_mm == 0.0 {
+            &[0.0]
+        } else {
+            &[-1.0, 1.0]
+        };
+        for x_sign in x_signs {
+            for y_sign in y_signs {
+                let away = Pose {
+                    x_mm: seed.x_mm + x_sign * offset.x_mm,
+                    y_mm: seed.y_mm + y_sign * offset.y_mm,
+                    ..seed
+                };
+                if !profile.bounds.contains(away) {
+                    bail!(
+                        "motion-model point X{:.3} Y{:.3} is outside machine bounds",
+                        away.x_mm,
+                        away.y_mm
+                    );
+                }
+            }
+        }
+    }
+    Ok(MotionModelPlan {
+        feeds,
+        offsets,
+        seed,
+        response_guard_mm,
+    })
+}
+
+async fn diagnostic_jog(
+    client: &Client,
+    base: &str,
+    lease: Uuid,
+    target: Pose,
+    feed_mm_per_min: f64,
+) -> Result<f64> {
+    let started = Instant::now();
+    let operation = post(
+        client,
+        &format!("{base}/machine/jog"),
+        Some(json!({
+            "lease_id": lease,
+            "target": JogTarget {
+                x_mm: target.x_mm,
+                y_mm: target.y_mm,
+                z_mm: target.z_mm,
+                rotation_deg: None,
+            },
+            "feed_mm_per_min": feed_mm_per_min,
+        })),
+    )
+    .await?;
+    run_operation(client, base, operation).await?;
+    Ok(started.elapsed().as_secs_f64() * 1_000.0)
+}
+
+async fn apply_visual_home(client: &Client, base: &str, lease: Uuid) -> Result<Value> {
+    post(
+        client,
+        &format!("{base}/machine/visual-home"),
+        Some(json!({
+            "lease_id": lease,
+            "apply_offset": true,
+            "move_to_seed": true,
+        })),
+    )
+    .await
+}
+
+async fn capture_motion_model_baseline(
+    client: &Client,
+    base: &str,
+    lease: Uuid,
+) -> Result<(Vec<Value>, Vec<[f64; 2]>, [f64; 2], f64)> {
+    let mut observations = Vec::with_capacity(MOTION_SWEEP_BASELINE_SAMPLES);
+    let mut corrections = Vec::with_capacity(MOTION_SWEEP_BASELINE_SAMPLES);
+    for sample in 1..=MOTION_SWEEP_BASELINE_SAMPLES {
+        let observation = observe_visual_home(client, base, lease)
+            .await
+            .with_context(|| format!("capturing motion-model baseline sample {sample}"))?;
+        if !visual_observation_valid(&observation) {
+            bail!("motion-model baseline sample {sample} exceeded the fiducial bounds");
+        }
+        corrections.push(visual_correction(&observation)?);
+        observations.push(observation["initial"].clone());
+    }
+    let mean = mean_correction(&corrections);
+    let spread = max_pairwise_correction_error(&corrections);
+    Ok((observations, corrections, mean, spread))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_motion_model_diagnostic(
+    client: &Client,
+    base: &str,
+    lease: Uuid,
+    feeds: Vec<f64>,
+    offsets: Vec<String>,
+    samples_per_condition: u32,
+    response_guard_mm: f64,
+    surface_path: Option<PathBuf>,
+) -> Result<Value> {
+    let status_value = get(client, &format!("{base}/machine/status")).await?;
+    let initial_status: MachineStatus = serde_json::from_value(status_value["machine"].clone())
+        .context("machine status response did not contain a valid machine")?;
+    let profile: MachineProfile = get(client, &format!("{base}/machine/profile"))
+        .await
+        .and_then(|value| {
+            serde_json::from_value(value).context("machine profile response was invalid")
+        })?;
+    let plan = motion_model_plan(&initial_status, &profile, feeds, offsets, response_guard_mm)?;
+    let surface = surface_path
+        .as_ref()
+        .map(|path| -> Result<PlanarXyMotionSurface> {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading motion surface {}", path.display()))?;
+            let report: PlanarXyDirectionResponseSurface = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing motion surface {}", path.display()))?;
+            PlanarXyMotionSurface::from_report(&report)
+                .context("validating the motion response surface")
+        })
+        .transpose()?;
+    if let Some(surface) = &surface {
+        if plan.feeds.len() != 1 || (plan.feeds[0] - surface.feed_mm_per_min()).abs() > 1e-6 {
+            bail!("motion surface validation requires its one exact feed");
+        }
+        if plan
+            .offsets
+            .iter()
+            .any(|offset| !surface.supports(offset.x_mm, offset.y_mm))
+        {
+            bail!("motion surface validation offset is outside the qualified grid");
+        }
+    }
+    let initial_alignment = apply_visual_home(client, base, lease)
+        .await
+        .context("establishing the motion-model datum anchor")?;
+    let status_value = get(client, &format!("{base}/machine/status")).await?;
+    let aligned_status: MachineStatus = serde_json::from_value(status_value["machine"].clone())
+        .context("aligned machine status was invalid")?;
+    let seed = aligned_status
+        .pose
+        .context("visual home did not return a known pose")?;
+    if (seed.x_mm - plan.seed.x_mm).abs() > 0.01
+        || (seed.y_mm - plan.seed.y_mm).abs() > 0.01
+        || (seed.z_mm - plan.seed.z_mm).abs() > 0.01
+    {
+        bail!("visual home did not finish at the planned motion-model seed");
+    }
+    let (_baseline_observations, baseline_corrections, baseline, baseline_spread_mm) =
+        capture_motion_model_baseline(client, base, lease).await?;
+    if baseline_spread_mm > 0.05 {
+        bail!(
+            "stationary camera spread {baseline_spread_mm:.4}mm exceeds the 0.0500mm diagnostic gate"
+        );
+    }
+
+    let mut conditions = Vec::new();
+    let mut stopped_early = false;
+    let mut stop_reason = None;
+    'feeds: for feed in &plan.feeds {
+        for offset in &plan.offsets {
+            let x_signs: &[f64] = if offset.x_mm == 0.0 {
+                &[0.0]
+            } else {
+                &[-1.0, 1.0]
+            };
+            let y_signs: &[f64] = if offset.y_mm == 0.0 {
+                &[0.0]
+            } else {
+                &[-1.0, 1.0]
+            };
+            for x_sign in x_signs {
+                for y_sign in y_signs {
+                    let x_offset_mm = x_sign * offset.x_mm;
+                    let y_offset_mm = y_sign * offset.y_mm;
+                    let away = Pose {
+                        x_mm: seed.x_mm + x_offset_mm,
+                        y_mm: seed.y_mm + y_offset_mm,
+                        ..seed
+                    };
+                    let x_approach = if x_offset_mm < 0.0 {
+                        Some(ApproachSide::Negative)
+                    } else if x_offset_mm > 0.0 {
+                        Some(ApproachSide::Positive)
+                    } else {
+                        None
+                    };
+                    let y_approach = if y_offset_mm < 0.0 {
+                        Some(ApproachSide::Negative)
+                    } else if y_offset_mm > 0.0 {
+                        Some(ApproachSide::Positive)
+                    } else {
+                        None
+                    };
+                    let applied_correction = match (&surface, x_approach, y_approach) {
+                        (Some(surface), Some(x_approach), Some(y_approach)) => surface
+                            .correction(
+                                x_approach,
+                                y_approach,
+                                x_offset_mm.abs(),
+                                y_offset_mm.abs(),
+                            )
+                            .context("interpolating the motion response surface")?,
+                        (Some(_), _, _) => {
+                            bail!("motion surface validation requires two-axis offsets")
+                        }
+                        (None, _, _) => [0.0, 0.0],
+                    };
+                    let return_target = Pose {
+                        x_mm: seed.x_mm + applied_correction[0],
+                        y_mm: seed.y_mm + applied_correction[1],
+                        ..seed
+                    };
+                    let mut condition_samples = Vec::new();
+                    let mut responses = Vec::new();
+                    for sample in 1..=samples_per_condition {
+                        let outbound_ms = match diagnostic_jog(client, base, lease, away, *feed)
+                            .await
+                        {
+                            Ok(elapsed) => elapsed,
+                            Err(error) => {
+                                stopped_early = true;
+                                stop_reason = Some(format!(
+                                    "feed {feed:.0}, offset {x_offset_mm:.0},{y_offset_mm:.0}, sample {sample}: outbound move failed: {error:#}"
+                                ));
+                                break;
+                            }
+                        };
+                        let return_ms = match diagnostic_jog(
+                            client,
+                            base,
+                            lease,
+                            return_target,
+                            *feed,
+                        )
+                        .await
+                        {
+                            Ok(elapsed) => elapsed,
+                            Err(error) => {
+                                stopped_early = true;
+                                stop_reason = Some(format!(
+                                    "feed {feed:.0}, offset {x_offset_mm:.0},{y_offset_mm:.0}, sample {sample}: return move failed: {error:#}"
+                                ));
+                                break;
+                            }
+                        };
+                        let observation = match observe_visual_home(client, base, lease).await {
+                            Ok(value) => value,
+                            Err(error) => {
+                                stopped_early = true;
+                                stop_reason = Some(format!(
+                                    "feed {feed:.0}, offset {x_offset_mm:.0},{y_offset_mm:.0}, sample {sample}: endpoint observation failed: {error:#}"
+                                ));
+                                break;
+                            }
+                        };
+                        let correction = match visual_correction(&observation) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                stopped_early = true;
+                                stop_reason = Some(format!(
+                                    "feed {feed:.0}, offset {x_offset_mm:.0},{y_offset_mm:.0}, sample {sample}: endpoint result was invalid: {error:#}"
+                                ));
+                                break;
+                            }
+                        };
+                        let response = [correction[0] - baseline[0], correction[1] - baseline[1]];
+                        let response_mm = response[0].hypot(response[1]);
+                        let observation_valid = visual_observation_valid(&observation);
+                        condition_samples.push(json!({
+                            "sample": sample,
+                            "outbound_elapsed_ms": outbound_ms,
+                            "return_elapsed_ms": return_ms,
+                            "observed_correction_x_mm": correction[0],
+                            "observed_correction_y_mm": correction[1],
+                            "response_x_mm": response[0],
+                            "response_y_mm": response[1],
+                            "response_mm": response_mm,
+                            "observation_valid": observation_valid,
+                        }));
+                        responses.push(response);
+                        if !observation_valid || response_mm > plan.response_guard_mm {
+                            stopped_early = true;
+                            stop_reason = Some(if observation_valid {
+                                format!(
+                                    "feed {feed:.0}, offset {x_offset_mm:.0},{y_offset_mm:.0}, sample {sample}: response {response_mm:.4}mm exceeds the {:.4}mm guard",
+                                    plan.response_guard_mm
+                                )
+                            } else {
+                                format!(
+                                    "feed {feed:.0}, offset {x_offset_mm:.0},{y_offset_mm:.0}, sample {sample}: fiducial observation exceeded its bounds"
+                                )
+                            });
+                            break;
+                        }
+                    }
+                    let fitted = if responses.len() == samples_per_condition as usize {
+                        let training = &responses[..responses.len() - 1];
+                        let fit = mean_correction(training);
+                        let validation = responses[responses.len() - 1];
+                        let residual = [validation[0] - fit[0], validation[1] - fit[1]];
+                        Some(json!({
+                            "training_samples": training.len(),
+                            "correction_x_mm": fit[0],
+                            "correction_y_mm": fit[1],
+                            "validation_response_x_mm": validation[0],
+                            "validation_response_y_mm": validation[1],
+                            "validation_residual_x_mm": residual[0],
+                            "validation_residual_y_mm": residual[1],
+                            "validation_residual_mm": residual[0].hypot(residual[1]),
+                        }))
+                    } else {
+                        None
+                    };
+                    conditions.push(json!({
+                        "feed_mm_per_min": feed,
+                        "away_x_mm": away.x_mm,
+                        "away_y_mm": away.y_mm,
+                        "x_offset_mm": x_offset_mm,
+                        "y_offset_mm": y_offset_mm,
+                        "distance_mm": x_offset_mm.hypot(y_offset_mm),
+                        "x_approach": x_approach,
+                        "y_approach": y_approach,
+                        "applied_correction_x_mm": applied_correction[0],
+                        "applied_correction_y_mm": applied_correction[1],
+                        "samples": condition_samples,
+                        "fit": fitted,
+                    }));
+                    if stopped_early {
+                        break 'feeds;
+                    }
+                }
+            }
+        }
+    }
+
+    let restore = if matches!(
+        get(client, &format!("{base}/machine/status")).await?["machine"]["state"].as_str(),
+        Some("ready")
+    ) {
+        apply_visual_home(client, base, lease).await.ok()
+    } else {
+        None
+    };
+    let end_baseline = if restore.is_some() {
+        capture_motion_model_baseline(client, base, lease)
+            .await
+            .ok()
+            .map(|(_observations, corrections, mean, spread)| {
+                json!({
+                    "correction_x_mm": mean[0],
+                    "correction_y_mm": mean[1],
+                    "max_pairwise_error_mm": spread,
+                    "corrections": corrections,
+                })
+            })
+    } else {
+        None
+    };
+    let maximum_validation_residual_mm = conditions
+        .iter()
+        .filter_map(|condition| condition["fit"]["validation_residual_mm"].as_f64())
+        .fold(0.0_f64, f64::max);
+    let complete_conditions = conditions
+        .iter()
+        .filter(|condition| !condition["fit"].is_null())
+        .count();
+    Ok(json!({
+        "kind": if surface.is_some() {
+            "xy_motion_model_validation"
+        } else {
+            "xy_motion_model_diagnostic"
+        },
+        "surface_source": surface_path.map(|path| path.display().to_string()),
+        "profile_id": profile.id,
+        "calibration_revision": initial_status.calibration_revision,
+        "passed": !stopped_early,
+        "stopped_early": stopped_early,
+        "stop_reason": stop_reason,
+        "samples_per_condition": samples_per_condition,
+        "response_guard_mm": plan.response_guard_mm,
+        "requested_feeds_mm_per_min": plan.feeds,
+        "requested_offsets": plan.offsets.iter().map(|offset| {
+            json!({"x_mm": offset.x_mm, "y_mm": offset.y_mm})
+        }).collect::<Vec<_>>(),
+        "seed": seed,
+        "initial_alignment": initial_alignment,
+        "baseline": {
+            "correction_x_mm": baseline[0],
+            "correction_y_mm": baseline[1],
+            "max_pairwise_error_mm": baseline_spread_mm,
+            "corrections": baseline_corrections,
+        },
+        "conditions": conditions,
+        "complete_condition_count": complete_conditions,
+        "maximum_validation_residual_mm": maximum_validation_residual_mm,
+        "restore_alignment": restore,
+        "end_baseline": end_baseline,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2602,6 +3228,120 @@ mod tests {
                 confirm_safety_checks: true,
                 ..
             } if parsed_lease == lease && feeds == vec![1_200.0, 6_000.0, 12_000.0]
+        ));
+    }
+
+    #[test]
+    fn motion_model_plan_covers_bounded_diagonal_points() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let mut status = MachineStatus {
+            state: MachineState::Ready,
+            simulated: false,
+            profile_id: profile.id.clone(),
+            pose: Some(profile.home_pose),
+            homed: true,
+            ..MachineStatus::default()
+        };
+        let mut controller = velocitypnp_domain::ControllerConnection::default();
+        controller
+            .settings
+            .max_feed_units_per_second
+            .insert("X".into(), 500.0);
+        controller
+            .settings
+            .max_feed_units_per_second
+            .insert("Y".into(), 500.0);
+        status.controller = Some(controller);
+
+        let plan = motion_model_plan(
+            &status,
+            &profile,
+            Vec::new(),
+            vec!["25,0".into(), "0,25".into(), "200,100".into()],
+            0.25,
+        )
+        .expect("motion-model plan");
+
+        assert_eq!(plan.feeds, DEFAULT_MOTION_MODEL_FEEDS);
+        assert_eq!(
+            plan.offsets,
+            vec![
+                MotionModelOffset {
+                    x_mm: 25.0,
+                    y_mm: 0.0,
+                },
+                MotionModelOffset {
+                    x_mm: 0.0,
+                    y_mm: 25.0,
+                },
+                MotionModelOffset {
+                    x_mm: 200.0,
+                    y_mm: 100.0,
+                },
+            ]
+        );
+        assert_eq!(plan.seed.z_mm, profile.safe_z_mm);
+    }
+
+    #[test]
+    fn motion_model_cli_accepts_an_explicit_matrix() {
+        let lease = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "motion-model-diagnostic",
+            "--lease",
+            &lease.to_string(),
+            "--feed",
+            "1200",
+            "23000",
+            "--offset",
+            "25,25",
+            "100,50",
+            "--samples",
+            "4",
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::MotionModelDiagnostic {
+                lease: parsed_lease,
+                feeds,
+                offsets,
+                samples: 4,
+                confirm_safety_checks: true,
+                ..
+            } if parsed_lease == lease
+                && feeds == vec![1_200.0, 23_000.0]
+                && offsets == vec!["25,25", "100,50"]
+        ));
+    }
+
+    #[test]
+    fn planar_motion_surface_activation_requires_explicit_input() {
+        let lease = Uuid::new_v4();
+        let calibration = Uuid::new_v4();
+        let args = Args::try_parse_from([
+            "velocitypnp",
+            "attach-xy-planar-response",
+            &calibration.to_string(),
+            "surface.json",
+            "--lease",
+            &lease.to_string(),
+            "--confirm-safety-checks",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::AttachXyPlanarResponse {
+                calibration: parsed_calibration,
+                lease: parsed_lease,
+                confirm_safety_checks: true,
+                ..
+            } if parsed_calibration == calibration && parsed_lease == lease
         ));
     }
 

@@ -1012,6 +1012,33 @@ pub struct LocalXyAxisDirectionReport {
     pub feeds: Vec<LocalXyFeedDirectionReport>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarXyDirectionResponseNode {
+    pub x_approach: ApproachSide,
+    pub y_approach: ApproachSide,
+    pub x_distance_mm: f64,
+    pub y_distance_mm: f64,
+    pub correction_x_mm: f64,
+    pub correction_y_mm: f64,
+    pub validation_residual_x_mm: f64,
+    pub validation_residual_y_mm: f64,
+    pub validation_residual_mm: f64,
+    pub qualified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarXyDirectionResponseSurface {
+    pub feed_mm_per_min: f64,
+    pub x_distances_mm: Vec<f64>,
+    pub y_distances_mm: Vec<f64>,
+    pub nodes: Vec<PlanarXyDirectionResponseNode>,
+    pub maximum_validation_residual_mm: f64,
+    pub independent_validation_sample_count: u32,
+    pub independent_validation_mean_residual_mm: f64,
+    pub independent_validation_maximum_residual_mm: f64,
+    pub passed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalXyDirectionResponseReport {
     pub datum_x_approach: ApproachSide,
@@ -1024,6 +1051,8 @@ pub struct LocalXyDirectionResponseReport {
     pub reference_observed_y_px: f64,
     pub pixel_error_to_machine_mm: [[f64; 2]; 2],
     pub axes: Vec<LocalXyAxisDirectionReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planar_surfaces: Vec<PlanarXyDirectionResponseSurface>,
     pub samples: Vec<LocalXyDirectionResponseSample>,
     pub passed: bool,
     pub observed_at: DateTime<Utc>,

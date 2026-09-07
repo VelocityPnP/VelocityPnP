@@ -1,0 +1,1361 @@
+{
+  "kind": "xy_motion_model_diagnostic",
+  "profile_id": "lumenpnp-v3.0.2",
+  "calibration_revision": "3b837434-a961-4e60-945a-18335b42d21f",
+  "passed": true,
+  "stopped_early": false,
+  "stop_reason": null,
+  "samples_per_condition": 3,
+  "response_guard_mm": 0.25,
+  "requested_feeds_mm_per_min": [
+    1200,
+    6000,
+    12000,
+    23000
+  ],
+  "requested_offsets": [
+    {
+      "x_mm": 25,
+      "y_mm": 0
+    },
+    {
+      "x_mm": 0,
+      "y_mm": 25
+    },
+    {
+      "x_mm": 25,
+      "y_mm": 25
+    }
+  ],
+  "seed": {
+    "rotation_deg": 890.88,
+    "x_mm": 220.13,
+    "y_mm": 190.27,
+    "z_mm": 31.5
+  },
+  "baseline": {
+    "correction_x_mm": 0.0014176035050461324,
+    "correction_y_mm": 0.0025867629293491504,
+    "max_pairwise_error_mm": 0.00112131523652915
+  },
+  "end_baseline": {
+    "correction_x_mm": 0.004538891110312928,
+    "correction_y_mm": 0.002644340254049109,
+    "max_pairwise_error_mm": 0.001720082409841966
+  },
+  "maximum_validation_residual_mm": 0.005744846095412249,
+  "conditions": [
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": -25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "negative",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.004226171712418825,
+          "response_y_mm": 0.00031059419507503856,
+          "response_mm": 0.004237569597878408,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.004828659921444734,
+          "response_y_mm": 0.0014826480701904707,
+          "response_mm": 0.0050511584747467775,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.004079827249285977,
+          "response_y_mm": 0.0010474220844753999,
+          "response_mm": 0.004212135255077069,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.004527415816931779,
+        "correction_y_mm": 0.0008966211326327546,
+        "training_samples": 2,
+        "validation_residual_mm": 0.00047230970026442275,
+        "validation_residual_x_mm": 0.0004475885676458024,
+        "validation_residual_y_mm": 0.00015080095184264526,
+        "validation_response_x_mm": -0.004079827249285977,
+        "validation_response_y_mm": 0.0010474220844753999
+      }
+    },
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": 25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "positive",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.043855801767514885,
+          "response_y_mm": 0.00020361294746051124,
+          "response_mm": 0.0438562744302789,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04471307364770624,
+          "response_y_mm": 0.0003128298456163284,
+          "response_mm": 0.04471416797322199,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04605944958650015,
+          "response_y_mm": 0.00031906552900344727,
+          "response_mm": 0.04606055469730198,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04428443770761056,
+        "correction_y_mm": 0.0002582213965384198,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0017760543850497822,
+        "validation_residual_x_mm": -0.001775011878889586,
+        "validation_residual_y_mm": 0.00006084413246502745,
+        "validation_response_x_mm": -0.04605944958650015,
+        "validation_response_y_mm": 0.00031906552900344727
+      }
+    },
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": 0,
+      "y_offset_mm": -25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04462727700700106,
+          "response_y_mm": -0.004992076353124821,
+          "response_mm": 0.04490561968590383,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04482746171530554,
+          "response_y_mm": -0.0035967112523307898,
+          "response_mm": 0.04497152049541829,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04504409158976081,
+          "response_y_mm": -0.004533191879625674,
+          "response_mm": 0.04527162484122107,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.044727369361153305,
+        "correction_y_mm": -0.004294393802727805,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0003966579025107482,
+        "validation_residual_x_mm": -0.0003167222286075064,
+        "validation_residual_y_mm": -0.00023879807689786928,
+        "validation_response_x_mm": -0.04504409158976081,
+        "validation_response_y_mm": -0.004533191879625674
+      }
+    },
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": 0,
+      "y_offset_mm": 25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04617062076021858,
+          "response_y_mm": -0.04267025753164767,
+          "response_mm": 0.0628687291043891,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04612977644012852,
+          "response_y_mm": -0.04173369133634698,
+          "response_mm": 0.0622065693232935,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04596835386391467,
+          "response_y_mm": -0.046148577169054725,
+          "response_mm": 0.06513663125835015,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04615019860017355,
+        "correction_y_mm": -0.04220197443399733,
+        "training_samples": 2,
+        "validation_residual_mm": 0.003950789877539375,
+        "validation_residual_x_mm": 0.0001818447362588807,
+        "validation_residual_y_mm": -0.003946602735057397,
+        "validation_response_x_mm": -0.04596835386391467,
+        "validation_response_y_mm": -0.046148577169054725
+      }
+    },
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": -25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.006421338659423851,
+          "response_y_mm": -0.003061330044556202,
+          "response_mm": 0.007113742462355084,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0054535803154710195,
+          "response_y_mm": -0.0013086247236297438,
+          "response_mm": 0.005608389869168156,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.004714264894126467,
+          "response_y_mm": 0.0015959570890801494,
+          "response_mm": 0.004977084741309757,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.005937459487447436,
+        "correction_y_mm": -0.002184977384092973,
+        "training_samples": 2,
+        "validation_residual_mm": 0.003973873488620211,
+        "validation_residual_x_mm": 0.0012231945933209691,
+        "validation_residual_y_mm": 0.0037809344731731223,
+        "validation_response_x_mm": -0.004714264894126467,
+        "validation_response_y_mm": 0.0015959570890801494
+      }
+    },
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": -25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.010561289434209198,
+          "response_y_mm": -0.04563058392290964,
+          "response_mm": 0.04683685539891463,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.008160369364259987,
+          "response_y_mm": -0.049212710506988784,
+          "response_mm": 0.04988469207688705,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.00904784944993655,
+          "response_y_mm": -0.04635791551717956,
+          "response_mm": 0.04723261490502802,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.009360829399234593,
+        "correction_y_mm": -0.04742164721494921,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0011088199012925853,
+        "validation_residual_x_mm": 0.00031297994929804264,
+        "validation_residual_y_mm": 0.001063731697769646,
+        "validation_response_x_mm": -0.00904784944993655,
+        "validation_response_y_mm": -0.04635791551717956
+      }
+    },
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": 25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04600627453889442,
+          "response_y_mm": -0.00024364638778765803,
+          "response_mm": 0.046006919702479616,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04729077723491301,
+          "response_y_mm": 0.002224066803738528,
+          "response_mm": 0.04734304684565262,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04895708836258335,
+          "response_y_mm": 0.0010591961561287008,
+          "response_mm": 0.04896854497980261,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04664852588690371,
+        "correction_y_mm": 0.0009902102079754349,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0023095929869045516,
+        "validation_residual_x_mm": -0.0023085624756796347,
+        "validation_residual_y_mm": 0.00006898594815326589,
+        "validation_response_x_mm": -0.04895708836258335,
+        "validation_response_y_mm": 0.0010591961561287008
+      }
+    },
+    {
+      "feed_mm_per_min": 1200,
+      "x_offset_mm": 25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.05254552641434533,
+          "response_y_mm": -0.051336152945422577,
+          "response_mm": 0.07346041754166989,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.052985579768252175,
+          "response_y_mm": -0.051484282378132004,
+          "response_mm": 0.07387897532701064,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.05239714122991404,
+          "response_y_mm": -0.05172822994108119,
+          "response_mm": 0.07362927530476533,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.05276555309129875,
+        "correction_y_mm": -0.051410217661777294,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0004866817331655357,
+        "validation_residual_x_mm": 0.0003684118613847126,
+        "validation_residual_y_mm": -0.0003180122793038989,
+        "validation_response_x_mm": -0.05239714122991404,
+        "validation_response_y_mm": -0.05172822994108119
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": -25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "negative",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.016139790748014565,
+          "response_y_mm": -0.05159591382838065,
+          "response_mm": 0.054061364847508044,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.01596175217094447,
+          "response_y_mm": -0.05211033912289717,
+          "response_mm": 0.054500137393129554,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.01489070043166291,
+          "response_y_mm": -0.05289715161119885,
+          "response_mm": 0.054953085517773094,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.016050771459479515,
+        "correction_y_mm": -0.05185312647563891,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0015606899990902841,
+        "validation_residual_x_mm": 0.0011600710278166053,
+        "validation_residual_y_mm": -0.0010440251355599423,
+        "validation_response_x_mm": -0.01489070043166291,
+        "validation_response_y_mm": -0.05289715161119885
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": 25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "positive",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.043829043320756406,
+          "response_y_mm": -0.054464976889266103,
+          "response_mm": 0.06991007614043224,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04486811320334206,
+          "response_y_mm": -0.05605707586348104,
+          "response_mm": 0.07180211234213091,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.0448047221522001,
+          "response_y_mm": -0.05628454059701438,
+          "response_mm": 0.07194034082038263,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04434857826204923,
+        "correction_y_mm": -0.055261026376373576,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0011205572758123197,
+        "validation_residual_x_mm": -0.0004561438901508688,
+        "validation_residual_y_mm": -0.0010235142206408074,
+        "validation_response_x_mm": -0.0448047221522001,
+        "validation_response_y_mm": -0.05628454059701438
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": 0,
+      "y_offset_mm": -25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0434955987146269,
+          "response_y_mm": -0.013019309686603782,
+          "response_mm": 0.04540230756536003,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.043818734397573576,
+          "response_y_mm": -0.0123868641839616,
+          "response_mm": 0.04553587474197689,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04393397482441082,
+          "response_y_mm": -0.011222910182400148,
+          "response_mm": 0.04534476658705153,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04365716655610024,
+        "correction_y_mm": -0.01270308693528269,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0015058373209543615,
+        "validation_residual_x_mm": -0.00027680826831057853,
+        "validation_residual_y_mm": 0.0014801767528825425,
+        "validation_response_x_mm": -0.04393397482441082,
+        "validation_response_y_mm": -0.011222910182400148
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": 0,
+      "y_offset_mm": 25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04358510535817704,
+          "response_y_mm": -0.04974399509325315,
+          "response_mm": 0.06613717908197314,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04323593311297965,
+          "response_y_mm": -0.04996537744503195,
+          "response_mm": 0.06607484283276471,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.042971023438164654,
+          "response_y_mm": -0.05053413332141583,
+          "response_mm": 0.06633405977226123,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04341051923557834,
+        "correction_y_mm": -0.04985468626914255,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0008092001314799368,
+        "validation_residual_x_mm": 0.0004394957974136887,
+        "validation_residual_y_mm": -0.0006794470522732826,
+        "validation_response_x_mm": -0.042971023438164654,
+        "validation_response_y_mm": -0.05053413332141583
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": -25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.00937203376977912,
+          "response_y_mm": -0.004477044890675078,
+          "response_mm": 0.010386479092310351,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.010223180988916773,
+          "response_y_mm": -0.0048815447035429225,
+          "response_mm": 0.011328852908606295,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.009278200210061961,
+          "response_y_mm": -0.004466821470536527,
+          "response_mm": 0.01029745081015879,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.009797607379347947,
+        "correction_y_mm": -0.004679294797109001,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0005611851049435061,
+        "validation_residual_x_mm": 0.0005194071692859858,
+        "validation_residual_y_mm": 0.00021247332657247427,
+        "validation_response_x_mm": -0.009278200210061961,
+        "validation_response_y_mm": -0.004466821470536527
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": -25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.011389641918839965,
+          "response_y_mm": -0.05905502452015355,
+          "response_mm": 0.06014332767743512,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.010999120018490922,
+          "response_y_mm": -0.05916038812815366,
+          "response_mm": 0.06017418187773684,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.012715631180373933,
+          "response_y_mm": -0.060597812977636015,
+          "response_mm": 0.06191754366888152,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.011194380968665443,
+        "correction_y_mm": -0.0591077063241536,
+        "training_samples": 2,
+        "validation_residual_mm": 0.002129464732127695,
+        "validation_residual_x_mm": -0.0015212502117084893,
+        "validation_residual_y_mm": -0.001490106653482412,
+        "validation_response_x_mm": -0.012715631180373933,
+        "validation_response_y_mm": -0.060597812977636015
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": 25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04273398409070502,
+          "response_y_mm": -0.0009277533974144773,
+          "response_mm": 0.042744053652304013,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.044016297124861686,
+          "response_y_mm": -0.0012504818417916617,
+          "response_mm": 0.04403405633621275,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.045294495255391885,
+          "response_y_mm": -0.0003117624549136733,
+          "response_mm": 0.04529556817470128,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04337514060778336,
+        "correction_y_mm": -0.0010891176196030695,
+        "training_samples": 2,
+        "validation_residual_mm": 0.002070797748541787,
+        "validation_residual_x_mm": -0.0019193546476085274,
+        "validation_residual_y_mm": 0.0007773551646893962,
+        "validation_response_x_mm": -0.045294495255391885,
+        "validation_response_y_mm": -0.0003117624549136733
+      }
+    },
+    {
+      "feed_mm_per_min": 6000,
+      "x_offset_mm": 25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04863568958410772,
+          "response_y_mm": -0.05780257129524226,
+          "response_mm": 0.0755418264914428,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04726890246611474,
+          "response_y_mm": -0.059824477091984546,
+          "response_mm": 0.0762451126281577,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04800005241949023,
+          "response_y_mm": -0.059850751544804605,
+          "response_mm": 0.07672103683313815,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04795229602511123,
+        "correction_y_mm": -0.0588135241936134,
+        "training_samples": 2,
+        "validation_residual_mm": 0.00103832617768368,
+        "validation_residual_x_mm": -0.0000477563943789977,
+        "validation_residual_y_mm": -0.0010372273511912028,
+        "validation_response_x_mm": -0.04800005241949023,
+        "validation_response_y_mm": -0.059850751544804605
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": -25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "negative",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.013580073804516164,
+          "response_y_mm": -0.05717750203554622,
+          "response_mm": 0.05876806227502314,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.01185858773448607,
+          "response_y_mm": -0.057502131051901495,
+          "response_mm": 0.05871218935252336,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.012882291021175492,
+          "response_y_mm": -0.05705895015976387,
+          "response_mm": 0.05849510419931463,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.012719330769501117,
+        "correction_y_mm": -0.05733981654372386,
+        "training_samples": 2,
+        "validation_residual_mm": 0.00032471829216188994,
+        "validation_residual_x_mm": -0.00016296025167437597,
+        "validation_residual_y_mm": 0.0002808663839599865,
+        "validation_response_x_mm": -0.012882291021175492,
+        "validation_response_y_mm": -0.05705895015976387
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": 25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "positive",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04477850670476916,
+          "response_y_mm": -0.05852283959371213,
+          "response_mm": 0.07368878759228174,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04561648704095702,
+          "response_y_mm": -0.0597818290066973,
+          "response_mm": 0.07519794524682037,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.046342323141241995,
+          "response_y_mm": -0.060584357324928235,
+          "response_mm": 0.07627630868495065,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04519749687286309,
+        "correction_y_mm": -0.05915233430020471,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0018333895189262656,
+        "validation_residual_x_mm": -0.001144826268378904,
+        "validation_residual_y_mm": -0.0014320230247235263,
+        "validation_response_x_mm": -0.046342323141241995,
+        "validation_response_y_mm": -0.060584357324928235
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": 0,
+      "y_offset_mm": -25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04277043799836722,
+          "response_y_mm": -0.015749934398718145,
+          "response_mm": 0.04557818337906963,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.042682793534965416,
+          "response_y_mm": -0.014814633801615854,
+          "response_mm": 0.04518068435321077,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.043391573014939705,
+          "response_y_mm": -0.01340255576413962,
+          "response_mm": 0.04541428310258476,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.042726615766666316,
+        "correction_y_mm": -0.015282284100167,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0019938773180152233,
+        "validation_residual_x_mm": -0.0006649572482733887,
+        "validation_residual_y_mm": 0.0018797283360273802,
+        "validation_response_x_mm": -0.043391573014939705,
+        "validation_response_y_mm": -0.01340255576413962
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": 0,
+      "y_offset_mm": 25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.044459596974386714,
+          "response_y_mm": -0.0523299578348353,
+          "response_mm": 0.06866644195034818,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04440322739842293,
+          "response_y_mm": -0.05244364777126,
+          "response_mm": 0.06871668498226643,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04453347324863527,
+          "response_y_mm": -0.05182300737379344,
+          "response_mm": 0.068329015307197,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.044431412186404826,
+        "correction_y_mm": -0.05238680280304765,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0005729587650708821,
+        "validation_residual_x_mm": -0.00010206106223044353,
+        "validation_residual_y_mm": 0.0005637954292542144,
+        "validation_response_x_mm": -0.04453347324863527,
+        "validation_response_y_mm": -0.05182300737379344
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": -25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.00949089208797737,
+          "response_y_mm": -0.006305492402549129,
+          "response_mm": 0.011394571824524,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.009576821489364087,
+          "response_y_mm": -0.005105538953334504,
+          "response_mm": 0.010852743332593917,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.006956335819476774,
+          "response_y_mm": -0.003886177000349607,
+          "response_mm": 0.00796824822099449,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.009533856788670728,
+        "correction_y_mm": -0.005705515677941817,
+        "training_samples": 2,
+        "validation_residual_mm": 0.003154933845648354,
+        "validation_residual_x_mm": 0.002577520969193954,
+        "validation_residual_y_mm": 0.00181933867759221,
+        "validation_response_x_mm": -0.006956335819476774,
+        "validation_response_y_mm": -0.003886177000349607
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": -25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.013144023291154841,
+          "response_y_mm": -0.04387916288335098,
+          "response_mm": 0.04580552678031405,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.012824869877460676,
+          "response_y_mm": -0.04333063217072849,
+          "response_mm": 0.04518872615696053,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.01359717521926668,
+          "response_y_mm": -0.04931697423169582,
+          "response_mm": 0.0511570828069114,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.012984446584307759,
+        "correction_y_mm": -0.043604897527039735,
+        "training_samples": 2,
+        "validation_residual_mm": 0.005744846095412249,
+        "validation_residual_x_mm": -0.0006127286349589221,
+        "validation_residual_y_mm": -0.005712076704656087,
+        "validation_response_x_mm": -0.01359717521926668,
+        "validation_response_y_mm": -0.04931697423169582
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": 25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0444632896129544,
+          "response_y_mm": -0.0008590185392177549,
+          "response_mm": 0.044471586839870896,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04388063561830521,
+          "response_y_mm": -0.0033291508943584704,
+          "response_mm": 0.04400674298268259,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04410921284390867,
+          "response_y_mm": -0.003217292364962723,
+          "response_mm": 0.044226390626761355,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.044171962615629806,
+        "correction_y_mm": -0.0020940847167881128,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0011249590902646166,
+        "validation_residual_x_mm": 0.00006274977172113921,
+        "validation_residual_y_mm": -0.00112320764817461,
+        "validation_response_x_mm": -0.04410921284390867,
+        "validation_response_y_mm": -0.003217292364962723
+      }
+    },
+    {
+      "feed_mm_per_min": 12000,
+      "x_offset_mm": 25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04804325524227618,
+          "response_y_mm": -0.048101015971226964,
+          "response_mm": 0.06798427841595973,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.0489963551690278,
+          "response_y_mm": -0.054741548052479355,
+          "response_mm": 0.07346618203657669,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04912755042599589,
+          "response_y_mm": -0.05069772325200432,
+          "response_mm": 0.07059585932471953,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04851980520565199,
+        "correction_y_mm": -0.051421282011853156,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0009449293792685483,
+        "validation_residual_x_mm": -0.0006077452203439027,
+        "validation_residual_y_mm": 0.0007235587598488358,
+        "validation_response_x_mm": -0.04912755042599589,
+        "validation_response_y_mm": -0.05069772325200432
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "negative",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.01259080232059277,
+          "response_y_mm": -0.04811747714278082,
+          "response_mm": 0.04973751008707894,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.014728955127600044,
+          "response_y_mm": -0.04808030546559776,
+          "response_mm": 0.05028576232708464,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.014107498015165035,
+          "response_y_mm": -0.04865349924029663,
+          "response_mm": 0.05065752153997894,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.013659878724096406,
+        "correction_y_mm": -0.04809889130418929,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0007127082099499266,
+        "validation_residual_x_mm": -0.00044761929106862906,
+        "validation_residual_y_mm": -0.000554607936107343,
+        "validation_response_x_mm": -0.014107498015165035,
+        "validation_response_y_mm": -0.04865349924029663
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 25,
+      "y_offset_mm": 0,
+      "distance_mm": 25,
+      "x_approach": "positive",
+      "y_approach": null,
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.046054552511500584,
+          "response_y_mm": -0.050243398701594284,
+          "response_mm": 0.0681573247723378,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04635368202382093,
+          "response_y_mm": -0.05167129448889774,
+          "response_mm": 0.06941603929441591,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04672998486230424,
+          "response_y_mm": -0.05351745937747409,
+          "response_mm": 0.07104794116264575,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04620411726766076,
+        "correction_y_mm": -0.05095734659524601,
+        "training_samples": 2,
+        "validation_residual_mm": 0.002613563503116713,
+        "validation_residual_x_mm": -0.0005258675946434796,
+        "validation_residual_y_mm": -0.0025601127822280773,
+        "validation_response_x_mm": -0.04672998486230424,
+        "validation_response_y_mm": -0.05351745937747409
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 0,
+      "y_offset_mm": -25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.0429722689240147,
+          "response_y_mm": -0.013332672758999606,
+          "response_mm": 0.04499306679230045,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.042213046737160996,
+          "response_y_mm": -0.012570912554377657,
+          "response_mm": 0.04404508096579626,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.042303278376192334,
+          "response_y_mm": -0.01279769447559836,
+          "response_mm": 0.04419670061514075,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04259265783058785,
+        "correction_y_mm": -0.01295179265668863,
+        "training_samples": 2,
+        "validation_residual_mm": 0.00032785167079271563,
+        "validation_residual_x_mm": 0.0002893794543955136,
+        "validation_residual_y_mm": 0.00015409818109027133,
+        "validation_response_x_mm": -0.042303278376192334,
+        "validation_response_y_mm": -0.01279769447559836
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 0,
+      "y_offset_mm": 25,
+      "distance_mm": 25,
+      "x_approach": null,
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.043959442252451325,
+          "response_y_mm": -0.05453365489243997,
+          "response_mm": 0.0700453572984987,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04342746700423919,
+          "response_y_mm": -0.05263269580656611,
+          "response_mm": 0.06823595502571064,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04351330912543341,
+          "response_y_mm": -0.053212285992079555,
+          "response_mm": 0.0687383113812697,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04369345462834526,
+        "correction_y_mm": -0.05358317534950304,
+        "training_samples": 2,
+        "validation_residual_mm": 0.00041232428702341783,
+        "validation_residual_x_mm": 0.00018014550291185066,
+        "validation_residual_y_mm": 0.0003708893574234859,
+        "validation_response_x_mm": -0.04351330912543341,
+        "validation_response_y_mm": -0.053212285992079555
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.007490287589261719,
+          "response_y_mm": -0.00655577540518891,
+          "response_mm": 0.009954024278307138,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.008602395276526875,
+          "response_y_mm": -0.007343826592099511,
+          "response_mm": 0.01131074681479697,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.007903590340606281,
+          "response_y_mm": -0.004384294168409176,
+          "response_mm": 0.009038184310317622,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.008046341432894297,
+        "correction_y_mm": -0.006949800998644211,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0025694752713992085,
+        "validation_residual_x_mm": 0.00014275109228801576,
+        "validation_residual_y_mm": 0.0025655068302350348,
+        "validation_response_x_mm": -0.007903590340606281,
+        "validation_response_y_mm": -0.004384294168409176
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": -25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "negative",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.013088079597502893,
+          "response_y_mm": -0.044028750445448704,
+          "response_mm": 0.04593287159908654,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.013381912773001575,
+          "response_y_mm": -0.04984693123966219,
+          "response_mm": 0.051611937993799775,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.012845656925009073,
+          "response_y_mm": -0.0447268257352368,
+          "response_mm": 0.04653493141915301,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.013234996185252234,
+        "correction_y_mm": -0.04693784084255545,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0022450329316867483,
+        "validation_residual_x_mm": 0.00038933926024316105,
+        "validation_residual_y_mm": 0.0022110151073186507,
+        "validation_response_x_mm": -0.012845656925009073,
+        "validation_response_y_mm": -0.0447268257352368
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 25,
+      "y_offset_mm": -25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "negative",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04377528520663442,
+          "response_y_mm": -0.002405803196445928,
+          "response_mm": 0.043841344458652454,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04483699042582068,
+          "response_y_mm": -0.0048804876875253094,
+          "response_mm": 0.04510182779570271,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.04364965431498625,
+          "response_y_mm": -0.004663245497227297,
+          "response_mm": 0.043898043013159575,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.04430613781622755,
+        "correction_y_mm": -0.0036431454419856187,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0012130847909796406,
+        "validation_residual_x_mm": 0.0006564835012413048,
+        "validation_residual_y_mm": -0.0010201000552416788,
+        "validation_response_x_mm": -0.04364965431498625,
+        "validation_response_y_mm": -0.004663245497227297
+      }
+    },
+    {
+      "feed_mm_per_min": 23000,
+      "x_offset_mm": 25,
+      "y_offset_mm": 25,
+      "distance_mm": 35.35533905932738,
+      "x_approach": "positive",
+      "y_approach": "positive",
+      "samples": [
+        {
+          "sample": 1,
+          "response_x_mm": -0.04781937748801901,
+          "response_y_mm": -0.055786495745732405,
+          "response_mm": 0.07347670359324973,
+          "observation_valid": true
+        },
+        {
+          "sample": 2,
+          "response_x_mm": -0.04941418467569931,
+          "response_y_mm": -0.05350574578583517,
+          "response_mm": 0.07283286675164266,
+          "observation_valid": true
+        },
+        {
+          "sample": 3,
+          "response_x_mm": -0.048683794372510754,
+          "response_y_mm": -0.05710222494039364,
+          "response_mm": 0.07503849630455173,
+          "observation_valid": true
+        }
+      ],
+      "fit": {
+        "correction_x_mm": -0.048616781081859156,
+        "correction_y_mm": -0.05464612076578379,
+        "training_samples": 2,
+        "validation_residual_mm": 0.0024570182127244965,
+        "validation_residual_x_mm": -0.00006701329065159772,
+        "validation_residual_y_mm": -0.002456104174609848,
+        "validation_response_x_mm": -0.048683794372510754,
+        "validation_response_y_mm": -0.05710222494039364
+      }
+    }
+  ]
+}

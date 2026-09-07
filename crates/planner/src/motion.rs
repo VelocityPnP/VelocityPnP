@@ -3,7 +3,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use velocitypnp_domain::{
     ApproachSide, Bounds, LinearAxis, LocalXyAxisDirectionReport, LocalXyDirectionResponseReport,
-    Pose,
+    PlanarXyDirectionResponseNode, PlanarXyDirectionResponseSurface, Pose,
 };
 
 const DIRECTION_EPSILON_MM: f64 = 1e-9;
@@ -27,6 +27,7 @@ pub struct MotionCalibration {
     datum_y_approach: ApproachSide,
     datum_approach_feed_mm_per_min: f64,
     datum_compensation_mm: [f64; 2],
+    planar_surfaces: Vec<PlanarXyMotionSurface>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +41,198 @@ struct AxisDirectionCompensation {
     feed_mm_per_min: f64,
     negative_approach_mm: [f64; 2],
     positive_approach_mm: [f64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanarXyMotionSurface {
+    feed_mm_per_min: f64,
+    x_distances_mm: Vec<f64>,
+    y_distances_mm: Vec<f64>,
+    nodes: Vec<PlanarXyDirectionResponseNode>,
+}
+
+impl PlanarXyMotionSurface {
+    pub fn from_report(report: &PlanarXyDirectionResponseSurface) -> Result<Self, MotionPlanError> {
+        if !report.passed
+            || !report.feed_mm_per_min.is_finite()
+            || report.feed_mm_per_min <= 0.0
+            || !report.maximum_validation_residual_mm.is_finite()
+            || !report.independent_validation_mean_residual_mm.is_finite()
+            || !report
+                .independent_validation_maximum_residual_mm
+                .is_finite()
+            || report.independent_validation_mean_residual_mm < 0.0
+            || report.independent_validation_maximum_residual_mm < 0.0
+            || report.maximum_validation_residual_mm < 0.0
+        {
+            return Err(MotionPlanError::InvalidPlanarSurface);
+        }
+        validate_distance_axis(&report.x_distances_mm)?;
+        validate_distance_axis(&report.y_distances_mm)?;
+        let expected_nodes = report.x_distances_mm.len() * report.y_distances_mm.len() * 4;
+        if report.nodes.len() != expected_nodes {
+            return Err(MotionPlanError::IncompletePlanarSurface);
+        }
+        for x_approach in [ApproachSide::Negative, ApproachSide::Positive] {
+            for y_approach in [ApproachSide::Negative, ApproachSide::Positive] {
+                for x_distance_mm in &report.x_distances_mm {
+                    for y_distance_mm in &report.y_distances_mm {
+                        let matches = report
+                            .nodes
+                            .iter()
+                            .filter(|node| {
+                                node.x_approach == x_approach
+                                    && node.y_approach == y_approach
+                                    && (node.x_distance_mm - x_distance_mm).abs()
+                                        < DIRECTION_EPSILON_MM
+                                    && (node.y_distance_mm - y_distance_mm).abs()
+                                        < DIRECTION_EPSILON_MM
+                            })
+                            .count();
+                        if matches != 1 {
+                            return Err(MotionPlanError::IncompletePlanarSurface);
+                        }
+                    }
+                }
+            }
+        }
+        if report.nodes.iter().any(|node| {
+            !node.qualified
+                || [
+                    node.x_distance_mm,
+                    node.y_distance_mm,
+                    node.correction_x_mm,
+                    node.correction_y_mm,
+                    node.validation_residual_x_mm,
+                    node.validation_residual_y_mm,
+                    node.validation_residual_mm,
+                ]
+                .iter()
+                .any(|value| !value.is_finite())
+                || node.x_distance_mm <= 0.0
+                || node.y_distance_mm <= 0.0
+                || node.validation_residual_mm < 0.0
+                || (node
+                    .validation_residual_x_mm
+                    .hypot(node.validation_residual_y_mm)
+                    - node.validation_residual_mm)
+                    .abs()
+                    > DIRECTION_EPSILON_MM
+        }) {
+            return Err(MotionPlanError::InvalidPlanarSurface);
+        }
+        let observed_maximum = report
+            .nodes
+            .iter()
+            .map(|node| node.validation_residual_mm)
+            .fold(0.0_f64, f64::max);
+        if report.independent_validation_sample_count == 0
+            || report.independent_validation_mean_residual_mm
+                > report.independent_validation_maximum_residual_mm
+            || (observed_maximum - report.maximum_validation_residual_mm).abs()
+                > DIRECTION_EPSILON_MM
+        {
+            return Err(MotionPlanError::InvalidPlanarSurface);
+        }
+        Ok(Self {
+            feed_mm_per_min: report.feed_mm_per_min,
+            x_distances_mm: report.x_distances_mm.clone(),
+            y_distances_mm: report.y_distances_mm.clone(),
+            nodes: report.nodes.clone(),
+        })
+    }
+
+    pub fn feed_mm_per_min(&self) -> f64 {
+        self.feed_mm_per_min
+    }
+
+    pub fn supports(&self, x_distance_mm: f64, y_distance_mm: f64) -> bool {
+        distance_bracket(&self.x_distances_mm, x_distance_mm).is_some()
+            && distance_bracket(&self.y_distances_mm, y_distance_mm).is_some()
+    }
+
+    fn exceeds_maximum(&self, x_distance_mm: f64, y_distance_mm: f64) -> bool {
+        x_distance_mm > *self.x_distances_mm.last().unwrap() + DIRECTION_EPSILON_MM
+            || y_distance_mm > *self.y_distances_mm.last().unwrap() + DIRECTION_EPSILON_MM
+    }
+
+    pub fn correction(
+        &self,
+        x_approach: ApproachSide,
+        y_approach: ApproachSide,
+        x_distance_mm: f64,
+        y_distance_mm: f64,
+    ) -> Result<[f64; 2], MotionPlanError> {
+        let (x_low, x_high, x_weight) = distance_bracket(&self.x_distances_mm, x_distance_mm)
+            .ok_or(MotionPlanError::UnqualifiedPlanarDistance)?;
+        let (y_low, y_high, y_weight) = distance_bracket(&self.y_distances_mm, y_distance_mm)
+            .ok_or(MotionPlanError::UnqualifiedPlanarDistance)?;
+        let node = |x_index: usize, y_index: usize| {
+            self.nodes
+                .iter()
+                .find(|node| {
+                    node.x_approach == x_approach
+                        && node.y_approach == y_approach
+                        && (node.x_distance_mm - self.x_distances_mm[x_index]).abs()
+                            < DIRECTION_EPSILON_MM
+                        && (node.y_distance_mm - self.y_distances_mm[y_index]).abs()
+                            < DIRECTION_EPSILON_MM
+                })
+                .ok_or(MotionPlanError::IncompletePlanarSurface)
+        };
+        let low_low = node(x_low, y_low)?;
+        let high_low = node(x_high, y_low)?;
+        let low_high = node(x_low, y_high)?;
+        let high_high = node(x_high, y_high)?;
+        let interpolate = |component: fn(&PlanarXyDirectionResponseNode) -> f64| {
+            let low = linear_interpolate(component(low_low), component(high_low), x_weight);
+            let high = linear_interpolate(component(low_high), component(high_high), x_weight);
+            linear_interpolate(low, high, y_weight)
+        };
+        Ok([
+            interpolate(|node| node.correction_x_mm),
+            interpolate(|node| node.correction_y_mm),
+        ])
+    }
+}
+
+fn validate_distance_axis(distances_mm: &[f64]) -> Result<(), MotionPlanError> {
+    if distances_mm.len() < 2
+        || distances_mm
+            .iter()
+            .any(|distance| !distance.is_finite() || *distance <= 0.0)
+        || distances_mm.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(MotionPlanError::InvalidPlanarSurface);
+    }
+    Ok(())
+}
+
+fn distance_bracket(distances_mm: &[f64], distance_mm: f64) -> Option<(usize, usize, f64)> {
+    if !distance_mm.is_finite()
+        || distance_mm < *distances_mm.first()?
+        || distance_mm > *distances_mm.last()?
+    {
+        return None;
+    }
+    let high = distances_mm.partition_point(|candidate| *candidate < distance_mm);
+    if high == 0 {
+        return Some((0, 0, 0.0));
+    }
+    if high == distances_mm.len() {
+        let last = high - 1;
+        return Some((last, last, 0.0));
+    }
+    if (distances_mm[high] - distance_mm).abs() < DIRECTION_EPSILON_MM {
+        return Some((high, high, 0.0));
+    }
+    let low = high - 1;
+    let weight = (distance_mm - distances_mm[low]) / (distances_mm[high] - distances_mm[low]);
+    Some((low, high, weight))
+}
+
+fn linear_interpolate(low: f64, high: f64, weight: f64) -> f64 {
+    low + (high - low) * weight
 }
 
 impl MotionCalibration {
@@ -88,6 +281,18 @@ impl MotionCalibration {
         };
         let datum_x = component(&x, report.datum_x_approach, LinearAxis::X)?;
         let datum_y = component(&y, report.datum_y_approach, LinearAxis::Y)?;
+        let planar_surfaces = report
+            .planar_surfaces
+            .iter()
+            .map(PlanarXyMotionSurface::from_report)
+            .collect::<Result<Vec<_>, _>>()?;
+        if planar_surfaces.iter().enumerate().any(|(index, surface)| {
+            planar_surfaces[..index].iter().any(|prior| {
+                (prior.feed_mm_per_min - surface.feed_mm_per_min).abs() < FEED_EPSILON_MM_PER_MIN
+            })
+        }) {
+            return Err(MotionPlanError::DuplicatePlanarFeed);
+        }
         Ok(Self {
             identity: MotionCalibrationIdentity {
                 snapshot_id,
@@ -99,6 +304,7 @@ impl MotionCalibration {
             datum_y_approach: report.datum_y_approach,
             datum_approach_feed_mm_per_min: report.datum_approach_feed_mm_per_min,
             datum_compensation_mm: [datum_x[0] + datum_y[0], datum_x[1] + datum_y[1]],
+            planar_surfaces,
         })
     }
 
@@ -140,7 +346,37 @@ impl MotionCalibration {
                 }
             }
         }
+        for surface in &self.planar_surfaces {
+            for node in &surface.nodes {
+                maximum[0] = maximum[0].max(node.correction_x_mm.abs());
+                maximum[1] = maximum[1].max(node.correction_y_mm.abs());
+            }
+        }
         maximum
+    }
+
+    fn planar_correction(
+        &self,
+        x_approach: ApproachSide,
+        y_approach: ApproachSide,
+        x_distance_mm: f64,
+        y_distance_mm: f64,
+        feed_mm_per_min: f64,
+    ) -> Result<Option<[f64; 2]>, MotionPlanError> {
+        let Some(surface) = self.planar_surfaces.iter().find(|surface| {
+            (surface.feed_mm_per_min - feed_mm_per_min).abs() < FEED_EPSILON_MM_PER_MIN
+        }) else {
+            return Ok(None);
+        };
+        if surface.exceeds_maximum(x_distance_mm, y_distance_mm) {
+            return Err(MotionPlanError::UnqualifiedPlanarDistance);
+        }
+        if !surface.supports(x_distance_mm, y_distance_mm) {
+            return Ok(None);
+        }
+        surface
+            .correction(x_approach, y_approach, x_distance_mm, y_distance_mm)
+            .map(Some)
     }
 }
 
@@ -415,20 +651,34 @@ impl MotionPlanner {
             .or(state.y_approach_feed_mm_per_min);
         let mut correction = [0.0, 0.0];
         if let Some(calibration) = &self.calibration {
-            for (axis, approach) in [
-                (LinearAxis::X, x_approach.zip(x_feed)),
-                (LinearAxis::Y, y_approach.zip(y_feed)),
-            ] {
-                if let Some((side, feed)) = approach {
-                    let component = calibration.correction(axis, side, feed)?;
-                    correction[0] += component[0];
-                    correction[1] += component[1];
+            let planar = match (x_move, y_move) {
+                (Some(x_side), Some(y_side)) => calibration.planar_correction(
+                    x_side,
+                    y_side,
+                    (logical_target.x_mm - state.logical_pose.x_mm).abs(),
+                    (logical_target.y_mm - state.logical_pose.y_mm).abs(),
+                    feed_mm_per_min,
+                )?,
+                _ => None,
+            };
+            if let Some(planar) = planar {
+                correction = planar;
+            } else {
+                for (axis, approach) in [
+                    (LinearAxis::X, x_approach.zip(x_feed)),
+                    (LinearAxis::Y, y_approach.zip(y_feed)),
+                ] {
+                    if let Some((side, feed)) = approach {
+                        let component = calibration.correction(axis, side, feed)?;
+                        correction[0] += component[0];
+                        correction[1] += component[1];
+                    }
                 }
+                // Fine home assigns the nominal datum after this exact approach.
+                // Remove that observed travel response from all later targets.
+                correction[0] -= calibration.datum_compensation_mm[0];
+                correction[1] -= calibration.datum_compensation_mm[1];
             }
-            // Fine home assigns the nominal datum after this exact approach.
-            // Remove that observed travel response from all later targets.
-            correction[0] -= calibration.datum_compensation_mm[0];
-            correction[1] -= calibration.datum_compensation_mm[1];
         }
         Ok(CalibratedTarget {
             controller_target: Pose {
@@ -500,6 +750,14 @@ pub enum MotionPlanError {
     },
     #[error("disabled {0:?} compensation is nonzero")]
     DisabledCompensationIsNonzero(LinearAxis),
+    #[error("planar XY response surface is invalid")]
+    InvalidPlanarSurface,
+    #[error("planar XY response surface does not contain each grid node once")]
+    IncompletePlanarSurface,
+    #[error("planar XY response repeats a feed")]
+    DuplicatePlanarFeed,
+    #[error("XY move distance is outside the planar response surface")]
+    UnqualifiedPlanarDistance,
     #[error("logical target contains a non-finite coordinate")]
     NonFiniteLogicalPose,
     #[error("controller pose contains a non-finite coordinate")]
@@ -598,6 +856,51 @@ mod tests {
         }
     }
 
+    fn planar_surface_report() -> PlanarXyDirectionResponseSurface {
+        let mut nodes = Vec::new();
+        for x_approach in [ApproachSide::Negative, ApproachSide::Positive] {
+            for y_approach in [ApproachSide::Negative, ApproachSide::Positive] {
+                for x_distance_mm in [5.0, 25.0] {
+                    for y_distance_mm in [5.0, 25.0] {
+                        let quadrant_x = if x_approach == ApproachSide::Negative {
+                            0.01
+                        } else {
+                            -0.01
+                        };
+                        let quadrant_y = if y_approach == ApproachSide::Negative {
+                            0.02
+                        } else {
+                            -0.02
+                        };
+                        nodes.push(PlanarXyDirectionResponseNode {
+                            x_approach,
+                            y_approach,
+                            x_distance_mm,
+                            y_distance_mm,
+                            correction_x_mm: quadrant_x + x_distance_mm * 0.001,
+                            correction_y_mm: quadrant_y + y_distance_mm * 0.002,
+                            validation_residual_x_mm: 0.001,
+                            validation_residual_y_mm: -0.001,
+                            validation_residual_mm: 2.0_f64.sqrt() * 0.001,
+                            qualified: true,
+                        });
+                    }
+                }
+            }
+        }
+        PlanarXyDirectionResponseSurface {
+            feed_mm_per_min: 300.0,
+            x_distances_mm: vec![5.0, 25.0],
+            y_distances_mm: vec![5.0, 25.0],
+            nodes,
+            maximum_validation_residual_mm: 2.0_f64.sqrt() * 0.001,
+            independent_validation_sample_count: 20,
+            independent_validation_mean_residual_mm: 0.005,
+            independent_validation_maximum_residual_mm: 0.01,
+            passed: true,
+        }
+    }
+
     fn calibration() -> MotionCalibration {
         let report = LocalXyDirectionResponseReport {
             datum_x_approach: ApproachSide::Negative,
@@ -613,6 +916,7 @@ mod tests {
                 axis_report(LinearAxis::X, [0.03, -0.005], [-0.03, 0.005]),
                 axis_report(LinearAxis::Y, [0.002, 0.02], [-0.002, -0.02]),
             ],
+            planar_surfaces: vec![],
             samples: vec![],
             passed: true,
             observed_at: Utc::now(),
@@ -628,6 +932,91 @@ mod tests {
             z_mm,
             rotation_deg: 0.0,
         }
+    }
+
+    #[test]
+    fn planar_surface_bilinearly_interpolates_a_quadrant() {
+        let surface = PlanarXyMotionSurface::from_report(&planar_surface_report()).unwrap();
+
+        let correction = surface
+            .correction(ApproachSide::Negative, ApproachSide::Positive, 15.0, 20.0)
+            .unwrap();
+
+        assert!((correction[0] - 0.025).abs() < 1e-12);
+        assert!((correction[1] - 0.020).abs() < 1e-12);
+    }
+
+    #[test]
+    fn planar_surface_rejects_an_understated_node_residual() {
+        let mut report = planar_surface_report();
+        report.maximum_validation_residual_mm = 0.0;
+
+        let error = PlanarXyMotionSurface::from_report(&report).unwrap_err();
+
+        assert_eq!(error, MotionPlanError::InvalidPlanarSurface);
+    }
+
+    #[test]
+    fn physical_planar_surface_is_complete_and_interpolates() {
+        let report: PlanarXyDirectionResponseSurface = serde_json::from_str(include_str!(
+            "../../../datasets/motion-model-qualification-2026-09-06/surface-23000.json"
+        ))
+        .unwrap();
+        let surface = PlanarXyMotionSurface::from_report(&report).unwrap();
+
+        let correction = surface
+            .correction(ApproachSide::Positive, ApproachSide::Positive, 175.0, 125.0)
+            .unwrap();
+
+        assert_eq!(surface.feed_mm_per_min(), 23_000.0);
+        assert!(surface.supports(5.0, 5.0));
+        assert!(surface.supports(200.0, 180.0));
+        assert!(!surface.supports(201.0, 180.0));
+        assert!((correction[0] - -0.047_514_864_359_342_25).abs() < 1e-12);
+        assert!((correction[1] - -0.090_762_570_971_710_13).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calibrated_diagonal_motion_uses_the_planar_surface() {
+        let mut calibration = calibration();
+        calibration.planar_surfaces =
+            vec![PlanarXyMotionSurface::from_report(&planar_surface_report()).unwrap()];
+        let planner = MotionPlanner::new(bounds(), Some(calibration));
+        let state = planner.initial_state(pose(50.0, 50.0, 10.0)).unwrap();
+
+        let planned = planner
+            .plan(
+                &state,
+                pose(65.0, 65.0, 10.0),
+                300.0,
+                MotionMode::Calibrated,
+            )
+            .unwrap();
+
+        assert!((planned.correction.local_direction_x_mm - 0.025).abs() < 1e-12);
+        assert!((planned.correction.local_direction_y_mm - 0.050).abs() < 1e-12);
+        assert!((planned.controller_target.x_mm - 65.025).abs() < 1e-12);
+        assert!((planned.controller_target.y_mm - 65.050).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calibrated_diagonal_motion_rejects_distance_beyond_the_surface() {
+        let mut calibration = calibration();
+        calibration.planar_surfaces =
+            vec![PlanarXyMotionSurface::from_report(&planar_surface_report()).unwrap()];
+        let planner = MotionPlanner::new(bounds(), Some(calibration));
+        let state = planner.initial_state(pose(50.0, 50.0, 10.0)).unwrap();
+
+        let error = planner
+            .plan(
+                &state,
+                pose(80.0, 60.0, 10.0),
+                300.0,
+                MotionMode::Calibrated,
+            )
+            .unwrap_err();
+
+        assert_eq!(error, MotionPlanError::UnqualifiedPlanarDistance);
     }
 
     #[test]

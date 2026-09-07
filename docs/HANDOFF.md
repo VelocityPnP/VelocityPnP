@@ -224,3 +224,34 @@ work moves to another computer.
 
 There is no project `SKILL.md`. `AGENTS.md` contains the current repository
 rules, so no skill was created or changed during closeout.
+
+## Planar XY motion model
+
+The active calibration now contains one four-quadrant response surface at
+23,000 mm/min. It covers 5-200 mm X travel and 5-180 mm Y travel. The planner
+uses bilinear interpolation for two-axis moves inside that range. It keeps the
+prior axis-direction model for single-axis moves, other feeds, and distances
+below the grid. It rejects a 23,000 mm/min diagonal move beyond the maximum X
+or Y distance.
+
+The independent surface holdout passed 108 of 108 samples. Mean residual was
+0.0178 mm and maximum residual was 0.04987 mm. Repeated raw nodes differed by
+up to 0.0323 mm between runs, mainly in Y. Do not tighten the 0.05 mm gate from
+this evidence.
+
+Active FTP board registration passed with 0.0314 mm maximum residual. Its
+long return to the datum passed at 0.0351 mm, down from 0.0634 mm. A ten-tile
+survey passed in 5.343 seconds and returned at 0.00525 mm. The machine ended
+ready, homed, and fault-free at X220.091 Y190.278 Z31.500. The daemon is the
+release build in the active terminal session.
+
+After the final range guard was added, the new release restarted cleanly.
+Connect, preflight, coarse home, and N2 fine home passed. The current pose is
+X220.123 Y190.234 Z31.500. The machine is ready, homed, and fault-free with
+the same calibration active. A no-move camera return then passed at 0.02347
+mm.
+
+The next motion task is a spatial holdout. Observe fixed plate holes from
+multiple approach quadrants at several workspace positions. Do not change
+acceleration during that test. The qualification data and attached surface
+are in `datasets/motion-model-qualification-2026-09-06`.
