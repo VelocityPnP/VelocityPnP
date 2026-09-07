@@ -16767,6 +16767,22 @@ struct VacuumProbeSearch {
 }
 
 impl VacuumProbeSearch {
+    fn around_characterization_contact(
+        contact_nozzle_z_mm: f64,
+        clearance_mm: f64,
+        step_mm: f64,
+        profile_start_nozzle_z_mm: f64,
+        profile_end_nozzle_z_mm: f64,
+    ) -> Self {
+        Self {
+            start_nozzle_z_mm: (contact_nozzle_z_mm + clearance_mm).min(profile_start_nozzle_z_mm),
+            // A contact probe can pass at exactly the minimum sensor delta.
+            // Give characterization one bounded follow-through step so normal
+            // sensor variation does not reject an otherwise valid contact.
+            end_nozzle_z_mm: (contact_nozzle_z_mm - step_mm).max(profile_end_nozzle_z_mm),
+        }
+    }
+
     fn around_fine_home_contact(
         contact_nozzle_z_mm: f64,
         profile_start_nozzle_z_mm: f64,
@@ -17083,14 +17099,15 @@ async fn start_vacuum_operation(
             probe.search_start_nozzle_z_mm,
             probe.search_end_nozzle_z_mm,
         ),
-        Some(contact_z_mm) => VacuumProbeSearch {
-            start_nozzle_z_mm: (contact_z_mm
-                + characterization_profile
-                    .unwrap()
-                    .characterization_clearance_mm)
-                .min(probe.search_start_nozzle_z_mm),
-            end_nozzle_z_mm: contact_z_mm,
-        },
+        Some(contact_z_mm) => VacuumProbeSearch::around_characterization_contact(
+            contact_z_mm,
+            characterization_profile
+                .unwrap()
+                .characterization_clearance_mm,
+            probe.step_mm,
+            probe.search_start_nozzle_z_mm,
+            probe.search_end_nozzle_z_mm,
+        ),
         None => VacuumProbeSearch {
             start_nozzle_z_mm: probe.search_start_nozzle_z_mm,
             end_nozzle_z_mm: probe.search_end_nozzle_z_mm,
@@ -17658,7 +17675,7 @@ async fn execute_vacuum_probe(
     };
     let characterization_values = if characterize {
         let contact = contact.as_ref().ok_or_else(|| {
-            "vacuum characterization did not reproduce contact at the stored safe Z".to_string()
+            characterization_missing_contact_message(search, &open_nozzle_raw_values, &samples)
         });
         match contact {
             Ok(_) => {
@@ -17898,9 +17915,35 @@ fn fine_home_missing_contact_message(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "fine home did not reproduce contact in the bounded datum interval \
+        "Fine home did not reproduce contact in the bounded datum interval \
          (nozzle Z{:.3} to Z{:.3}; open median {open_median}; \
-         signal deltas [{sample_deltas}])",
+         signal deltas [{sample_deltas}]).",
+        search.start_nozzle_z_mm, search.end_nozzle_z_mm,
+    )
+}
+
+fn characterization_missing_contact_message(
+    search: VacuumProbeSearch,
+    open_nozzle_raw_values: &[i64],
+    samples: &[VacuumProbeSample],
+) -> String {
+    let open_median = median_raw(open_nozzle_raw_values)
+        .map(|value| format!("{value:.1}"))
+        .unwrap_or_else(|| "unavailable".to_string());
+    let sample_deltas = samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "Z{:.3}:{:.1}",
+                sample.nozzle_z_mm, sample.signal_delta_counts
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Vacuum characterization did not reproduce contact in the bounded \
+         datum interval (nozzle Z{:.3} to Z{:.3}; open median {open_median}; \
+         signal deltas [{sample_deltas}]).",
         search.start_nozzle_z_mm, search.end_nozzle_z_mm,
     )
 }
@@ -39315,6 +39358,24 @@ mod tests {
     }
 
     #[test]
+    fn characterization_search_allows_one_bounded_follow_through_step() {
+        let search = VacuumProbeSearch::around_characterization_contact(3.4, 0.3, 0.1, 5.0, 3.0);
+        let targets = search.descent_targets(5.0, 0.1);
+
+        assert!((search.start_nozzle_z_mm - 3.7).abs() < 1e-9);
+        assert!((search.end_nozzle_z_mm - 3.3).abs() < 1e-9);
+        assert!((targets[0] - 3.7).abs() < 1e-9);
+        assert!((targets[4] - 3.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn characterization_search_does_not_exceed_the_profile_z_limit() {
+        let search = VacuumProbeSearch::around_characterization_contact(3.0, 0.3, 0.1, 5.0, 3.0);
+
+        assert!((search.end_nozzle_z_mm - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn fine_home_search_uses_the_full_allowed_correction_range() {
         let search = VacuumProbeSearch::around_fine_home_contact(3.4, 5.0, 3.0);
         assert!((search.start_nozzle_z_mm - 3.9).abs() < 1e-9);
@@ -39338,6 +39399,30 @@ mod tests {
         assert!(message.contains("nozzle Z3.900 to Z3.000"));
         assert!(message.contains("open median 237.0"));
         assert!(message.contains("signal deltas [Z3.000:7.0]"));
+        assert!(message.starts_with("Fine home"));
+        assert!(message.ends_with('.'));
+    }
+
+    #[test]
+    fn failed_characterization_message_keeps_sensor_evidence() {
+        let search = VacuumProbeSearch {
+            start_nozzle_z_mm: 3.7,
+            end_nozzle_z_mm: 3.3,
+        };
+        let samples = [VacuumProbeSample {
+            nozzle_z_mm: 3.3,
+            controller_z_mm: 3.3,
+            raw_values: vec![231, 230, 230],
+            median_raw_value: 230.0,
+            signal_delta_counts: 7.0,
+        }];
+        let message = characterization_missing_contact_message(search, &[237, 237, 238], &samples);
+
+        assert!(message.contains("nozzle Z3.700 to Z3.300"));
+        assert!(message.contains("open median 237.0"));
+        assert!(message.contains("signal deltas [Z3.300:7.0]"));
+        assert!(message.starts_with("Vacuum characterization"));
+        assert!(message.ends_with('.'));
     }
 
     #[test]
