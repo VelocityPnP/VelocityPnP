@@ -16,6 +16,21 @@ import "./styles.css";
 type Tab = "machine" | "calibration" | "boards" | "jobs";
 
 const EMPTY_POSE: Pose = { x_mm: 0, y_mm: 0, z_mm: 31.5, rotation_deg: 0 };
+const HEAD_GEOMETRY_PREREQUISITES = [
+  "coarse_homing", "camera_reproducibility", "visual_homing",
+];
+
+export function canSeedHeadGeometryRevision(
+  snapshot: Pick<CalibrationSnapshot, "completed_steps" | "values"> | null,
+): boolean {
+  if (!snapshot || !HEAD_GEOMETRY_PREREQUISITES.every(
+    (step) => snapshot.completed_steps.includes(step),
+  )) return false;
+  const visualHoming = snapshot.values.visual_homing;
+  if (!visualHoming || typeof visualHoming !== "object") return false;
+  const report = (visualHoming as { report?: { passed?: unknown } }).report;
+  return report?.passed === true;
+}
 
 export function canStartJob(
   status: Pick<MachineStatus, "state" | "homed" | "calibration_revision">,
@@ -610,9 +625,17 @@ function CalibrationPanel({ status, devices, setError }: {
 
   const runActive = Boolean(activeRun && ["pending", "running"].includes(activeRun.status));
   const machineReady = ["unhomed", "ready"].includes(status.state);
+  const activeParent = active?.parent_id
+    ? snapshots.find((snapshot) => snapshot.id === active.parent_id) ?? null
+    : null;
   const canRecalibrateHeadGeometry = Boolean(
-    active?.parent_id && status.state === "ready" && status.homed,
+    active?.parent_id
+      && activeParent?.id === active.parent_id
+      && canSeedHeadGeometryRevision(activeParent)
+      && status.state === "ready"
+      && status.homed,
   );
+  const canCreateRevision = canSeedHeadGeometryRevision(active);
   const canVacuumProbe = Boolean(active && completed.has("nozzle_height_model") && status.state === "ready" && status.homed);
   const canCharacterizeVacuum = (nozzleId: "N1" | "N2") => Boolean(
     canVacuumProbe && active?.values.vacuum_probe?.[nozzleId]?.passed,
@@ -635,9 +658,9 @@ function CalibrationPanel({ status, devices, setError }: {
       {status.simulated && <div className="notice">Simulation can exercise the runner but can never mark a machine production-ready.</div>}
       {!active ? <button onClick={() => void createSnapshot()}>Create calibration</button> : <>
         <div className="button-cluster">
-          <button disabled={starting || runActive || !machineReady} onClick={() => void start()}>{runActive ? "Calibration running" : activeRun ? "Run calibration again" : "Run initial calibration"}</button>
+          <button disabled={starting || runActive || !machineReady} onClick={() => void start()}>{runActive ? "Calibration running" : activeRun ? "Run full calibration again" : active.parent_id ? "Run full calibration" : "Run initial calibration"}</button>
           <button className="secondary" disabled={starting || runActive || !canRecalibrateHeadGeometry} onClick={() => void recalibrateHeadGeometry()}>Recalibrate head geometry</button>
-          <button className="secondary" disabled={starting || runActive} onClick={() => void createSnapshot()}>New revision</button>
+          <button className="secondary" disabled={starting || runActive || !canCreateRevision} onClick={() => void createSnapshot()}>New revision</button>
           <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N1")}>Probe N1 vacuum</button>
           <button className="secondary" disabled={starting || runActive || !canVacuumProbe} onClick={() => void vacuumProbe("N2")}>Probe N2 vacuum</button>
           <button className="secondary" disabled={starting || runActive || !canCharacterizeVacuum("N2")} onClick={() => void fineHome()}>Fine-home XYZ</button>
@@ -649,6 +672,10 @@ function CalibrationPanel({ status, devices, setError }: {
           <button className="secondary" disabled={starting || runActive || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
         </div>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
+        {active.parent_id && !canSeedHeadGeometryRevision(activeParent) && <div className="notice">
+          This revision cannot reuse its parent. The parent did not complete coarse homing,
+          camera verification, and visual homing. Run the full calibration for this revision.
+        </div>}
       </>}
       {active && status.calibration_revision === active.id && <div className="notice">Fine XYZ home is active for this calibration revision.</div>}
       {artifactPlan && <div className="run-result">
@@ -700,7 +727,7 @@ function CalibrationPanel({ status, devices, setError }: {
           {activeRun.installed_geometry_report.plate_geometry.registrations.map((registration) => <p key={registration.plate_id}>{pretty(registration.workspace_position)} {pretty(registration.role)} registration <strong>{registration.passed ? "passed" : "not found"}</strong>{registration.offset_x_mm !== null && registration.offset_y_mm !== null ? ` at ${registration.offset_x_mm.toFixed(3)} mm X, ${registration.offset_y_mm.toFixed(3)} mm Y` : ""}{registration.seeded_from_plate_id ? `; seeded from ${pretty(registration.seeded_from_plate_id)}` : ""}</p>)}
           {activeRun.installed_geometry_report.plate_geometry.limitations.map((limitation) => <p key={limitation}>{limitation}</p>)}
         </div>}
-        {activeRun.failure && <div className="notice">{activeRun.failure}</div>}
+        {activeRun.failure && <div className="notice">{formatErrorMessage(activeRun.failure)}</div>}
       </div>}
       <small>Machine measurements complete each automated step. Reciprocal camera geometry supplies the working-plane transfer. Manual target observations are diagnostic overrides only.</small>
     </section>
