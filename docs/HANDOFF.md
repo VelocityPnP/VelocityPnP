@@ -1,7 +1,7 @@
 # Session handoff
 
-This document records the state at the end of the 2026-09-06 hardware and
-vision session. Verify live state again before each new session.
+This document records the state at the end of the hardware, vision, and speed
+sessions through 2026-09-07. Verify live state again before each new session.
 
 ## Live state
 
@@ -12,8 +12,14 @@ vision session. Verify live state again before each new session.
   top-camera MJPEG at 30 FPS with zero initial discard and bottom-camera YUYV
   at 10 FPS with 20 initial discard frames.
 - The last physical operation was normal disconnect
-  `7bab1274-9eba-432e-9927-830c3f50ce4c`. It cleared the calibration revision
-  and control lease. Acquire a new lease and home before more motion.
+  `d52d27ff-8c1a-469a-a45e-605aac6f1f4f`. It cleared the calibration revision
+  and control lease. The final status check showed disconnected, unhomed, and
+  fault-free. Acquire a new lease and home before more motion.
+- Before disconnect, the final release daemon passed coarse home, N2 fine
+  home, and a no-move datum check at 0.02719 mm. The last connected pose was
+  X220.124 Y190.234 Z31.500.
+- The last recorded states for lights, both vacuum outputs, and blowoff are
+  off.
 - Do not infer that the machine is safe from this document. Get a new operator
   confirmation before motion.
 - The daemon reports all three learned models as ready.
@@ -46,6 +52,55 @@ placement-verification package records clean source provenance.
 The application still needs a versioned model download, cache, checksum, and
 selection mechanism. Do not put changing binary model history in the main
 source repository.
+
+## 2026-09-07 speed closeout
+
+The current LumenPnP V3.0.2 profile uses 23,000 mm/min for clear and carried
+XY transit. The controller travel acceleration stays at 1,000 mm/s2. No
+controller acceleration or persistent firmware setting changed.
+
+The active calibration before disconnect was
+`3b837434-a961-4e60-945a-18335b42d21f`. It contains an exact-feed planar XY
+response surface for 23,000 mm/min. The surface covers 5-200 mm X travel and
+5-180 mm Y travel in all four approach quadrants. The planner uses the prior
+axis response for single-axis moves and other qualified feeds. It rejects a
+23,000 mm/min diagonal move outside the surface range.
+
+The independent datum interpolation holdout passed 108 of 108 returns. Mean
+error was 0.0178 mm, p95 was 0.0369 mm, and maximum error was 0.04987 mm. The
+fixed-hole spatial holdout then passed 72 of 72 returns at six plate locations.
+Its RMS error was 0.01866 mm, p95 was 0.03377 mm, and maximum error was
+0.04889 mm. This supports use of one surface across the tested workspace. The
+narrow right edge beyond X340 mm has no fixed-hole endpoint test.
+
+Three pickup-and-return cycles at 23,000 mm/min took 30.54, 25.90, and 25.88
+seconds. The first cycle included camera start. Each later cycle used about
+2.52 seconds for bottom-camera capture and 1.07 seconds for top-camera capture.
+This is not a PCB placement benchmark. A physical multi-placement job remains
+unqualified until suitable parts are available.
+
+The measured full reconnaissance scan took 7 minutes 26.8 seconds before the
+final timestamp-source improvement. The final 10-tile qualification projects
+about 6 minutes 52 seconds for the same 1,023-tile scan. Short raster moves are
+acceleration-bound, so 24,000 mm/min would give almost no scan improvement.
+Do not increase acceleration without a separate mechanical-noise review.
+
+Good later speed tasks, in priority order, are:
+
+1. Measure a real multi-placement job when suitable parts are available.
+2. Compare and qualify a faster bottom-camera mode. The current profile keeps
+   YUYV at 10 FPS with 20 initial discard frames.
+3. Qualify higher clear and carried Z rates if a one-to-two-second cycle gain
+   is useful. The current Z rate is 1,200 mm/min.
+4. Measure a complete feeder-bank population scan with the final camera and
+   motion configuration.
+5. Change scan acceleration or add continuous-motion capture only if a scan
+   below approximately seven minutes becomes necessary.
+
+The refined workspace mosaic copy is
+`/tmp/velocitypnp-refined-workspace-4f007afa-cfa9-4984-b382-7c749304e071.png`.
+Its SHA-256 is
+`9504fb140b055bcb597adaf3d0ae70d5ca26c4e9629a4bd64a30e65605e2e61d`.
 
 ## 2026-09-06 scan closeout
 
@@ -219,7 +274,7 @@ as proof that its physical workflow is ready.
 ## Repository state
 
 The main worktree is expected to be clean after this handoff commit. The local
-branch will be 42 commits ahead of `origin/main`. Push these commits before
+branch will be 45 commits ahead of `origin/main`. Push these commits before
 work moves to another computer.
 
 There is no project `SKILL.md`. `AGENTS.md` contains the current repository
@@ -242,14 +297,13 @@ this evidence.
 Active FTP board registration passed with 0.0314 mm maximum residual. Its
 long return to the datum passed at 0.0351 mm, down from 0.0634 mm. A ten-tile
 survey passed in 5.343 seconds and returned at 0.00525 mm. The machine ended
-ready, homed, and fault-free at X220.091 Y190.278 Z31.500. The daemon is the
-release build in the active terminal session.
+that run ready, homed, and fault-free at X220.091 Y190.278 Z31.500.
 
 After the final range guard was added, the new release restarted cleanly.
 Connect, preflight, coarse home, and N2 fine home passed. The current pose is
-X220.123 Y190.234 Z31.500. The machine is ready, homed, and fault-free with
-the same calibration active. A no-move camera return then passed at 0.02347
-mm.
+X220.123 Y190.234 Z31.500. At that point, the machine was ready, homed, and
+fault-free with the same calibration active. A no-move camera return then
+passed at 0.02347 mm.
 
 The fixed-hole spatial holdout is complete. Its bracketed-reference procedure
 passed six of six locations and 72 of 72 returns. RMS was 0.01866 mm, p95 was
@@ -260,6 +314,9 @@ The test directly covered 50 mm by 50 mm paths at fixed-hole centers from
 X54.902-X340.386 and Y99.929-Y310.308. The datum matrix supplies distance
 coverage. The narrow right edge beyond X340 mm still lacks a fixed-hole
 endpoint test. After loading the final binary, coarse and fine home passed
-again. A no-move datum check passed at 0.02719 mm. The machine is ready,
-homed, and fault-free at X220.124 Y190.234 Z31.500. Qualification data is in
-`datasets/motion-model-qualification-2026-09-06`.
+again. A no-move datum check passed at 0.02719 mm. At that point, the machine
+was ready, homed, and fault-free at X220.124 Y190.234 Z31.500. Qualification
+data is in
+`datasets/motion-model-qualification-2026-09-06`. Normal disconnect
+`d52d27ff-8c1a-469a-a45e-605aac6f1f4f` then succeeded, and the physical
+daemon was stopped.
