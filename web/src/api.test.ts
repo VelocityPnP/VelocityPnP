@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, formatErrorMessage } from "./api";
+import { api, formatErrorMessage, waitForOperation } from "./api";
 
 const lease = {
   id: "lease-id",
@@ -8,7 +8,10 @@ const lease = {
   expires_at: "2026-09-07T18:01:00Z",
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("formatErrorMessage", () => {
   it("adds sentence capitalization and punctuation", () => {
@@ -40,5 +43,28 @@ describe("acquireOrRenewLease", () => {
     await expect(api.acquireOrRenewLease("test", 900))
       .resolves.toEqual(replacement);
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("waitForOperation", () => {
+  it("reports each polled operation state", async () => {
+    vi.useFakeTimers();
+    const running = {
+      id: "operation-id", kind: "calibration.test", status: "running", message: null,
+    } as const;
+    const succeeded = { ...running, status: "succeeded" as const, message: "Complete" };
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(running), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(succeeded), { status: 200 })));
+    const updates: string[] = [];
+
+    const result = waitForOperation(
+      { ...running, status: "pending" },
+      (current) => updates.push(current.status),
+    );
+    await vi.advanceTimersByTimeAsync(240);
+
+    await expect(result).resolves.toEqual(succeeded);
+    expect(updates).toEqual(["pending", "running", "succeeded"]);
   });
 });

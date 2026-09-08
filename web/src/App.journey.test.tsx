@@ -52,11 +52,14 @@ function calibrationSnapshot(
   };
 }
 
-function operation(kind: string): Operation {
+function operation(
+  kind: string,
+  status: Operation["status"] = "succeeded",
+): Operation {
   return {
     id: `${kind}-operation`,
     kind,
-    status: "succeeded",
+    status,
     message: null,
   };
 }
@@ -358,5 +361,39 @@ describe("calibration progress", () => {
     ];
 
     expect(currentCalibrationCheck(run)?.id).toBe("top_camera");
+  });
+
+  it("shows live state for a standalone vacuum characterization", async () => {
+    mockBrowserServices();
+    const user = userEvent.setup();
+    const status = machineStatus({
+      state: "ready", homed: true, control_lease: controlLease,
+      pose: { x_mm: 220.131, y_mm: 190.271, z_mm: 31.5, rotation_deg: 0 },
+    });
+    const snapshot = calibrationSnapshot(
+      "calibration",
+      null,
+      ["nozzle_height_model"],
+      { vacuum_probe: { N1: { passed: true } } },
+    );
+    vi.spyOn(api, "status").mockResolvedValue(status);
+    vi.spyOn(api, "devices").mockResolvedValue([]);
+    mockCalibrationApi([snapshot]);
+    vi.spyOn(api, "acquireOrRenewLease").mockResolvedValue(controlLease);
+    vi.spyOn(api, "characterizeVacuum").mockResolvedValue(
+      operation("calibration.vacuum_characterization", "running"),
+    );
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+
+    render(<App />);
+    await user.click(await enabledButton("Set up precision calibration"));
+    await user.click(await enabledButton("Characterize N1 vacuum"));
+    await user.click(await screen.findByRole("button", {
+      name: "Start characterization",
+    }));
+
+    expect(await screen.findByText("N1 vacuum sensor characterization"))
+      .toBeTruthy();
+    expect(screen.getByText(/Elapsed: 0 s\. Position: X220\.131/)).toBeTruthy();
   });
 });

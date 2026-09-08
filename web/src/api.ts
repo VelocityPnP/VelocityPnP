@@ -86,11 +86,16 @@ async function acquireOrRenewLease(
   }
 }
 
-export async function waitForOperation(operation: Operation): Promise<Operation> {
+export async function waitForOperation(
+  operation: Operation,
+  onUpdate?: (operation: Operation) => void,
+): Promise<Operation> {
   let current = operation;
+  onUpdate?.(current);
   while (current.status === "pending" || current.status === "running") {
-    await new Promise((resolve) => window.setTimeout(resolve, 120));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
     current = await request<Operation>(`/operations/${operation.id}`);
+    onUpdate?.(current);
   }
   if (current.status === "failed") throw new Error(current.message ?? "Operation failed");
   return current;

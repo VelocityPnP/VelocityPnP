@@ -4,7 +4,7 @@ import { DialogProvider, useDialog } from "./Dialog";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
   CalibrationSnapshot, CalibrationStep, Device, Job, JobExecutionRun, MachineEvent,
-  MachineStatus, Pose,
+  MachineStatus, Operation, Pose,
   SensorReading, StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun,
   StripFeederRegistration,
   StripFeederVisionReport,
@@ -482,6 +482,13 @@ function CalibrationPanel({ status, devices, setError }: {
   const [activeRun, setActiveRun] = useState<AutomatedCalibrationRun | null>(null);
   const [artifactPlan, setArtifactPlan] = useState<CalibrationArtifactPlan | null>(null);
   const [starting, setStarting] = useState(false);
+  const [activeAction, setActiveAction] = useState<{
+    operation: Operation;
+    title: string;
+    detail: string;
+    startedAt: number;
+  } | null>(null);
+  const [actionElapsedSeconds, setActionElapsedSeconds] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -515,6 +522,34 @@ function CalibrationPanel({ status, devices, setError }: {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [activeRun?.id, activeRun?.status, load, setError]);
+
+  useEffect(() => {
+    if (!activeAction) { setActionElapsedSeconds(0); return; }
+    const update = () => setActionElapsedSeconds(
+      Math.max(0, Math.floor((Date.now() - activeAction.startedAt) / 1000)),
+    );
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeAction?.operation.id, activeAction?.startedAt]);
+
+  const trackCalibrationAction = async (
+    operation: Operation,
+    title: string,
+    detail: string,
+  ) => {
+    const startedAt = Date.now();
+    setActiveAction({ operation, title, detail, startedAt });
+    try {
+      return await waitForOperation(operation, (current) => {
+        setActiveAction((activeValue) => activeValue?.operation.id === current.id
+          ? { ...activeValue, operation: current }
+          : activeValue);
+      });
+    } finally {
+      setActiveAction(null);
+    }
+  };
 
   const completed = useMemo(() => new Set(active?.completed_steps ?? []), [active]);
   const createSnapshot = async () => {
@@ -572,7 +607,11 @@ function CalibrationPanel({ status, devices, setError }: {
       const lease = await api.acquireOrRenewLease(
         "VelocityPnP vacuum probe", 900,
       );
-      await waitForOperation(await api.vacuumProbe(active.id, lease.id, nozzleId));
+      await trackCalibrationAction(
+        await api.vacuumProbe(active.id, lease.id, nozzleId),
+        `Probing ${nozzleId} vacuum contact`,
+        "Visually aligning, centering the datum target, and searching the bounded Z interval.",
+      );
       const snapshot = await api.calibration(active.id);
       setActive(snapshot);
       setSnapshots((current) => current.map((value) => value.id === snapshot.id ? snapshot : value));
@@ -591,7 +630,11 @@ function CalibrationPanel({ status, devices, setError }: {
       const lease = await api.acquireOrRenewLease(
         "VelocityPnP fine home", 900,
       );
-      await waitForOperation(await api.fineHome(active.id, lease.id));
+      await trackCalibrationAction(
+        await api.fineHome(active.id, lease.id),
+        "Fine-homing XYZ",
+        "Visually aligning, identifying N2, and reproducing the calibrated datum contact.",
+      );
       await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
@@ -608,7 +651,11 @@ function CalibrationPanel({ status, devices, setError }: {
       const lease = await api.acquireOrRenewLease(
         "VelocityPnP vacuum characterization", 900,
       );
-      await waitForOperation(await api.characterizeVacuum(active.id, lease.id, nozzleId));
+      await trackCalibrationAction(
+        await api.characterizeVacuum(active.id, lease.id, nozzleId),
+        `${nozzleId} vacuum sensor characterization`,
+        "Visually aligning, centering the datum target, reproducing contact, and sampling sensor states.",
+      );
       const snapshot = await api.calibration(active.id);
       setActive(snapshot);
       setSnapshots((current) => current.map((value) => value.id === snapshot.id ? snapshot : value));
@@ -627,7 +674,11 @@ function CalibrationPanel({ status, devices, setError }: {
       const lease = await api.acquireOrRenewLease(
         "VelocityPnP XY direction response", 900,
       );
-      await waitForOperation(await api.calibrateXyDirectionResponse(active.id, lease.id));
+      await trackCalibrationAction(
+        await api.calibrateXyDirectionResponse(active.id, lease.id),
+        "X/Y direction response measurement",
+        "Approaching the datum from both directions at each configured distance and speed.",
+      );
       const snapshot = await api.calibration(active.id);
       setActive(snapshot);
       setSnapshots((current) => current.map((value) => value.id === snapshot.id ? snapshot : value));
@@ -741,6 +792,17 @@ function CalibrationPanel({ status, devices, setError }: {
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
       </>}
       {active && status.calibration_revision === active.id && <div className="notice">Fine XYZ home is active for this calibration revision.</div>}
+      {activeAction && <div className="calibration-current" role="status" aria-live="polite">
+        <span className="activity-indicator" aria-hidden="true" />
+        <div>
+          <small>Current action · {pretty(activeAction.operation.status)}</small>
+          <strong>{activeAction.title}</strong>
+          <span>{activeAction.operation.message ?? activeAction.detail}</span>
+          <span>Elapsed: {actionElapsedSeconds} s.{status.pose
+            ? ` Position: X${status.pose.x_mm.toFixed(3)}, Y${status.pose.y_mm.toFixed(3)}, Z${status.pose.z_mm.toFixed(3)} mm.`
+            : " Position is not available."}</span>
+        </div>
+      </div>}
       {artifactPlan && <div className="run-result">
         <p>Selective plan: <strong>{artifactPlan.requires_motion ? `${artifactPlan.estimated_duration_seconds} s estimated motion` : "no motion"}</strong></p>
         {artifactPlan.items.filter((item) => item.action !== "reuse").map((item) =>
