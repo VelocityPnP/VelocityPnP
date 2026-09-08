@@ -16770,16 +16770,15 @@ impl VacuumProbeSearch {
     fn around_characterization_contact(
         contact_nozzle_z_mm: f64,
         clearance_mm: f64,
-        step_mm: f64,
         profile_start_nozzle_z_mm: f64,
         profile_end_nozzle_z_mm: f64,
     ) -> Self {
         Self {
             start_nozzle_z_mm: (contact_nozzle_z_mm + clearance_mm).min(profile_start_nozzle_z_mm),
-            // A contact probe can pass at exactly the minimum sensor delta.
-            // Give characterization one bounded follow-through step so normal
-            // sensor variation does not reject an otherwise valid contact.
-            end_nozzle_z_mm: (contact_nozzle_z_mm - step_mm).max(profile_end_nozzle_z_mm),
+            // The stored contact is the first point that met the minimum
+            // sensor delta. Characterization needs a robust reference seal,
+            // so keep searching inside the full operator-approved interval.
+            end_nozzle_z_mm: profile_end_nozzle_z_mm,
         }
     }
 
@@ -17104,7 +17103,6 @@ async fn start_vacuum_operation(
             characterization_profile
                 .unwrap()
                 .characterization_clearance_mm,
-            probe.step_mm,
             probe.search_start_nozzle_z_mm,
             probe.search_end_nozzle_z_mm,
         ),
@@ -39358,19 +39356,19 @@ mod tests {
     }
 
     #[test]
-    fn characterization_search_allows_one_bounded_follow_through_step() {
-        let search = VacuumProbeSearch::around_characterization_contact(3.4, 0.3, 0.1, 5.0, 3.0);
+    fn characterization_search_uses_the_full_approved_interval() {
+        let search = VacuumProbeSearch::around_characterization_contact(3.4, 0.3, 5.0, 3.0);
         let targets = search.descent_targets(5.0, 0.1);
 
         assert!((search.start_nozzle_z_mm - 3.7).abs() < 1e-9);
-        assert!((search.end_nozzle_z_mm - 3.3).abs() < 1e-9);
+        assert!((search.end_nozzle_z_mm - 3.0).abs() < 1e-9);
         assert!((targets[0] - 3.7).abs() < 1e-9);
-        assert!((targets[4] - 3.3).abs() < 1e-9);
+        assert!((targets[7] - 3.0).abs() < 1e-9);
     }
 
     #[test]
     fn characterization_search_does_not_exceed_the_profile_z_limit() {
-        let search = VacuumProbeSearch::around_characterization_contact(3.0, 0.3, 0.1, 5.0, 3.0);
+        let search = VacuumProbeSearch::around_characterization_contact(3.0, 0.3, 5.0, 3.0);
 
         assert!((search.end_nozzle_z_mm - 3.0).abs() < 1e-9);
     }
