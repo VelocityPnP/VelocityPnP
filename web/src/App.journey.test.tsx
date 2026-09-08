@@ -3,7 +3,10 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import App, { attachedMachineDevices, currentCalibrationCheck } from "./App";
+import App, {
+  attachedMachineDevices, calibrationRunSupersededBySnapshot,
+  currentCalibrationCheck, latestCalibrationChecks,
+} from "./App";
 import { api } from "./api";
 import type {
   AutomatedCalibrationRun, CalibrationArtifact, CalibrationSnapshot,
@@ -395,5 +398,75 @@ describe("calibration progress", () => {
     expect(await screen.findByText("N1 vacuum sensor characterization"))
       .toBeTruthy();
     expect(screen.getByText(/Elapsed: 0 s\. Position: X220\.131/)).toBeTruthy();
+
+    await user.click(screen.getByText("Machine"));
+    await user.click(screen.getByText("Calibration"));
+    expect(await screen.findByText("N1 vacuum sensor characterization"))
+      .toBeTruthy();
+    expect((await screen.findByRole("button", {
+      name: "Probe N2 vacuum",
+    }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("replaces a superseded run failure with current snapshot state", async () => {
+    mockBrowserServices();
+    const user = userEvent.setup();
+    const status = machineStatus({
+      state: "ready", homed: true, control_lease: controlLease,
+    });
+    const snapshot = calibrationSnapshot(
+      "calibration",
+      null,
+      ["vacuum_sensor_characterization"],
+      { vacuum_sensor_characterization: {
+        N1: {
+          tip_id: "N045", passed: true, median_signal_delta_counts: 9,
+          robust_distribution_gap_counts: 9, acquire_threshold_raw_value: 231,
+          release_threshold_raw_value: 234, observed_at: "2026-09-08T18:00:00Z",
+        },
+        N2: {
+          tip_id: "N24", passed: true, median_signal_delta_counts: 11,
+          robust_distribution_gap_counts: 11, acquire_threshold_raw_value: 245,
+          release_threshold_raw_value: 248, observed_at: "2026-09-08T18:01:00Z",
+        },
+      } },
+    );
+    snapshot.artifacts.vacuum_characterization_n1 = calibrationArtifact();
+    snapshot.artifacts.vacuum_characterization_n2 = calibrationArtifact();
+    const run = calibrationRun(snapshot.id, "rejected");
+    run.phase = "vacuum_sensor_characterization";
+    run.failure = "vacuum characterization did not reproduce contact at the stored safe Z";
+    run.checks = [{
+      id: "vacuum_characterization_N1",
+      title: "N1 vacuum sensor characterization",
+      source: "controller",
+      status: "failed",
+      message: run.failure,
+      evidence: null,
+    }, {
+      id: "vacuum_characterization_N2",
+      title: "N2 vacuum sensor characterization",
+      source: "controller",
+      status: "pending",
+      message: "Waiting for pump-off, open, sealed, and release samples",
+      evidence: null,
+    }];
+    vi.spyOn(api, "status").mockResolvedValue(status);
+    vi.spyOn(api, "devices").mockResolvedValue([]);
+    mockCalibrationApi([snapshot], [run]);
+
+    expect(calibrationRunSupersededBySnapshot(run, snapshot)).toBe(true);
+    expect(latestCalibrationChecks(run, snapshot).map((check) => check.status))
+      .toEqual(["passed", "passed"]);
+    render(<App />);
+    await user.click(await enabledButton("Set up precision calibration"));
+
+    expect(await screen.findByText("Recovered")).toBeTruthy();
+    expect(screen.getByText(/Later targeted measurements resolved/)).toBeTruthy();
+    expect(screen.getByText(/N1 N045 characterized a 9.0-count reference seal/))
+      .toBeTruthy();
+    expect(screen.getByText(/N2 N24 characterized an? 11.0-count reference seal/))
+      .toBeTruthy();
+    expect(screen.queryByText(/Did not reproduce contact/)).toBeNull();
   });
 });
