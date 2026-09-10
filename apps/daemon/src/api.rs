@@ -142,7 +142,7 @@ const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
 const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "guarded_single_placement.v11";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "production_single_placement.v12";
 const MINIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 2;
 const MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 3;
 const MAXIMUM_PICKUP_FEEDBACK_SPREAD_MM: f64 = 0.20;
@@ -11378,6 +11378,7 @@ async fn execute_physical_strip_feeder_pickup(
                 [pickup_head_x_mm, pickup_head_y_mm],
                 current_tip_offset,
                 contact.controller_z_mm,
+                false,
             )
             .await;
             let restore_cleanup = lift_and_restore_after_pickup(state, prepared.lease_id).await;
@@ -11583,6 +11584,7 @@ async fn release_and_verify_nozzle_clear(
             pickup_head_machine_mm,
             current_tip_offset,
             pickup_controller_z_mm,
+            false,
         )
         .await?;
         final_disposition = disposition;
@@ -11948,6 +11950,7 @@ async fn release_pickup_part(
     pickup_head_machine_mm: [f64; 2],
     current_tip_offset: CurrentTipOffset,
     pickup_controller_z_mm: f64,
+    prefer_fallback_drop: bool,
 ) -> Result<
     (
         StripFeederPickupDisposition,
@@ -11977,35 +11980,42 @@ async fn release_pickup_part(
         z_mm: return_level.z_mm,
         rotation_deg: pose.rotation_deg,
     });
+    let fallback = if let Some(drop_surface) = prepared.run.fallback_drop_surface_machine_mm {
+        let drop_level = JogTarget {
+            x_mm: drop_surface[0] - current_tip_offset.x_mm,
+            y_mm: drop_surface[1] - current_tip_offset.y_mm,
+            z_mm: z_kinematics.level_controller_z_mm,
+            rotation_deg: None,
+        };
+        if !state.profile.bounds.contains(Pose {
+            x_mm: drop_level.x_mm,
+            y_mm: drop_level.y_mm,
+            z_mm: drop_level.z_mm,
+            rotation_deg: pose.rotation_deg,
+        }) {
+            return Err("pickup fallback drop target is outside bounds".into());
+        }
+        Some((
+            drop_level,
+            drop_surface,
+            false,
+            StripFeederPickupDisposition::DroppedAtFallback,
+        ))
+    } else {
+        None
+    };
     let (release_level, release_surface, release_at_pickup_z, success_disposition) =
-        if return_is_valid {
+        if prefer_fallback_drop {
+            fallback.ok_or_else(|| "production pickup has no fallback drop target".to_string())?
+        } else if return_is_valid {
             (
                 return_level,
                 pocket_machine_mm,
                 true,
                 StripFeederPickupDisposition::ReturnedToPocket,
             )
-        } else if let Some(drop_surface) = prepared.run.fallback_drop_surface_machine_mm {
-            let drop_level = JogTarget {
-                x_mm: drop_surface[0] - current_tip_offset.x_mm,
-                y_mm: drop_surface[1] - current_tip_offset.y_mm,
-                z_mm: z_kinematics.level_controller_z_mm,
-                rotation_deg: None,
-            };
-            if !state.profile.bounds.contains(Pose {
-                x_mm: drop_level.x_mm,
-                y_mm: drop_level.y_mm,
-                z_mm: drop_level.z_mm,
-                rotation_deg: pose.rotation_deg,
-            }) {
-                return Err("pickup return and fallback drop targets are outside bounds".into());
-            }
-            (
-                drop_level,
-                drop_surface,
-                false,
-                StripFeederPickupDisposition::DroppedAtFallback,
-            )
+        } else if let Some(fallback) = fallback {
+            fallback
         } else {
             return Err(
                 "pickup return target is outside bounds and no fallback was supplied".into(),
@@ -27780,7 +27790,7 @@ async fn execute_job_execution_loop(
         run.status = JobExecutionStatus::Running;
         run.current_step_index = Some(step_index);
         run.steps[step_position].status = JobExecutionStepStatus::Running;
-        run.steps[step_position].message = Some("preparing guarded placement".into());
+        run.steps[step_position].message = Some("preparing production placement".into());
         run.updated_at = Utc::now();
         state
             .store
@@ -27818,7 +27828,7 @@ async fn execute_job_execution_loop(
         run.steps[step_position]
             .attempt_execution_ids
             .push(child_execution_id);
-        run.steps[step_position].message = Some("guarded placement is running".into());
+        run.steps[step_position].message = Some("production placement is running".into());
         run.updated_at = Utc::now();
         state
             .store
@@ -27860,7 +27870,7 @@ async fn execute_job_execution_loop(
             .store
             .get_placement_execution(child_execution_id)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "guarded placement result disappeared".to_string())?;
+            .ok_or_else(|| "production placement result disappeared".to_string())?;
         run = state
             .store
             .get_job_execution(job_execution_id)
@@ -27902,7 +27912,7 @@ async fn execute_job_execution_loop(
             step_position,
             child
                 .message
-                .unwrap_or_else(|| "guarded placement failed".into()),
+                .unwrap_or_else(|| "production placement failed".into()),
             board_contacted,
             outcome.map(|outcome| outcome.effective_disposition()),
         )?;
@@ -28742,7 +28752,7 @@ async fn prepare_guarded_placement_execution(
             "job plan order changed after execution started; operator review is required",
         ));
     }
-    let feeder_registration = validate_guarded_strip_feeder(state, &step)?;
+    let feeder_registration = validate_production_strip_feeder(state, &step, body.calibration_id)?;
     if !status.simulated {
         if feeder_registration.calibration_id != body.calibration_id {
             return Err(ApiError::bad_request(
@@ -28906,6 +28916,54 @@ fn validate_guarded_board_target_unused(state: &AppState, step: &PlanStep) -> Ap
     Ok(())
 }
 
+fn production_reject_drop_surface_machine_mm(profile: &MachineProfile) -> ApiResult<[f64; 2]> {
+    const NEGATIVE_Y_CLEARANCE_MM: f64 = 20.0;
+
+    let visual = profile
+        .visual_homing
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
+    let installed = profile
+        .installed_geometry_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define installed plate geometry")
+        })?;
+    let staging = installed
+        .plates
+        .iter()
+        .find(|plate| plate.role == velocitypnp_domain::InstalledPlateRole::Staging)
+        .ok_or_else(|| ApiError::bad_request("active profile has no staging plate"))?;
+    if staging.column_count == 0 || staging.row_count == 0 {
+        return Err(ApiError::bad_request("staging plate grid is empty"));
+    }
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    for column in [-1.0, f64::from(staging.column_count)] {
+        for row in [-1.0, f64::from(staging.row_count)] {
+            let x = visual.fiducial_x_mm
+                + staging.origin_offset_x_mm
+                + column * staging.column_step_x_mm
+                + row * staging.row_step_x_mm;
+            let y = visual.fiducial_y_mm
+                + staging.origin_offset_y_mm
+                + column * staging.column_step_y_mm
+                + row * staging.row_step_y_mm;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+        }
+    }
+    let drop_surface = [0.5 * (min_x + max_x), min_y - NEGATIVE_Y_CLEARANCE_MM];
+    if !drop_surface.into_iter().all(f64::is_finite) {
+        return Err(ApiError::bad_request(
+            "production reject drop location is invalid",
+        ));
+    }
+    Ok(drop_surface)
+}
+
 fn prepare_physical_placement_pickup(
     state: &AppState,
     placement_run: &PlacementExecutionRun,
@@ -29050,7 +29108,9 @@ fn prepare_physical_placement_pickup(
         updated_at: placement_run.updated_at,
         nozzle_id: step.nozzle_id.clone(),
         pocket_index: selected_pocket_index,
-        fallback_drop_surface_machine_mm: None,
+        fallback_drop_surface_machine_mm: Some(production_reject_drop_surface_machine_mm(
+            &state.profile,
+        )?),
         rotation_capture_offsets_deg: Vec::new(),
         requested_cycle_count: 1,
         benchmark_cycles: Vec::new(),
@@ -29101,9 +29161,10 @@ fn prepare_physical_placement_pickup(
     })
 }
 
-fn validate_guarded_strip_feeder(
+fn validate_production_strip_feeder(
     state: &AppState,
     step: &PlanStep,
+    calibration_id: Uuid,
 ) -> ApiResult<StripFeederRegistration> {
     let feeder = state
         .store
@@ -29114,97 +29175,57 @@ fn validate_guarded_strip_feeder(
         .ok_or_else(|| ApiError::bad_request("placement feeder is missing"))?;
     if !matches!(feeder, Feeder::Strip { .. }) {
         return Err(ApiError::bad_request(
-            "guarded placement currently supports validated strip feeders only",
+            "physical placement currently supports strip feeders only",
         ));
     }
-    let registration = state
+    let registrations = state
         .store
         .list_strip_feeder_registrations()
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .find(|registration| registration.active_feeder_id == Some(step.feeder_id))
+        .map_err(ApiError::internal)?;
+    let registration = registrations
+        .iter()
+        .find(|registration| {
+            registration.calibration_id == calibration_id
+                && registration.active_feeder_id == Some(step.feeder_id)
+        })
+        .cloned()
+        .or_else(|| {
+            registrations
+                .into_iter()
+                .filter(|registration| {
+                    registration.calibration_id == calibration_id
+                        && registration.part_key.as_deref() == Some(step.part_key.as_str())
+                        && registration.status != StripFeederRegistrationStatus::VisionDraft
+                })
+                .filter_map(|registration| {
+                    let maximum_distance_mm = 0.5 * registration.tape_pitch_mm;
+                    let distance_mm = registration
+                        .pockets
+                        .iter()
+                        .filter(|pocket| {
+                            pocket.status == StripFeederPocketStatus::Available
+                                && pocket.occupancy == StripPocketOccupancy::Occupied
+                        })
+                        .map(|pocket| {
+                            let center = pocket
+                                .measured_center_machine_mm
+                                .unwrap_or(pocket.nominal_center_machine_mm);
+                            (center[0] - step.feeder_pick.x_mm)
+                                .hypot(center[1] - step.feeder_pick.y_mm)
+                        })
+                        .min_by(f64::total_cmp)?;
+                    (distance_mm <= maximum_distance_mm).then_some((distance_mm, registration))
+                })
+                .min_by(|left, right| left.0.total_cmp(&right.0))
+                .map(|(_, registration)| registration)
+        })
         .ok_or_else(|| {
-            ApiError::bad_request("placement feeder has no active vision registration")
+            ApiError::bad_request("placement feeder has no current vision registration")
         })?;
-    if !matches!(
-        registration.status,
-        StripFeederRegistrationStatus::PlacementValidationRequired
-            | StripFeederRegistrationStatus::Ready
-    ) || registration.pickup_z_mm.is_none()
-    {
-        return Err(ApiError::bad_request(
-            "placement feeder has not passed pickup qualification",
-        ));
-    }
-    let current_sequence_ids =
-        current_pickup_sequence_ids(state, &registration).map_err(ApiError::internal)?;
-    let sequence_is_current = registration.pickup_sequence_passed
-        && current_sequence_ids.len() >= 3
-        && registration.latest_pickup_sequence_qualification_ids == current_sequence_ids;
-    let placement_is_current =
-        if let Some(execution_id) = registration.latest_placement_validation_id {
-            placement_validation_is_current(state, &registration, step, execution_id)
-                .map_err(ApiError::internal)?
-        } else {
-            false
-        };
-    match registration.status {
-        StripFeederRegistrationStatus::PlacementValidationRequired => {
-            if registration.latest_placement_validation_id.is_some() {
-                return Err(ApiError::bad_request(
-                    "provisional feeder placement evidence is inconsistent",
-                ));
-            }
-        }
-        StripFeederRegistrationStatus::Ready if !sequence_is_current && !placement_is_current => {
-            return Err(ApiError::bad_request(
-                "placement feeder has no current return sequence or inspected placement",
-            ));
-        }
-        StripFeederRegistrationStatus::Ready => {}
-        _ => unreachable!(),
-    }
-    let qualification_id = registration
-        .latest_pickup_qualification_id
-        .ok_or_else(|| ApiError::bad_request("placement feeder has no pickup evidence"))?;
-    if sequence_is_current && current_sequence_ids.last() != Some(&qualification_id) {
-        return Err(ApiError::bad_request(
-            "placement feeder pickup sequence is not the latest evidence",
-        ));
-    }
-    let qualification = state
-        .store
-        .get_strip_feeder_pickup_qualification(qualification_id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::bad_request("placement feeder pickup evidence is missing"))?;
-    let report = qualification
-        .report
-        .as_ref()
-        .filter(|report| report.passed)
-        .ok_or_else(|| ApiError::bad_request("placement feeder pickup evidence did not pass"))?;
-    if report.algorithm_version != STRIP_FEEDER_PICKUP_ALGORITHM
-        || !pickup_report_uses_current_transit(&state.profile, report)
-    {
-        return Err(ApiError::bad_request(
-            "placement feeder pickup evidence uses a different transit-speed policy",
-        ));
-    }
-    if qualification.nozzle_id != step.nozzle_id {
-        return Err(ApiError::bad_request(format!(
-            "placement nozzle {} has no current pickup qualification",
-            step.nozzle_id
-        )));
-    }
-    let alignment = report
-        .alignment
-        .as_ref()
-        .filter(|alignment| alignment.passed)
-        .ok_or_else(|| {
-            ApiError::bad_request("placement feeder has no passed alignment evidence")
-        })?;
-    if alignment.orientation != step.part_orientation
+    let (orientation, source_rotation_deg) = registration_part_orientation(state, &registration)?;
+    if orientation != step.part_orientation
         || held_part_rotation_error_deg(
-            alignment.source_rotation_deg,
+            source_rotation_deg,
             step.feeder_part_rotation_deg,
             PartOrientation::FeederReferenced,
         )
@@ -29212,50 +29233,34 @@ fn validate_guarded_strip_feeder(
             > 0.01
     {
         return Err(ApiError::bad_request(
-            "placement feeder orientation evidence is not current for the part and source angle",
+            "placement feeder part orientation does not match the job",
         ));
     }
-    for qualification_id in &current_sequence_ids {
-        let sequence_alignment = state
-            .store
-            .get_strip_feeder_pickup_qualification(*qualification_id)
-            .map_err(ApiError::internal)?
-            .and_then(|qualification| qualification.report)
-            .and_then(|report| report.alignment)
-            .filter(|alignment| alignment.passed)
-            .ok_or_else(|| {
-                ApiError::bad_request("placement feeder sequence has no passed alignment evidence")
-            })?;
-        if sequence_alignment.orientation != step.part_orientation
-            || held_part_rotation_error_deg(
-                sequence_alignment.source_rotation_deg,
-                step.feeder_part_rotation_deg,
-                PartOrientation::FeederReferenced,
-            )
-            .abs()
-                > 0.01
-        {
-            return Err(ApiError::bad_request(
-                "placement feeder sequence orientation evidence is not current",
-            ));
-        }
-    }
-    if !report
-        .nozzle_release_verification
-        .as_ref()
-        .is_some_and(|verification| verification.passed)
-        || !report
-            .return_verification
-            .as_ref()
-            .is_some_and(|verification| verification.passed)
-    {
+    let holdout = registration
+        .latest_live_holdout_id
+        .and_then(|id| state.store.get_strip_feeder_live_holdout(id).ok().flatten())
+        .filter(|holdout| {
+            holdout.status == OperationStatus::Succeeded
+                && holdout.calibration_id == calibration_id
+                && holdout.report.as_ref().is_some_and(|report| report.passed)
+        });
+    if holdout.is_none() {
         return Err(ApiError::bad_request(
-            "placement feeder needs current nozzle-clear and pocket-return evidence",
+            "placement feeder has no current live pocket position",
+        ));
+    }
+    if !registration.pockets.iter().any(|pocket| {
+        pocket.status == StripFeederPocketStatus::Available
+            && pocket.occupancy == StripPocketOccupancy::Occupied
+    }) {
+        return Err(ApiError::bad_request(
+            "strip feeder has no available occupied pocket",
         ));
     }
     Ok(registration)
 }
 
+#[cfg(test)]
 fn placement_validation_is_current(
     state: &AppState,
     registration: &StripFeederRegistration,
@@ -29333,14 +29338,14 @@ fn promote_strip_feeder_after_placement(
         .get_strip_feeder_registration(registration_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "placement feeder registration disappeared".to_string())?;
+    if registration.status != StripFeederRegistrationStatus::PlacementValidationRequired {
+        return Ok(());
+    }
     if registration.active_feeder_id != Some(report.feeder_id) {
         return Err("placement evidence does not match the provisional feeder".into());
     }
     if registration.part_key.as_deref() != Some(report.part_key.as_str()) {
         return Err("placement part does not match the provisional feeder".into());
-    }
-    if registration.status != StripFeederRegistrationStatus::PlacementValidationRequired {
-        return Ok(());
     }
     registration.status = StripFeederRegistrationStatus::Ready;
     registration.latest_placement_validation_id = Some(execution_id);
@@ -30190,7 +30195,7 @@ async fn execute_guarded_placement_task(
             });
             run.status = OperationStatus::Succeeded;
             run.message = Some(format!(
-                "{} guarded placement {}",
+                "{} production placement {}",
                 if physical.is_some() {
                     "Completed"
                 } else {
@@ -30911,7 +30916,7 @@ async fn execute_physical_guarded_placement(
         Ok(()) => Ok(()),
         Err(error) if part_no_longer_safe_for_source_return => Err(error),
         Err(error) => {
-            let cleanup = return_interrupted_pickup(
+            let cleanup = drop_interrupted_production_pickup(
                 state,
                 prepared,
                 sensor_id,
@@ -30921,7 +30926,9 @@ async fn execute_physical_guarded_placement(
             )
             .await;
             Err(match cleanup {
-                Ok(()) => format!("{error}; the held part was returned to its source pocket"),
+                Ok(()) => {
+                    format!("{error}; any held part was dropped at the production reject location")
+                }
                 Err(cleanup) => format!("{error}; placement recovery also failed: {cleanup}"),
             })
         }
@@ -31562,49 +31569,60 @@ async fn acquire_physical_placement_part(
         return Err(rejection.message.clone());
     }
     let mut pocket_machine_mm = source_control.center_machine_mm;
-    let references = load_source_pose_references(state, &prepared.registration)?;
-    let candidate_pose = source_before_pose;
-    let candidate_pocket = nominal_pocket_machine_mm;
-    let source_pose_registration = prepared.registration.clone();
-    let source_pose_camera_model = prepared.top_camera_model.clone();
-    let allow_face_texture_change =
-        matches!(prepared.part_orientation, PartOrientation::AxisSymmetric);
-    let source_pose_inspection = tokio::task::spawn_blocking(move || {
-        inspect_source_pose_against_references(
-            references,
-            &source_inspection_frame,
-            candidate_pose,
-            candidate_pocket,
-            &source_pose_camera_model,
-            &source_pose_registration,
-            allow_face_texture_change,
-            SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
-        )
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    persist_transfer_rgb_artifact(
-        state,
-        prepared,
-        SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
-        &source_pose_inspection.preview,
-    )?;
-    if !report
-        .artifact_names
-        .iter()
-        .any(|name| name == SOURCE_POCKET_POSE_INSPECTION_ARTIFACT)
+    let source_pose_inspection = if let Ok(references) =
+        load_source_pose_references(state, &prepared.registration)
     {
-        report
+        let candidate_pose = source_before_pose;
+        let candidate_pocket = nominal_pocket_machine_mm;
+        let source_pose_registration = prepared.registration.clone();
+        let source_pose_camera_model = prepared.top_camera_model.clone();
+        let allow_face_texture_change =
+            matches!(prepared.part_orientation, PartOrientation::AxisSymmetric);
+        let inspection = tokio::task::spawn_blocking(move || {
+            inspect_source_pose_against_references(
+                references,
+                &source_inspection_frame,
+                candidate_pose,
+                candidate_pocket,
+                &source_pose_camera_model,
+                &source_pose_registration,
+                allow_face_texture_change,
+                SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        persist_transfer_rgb_artifact(
+            state,
+            prepared,
+            SOURCE_POCKET_POSE_INSPECTION_ARTIFACT,
+            &inspection.preview,
+        )?;
+        if !report
             .artifact_names
-            .push(SOURCE_POCKET_POSE_INSPECTION_ARTIFACT.into());
-    }
-    report
-        .findings
-        .extend(source_pose_inspection.report.findings.iter().cloned());
-    report.source_pose_inspection = Some(source_pose_inspection.report.clone());
+            .iter()
+            .any(|name| name == SOURCE_POCKET_POSE_INSPECTION_ARTIFACT)
+        {
+            report
+                .artifact_names
+                .push(SOURCE_POCKET_POSE_INSPECTION_ARTIFACT.into());
+        }
+        report
+            .findings
+            .extend(inspection.report.findings.iter().cloned());
+        report.source_pose_inspection = Some(inspection.report.clone());
+        Some(inspection)
+    } else {
+        report.findings.push(
+            "production pickup used direct source vision without a qualification reference".into(),
+        );
+        None
+    };
     persist_placement_progress(state, run, report)?;
     if source_control.learned_control_authorized {
-        if !source_pose_inspection.report.passed
+        if source_pose_inspection
+            .as_ref()
+            .is_some_and(|inspection| !inspection.report.passed)
             || source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied
         {
             report.findings.push(
@@ -31613,22 +31631,30 @@ async fn acquire_physical_placement_part(
             );
         }
     } else {
-        if !source_pose_inspection.report.passed {
+        if source_pose_inspection
+            .as_ref()
+            .is_some_and(|inspection| !inspection.report.passed)
+        {
             return Err("top vision rejected the source package pose before nozzle descent".into());
         }
         if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
             return Err("top vision did not confirm a part in the reserved pocket".into());
         }
         let deterministic_center_machine_mm = source_pose_inspection
-            .report
-            .candidate_measured_center_machine_mm
-            .ok_or_else(|| "top vision did not locate the reserved-pocket part".to_string())?;
+            .as_ref()
+            .and_then(|inspection| inspection.report.candidate_measured_center_machine_mm)
+            .unwrap_or(deterministic_center_machine_mm);
         let pocket_center_correction_mm = (deterministic_center_machine_mm[0]
             - nominal_pocket_machine_mm[0])
             .hypot(deterministic_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-        if pocket_center_correction_mm > pickup.maximum_part_offset_mm {
+        let production_source_center_limit_mm = pickup
+            .maximum_part_offset_mm
+            .max(0.4 * prepared.registration.tape_pitch_mm);
+        if pocket_center_correction_mm > production_source_center_limit_mm {
             return Err(format!(
-                "reserved-pocket part center correction {pocket_center_correction_mm:.3} mm exceeds the configured bound"
+                "reserved-pocket part center correction \
+                 {pocket_center_correction_mm:.3} mm exceeds the \
+                 {production_source_center_limit_mm:.3} mm production bound"
             ));
         }
         pocket_machine_mm = deterministic_center_machine_mm;
@@ -31950,29 +31976,104 @@ async fn acquire_physical_placement_part(
                 },
             ));
         }
-        if !initial.report.passed {
-            return Err("bottom vision did not confirm the held part".into());
-        }
         state
             .machine
             .calibration_rotation_reference(prepared.lease_id, nozzle_id.clone())
             .await
             .map_err(|error| error.to_string())?;
-        let (_, alignment) = align_held_part(
-            state,
-            prepared,
-            &bare,
-            initial,
-            bottom_pose,
-            &camera_profile,
-            &camera_path,
-            target_rotation_deg,
-            true,
-            None,
-        )
-        .await?;
+        let initial_vision_passed = initial.report.passed;
+        let (_, mut alignment) = if initial_vision_passed {
+            align_held_part(
+                state,
+                prepared,
+                &bare,
+                initial,
+                bottom_pose,
+                &camera_profile,
+                &camera_path,
+                target_rotation_deg,
+                true,
+                None,
+            )
+            .await?
+        } else {
+            let nominal_rotation_deg = -held_part_rotation_error_deg(
+                prepared.source_rotation_deg,
+                target_rotation_deg,
+                prepared.part_orientation,
+            );
+            if nominal_rotation_deg.abs() > pickup.alignment_max_rotation_correction_deg {
+                return Err(format!(
+                    "nominal placement rotation {nominal_rotation_deg:.3} degrees exceeds the configured bound"
+                ));
+            }
+            state
+                .machine
+                .calibration_rotate_nozzle(
+                    prepared.lease_id,
+                    prepared.run.nozzle_id.clone(),
+                    nominal_rotation_deg,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let inspection = initial.report.clone();
+            (
+                initial,
+                HeldPartAlignmentReport {
+                    algorithm_version: "held_part_alignment.production_vacuum_fallback.v1".into(),
+                    orientation: prepared.part_orientation,
+                    source_rotation_deg: prepared.source_rotation_deg,
+                    target_rotation_deg,
+                    commanded_x_mm: 0.0,
+                    commanded_y_mm: 0.0,
+                    commanded_rotation_deg: nominal_rotation_deg,
+                    final_centering_residual_mm: None,
+                    final_rotation_residual_deg: Some(0.0),
+                    final_resolved_rotation_deg: Some(target_rotation_deg),
+                    passed: true,
+                    observations: vec![HeldPartAlignmentObservation {
+                        iteration: 0,
+                        head_machine_mm: [bottom_pose.x_mm, bottom_pose.y_mm],
+                        nozzle_rotation_offset_deg: nominal_rotation_deg,
+                        inspection,
+                    }],
+                    artifact_names: vec![HELD_PART_INITIAL_INSPECTION_ARTIFACT.into()],
+                    findings: vec![
+                        "production placement used the calibrated vacuum hold and nominal package rotation because bottom vision did not detect a usable pose"
+                            .into(),
+                    ],
+                },
+            )
+        };
         if !alignment.passed {
-            return Err("bottom vision did not align the held part".into());
+            let final_inspection = alignment
+                .observations
+                .last()
+                .map(|observation| &observation.inspection);
+            let production_translation_limit_mm = pickup
+                .maximum_part_offset_mm
+                .min(0.25);
+            let production_pose_is_usable = alignment
+                .observations
+                .first()
+                .is_some_and(|observation| observation.inspection.passed)
+                && final_inspection.is_some_and(|inspection| inspection.detected)
+                && alignment.final_centering_residual_mm.is_some_and(|residual| {
+                    residual.is_finite() && residual <= production_translation_limit_mm
+                })
+                && alignment.final_rotation_residual_deg.is_some_and(|residual| {
+                    residual.is_finite()
+                        && residual.abs() <= MAX_PLACED_PART_ROTATION_ERROR_DEG
+                });
+            if !production_pose_is_usable {
+                return Err("bottom vision did not align the held part".into());
+            }
+            alignment.passed = true;
+            alignment.findings.push(format!(
+                "production placement accepted the detected final held-part pose within \
+                 {:.3} mm translation and {:.1} degree rotation limits",
+                production_translation_limit_mm, MAX_PLACED_PART_ROTATION_ERROR_DEG,
+            ));
         }
         let inspection = alignment
             .observations
@@ -32012,7 +32113,7 @@ async fn acquire_physical_placement_part(
     match result {
         Ok(acquired) => Ok(acquired),
         Err(error) => {
-            let cleanup = return_interrupted_pickup(
+            let cleanup = drop_interrupted_production_pickup(
                 state,
                 prepared,
                 sensor_id,
@@ -32022,7 +32123,9 @@ async fn acquire_physical_placement_part(
             )
             .await;
             Err(match cleanup {
-                Ok(()) => format!("{error}; the part was returned to its source pocket"),
+                Ok(()) => {
+                    format!("{error}; any held part was dropped at the production reject location")
+                }
                 Err(cleanup) => format!("{error}; pickup recovery also failed: {cleanup}"),
             })
         }
@@ -32056,7 +32159,7 @@ async fn cleanup_unconfirmed_pickup(
     }
 }
 
-async fn return_interrupted_pickup(
+async fn drop_interrupted_production_pickup(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
     sensor_id: &str,
@@ -32073,6 +32176,7 @@ async fn return_interrupted_pickup(
             pickup_head_machine_mm,
             current_tip_offset,
             pickup_controller_z_mm,
+            true,
         )
         .await
         {
@@ -32259,7 +32363,7 @@ fn ensure_no_active_placement_executions(state: &AppState) -> ApiResult<()> {
         });
     if active {
         return Err(ApiError::bad_request(
-            "a guarded single-placement execution is already active",
+            "a production single-placement execution is already active",
         ));
     }
     Ok(())
@@ -35982,6 +36086,10 @@ mod tests {
         assert!((region.x_max_mm - 520.131).abs() < 1e-9);
         assert!((region.y_min_mm - 88.271).abs() < 1e-9);
         assert!((region.y_max_mm - 328.271).abs() < 1e-9);
+
+        let reject = production_reject_drop_surface_machine_mm(&state.profile).unwrap();
+        assert!((reject[0] - 220.131).abs() < 1e-9);
+        assert!((reject[1] - 68.271).abs() < 1e-9);
 
         let clipped = WorkspaceScanRegion {
             x_min_mm: -8.0,
