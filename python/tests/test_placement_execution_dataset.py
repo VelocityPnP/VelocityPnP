@@ -225,6 +225,50 @@ class PlacementExecutionDatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not empty"):
                 export_dataset(database, output)
 
+    def test_export_excludes_prior_reviewed_executions(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "test.db"
+            output = root / "review"
+            reviewed = root / "reviewed"
+            self.make_database(database)
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "UPDATE entities SET document = json_set(document, "
+                "'$.report.top_inspection.expected_center_x_px', 256.0) "
+                "WHERE kind = 'placement_execution' AND id = 'invalid'"
+            )
+            connection.commit()
+            connection.close()
+            reviewed.mkdir()
+            (reviewed / "manifest.ground-truth.json").write_text(
+                json.dumps(
+                    {
+                        "samples": [
+                            {
+                                "source_execution_id": "valid",
+                            }
+                        ]
+                    }
+                )
+            )
+
+            manifest = export_dataset(
+                database,
+                output,
+                "2026-01-05T00:00:00Z",
+                exclude_reviewed=reviewed,
+            )
+
+            self.assertEqual(len(manifest["samples"]), 2)
+            self.assertEqual(
+                {sample["source_execution_id"] for sample in manifest["samples"]},
+                {"invalid"},
+            )
+            self.assertEqual(
+                manifest["excluded_reviewed_dataset"]["execution_count"], 1
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

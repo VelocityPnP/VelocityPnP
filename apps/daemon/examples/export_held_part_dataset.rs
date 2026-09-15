@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use velocitypnp_domain::{
     BottomCameraMappingReport, CalibrationArtifactId, HeldPartInspectionReport, MachineProfile,
-    Part, PartOrientation, StripFeederPickupQualificationReport, StripFeederRegistration,
+    Part, PartOrientation, PlacementExecutionReport, StripFeederPickupQualificationReport,
+    StripFeederRegistration,
 };
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
@@ -19,6 +20,7 @@ use velocitypnp_vision::{
 
 const BARE_NOZZLE_ARTIFACT: &str = "bare-nozzle.png";
 const CROP_SIZE_PX: u32 = 512;
+const MAX_ARCHIVED_FEEDER_MATCH_DISTANCE_MM: f64 = 2.0;
 
 #[derive(Debug, Serialize)]
 struct DatasetManifest {
@@ -262,7 +264,12 @@ fn main() -> Result<()> {
     };
 
     export_pickup_qualifications(&store, &registrations_by_id, &mut context)?;
-    export_placement_executions(&store, &registrations_by_feeder, &mut context)?;
+    export_placement_executions(
+        &store,
+        &registrations_by_feeder,
+        &registrations,
+        &mut context,
+    )?;
     ensure!(
         !context.samples.is_empty(),
         "no paired bottom-camera images were found"
@@ -345,6 +352,7 @@ fn main() -> Result<()> {
         notes: vec![
             "draft labels are weak supervision, not ground truth".into(),
             "reviewed labels are carried only when both source and crop hashes match".into(),
+            "archived feeder IDs use the nearest same-part registration centerline".into(),
             "each sample keeps aligned-size bare and observed camera crops".into(),
             "empty is an included negative state with no component outline".into(),
             "the multiple-components class uses one enclosing oriented box".into(),
@@ -485,16 +493,15 @@ fn export_pickup_qualifications(
 
 fn export_placement_executions(
     store: &Store,
-    registrations: &BTreeMap<Uuid, StripFeederRegistration>,
+    registrations_by_feeder: &BTreeMap<Uuid, StripFeederRegistration>,
+    registrations: &[StripFeederRegistration],
     context: &mut ExportContext<'_>,
 ) -> Result<()> {
     for run in store.list_placement_executions()? {
         let Some(report) = run.report else {
             continue;
         };
-        let group_id = registrations
-            .get(&report.feeder_id)
-            .map_or(report.feeder_id, |registration| registration.id);
+        let group_id = placement_registration(&report, registrations_by_feeder, registrations)?.id;
         let Some((bare_type, bare_bytes)) =
             store.get_placement_execution_artifact(run.id, BARE_NOZZLE_ARTIFACT)?
         else {
@@ -536,6 +543,48 @@ fn export_placement_executions(
         }
     }
     Ok(())
+}
+
+fn placement_registration(
+    report: &PlacementExecutionReport,
+    by_feeder: &BTreeMap<Uuid, StripFeederRegistration>,
+    registrations: &[StripFeederRegistration],
+) -> Result<StripFeederRegistration> {
+    if let Some(registration) = by_feeder.get(&report.feeder_id) {
+        return Ok(registration.clone());
+    }
+    let mut matches = registrations
+        .iter()
+        .filter(|registration| registration.part_key.as_deref() == Some(&report.part_key))
+        .filter_map(|registration| {
+            let [start, end] = registration.pick_centerline_machine_mm;
+            let delta_x = end[0] - start[0];
+            let delta_y = end[1] - start[1];
+            let length = delta_x.hypot(delta_y);
+            (length > f64::EPSILON).then(|| {
+                let relative_x = report.feeder_pick.x_mm - start[0];
+                let relative_y = report.feeder_pick.y_mm - start[1];
+                (
+                    (relative_x * delta_y - relative_y * delta_x).abs() / length,
+                    registration,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let Some((distance_mm, registration)) = matches.first() else {
+        anyhow::bail!(
+            "archived feeder {} has no registration with matching part and centerline",
+            report.feeder_id
+        );
+    };
+    ensure!(
+        *distance_mm <= MAX_ARCHIVED_FEEDER_MATCH_DISTANCE_MM,
+        "archived feeder {} is {:.3} mm from its nearest registration centerline",
+        report.feeder_id,
+        distance_mm
+    );
+    Ok((*registration).clone())
 }
 
 fn export_observation(

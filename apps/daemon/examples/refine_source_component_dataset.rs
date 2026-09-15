@@ -42,6 +42,10 @@ struct ReviewDecision {
     decision: String,
     #[serde(default)]
     note: String,
+    #[serde(default)]
+    class_name: Option<String>,
+    #[serde(default)]
+    outline_px: Option<[[f64; 2]; 4]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,7 +191,8 @@ fn main() -> Result<()> {
         source_carried_ground_truth_sha256: carried_bytes.as_deref().map(hex_sha256),
         classes: vec!["component_flat".into(), "component_on_edge".into()],
         notes: vec![
-            "accepted and empty decisions are final first-pass labels".into(),
+            "accepted boxes and empty decisions are final first-pass labels".into(),
+            "first-pass box edits preserve operator position, extent, and rotation".into(),
             "adjusted flat boxes use the median accepted extent for that part".into(),
             "verified carried ground truth can supply prior accepted extents".into(),
             "the existing image detector supplies the proposed center".into(),
@@ -213,13 +218,28 @@ fn main() -> Result<()> {
         .iter()
         .filter(|sample| sample.requires_review)
         .count();
+    if unresolved == 0 {
+        let review = serde_json::json!({
+            "schema_version": 1,
+            "dataset": output.name,
+            "decisions": {},
+        });
+        fs::write(
+            root.join("review-refined-decisions.json"),
+            serde_json::to_vec_pretty(&review)?,
+        )?;
+    }
     println!(
         "refined {} samples; {} flat boxes learned; {} require second review",
         output.samples.len(),
         learned,
         unresolved
     );
-    println!("review {}", root.join("review-refined.html").display());
+    if unresolved == 0 {
+        println!("no second review is required");
+    } else {
+        println!("review {}", root.join("review-refined.html").display());
+    }
     Ok(())
 }
 
@@ -245,15 +265,17 @@ fn learn_accepted_extents(
     }
     for sample in &manifest.samples {
         let decision = &review.decisions[&sample.id];
-        if decision.decision != "accept" {
+        if decision.decision != "accept"
+            || decision.class_name.as_deref().unwrap_or("component_flat") != "component_flat"
+        {
             continue;
         }
         let Some(part_key) = &sample.part_key else {
             continue;
         };
-        let outline = sample
-            .draft
+        let outline = decision
             .outline_px
+            .or(sample.draft.outline_px)
             .with_context(|| format!("accepted sample {} has no box", sample.id))?;
         values
             .entry(part_key.clone())
@@ -285,12 +307,28 @@ fn refine_sample(
     learned: &BTreeMap<String, LearnedExtent>,
 ) -> Result<RefinedLabel> {
     match decision.decision.as_str() {
-        "accept" => Ok((
-            Some("component_flat".into()),
-            sample.draft.outline_px,
-            "operator_accepted".into(),
-            false,
-        )),
+        "accept" => {
+            let class_name = decision.class_name.as_deref().unwrap_or("component_flat");
+            ensure!(
+                matches!(class_name, "component_flat" | "component_on_edge"),
+                "sample {} has unknown class {class_name}",
+                sample.id
+            );
+            let outline = decision
+                .outline_px
+                .or(sample.draft.outline_px)
+                .with_context(|| format!("accepted sample {} has no box", sample.id))?;
+            Ok((
+                Some(class_name.into()),
+                Some(outline),
+                if decision.outline_px.is_some() {
+                    "operator_edited".into()
+                } else {
+                    "operator_accepted".into()
+                },
+                false,
+            ))
+        }
         "empty" => Ok((None, None, "operator_empty".into(), false)),
         "reject" => Ok((None, None, "operator_rejected".into(), false)),
         "adjust" => {
@@ -316,6 +354,12 @@ fn refine_sample(
                 true,
             ))
         }
+        "on_edge" if decision.outline_px.is_some() => Ok((
+            Some("component_on_edge".into()),
+            decision.outline_px,
+            "operator_edited".into(),
+            false,
+        )),
         "on_edge" => {
             let extent = sample
                 .part_key
@@ -619,6 +663,8 @@ mod tests {
                         ReviewDecision {
                             decision: "accept".into(),
                             note: String::new(),
+                            class_name: None,
+                            outline_px: None,
                         },
                     )
                 })
@@ -644,6 +690,8 @@ mod tests {
                 ReviewDecision {
                     decision: "adjust".into(),
                     note: String::new(),
+                    class_name: None,
+                    outline_px: None,
                 },
             )]),
         };
@@ -677,6 +725,8 @@ mod tests {
         let decision = ReviewDecision {
             decision: "adjust".into(),
             note: String::new(),
+            class_name: None,
+            outline_px: None,
         };
         let learned = [(
             "part".into(),
@@ -693,6 +743,26 @@ mod tests {
         assert_eq!(outline.unwrap(), axis_aligned_box([48.0, 39.0], 40.0, 20.0));
         assert_eq!(source, "accepted_extent_and_detected_center");
         assert!(review);
+    }
+
+    #[test]
+    fn accepted_edit_preserves_class_and_rotated_outline() {
+        let sample = sample("edited", "part", None);
+        let outline = [[10.0, 20.0], [30.0, 30.0], [25.0, 40.0], [5.0, 30.0]];
+        let decision = ReviewDecision {
+            decision: "accept".into(),
+            note: String::new(),
+            class_name: Some("component_on_edge".into()),
+            outline_px: Some(outline),
+        };
+
+        let (class_name, resolved, source, requires_review) =
+            refine_sample(&sample, &decision, &BTreeMap::new()).unwrap();
+
+        assert_eq!(class_name.as_deref(), Some("component_on_edge"));
+        assert_eq!(resolved, Some(outline));
+        assert_eq!(source, "operator_edited");
+        assert!(!requires_review);
     }
 
     fn sample(id: &str, part: &str, outline: Option<[[f64; 2]; 4]>) -> DraftSample {

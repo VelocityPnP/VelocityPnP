@@ -9,7 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use velocitypnp_domain::{
-    CalibrationArtifactId, PlanarCameraCalibrationReport, PlanarCameraModel, Pose,
+    BottomCameraMappingReport, CalibrationArtifactId, CameraRole, PlacementExecutionReport,
+    PlanarCameraCalibrationReport, PlanarCameraModel, PlanarCameraModelKind, Pose,
     StripFeederInventoryLane, StripFeederInventoryReport, StripFeederRegistration,
     StripPocketOccupancy,
 };
@@ -20,6 +21,8 @@ use velocitypnp_vision::{
 };
 
 const SOURCE_ARTIFACT: &str = "source-pocket-before.png";
+const MAX_ARCHIVED_FEEDER_MATCH_DISTANCE_MM: f64 = 2.0;
+const MIN_ARCHIVED_FEEDER_MATCH_SEPARATION_MM: f64 = 1.0;
 
 #[derive(Debug, Serialize)]
 struct DatasetManifest {
@@ -264,10 +267,7 @@ fn main() -> Result<()> {
             continue;
         };
         ensure!(media_type == "image/png", "source artifact is not a PNG");
-        let registration = by_feeder
-            .get(&report.feeder_id)
-            .with_context(|| format!("feeder {} has no registration", report.feeder_id))?
-            .clone();
+        let registration = placement_registration(&report, &by_feeder, &registrations)?;
         let camera_pose = report
             .source_pose_inspection
             .as_ref()
@@ -417,25 +417,10 @@ fn main() -> Result<()> {
     for split in ["train", "eval"] {
         fs::create_dir_all(output.join("images").join(split))?;
     }
-    let mut models: BTreeMap<Uuid, PlanarCameraModel> = BTreeMap::new();
+    let mut models: BTreeMap<Uuid, (PlanarCameraModel, bool)> = BTreeMap::new();
     let mut samples = Vec::new();
     let mut carried_samples = Vec::new();
     for source in sources {
-        let model = if let Some(model) = models.get(&source.calibration_id) {
-            model.clone()
-        } else {
-            let model = load_top_camera_model(&store, source.calibration_id)?;
-            models.insert(source.calibration_id, model.clone());
-            model
-        };
-        let frame = decode_gray_png(&source.image)?;
-        let artifacts = draft_strip_feeder_source_component(
-            &frame,
-            source.camera_pose,
-            source.pocket_machine_mm,
-            &model,
-            &source.registration,
-        )?;
         let proposed_split = if evaluation_groups.contains(&source.registration.id) {
             "eval"
         } else {
@@ -453,8 +438,34 @@ fn main() -> Result<()> {
                 source.source_kind, source.source_id
             )
         };
-        let encoded_crop = encode_gray_png(&artifacts.crop)?;
         let source_sha256 = hex_sha256(&source.image);
+        let frame = decode_gray_png(&source.image)?;
+        let (model, legacy_affine) = if let Some(model) = models.get(&source.calibration_id) {
+            model.clone()
+        } else {
+            let model =
+                load_top_camera_model(&store, source.calibration_id, frame.width, frame.height)?;
+            models.insert(source.calibration_id, model.clone());
+            model
+        };
+        if legacy_affine {
+            if let Some(reviewed) = &reviewed {
+                if let Some(carried) =
+                    carry_frozen_reviewed_sample(reviewed, &id, &source_sha256, &output)?
+                {
+                    carried_samples.push(carried);
+                    continue;
+                }
+            }
+        }
+        let artifacts = draft_strip_feeder_source_component(
+            &frame,
+            source.camera_pose,
+            source.pocket_machine_mm,
+            &model,
+            &source.registration,
+        )?;
+        let encoded_crop = encode_gray_png(&artifacts.crop)?;
         let carried = if let Some(reviewed) = &reviewed {
             carry_reviewed_sample(reviewed, &id, &source_sha256, &encoded_crop)?
         } else {
@@ -568,6 +579,9 @@ fn main() -> Result<()> {
         notes: vec![
             "draft labels are weak supervision, not ground truth".into(),
             "reviewed labels are carried only when source and crop hashes match".into(),
+            "reviewed legacy-calibration images keep their prior crop when the source hash matches"
+                .into(),
+            "new legacy-calibration images use the retained affine working-plane mapping".into(),
             "accept or correct every evaluation label before scoring a model".into(),
             "OBB rotation is axis-only and does not resolve 180-degree polarity".into(),
             "operator review assigns on-edge components to a separate class".into(),
@@ -609,6 +623,55 @@ fn main() -> Result<()> {
     );
     println!("review {}", output.join("review.html").display());
     Ok(())
+}
+
+fn placement_registration(
+    report: &PlacementExecutionReport,
+    by_feeder: &BTreeMap<Uuid, StripFeederRegistration>,
+    registrations: &[StripFeederRegistration],
+) -> Result<StripFeederRegistration> {
+    if let Some(registration) = by_feeder.get(&report.feeder_id) {
+        return Ok(registration.clone());
+    }
+    let mut matches = registrations
+        .iter()
+        .filter(|registration| registration.part_key.as_deref() == Some(&report.part_key))
+        .filter_map(|registration| {
+            let [start, end] = registration.pick_centerline_machine_mm;
+            let delta_x = end[0] - start[0];
+            let delta_y = end[1] - start[1];
+            let length = delta_x.hypot(delta_y);
+            (length > f64::EPSILON).then(|| {
+                let relative_x = report.feeder_pick.x_mm - start[0];
+                let relative_y = report.feeder_pick.y_mm - start[1];
+                (
+                    (relative_x * delta_y - relative_y * delta_x).abs() / length,
+                    registration,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let Some((distance_mm, registration)) = matches.first() else {
+        anyhow::bail!(
+            "archived feeder {} has no registration with matching part and centerline",
+            report.feeder_id
+        );
+    };
+    ensure!(
+        *distance_mm <= MAX_ARCHIVED_FEEDER_MATCH_DISTANCE_MM,
+        "archived feeder {} is {:.3} mm from its nearest registration centerline",
+        report.feeder_id,
+        distance_mm
+    );
+    if let Some((next_distance_mm, _)) = matches.get(1) {
+        ensure!(
+            next_distance_mm - distance_mm >= MIN_ARCHIVED_FEEDER_MATCH_SEPARATION_MM,
+            "archived feeder {} has ambiguous registration geometry",
+            report.feeder_id
+        );
+    }
+    Ok((*registration).clone())
 }
 
 fn load_reviewed_dataset(root: &Path) -> Result<ReviewedDataset> {
@@ -719,6 +782,58 @@ fn carry_reviewed_sample(
     }))
 }
 
+fn carry_frozen_reviewed_sample(
+    reviewed: &ReviewedDataset,
+    id: &str,
+    source_sha256: &str,
+    output: &Path,
+) -> Result<Option<CarriedGroundTruthSample>> {
+    let Some(draft) = reviewed.draft_by_id.get(id) else {
+        return Ok(None);
+    };
+    if draft.source_sha256 != source_sha256 {
+        return Ok(None);
+    }
+    let ground_truth = reviewed
+        .ground_truth_by_id
+        .get(id)
+        .with_context(|| format!("reviewed sample {id} has no ground truth"))?;
+    let image_path = Path::new(&ground_truth.image_path);
+    ensure!(
+        !image_path.is_absolute()
+            && image_path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "reviewed sample {id} has an unsafe image path"
+    );
+    let prior_image = fs::read(reviewed.root.join(image_path)).with_context(|| {
+        format!(
+            "cannot read reviewed image {}",
+            reviewed.root.join(image_path).display()
+        )
+    })?;
+    let frame = decode_gray_png(&prior_image)
+        .with_context(|| format!("reviewed sample {id} is not a valid PNG"))?;
+    ensure!(
+        frame.width == draft.width_px && frame.height == draft.height_px,
+        "reviewed sample {id} dimensions changed"
+    );
+    let destination = output.join(image_path);
+    fs::create_dir_all(
+        destination
+            .parent()
+            .context("carried image path has no parent")?,
+    )?;
+    fs::write(destination, &prior_image)?;
+    Ok(Some(CarriedGroundTruthSample {
+        ground_truth: ground_truth.clone(),
+        width_px: draft.width_px,
+        height_px: draft.height_px,
+        source_sha256: source_sha256.into(),
+        image_sha256: hex_sha256(&prior_image),
+    }))
+}
+
 fn load_active_strip_feeder_inventory(store: &Store) -> Result<Option<StripFeederInventoryReport>> {
     let Some(baseline) = store
         .list_workspace_inventory_baselines()?
@@ -789,17 +904,70 @@ fn inventory_lane_matches_registration(
     (delta[0] * direction[1] - delta[1] * direction[0]).abs() / length <= 1.5
 }
 
-fn load_top_camera_model(store: &Store, calibration_id: Uuid) -> Result<PlanarCameraModel> {
+fn load_top_camera_model(
+    store: &Store,
+    calibration_id: Uuid,
+    frame_width: u32,
+    frame_height: u32,
+) -> Result<(PlanarCameraModel, bool)> {
     let snapshot = store
         .get_calibration(calibration_id)?
         .with_context(|| format!("calibration {calibration_id} is absent"))?;
-    let artifact = snapshot
+    if let Some(artifact) = snapshot
         .artifacts
         .get(&CalibrationArtifactId::TopCameraPlanarModel)
-        .context("top-camera planar model is absent")?;
-    let report: PlanarCameraCalibrationReport = serde_json::from_value(artifact.value.clone())?;
-    ensure!(report.passed, "top-camera planar model did not pass");
-    Ok(report.model)
+    {
+        let report: PlanarCameraCalibrationReport = serde_json::from_value(artifact.value.clone())?;
+        ensure!(report.passed, "top-camera planar model did not pass");
+        return Ok((report.model, false));
+    }
+    let artifact = snapshot
+        .artifacts
+        .get(&CalibrationArtifactId::TopCameraWorkingPlaneMap)
+        .context("top-camera planar model and working-plane map are absent")?;
+    let value = artifact
+        .value
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| artifact.value.clone());
+    let report: BottomCameraMappingReport = serde_json::from_value(value)?;
+    let center_x_px = f64::from(frame_width) * 0.5;
+    let center_y_px = f64::from(frame_height) * 0.5;
+    let normalization_x_px = center_x_px.max(1.0);
+    let normalization_y_px = center_y_px.max(1.0);
+    Ok((
+        PlanarCameraModel {
+            role: CameraRole::TopCamera,
+            center_x_px,
+            center_y_px,
+            normalization_x_px,
+            normalization_y_px,
+            correction_x_coefficients_mm: [
+                report.pixel_error_to_machine_mm[0][0] * normalization_x_px,
+                report.pixel_error_to_machine_mm[0][1] * normalization_y_px,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            correction_y_coefficients_mm: [
+                report.pixel_error_to_machine_mm[1][0] * normalization_x_px,
+                report.pixel_error_to_machine_mm[1][1] * normalization_y_px,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            supported_min_x_px: 0.0,
+            supported_max_x_px: f64::from(frame_width.saturating_sub(1)),
+            supported_min_y_px: 0.0,
+            supported_max_y_px: f64::from(frame_height.saturating_sub(1)),
+            kind: PlanarCameraModelKind::Affine,
+        },
+        true,
+    ))
 }
 
 fn hex_sha256(data: &[u8]) -> String {
@@ -837,10 +1005,14 @@ body {{ margin: 0; background: #111; color: #eee; font: 16px sans-serif; }}
 main {{ max-width: 960px; margin: auto; padding: 16px; }}
 #frame {{ position: relative; width: min(92vw, 760px); margin: 12px auto; }}
 #image {{ display: block; width: 100%; image-rendering: auto; }}
-#overlay {{ position: absolute; inset: 0; width: 100%; height: 100%; }}
-polygon {{ fill: rgba(0, 255, 128, .12); stroke: #00ff80; stroke-width: 2; }}
+#overlay {{ position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: none; }}
+#box {{ fill: rgba(0, 255, 128, .12); stroke: #00ff80; stroke-width: 2;
+  cursor: move; }}
+.handle {{ fill: #00d4ff; stroke: #111; stroke-width: 1; cursor: pointer; }}
+#rotate-line {{ stroke: #00d4ff; stroke-width: 1; }}
 .controls {{ display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }}
-button {{ padding: 10px 14px; font: inherit; }}
+button, select {{ padding: 10px 14px; font: inherit; }}
 button.selected {{ outline: 3px solid #00d4ff; }}
 #meta {{ white-space: pre-wrap; background: #222; padding: 12px; }}
 textarea {{ width: 100%; min-height: 55px; margin: 10px 0; }}
@@ -850,17 +1022,21 @@ textarea {{ width: 100%; min-height: 55px; margin: 10px 0; }}
 <body>
 <main>
 <h1>Source component draft review</h1>
-<p class="warning">Draft boxes are not ground truth. Green is the automatic OBB.</p>
+<p class="warning">Green is the component box. Drag the box to move it, drag a
+corner to resize it, or drag the round handle to rotate it.</p>
 <p id="progress"></p>
-<div id="frame"><img id="image"><svg id="overlay"></svg></div>
+<div id="frame"><img id="image"><svg id="overlay">
+<line id="rotate-line"></line><polygon id="box"></polygon>
+<g id="handles"></g></svg></div>
 <pre id="meta"></pre>
 <textarea id="note" placeholder="Optional correction note"></textarea>
 <div class="controls">
-<button data-decision="accept">A: Accept</button>
-<button data-decision="adjust">J: Adjust box</button>
-<button data-decision="on_edge">S: On side</button>
+<select id="class-name"><option value="component_flat">Flat component</option>
+<option value="component_on_edge">Component on edge</option></select>
+<button data-decision="accept">A: Accept state and box</button>
 <button data-decision="empty">E: Empty</button>
 <button data-decision="reject">R: Reject image</button>
+<button id="reset">Reset proposal</button>
 <button id="previous">Previous</button>
 <button id="next">Next</button>
 <button id="download">Download decisions</button>
@@ -872,23 +1048,83 @@ const key = {title} + ":review";
 const saved = JSON.parse(localStorage.getItem(key) || "{{}}");
 const requested = Number(new URLSearchParams(location.search).get("index") || 0);
 let index = Math.max(0, Math.min(manifest.samples.length - 1, requested));
+let drag = null, boxState = null;
 const image = document.querySelector("#image");
 const overlay = document.querySelector("#overlay");
+const polygon = document.querySelector("#box");
+const handles = document.querySelector("#handles");
+const rotateLine = document.querySelector("#rotate-line");
 const meta = document.querySelector("#meta");
 const note = document.querySelector("#note");
+const className = document.querySelector("#class-name");
 function store() {{ localStorage.setItem(key, JSON.stringify(saved)); }}
+function initialOutline(sample) {{
+  if (sample.draft.outline_px) return sample.draft.outline_px;
+  const center = sample.draft.center_px ||
+    [sample.width_px / 2, sample.height_px / 2];
+  return [[center[0] - 32, center[1] - 16],
+    [center[0] + 32, center[1] - 16],
+    [center[0] + 32, center[1] + 16],
+    [center[0] - 32, center[1] + 16]];
+}}
+function fromOutline(points) {{
+  const center = points.reduce((sum, point) =>
+    [sum[0] + point[0] / 4, sum[1] + point[1] / 4], [0, 0]);
+  return {{cx: center[0], cy: center[1],
+    width: Math.hypot(points[1][0] - points[0][0],
+      points[1][1] - points[0][1]),
+    height: Math.hypot(points[2][0] - points[1][0],
+      points[2][1] - points[1][1]),
+    angle: Math.atan2(points[1][1] - points[0][1],
+      points[1][0] - points[0][0])}};
+}}
+function points(state = boxState) {{
+  const along = [Math.cos(state.angle), Math.sin(state.angle)];
+  const across = [-along[1], along[0]];
+  const halfWidth = state.width / 2, halfHeight = state.height / 2;
+  return [[-halfWidth, -halfHeight], [halfWidth, -halfHeight],
+    [halfWidth, halfHeight], [-halfWidth, halfHeight]].map(offset =>
+      [state.cx + along[0] * offset[0] + across[0] * offset[1],
+        state.cy + along[1] * offset[0] + across[1] * offset[1]]);
+}}
+function renderBox() {{
+  const corners = points();
+  polygon.setAttribute("points", corners.map(point => point.join(",")).join(" "));
+  handles.innerHTML = "";
+  corners.forEach((point, corner) => {{
+    const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    handle.setAttribute("class", "handle"); handle.setAttribute("r", 5);
+    handle.setAttribute("cx", point[0]); handle.setAttribute("cy", point[1]);
+    handle.dataset.corner = corner; handles.appendChild(handle);
+  }});
+  const normal = [-Math.sin(boxState.angle), Math.cos(boxState.angle)];
+  const top = [boxState.cx - normal[0] * boxState.height / 2,
+    boxState.cy - normal[1] * boxState.height / 2];
+  const rotate = [top[0] - normal[0] * 24, top[1] - normal[1] * 24];
+  rotateLine.setAttribute("x1", top[0]); rotateLine.setAttribute("y1", top[1]);
+  rotateLine.setAttribute("x2", rotate[0]); rotateLine.setAttribute("y2", rotate[1]);
+  const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  handle.setAttribute("class", "handle"); handle.setAttribute("r", 6);
+  handle.setAttribute("cx", rotate[0]); handle.setAttribute("cy", rotate[1]);
+  handle.dataset.rotate = "true"; handles.appendChild(handle);
+}}
+function current() {{
+  const sample = manifest.samples[index];
+  const result = saved[sample.id] || {{decision: "unreviewed", note: ""}};
+  return {{...result,
+    class_name: result.class_name ||
+      (result.decision === "on_edge" ? "component_on_edge" : "component_flat"),
+    outline_px: result.outline_px || initialOutline(sample)}};
+}}
 function show() {{
   const sample = manifest.samples[index];
-  const decision = saved[sample.id] || {{decision: "unreviewed", note: ""}};
+  const decision = current();
   image.src = sample.image_path;
   overlay.setAttribute("viewBox", `0 0 ${{sample.width_px}} ${{sample.height_px}}`);
-  overlay.innerHTML = "";
-  if (sample.draft.outline_px) {{
-    const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-    polygon.setAttribute("points", sample.draft.outline_px.map(p => p.join(",")).join(" "));
-    overlay.appendChild(polygon);
-  }}
+  boxState = fromOutline(decision.outline_px);
+  renderBox();
   note.value = decision.note || "";
+  className.value = decision.class_name;
   document.querySelectorAll("[data-decision]").forEach(button =>
     button.classList.toggle("selected", button.dataset.decision === decision.decision));
   const reviewed = Object.values(saved).filter(value => value.decision !== "unreviewed").length;
@@ -907,24 +1143,70 @@ function show() {{
     measured_size_mm: sample.draft.measured_size_mm
   }}, null, 2);
 }}
-function decide(value) {{
+function persist(decision = current().decision) {{
   const sample = manifest.samples[index];
-  saved[sample.id] = {{decision: value, note: note.value}};
+  saved[sample.id] = {{decision, note: note.value,
+    class_name: className.value, outline_px: points()}};
   store();
+}}
+function decide(value) {{
+  persist(value);
   if (index + 1 < manifest.samples.length) index++;
   show();
 }}
+function eventPoint(event) {{
+  const point = overlay.createSVGPoint(); point.x = event.clientX;
+  point.y = event.clientY;
+  const value = point.matrixTransform(overlay.getScreenCTM().inverse());
+  return [value.x, value.y];
+}}
+overlay.onpointerdown = event => {{
+  const point = eventPoint(event), corner = event.target.dataset.corner;
+  drag = {{start: point, initial: {{...boxState}},
+    mode: event.target.dataset.rotate ? "rotate" :
+      corner !== undefined ? "corner" : event.target === polygon ? "move" : "none",
+    corner: Number(corner)}};
+  overlay.setPointerCapture(event.pointerId);
+}};
+overlay.onpointermove = event => {{
+  if (!drag || drag.mode === "none") return;
+  const point = eventPoint(event), dx = point[0] - drag.start[0];
+  const dy = point[1] - drag.start[1];
+  if (drag.mode === "move") {{
+    boxState.cx = drag.initial.cx + dx; boxState.cy = drag.initial.cy + dy;
+  }} else if (drag.mode === "rotate") {{
+    boxState.angle = Math.atan2(point[1] - boxState.cy,
+      point[0] - boxState.cx) + Math.PI / 2;
+  }} else {{
+    const old = points(drag.initial), opposite = old[(drag.corner + 2) % 4];
+    const along = [Math.cos(drag.initial.angle), Math.sin(drag.initial.angle)];
+    const across = [-along[1], along[0]];
+    const delta = [point[0] - opposite[0], point[1] - opposite[1]];
+    boxState.width = Math.max(4,
+      Math.abs(delta[0] * along[0] + delta[1] * along[1]));
+    boxState.height = Math.max(4,
+      Math.abs(delta[0] * across[0] + delta[1] * across[1]));
+    boxState.cx = (point[0] + opposite[0]) / 2;
+    boxState.cy = (point[1] + opposite[1]) / 2;
+  }}
+  renderBox();
+}};
+overlay.onpointerup = () => {{ if (drag) persist(); drag = null; }};
 document.querySelectorAll("[data-decision]").forEach(button =>
   button.addEventListener("click", () => decide(button.dataset.decision)));
-document.querySelector("#previous").onclick = () => {{ index = Math.max(0, index - 1); show(); }};
-document.querySelector("#next").onclick = () => {{ index = Math.min(manifest.samples.length - 1, index + 1); show(); }};
-note.onchange = () => {{
-  const sample = manifest.samples[index];
-  const current = saved[sample.id] || {{decision: "unreviewed"}};
-  saved[sample.id] = {{decision: current.decision, note: note.value}};
-  store();
+document.querySelector("#reset").onclick = () => {{
+  boxState = fromOutline(initialOutline(manifest.samples[index])); renderBox(); persist();
 }};
+document.querySelector("#previous").onclick = () => {{
+  persist(); index = Math.max(0, index - 1); show();
+}};
+document.querySelector("#next").onclick = () => {{
+  persist(); index = Math.min(manifest.samples.length - 1, index + 1); show();
+}};
+note.onchange = () => persist();
+className.onchange = () => persist();
 document.querySelector("#download").onclick = () => {{
+  persist();
   const result = {{schema_version: 1, dataset: manifest.name,
     exported_at: new Date().toISOString(), decisions: saved}};
   const link = document.createElement("a");
@@ -934,12 +1216,15 @@ document.querySelector("#download").onclick = () => {{
   link.click();
 }};
 document.addEventListener("keydown", event => {{
-  if (event.target === note) return;
-  const action = {{a: "accept", j: "adjust", s: "on_edge", e: "empty",
-    r: "reject"}}[event.key.toLowerCase()];
+  if (event.target === note || event.target === className) return;
+  const action = {{a: "accept", e: "empty", r: "reject"}}[event.key.toLowerCase()];
   if (action) decide(action);
-  if (event.key === "ArrowLeft") {{ index = Math.max(0, index - 1); show(); }}
-  if (event.key === "ArrowRight") {{ index = Math.min(manifest.samples.length - 1, index + 1); show(); }}
+  if (event.key === "ArrowLeft") {{
+    persist(); index = Math.max(0, index - 1); show();
+  }}
+  if (event.key === "ArrowRight") {{
+    persist(); index = Math.min(manifest.samples.length - 1, index + 1); show();
+  }}
 }});
 show();
 </script>

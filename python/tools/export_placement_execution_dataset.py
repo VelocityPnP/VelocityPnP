@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("database", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--exclude-reviewed",
+        type=Path,
+        help="dataset whose reviewed execution IDs must not be exported again",
+    )
     return parser.parse_args()
 
 
@@ -202,11 +207,39 @@ def prepare_output(output: Path) -> Path:
     return images
 
 
+def reviewed_execution_ids(root: Path) -> tuple[set[str], Path]:
+    manifest_path = root / "manifest.ground-truth.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"reviewed manifest does not exist: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    samples = manifest.get("samples")
+    if not isinstance(samples, list):
+        raise ValueError(f"reviewed manifest has no sample list: {manifest_path}")
+    execution_ids = {
+        sample["source_execution_id"]
+        for sample in samples
+        if isinstance(sample, dict)
+        and isinstance(sample.get("source_execution_id"), str)
+    }
+    if not execution_ids:
+        raise ValueError(
+            f"reviewed manifest has no source execution IDs: {manifest_path}"
+        )
+    return execution_ids, manifest_path
+
+
 def export_dataset(
     database: Path,
     output: Path,
     generated_at: str | None = None,
+    exclude_reviewed: Path | None = None,
 ) -> dict[str, Any]:
+    excluded_execution_ids: set[str] = set()
+    excluded_manifest: Path | None = None
+    if exclude_reviewed is not None:
+        excluded_execution_ids, excluded_manifest = reviewed_execution_ids(
+            exclude_reviewed
+        )
     images = prepare_output(output)
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
@@ -221,6 +254,8 @@ def export_dataset(
             execution = json.loads(row["execution_document"])
             report = execution.get("report", {})
             execution_id = str(execution.get("id", "unknown"))
+            if execution_id in excluded_execution_ids:
+                continue
             reference = str(report.get("placement_reference", "unknown"))
             try:
                 inspection = report["top_inspection"]
@@ -362,6 +397,15 @@ def export_dataset(
             "all labels are weak proposals from retained execution evidence; "
             "operator review is required"
         ),
+        "excluded_reviewed_dataset": (
+            {
+                "manifest": str(excluded_manifest.resolve()),
+                "manifest_sha256": sha256_file(excluded_manifest),
+                "execution_count": len(excluded_execution_ids),
+            }
+            if excluded_manifest is not None
+            else None
+        ),
         "samples": samples,
         "skipped": skipped,
     }
@@ -381,7 +425,11 @@ def export_dataset(
 
 def main() -> None:
     args = parse_args()
-    manifest = export_dataset(args.database, args.output)
+    manifest = export_dataset(
+        args.database,
+        args.output,
+        exclude_reviewed=args.exclude_reviewed,
+    )
     counts = {
         state: sum(sample["draft_state"] == state for sample in manifest["samples"])
         for state in (
