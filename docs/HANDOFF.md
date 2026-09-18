@@ -37,21 +37,23 @@ They persist across reboots on this computer, but Git does not contain them.
 
 ## Model distribution
 
-Create a separate model-zoo repository before a public model release. Keep
-model contracts, training code, and evaluation baselines in this repository.
-Put versioned runtime packages, checksums, licenses, and model cards in the
-model-zoo repository. Keep raw training images in separate storage.
+The model zoo is `VelocityPnP/velocitypnp-models`. Immutable prerelease
+`models-2026-09-14.1` contains the combined September 2026 source-component,
+held-part, and placement-verification packages. The model-zoo catalog records
+package, manifest, checkpoint, ONNX, dataset, and training-source checksums.
+Raw training images remain in separate storage.
 
-The three current artifacts declare Apache-2.0 terms. Their training code
-declares Apache-2.0 terms, and the training framework declares BSD-3-Clause
-terms. The source-component manifest has no Git commit provenance. The
-held-part manifest records a dirty source worktree. Retrain or reproduce those
-two packages from clean commits before a final model-zoo release. The current
-placement-verification package records clean source provenance.
+This repository pins those packages in `models.lock.json`. The lock is
+cache-only because all three models remain candidates and all three training
+manifests record a dirty source worktree. Run
+`python3 python/tools/model_cache.py sync models.lock.json` to download and
+verify them. The tool uses a content-addressed local cache and cannot activate
+this candidate lock.
 
-The application still needs a versioned model download, cache, checksum, and
-selection mechanism. Do not put changing binary model history in the main
-source repository.
+Runtime activation requires a separate lock with `selection_policy: runtime`
+and approved status for every package. The cache keeps exact prior lock
+snapshots for explicit rollback. Model selection still does not change daemon
+acceptance policy. See `docs/MODEL_DISTRIBUTION.md`.
 
 ## 2026-09-07 speed closeout
 

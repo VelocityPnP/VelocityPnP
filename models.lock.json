@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "selection_policy": "cache_only",
+  "catalog": {
+    "repository": "VelocityPnP/velocitypnp-models",
+    "commit": "e115220ed5c4c474be6b577f0331c3666bb45f3b",
+    "release_tag": "models-2026-09-14.1"
+  },
+  "models": [
+    {
+      "role": "source_component",
+      "id": "source-component-pose/2026-09-14.1",
+      "status": "candidate",
+      "contract_version": "velocitypnp.source-component-pose.v2",
+      "package_root": "source-component-pose-2026-09-14.1",
+      "dataset_content_sha256": "5f06a4f1dbc2f1e9d6d28e97024c7501b30d41389c6af1812b90512a7afdff04",
+      "manifest_sha256": "2c34e926c58986f45aee1b68baaad2e64f4bca49a05a6833ae16d0cf10263f5d",
+      "onnx_sha256": "c3273c4c128a4dfb8a3d258107a25c6ee283c051faa4333ede93d99d1f50a14c",
+      "checkpoint_sha256": "5f818707807782d4aa4255ad9fc00ba1a80ed4a3442797f2282596a1cc0b1190",
+      "asset": {
+        "name": "source-component-pose-2026-09-14.1.tar.gz",
+        "size_bytes": 7314727,
+        "sha256": "0c43e1fb5cbf6ae3c6b25e632be53ca49fbd88a3488d70cc660bb0a4423e8ca9",
+        "api_url": "https://api.github.com/repos/VelocityPnP/velocitypnp-models/releases/assets/573213088",
+        "download_url": "https://github.com/VelocityPnP/velocitypnp-models/releases/download/models-2026-09-14.1/source-component-pose-2026-09-14.1.tar.gz"
+      }
+    },
+    {
+      "role": "held_part",
+      "id": "held-part-pose/2026-09-14.1",
+      "status": "candidate",
+      "contract_version": "velocitypnp.held-part-pose.v1",
+      "package_root": "held-part-pose-2026-09-14.1",
+      "dataset_content_sha256": "dadcb24a3145c3f75f4f2dfc61c0ec78008fa33f7f40dcfca3948cf7ef09ef79",
+      "manifest_sha256": "44d3f41f0c27f5d9333b5cf28dc222ad5540b64e4c773e918f8cda1fe0e58d3e",
+      "onnx_sha256": "6e3a50e742b5e6968dbf080a02fbb1d7cb24a5f16b23f4ab8879ffb27e3d08f4",
+      "checkpoint_sha256": "ddf3cdb107986c34577a0cd62b6764ba3ea3cf4032780f119376987dae4303a0",
+      "asset": {
+        "name": "held-part-pose-2026-09-14.1.tar.gz",
+        "size_bytes": 4613382,
+        "sha256": "e42eab879c95492237319742e8edb7a3964519a9482a688da9c9bc4dfbafa04c",
+        "api_url": "https://api.github.com/repos/VelocityPnP/velocitypnp-models/releases/assets/573213082",
+        "download_url": "https://github.com/VelocityPnP/velocitypnp-models/releases/download/models-2026-09-14.1/held-part-pose-2026-09-14.1.tar.gz"
+      }
+    },
+    {
+      "role": "placement_verification",
+      "id": "placement-verification/2026-09-14.1",
+      "status": "candidate",
+      "contract_version": "velocitypnp.placement-verification.v1",
+      "package_root": "placement-verification-2026-09-14.1",
+      "dataset_content_sha256": "cdeac286ff2614166a3a8927346e3932deb1bd12c8c42b1b5dc8a63b5b08a808",
+      "manifest_sha256": "cb2031b870783810fb0b17d94ea9fde1c55f5bd1cb784762c4773d3afbc9f87a",
+      "onnx_sha256": "eb5302231998b3a0dba92c2746c76bfc3ebc82c45c347c5b0d49568eb63ba232",
+      "checkpoint_sha256": "cc04b76a5471078b072aa46ec6939f9826edf86484e9e049dae1da8520d0aa6c",
+      "asset": {
+        "name": "placement-verification-2026-09-14.1.tar.gz",
+        "size_bytes": 4520652,
+        "sha256": "d3487ba2671e84ac09268bacf752064c7bbface950abe449d939a83567b93248",
+        "api_url": "https://api.github.com/repos/VelocityPnP/velocitypnp-models/releases/assets/573213087",
+        "download_url": "https://github.com/VelocityPnP/velocitypnp-models/releases/download/models-2026-09-14.1/placement-verification-2026-09-14.1.tar.gz"
+      }
+    }
+  ]
+}

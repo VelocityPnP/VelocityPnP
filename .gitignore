@@ -1,6 +1,8 @@
 /target/
 /.cargo-home/
 /.rustup-home/
+/.venv-training/
+/.model-cache/
 /web/node_modules/
 /web/dist/
 /web/*.tsbuildinfo

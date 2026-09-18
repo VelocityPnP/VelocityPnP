@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/VelocityPnP/VelocityPnP/docs/model-lock-v1.schema.json",
+  "title": "VelocityPnP model lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "selection_policy", "catalog", "models"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "selection_policy": {"enum": ["cache_only", "runtime"]},
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "release_tag"],
+      "properties": {
+        "repository": {"type": "string"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "release_tag": {"type": "string"}
+      }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "id",
+          "status",
+          "contract_version",
+          "package_root",
+          "dataset_content_sha256",
+          "manifest_sha256",
+          "onnx_sha256",
+          "checkpoint_sha256",
+          "asset"
+        ],
+        "properties": {
+          "role": {"type": "string"},
+          "id": {"type": "string"},
+          "status": {
+            "enum": ["candidate", "validated", "approved", "retired"]
+          },
+          "contract_version": {"type": "string"},
+          "package_root": {"type": "string"},
+          "dataset_content_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "manifest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "onnx_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "checkpoint_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "asset": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "size_bytes",
+              "sha256",
+              "api_url",
+              "download_url"
+            ],
+            "properties": {
+              "name": {"type": "string"},
+              "size_bytes": {"type": "integer", "minimum": 1},
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "api_url": {"type": "string"},
+              "download_url": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
