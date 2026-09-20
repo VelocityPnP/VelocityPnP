@@ -15590,7 +15590,11 @@ async fn execute_visual_home_with_limit(
         ));
     }
     let camera_profile = stored_camera_profile(state, visual.camera_role)?;
-    let device_path = camera_path_for_role(visual.camera_role)?;
+    let device_path = if status.simulated {
+        String::new()
+    } else {
+        camera_path_for_role(visual.camera_role)?
+    };
     let seed_pose = if body.move_to_seed {
         let feed_mm_per_min = safe_level_xy_feed(
             &state.profile,
