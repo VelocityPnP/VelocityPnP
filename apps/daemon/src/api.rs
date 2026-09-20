@@ -32071,8 +32071,8 @@ async fn acquire_physical_placement_part(
             alignment.passed = true;
             alignment.findings.push(format!(
                 "production placement accepted the detected final held-part pose within \
-                 {:.3} mm translation and {:.1} degree rotation limits",
-                production_translation_limit_mm, MAX_PLACED_PART_ROTATION_ERROR_DEG,
+                 {production_translation_limit_mm:.3} mm translation and \
+                 {MAX_PLACED_PART_ROTATION_ERROR_DEG:.1} degree rotation limits",
             ));
         }
         let inspection = alignment
