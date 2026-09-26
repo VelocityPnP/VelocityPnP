@@ -64,7 +64,11 @@ def artifact_map(connection: sqlite3.Connection, identifier: str) -> dict[str, b
 
 
 def export_trace(
-    database: Path, board_instance_id: str, output: Path, prior_notes: dict[str, str] | None = None
+    database: Path,
+    board_instance_id: str,
+    output: Path,
+    prior_notes: dict[str, str] | None = None,
+    execution_ids: set[str] | None = None,
 ) -> dict:
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"output directory is not empty: {output}")
@@ -95,6 +99,8 @@ def export_trace(
             raise ValueError(f"no placement result images for board {board_instance_id}")
         references = set()
         for identifier, recorded_at, document, feeder_name in rows:
+            if execution_ids is not None and identifier not in execution_ids:
+                continue
             execution = json.loads(document)
             report = execution["report"]
             reference = report.get("placement_reference")
@@ -186,6 +192,8 @@ def export_trace(
                 "inspection_passed": result.get("passed") is True,
                 "prior_note": (prior_notes or {}).get(reference, ""),
             })
+    if not samples:
+        raise ValueError("no selected placement traces have result images")
     manifest = {
         "board_instance_id": board_instance_id,
         "coordinate_note": (
@@ -210,11 +218,19 @@ def main() -> None:
     parser.add_argument("board_instance_id")
     parser.add_argument("output", type=Path)
     parser.add_argument("--prior-notes", type=Path)
+    parser.add_argument("--execution-id", action="append", default=[])
     args = parser.parse_args()
     notes = json.loads(args.prior_notes.read_text(encoding="utf-8")) if args.prior_notes else None
     if notes is not None and not isinstance(notes, dict):
         parser.error("prior notes must be a JSON object keyed by reference")
-    manifest = export_trace(args.database, args.board_instance_id, args.output, notes)
+    selected = set(args.execution_id) or None
+    manifest = export_trace(
+        args.database,
+        args.board_instance_id,
+        args.output,
+        notes,
+        selected,
+    )
     print(f"Exported {len(manifest['samples'])} traces to {args.output}")
 
 

@@ -99,7 +99,13 @@ class PlacementTraceReviewTests(unittest.TestCase):
                     [("execution-1", name, data) for name, data in artifacts.items()],
                 )
             output = root / "review"
-            manifest = export_trace(database, "board-1", output, {"R8": "On its side"})
+            manifest = export_trace(
+                database,
+                "board-1",
+                output,
+                {"R8": "On its side"},
+                {"execution-1"},
+            )
             self.assertEqual(len(manifest["samples"]), 1)
             sample = manifest["samples"][0]
             self.assertEqual(sample["feeder"], "Feeder 8")
