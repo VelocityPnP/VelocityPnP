@@ -114,8 +114,10 @@ The project is organized by measurable gates rather than calendar estimates.
   fallback when connected-component segmentation cannot separate both pads
 - [x] Retry one missed pickup with a bounded correction learned from recent,
   agreeing placement residuals for the same job, nozzle, and part
-- [ ] Add first-class placement-transfer calibration with provisional XY
+- [x] Add first-class placement-transfer calibration with provisional XY
   adjustment, independent check placements, and persistent evidence
+- [ ] Pass the N1 placement-transfer check and separate validation placements
+  on attached hardware
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
 
 ## Gate 5 — Inspection and newer machines
@@ -193,7 +195,7 @@ The project is organized by measurable gates rather than calendar estimates.
 - [ ] Meet labeled-dataset recall and false-flag targets
 - [ ] Reproduce the source-component and held-part release models from clean,
   commit-identified source trees
-- [ ] Publish versioned Apache-2.0 runtime packages in a separate model-zoo
+- [x] Publish versioned Apache-2.0 runtime packages in a separate model-zoo
   repository with model cards, checksums, and evaluation records
 - [ ] Add application-managed model download, cache, checksum, and selection
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures

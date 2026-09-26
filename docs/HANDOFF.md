@@ -1,23 +1,23 @@
 # Session handoff
 
-This document records the state at the end of the hardware, vision, and speed
-sessions through 2026-09-07. Verify live state again before each new session.
+This document records the current hardware, vision, and model state through
+2026-09-26. Verify live state again before each new session.
 
 ## Live state
 
-- The physical daemon is stopped. The machine is normally disconnected,
-  unhomed, and fault-free. Start a new release daemon with `velocitypnp.db`.
+- The physical daemon is running on loopback port 4080. At the last check, the
+  machine was connected, homed, ready, and fault-free at safe Z. It had a
+  session lease. Recheck status and get a new operator safety confirmation
+  before more motion.
 - The database contains the motion, camera, pickup, board-registration, and
   full-workspace qualification evidence. The stored camera profiles use
   top-camera MJPEG at 30 FPS with zero initial discard and bottom-camera YUYV
   at 10 FPS with 20 initial discard frames.
-- The last physical operation was normal disconnect
-  `d52d27ff-8c1a-469a-a45e-605aac6f1f4f`. It cleared the calibration revision
-  and control lease. The final status check showed disconnected, unhomed, and
-  fault-free. Acquire a new lease and home before more motion.
-- Before disconnect, the final release daemon passed coarse home, N2 fine
-  home, and a no-move datum check at 0.02719 mm. The last connected pose was
-  X220.124 Y190.234 Z31.500.
+- Coarse home `63e7428e-0480-4ffd-8cc2-d262e14e57be` and N2 fine home
+  `2109e395-9064-431f-b681-23a0eb7541af` passed after the latest daemon
+  restart. Fine home reset the datum contact from Z59.100 to Z59.200.
+- Calibration `77f004b5-04d3-44b1-921b-9218df91e6a0` and board instance
+  `763a44ae-2765-4839-8f46-930002525330` are active.
 - The last recorded states for lights, both vacuum outputs, and blowoff are
   off.
 - Do not infer that the machine is safe from this document. Get a new operator
@@ -28,12 +28,52 @@ The active local model packages are:
 
 | Purpose | Contract | ONNX SHA-256 |
 | --- | --- | --- |
-| Source component | `source-component-pose.v2` | `4a89e8abb0a2c5a513ef43ddddb9a936ee5b6656f34047b671530c155a94d204` |
-| Held part | `held-part-pose.v1` | `a34f48bdbd9e275dc136dd2eaafb733e691ebd952ece9b30f7f0d15b520699bf` |
-| Placement verification | `placement-verification.v1` | `10e07560dfc78c53a86d9da4b98e59fc663af58adebde83ddc45875a2247670e` |
+| Source component | `source-component-pose.v2` | `e97e723c68e31d7044220742562562d2d80e244f149c8ab0f0aa0177ae3ab072` |
+| Held part | `held-part-pose.v1` | `6e3a50e742b5e6968dbf080a02fbb1d7cb24a5f16b23f4ab8879ffb27e3d08f4` |
+| Placement verification | `placement-verification.v1` | `eb5302231998b3a0dba92c2746c76bfc3ebc82c45c347c5b0d49568eb63ba232` |
 
 The active model directories are below the ignored local `datasets/` tree.
 They persist across reboots on this computer, but Git does not contain them.
+
+## 2026-09-26 placement-transfer and model work
+
+The N1 placement-transfer runner completed baseline placements R25, R28, and
+R31. Their signed physical offsets were X+0.091/Y+0.055,
+X+0.110/Y+0.185, and X+0.026/Y+0.091 mm. The robust center was
+X+0.091/Y+0.091 mm, and p95 radial error was 0.215 mm. The runner prepared
+that value as a provisional correction but did not commit it.
+
+The first check stopped before pickup at feeder 7 pocket 10. Continuation run
+`9d1a443a-0a38-4032-a712-b9225968d2ac` stopped before pickup at pocket 14.
+The retained image shows a resistor and a correct learned pose, but all local
+source checkpoints classify it as empty. Deterministic vision selected the
+tape edge. This is a source-model regression, not placement evidence.
+
+The all-history source export has 595 unique images. It carried 213 prior
+labels and needs review for 382 images. The local review page is served from
+`datasets/source-components-v5-all`. Do not restart placement-transfer motion
+with the current source model.
+
+Nine N1 pickups after the latest vacuum calibration have bottom-camera part
+confirmation. Their open-nozzle median was 237 counts, their held-part median
+was 228 counts, and their held range was 228 to 231 counts. None were false
+negatives at the 231.092-count acquire threshold. This is useful retrospective
+evidence, but the stored calibration still needs a controlled known-part
+validation.
+
+A clean training clone at commit `61b44e1` is on `svl-spark` at
+`/home/tsmith/velocitypnp-training/clean-20260926`. Clean held-part and
+placement retraining can use the existing v3 reviewed datasets. The source
+retrain must wait for the new feeder decisions and a new independent holdout.
+
+The current board has physical contacts at R7, R9-R14, R17-R18, R25, R27-R28,
+R30-R31, and R40. R30 is on its side. R17 has no detected result center. Do
+not reuse any of these targets. R26, R29, and R32 remain the intended
+180-degree continuation targets.
+
+The database backup before this work is
+`/tmp/velocitypnp-before-placement-transfer-20260926.db`. Its SHA-256 is
+`ffae73385decc0e126fd02d54ad28c671915ea9c231c7369831d10d222161ccf`.
 
 ## Model distribution
 

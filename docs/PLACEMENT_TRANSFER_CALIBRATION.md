@@ -12,6 +12,33 @@ return parts to feeder pockets. It consumes parts and empty board targets.
 Keep final validation separate. Calibration data can fit a correction. Final
 validation must use different placements and must not change the correction.
 
+## Implementation and hardware status
+
+The daemon implements the placement-transfer artifact, report, endpoint,
+provisional correction, bounded rounds, and continuation of a rejected run.
+The continuation accepts only recomputed, compatible evidence from completed
+rounds. Normal production requests cannot supply a correction override.
+
+The 2026-09-26 N1 hardware run completed one three-part baseline. Its robust
+physical part offset was X+0.091 and Y+0.091 mm. The p95 radial offset was
+0.215 mm. The samples had a common direction and passed the 0.100 mm spread
+limit, so the runner prepared the provisional X+0.091 and Y+0.091 mm
+correction.
+
+No corrected check placement completed. The first run found an empty source
+pocket. A continued run then found a resistor, but the source model called it
+empty while deterministic vision selected the tape edge. The source-control
+gate stopped before pickup. No placement-transfer artifact was committed.
+
+The remaining work is:
+
+1. review and retrain the source-component model with all retained feeder
+   images;
+2. complete a three-part corrected check on unused targets;
+3. review its intended and detected center overlays;
+4. run separate validation placements that do not change the correction; and
+5. add the calibration controls and progress views to the web interface.
+
 Release and seating height are also separate. The existing placement-process
 estimate controls those values. Placement-transfer calibration reports release
 failures, but it does not tune Z.
@@ -240,7 +267,7 @@ targets. It must confirm that the PCB and feeders are fixed, the selected
 targets are empty, the nozzles are level, the travel path is clear, and power
 isolation is reachable.
 
-## Implementation order
+## Original implementation order
 
 1. Add pure summary and adjustment types in the domain crate. Test sign,
    spread, limits, convergence, and insufficient evidence.

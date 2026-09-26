@@ -45,6 +45,8 @@ This repository contains the first working platform slice:
   learned comparison evidence and a guarded bare-nozzle release decision
 - hash-checked top-camera placement verification with guarded deterministic
   agreement and persistent before/after evidence
+- bounded placement-transfer calibration with provisional corrections,
+  independent check targets, and restart-safe evidence continuation
 - persistent guarded job execution with pause, recovery, and restart-safe state
 - per-nozzle reference-seal vacuum characterization with learned hysteresis
 - live Marlin motion settings, per-move timing, and bounded XY speed sweeps

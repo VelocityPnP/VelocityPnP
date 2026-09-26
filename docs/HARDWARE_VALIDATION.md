@@ -3528,6 +3528,79 @@ The retained summary is
 The full v2 report is operation artifact
 `e7b09783-d945-40b5-805c-0295bba0c825/xy-spatial-holdout.json`.
 
+### N1 placement-transfer baseline and blocked check
+
+On 2026-09-26, release daemon commit `61b44e1` loaded source-component ONNX
+SHA-256 `e97e723c68e31d7044220742562562d2d80e244f149c8ab0f0aa0177ae3ab072`,
+held-part ONNX SHA-256
+`6e3a50e742b5e6968dbf080a02fbb1d7cb24a5f16b23f4ab8879ffb27e3d08f4`,
+and placement-verification ONNX SHA-256
+`eb5302231998b3a0dba92c2746c76bfc3ebc82c45c347c5b0d49568eb63ba232`.
+Coarse home and N2 fine home passed. The machine used calibration
+`77f004b5-04d3-44b1-921b-9218df91e6a0` and FTP board instance
+`763a44ae-2765-4839-8f46-930002525330`.
+
+Feeder 7 live holdout `917953ca-915d-488f-9151-609f11f33d32` passed. It
+found four sprocket centers, applied a 0.228 mm pocket correction, and
+reported 72 percent occupancy. This was a live placement precondition, not a
+feeder qualification run.
+
+Placement-transfer run `56389fd0-bcb3-4a22-b886-21a2e580d56a` completed one
+baseline round:
+
+| Target | X offset (mm) | Y offset (mm) | Radial (mm) | Held residual (mm) |
+| --- | ---: | ---: | ---: | ---: |
+| R25 | +0.091 | +0.055 | 0.106 | 0.069 |
+| R28 | +0.110 | +0.185 | 0.215 | 0.067 |
+| R31 | +0.026 | +0.091 | 0.094 | 0.048 |
+
+The robust physical offset was X+0.091 and Y+0.091 mm. Its magnitude was
+0.128 mm, p95 radial error was 0.215 mm, and maximum sample deviation was
+0.096 mm. All three samples had a common direction. The run therefore
+prepared a provisional X+0.091 and Y+0.091 mm correction.
+
+The first check stopped before nozzle descent because feeder 7 pocket 10 had
+no confirmed part. It made no board contact. Continuation support then reused
+only the recomputed baseline evidence and required three new targets. Run
+`9d1a443a-0a38-4032-a712-b9225968d2ac` selected R26 first and inspected
+pocket 14. The retained image shows a flat resistor. The learned pose is on
+the resistor, but the model classifies the image as empty with 0.777
+probability. Deterministic vision reports occupied but selects the tape edge,
+2.874 mm from the allowed pickup center. The source-control gate stopped
+before pickup and board contact.
+
+All three local source checkpoints and the published candidate classify the
+pocket 14 image as empty. Their pose estimates remain on the resistor. A clean
+rerun of the old reviewed data would therefore reproduce this failure. An
+all-history export retained 595 unique feeder images, carried 213 verified
+labels, and produced 382 new images for operator review.
+
+No placement-transfer artifact was committed. The provisional correction was
+not used by normal production placement. A corrected three-part check and a
+separate validation set remain required. Known-part vacuum classification and
+a larger reliability run also remain open.
+
+The latest N1 vacuum calibration was created at
+`2026-09-26T16:35:42.540Z`. Nine later pickups used the same calibration and
+had bottom-camera part confirmation. Open-nozzle medians ranged from 236 to
+237.5 counts, with a median of 237. Held-part medians ranged from 228 to 231
+counts, with a median of 228. The signal delta ranged from 6 to 9 counts, with
+a median of 8. All nine passed the 231.092-count acquire threshold. This
+retrospective result supports the threshold. It does not set the stored
+`known_part_validated` field because no controlled known-part calibration run
+was done.
+
+One earlier calibration attempt placed R30 on its side. Its bottom-camera
+classification was uncertain, but the old fallback continued to placement.
+The runner now rejects any held pose that bottom vision cannot prove usable
+and sends an acquired rejected part to the configured production reject area.
+It does not return a 0603 part to its feeder pocket.
+
+The retained current-board review contains 15 after images. R17 has no
+detected part center and is shown with only its registered target. The
+placement overlay exporter now preserves this evidence instead of failing the
+complete review.
+
 ## Procedure sources
 
 - [Opulo V3 connect and bottom-camera calibration](https://docs.opulo.io/misc/calibration/2-connect-to-machine/)
