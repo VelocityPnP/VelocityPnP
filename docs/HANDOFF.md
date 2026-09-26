@@ -63,8 +63,10 @@ validation.
 
 A clean training clone at commit `61b44e1` is on `svl-spark` at
 `/home/tsmith/velocitypnp-training/clean-20260926`. Clean held-part and
-placement retraining can use the existing v3 reviewed datasets. The source
-retrain must wait for the new feeder decisions and a new independent holdout.
+placement reruns reproduced the existing checkpoints, ONNX files, histories,
+and metrics byte for byte. Their new manifests record `dirty: false`. The
+source retrain must wait for the new feeder decisions and a new independent
+holdout. See `docs/baselines/model-reproduction-2026-09-26.md`.
 
 The current board has physical contacts at R7, R9-R14, R17-R18, R25, R27-R28,
 R30-R31, and R40. R30 is on its side. R17 has no detected result center. Do
