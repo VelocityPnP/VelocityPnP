@@ -21490,6 +21490,8 @@ struct StartPlacementTransferRunRequest {
     job_id: Uuid,
     nozzle_id: String,
     #[serde(default)]
+    continuation_run_id: Option<Uuid>,
+    #[serde(default)]
     placement_references: Vec<String>,
     confirmed_external_safety_checks: bool,
     confirmed_targets_empty: bool,
@@ -21541,6 +21543,116 @@ fn balance_placement_transfer_targets(
         rounds[index % round_count].push(step);
     }
     rounds.into_iter().flatten().collect()
+}
+
+fn placement_transfer_offsets_match(left: [f64; 2], right: [f64; 2]) -> bool {
+    (left[0] - right[0]).abs() <= 1e-9 && (left[1] - right[1]).abs() <= 1e-9
+}
+
+fn placement_transfer_summaries_match(
+    left: &velocitypnp_domain::PlacementTransferRoundSummary,
+    right: &velocitypnp_domain::PlacementTransferRoundSummary,
+) -> bool {
+    left.sample_count == right.sample_count
+        && left.common_direction == right.common_direction
+        && placement_transfer_offsets_match(
+            left.robust_observed_part_offset_mm,
+            right.robust_observed_part_offset_mm,
+        )
+        && (left.robust_observed_part_offset_magnitude_mm
+            - right.robust_observed_part_offset_magnitude_mm)
+            .abs()
+            <= 1e-9
+        && (left.p95_radial_part_offset_mm - right.p95_radial_part_offset_mm).abs() <= 1e-9
+        && (left.maximum_sample_deviation_mm - right.maximum_sample_deviation_mm).abs() <= 1e-9
+}
+
+fn validate_placement_transfer_continuation(
+    run: &AutomatedCalibrationRun,
+    calibration_id: Uuid,
+    nozzle_id: &str,
+    profile: &velocitypnp_domain::PlacementTransferCalibrationProfile,
+    active_initial_correction_mm: [f64; 2],
+) -> Result<PlacementTransferCalibrationReport, String> {
+    if run.calibration_id != calibration_id || run.status != CalibrationRunStatus::Rejected {
+        return Err(
+            "placement-transfer continuation requires a rejected run from this calibration".into(),
+        );
+    }
+    let transfer = run
+        .placement_transfer_report
+        .as_ref()
+        .ok_or_else(|| "continuation run has no placement-transfer report".to_string())?;
+    if transfer.algorithm_version != PLACEMENT_TRANSFER_ALGORITHM
+        || transfer.profile != *profile
+        || transfer.nozzle_id != nozzle_id
+        || transfer.passed
+        || transfer.committed
+        || transfer.artifact_fingerprint.is_some()
+        || !placement_transfer_offsets_match(
+            transfer.initial_correction_mm,
+            active_initial_correction_mm,
+        )
+    {
+        return Err("placement-transfer continuation evidence is stale or incompatible".into());
+    }
+    if transfer.rounds.is_empty()
+        || transfer.rounds.len() > profile.maximum_adjustment_rounds as usize
+    {
+        return Err("placement-transfer continuation has no remaining adjustment round".into());
+    }
+    let mut expected_correction = transfer.initial_correction_mm;
+    for (index, round) in transfer.rounds.iter().enumerate() {
+        let expected_kind = if index == 0 {
+            PlacementTransferRoundKind::Baseline
+        } else {
+            PlacementTransferRoundKind::Check
+        };
+        let summary = &round.summary;
+        let measured = round
+            .samples
+            .iter()
+            .map(|sample| sample.observed_part_offset_mm)
+            .collect::<Vec<_>>();
+        let recomputed_summary = summarize_placement_transfer_round(&measured);
+        if round.round_index != index as u32
+            || round.kind != expected_kind
+            || round.passed
+            || round.samples.len() != profile.samples_per_round as usize
+            || summary.sample_count != profile.samples_per_round
+            || recomputed_summary
+                .as_ref()
+                .is_none_or(|recomputed| !placement_transfer_summaries_match(recomputed, summary))
+            || !summary.common_direction
+            || summary.maximum_sample_deviation_mm > profile.maximum_sample_deviation_mm
+            || !placement_transfer_offsets_match(round.applied_correction_mm, expected_correction)
+        {
+            return Err(
+                "placement-transfer continuation has unusable completed-round evidence".into(),
+            );
+        }
+        let delta = summary.robust_observed_part_offset_mm;
+        if !delta.into_iter().all(f64::is_finite)
+            || delta[0].hypot(delta[1]) > profile.maximum_adjustment_mm
+        {
+            return Err("placement-transfer continuation correction is out of bounds".into());
+        }
+        expected_correction = [
+            expected_correction[0] + delta[0],
+            expected_correction[1] + delta[1],
+        ];
+        if expected_correction[0].hypot(expected_correction[1])
+            > profile.maximum_cumulative_correction_mm
+        {
+            return Err(
+                "placement-transfer continuation cumulative correction is out of bounds".into(),
+            );
+        }
+    }
+    if !placement_transfer_offsets_match(transfer.final_correction_mm, expected_correction) {
+        return Err("placement-transfer continuation correction does not match its rounds".into());
+    }
+    Ok(transfer.clone())
 }
 
 async fn start_placement_transfer_run(
@@ -21602,6 +21714,28 @@ async fn start_placement_transfer_run(
         calibrated_placement_transfer_correction(&state, &snapshot, &body.nozzle_id)?
     } else {
         [0.0, 0.0]
+    };
+    let continuation = match body.continuation_run_id {
+        Some(run_id) => {
+            let prior = state
+                .store
+                .get_calibration_run(run_id)
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| {
+                    ApiError::not_found("placement-transfer continuation run not found")
+                })?;
+            Some(
+                validate_placement_transfer_continuation(
+                    &prior,
+                    calibration_id,
+                    &body.nozzle_id,
+                    &profile,
+                    initial_correction_mm,
+                )
+                .map_err(ApiError::bad_request)?,
+            )
+        }
+        None => None,
     };
     let machine = state.machine.status();
     machine
@@ -21677,8 +21811,16 @@ async fn start_placement_transfer_run(
         .filter(|(_, step)| step.nozzle_id == body.nozzle_id)
         .map(|(index, step)| (index as u32, step))
         .collect::<Vec<_>>();
-    let minimum_target_count = profile.minimum_target_count() as usize;
-    let maximum_target_count = profile.maximum_target_count() as usize;
+    let completed_round_count = continuation
+        .as_ref()
+        .map_or(0, |report| report.rounds.len());
+    let minimum_target_count = if continuation.is_some() {
+        profile.samples_per_round as usize
+    } else {
+        profile.minimum_target_count() as usize
+    };
+    let maximum_target_count = profile.samples_per_round as usize
+        * (profile.maximum_adjustment_rounds as usize + 1 - completed_round_count);
     let mut selected = if body.placement_references.is_empty() {
         let mut best = Vec::new();
         for (_, anchor) in &indexed {
@@ -21738,9 +21880,30 @@ async fn start_placement_transfer_run(
     if body.placement_references.is_empty() {
         selected = balance_placement_transfer_targets(selected, profile.samples_per_round as usize);
     }
-    let baseline_centroid =
-        placement_target_centroid(&selected[..profile.samples_per_round as usize]);
-    for round in selected.chunks(profile.samples_per_round as usize).skip(1) {
+    let baseline_centroid = continuation.as_ref().map_or_else(
+        || placement_target_centroid(&selected[..profile.samples_per_round as usize]),
+        |report| {
+            let samples = &report.rounds[0].samples;
+            let count = samples.len() as f64;
+            [
+                samples
+                    .iter()
+                    .map(|sample| sample.target_machine_mm[0])
+                    .sum::<f64>()
+                    / count,
+                samples
+                    .iter()
+                    .map(|sample| sample.target_machine_mm[1])
+                    .sum::<f64>()
+                    / count,
+            ]
+        },
+    );
+    let selected_rounds_to_skip = usize::from(continuation.is_none());
+    for round in selected
+        .chunks(profile.samples_per_round as usize)
+        .skip(selected_rounds_to_skip)
+    {
         let centroid = placement_target_centroid(round);
         if (centroid[0] - baseline_centroid[0]).hypot(centroid[1] - baseline_centroid[1])
             > profile.maximum_round_centroid_separation_mm
@@ -21782,6 +21945,18 @@ async fn start_placement_transfer_run(
             "placement-transfer calibration can consume {selected_target_count} parts, but the feeder registration has only {available_pockets} available occupied pockets"
         )));
     }
+    if let Some(prior) = continuation.as_ref() {
+        if prior.board_instance_id != first.board_instance_id
+            || prior.feeder_registration_id != feeder_registration_id
+            || prior.part_key != first.part_key
+            || prior.nozzle_id != first.nozzle_id
+            || (prior.nominal_rotation_deg - first.board_place.rotation_deg).abs() > 1e-9
+        {
+            return Err(ApiError::bad_request(
+                "placement-transfer continuation does not match the selected board, feeder registration, part, nozzle, or rotation",
+            ));
+        }
+    }
     state
         .machine
         .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
@@ -21793,18 +21968,39 @@ async fn start_placement_transfer_run(
             .put_calibration(&snapshot)
             .map_err(ApiError::internal)?;
     }
-    let mut findings = vec![
+    let mut findings = continuation
+        .as_ref()
+        .map_or_else(Vec::new, |prior| prior.findings.clone());
+    findings.extend([
         format!(
             "preflight reserved no resources; the run can consume at most {selected_target_count} parts and targets"
         ),
         "this calibration uses production pickup and placement but does not promote or qualify the feeder"
             .into(),
-    ];
+    ]);
+    if let Some(run_id) = body.continuation_run_id {
+        findings.push(format!(
+            "continued {completed_round_count} completed placement-transfer round(s) from {run_id}"
+        ));
+    }
     if selected_target_count < maximum_target_count {
         findings.push(format!(
             "the run has {selected_target_count} of {maximum_target_count} possible targets; it will stop without a result if another adjustment round is needed"
         ));
     }
+    let mut target_references = continuation.as_ref().map_or_else(Vec::new, |prior| {
+        prior
+            .rounds
+            .iter()
+            .flat_map(|round| round.samples.iter())
+            .map(|sample| sample.placement_reference.clone())
+            .collect()
+    });
+    target_references.extend(
+        selected
+            .iter()
+            .map(|(_, step)| step.placement_reference.clone()),
+    );
     let report = PlacementTransferCalibrationReport {
         algorithm_version: PLACEMENT_TRANSFER_ALGORITHM.into(),
         profile: profile.clone(),
@@ -21815,13 +22011,16 @@ async fn start_placement_transfer_run(
         part_key: first.part_key.clone(),
         nozzle_id: first.nozzle_id.clone(),
         nominal_rotation_deg: first.board_place.rotation_deg,
-        target_references: selected
-            .iter()
-            .map(|(_, step)| step.placement_reference.clone())
-            .collect(),
-        initial_correction_mm,
-        final_correction_mm: initial_correction_mm,
-        rounds: Vec::new(),
+        target_references,
+        initial_correction_mm: continuation
+            .as_ref()
+            .map_or(initial_correction_mm, |prior| prior.initial_correction_mm),
+        final_correction_mm: continuation
+            .as_ref()
+            .map_or(initial_correction_mm, |prior| prior.final_correction_mm),
+        rounds: continuation
+            .as_ref()
+            .map_or_else(Vec::new, |prior| prior.rounds.clone()),
         passed: false,
         committed: false,
         artifact_fingerprint: None,
@@ -21862,7 +22061,7 @@ async fn start_placement_transfer_run(
             } else {
                 CalibrationCheckSource::Vision
             },
-            status: if id == "preflight" {
+            status: if id == "preflight" || (id == "measure" && continuation.is_some()) {
                 CalibrationCheckStatus::Passed
             } else {
                 CalibrationCheckStatus::Pending
@@ -21871,10 +22070,20 @@ async fn start_placement_transfer_run(
                 format!(
                     "Validated {selected_target_count} targets and {available_pockets} occupied pockets"
                 )
+            } else if id == "measure" && continuation.is_some() {
+                "Reused stable placement measurements from the continuation run".into()
             } else {
                 "Waiting for placement evidence".into()
             },
-            evidence: Value::Null,
+            evidence: if id == "measure" {
+                continuation
+                    .as_ref()
+                    .and_then(|prior| prior.rounds.last())
+                    .and_then(|round| serde_json::to_value(&round.summary).ok())
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            },
         })
         .collect(),
         camera_reports: BTreeMap::new(),
@@ -22228,10 +22437,11 @@ async fn execute_placement_transfer_run(
     )?;
     let profile = transfer.profile.clone();
     let samples_per_round = profile.samples_per_round as usize;
-    let initial_correction = transfer.initial_correction_mm;
-    let mut candidate = initial_correction;
+    let starting_round_index = transfer.rounds.len();
+    let mut candidate = transfer.final_correction_mm;
 
-    for (round_index, target_round) in targets.chunks(samples_per_round).enumerate() {
+    for (relative_round_index, target_round) in targets.chunks(samples_per_round).enumerate() {
+        let round_index = starting_round_index + relative_round_index;
         let kind = if round_index == 0 {
             PlacementTransferRoundKind::Baseline
         } else {
@@ -34694,6 +34904,84 @@ mod tests {
         );
         assert_eq!(inspection.rotation_error_deg, Some(1.0));
         assert!(center_delta_mm.unwrap() <= transfer.maximum_model_cv_center_delta_mm);
+    }
+
+    #[test]
+    fn placement_transfer_continuation_reuses_only_bounded_rejected_evidence() {
+        let machine: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let profile = machine.placement_transfer_calibration.unwrap();
+        let calibration_id = Uuid::new_v4();
+        let nozzle_id = "N1";
+        let offsets = [[0.08, 0.09], [0.09, 0.10], [0.10, 0.08]];
+        let summary = summarize_placement_transfer_round(&offsets).unwrap();
+        let samples = offsets
+            .into_iter()
+            .enumerate()
+            .map(|(index, offset)| PlacementTransferSample {
+                execution_id: Uuid::new_v4(),
+                placement_reference: format!("R{}", index + 1),
+                target_machine_mm: [300.0 + index as f64, 250.0],
+                observed_part_offset_mm: offset,
+                radial_part_offset_mm: offset[0].hypot(offset[1]),
+                stored_correction_delta_mm: offset,
+                rotation_error_deg: 0.1,
+                held_centering_residual_mm: 0.02,
+                model_cv_center_delta_mm: Some(0.01),
+            })
+            .collect();
+        let mut run = test_calibration_run(Uuid::new_v4());
+        run.calibration_id = calibration_id;
+        run.status = CalibrationRunStatus::Rejected;
+        run.placement_transfer_report = Some(PlacementTransferCalibrationReport {
+            algorithm_version: PLACEMENT_TRANSFER_ALGORITHM.into(),
+            profile: profile.clone(),
+            job_id: Uuid::new_v4(),
+            board_instance_id: Uuid::new_v4(),
+            feeder_id: Uuid::new_v4(),
+            feeder_registration_id: Uuid::new_v4(),
+            part_key: "test-part".into(),
+            nozzle_id: nozzle_id.into(),
+            nominal_rotation_deg: 180.0,
+            target_references: vec!["R1".into(), "R2".into(), "R3".into()],
+            initial_correction_mm: [0.0, 0.0],
+            final_correction_mm: summary.robust_observed_part_offset_mm,
+            rounds: vec![PlacementTransferRoundReport {
+                round_index: 0,
+                kind: PlacementTransferRoundKind::Baseline,
+                applied_correction_mm: [0.0, 0.0],
+                samples,
+                summary,
+                passed: false,
+                findings: Vec::new(),
+            }],
+            passed: false,
+            committed: false,
+            artifact_fingerprint: None,
+            findings: Vec::new(),
+        });
+
+        assert!(validate_placement_transfer_continuation(
+            &run,
+            calibration_id,
+            nozzle_id,
+            &profile,
+            [0.0, 0.0],
+        )
+        .is_ok());
+
+        run.placement_transfer_report
+            .as_mut()
+            .unwrap()
+            .final_correction_mm = [0.0, 0.0];
+        assert!(validate_placement_transfer_continuation(
+            &run,
+            calibration_id,
+            nozzle_id,
+            &profile,
+            [0.0, 0.0],
+        )
+        .is_err());
     }
 
     #[test]
