@@ -41,12 +41,12 @@ use velocitypnp_domain::{
     LocalXyCompensationHoldout, LocalXyDirectionResponseReport, LocalXyDirectionResponseSample,
     LocalXyFeedDirectionReport, MachineProfile, MachineState, NozzleHeightModel,
     NozzleHeightSample, NozzleReleaseVerificationReport, NozzleRunoutReport, NozzleRunoutSample,
-    Operation, OperationStatus, Part, PartOrientation, PlacementExecutionReport,
-    PlacementExecutionRun, PlacementExecutionStage, PlacementExecutionStageReport,
-    PlacementOutcomeDisposition, PlacementOutcomeRecord, PlacementPickupAttemptReport,
-    PlacementProcessEstimate, PlacementReleaseAttemptReport, PlacementTransferCalibrationReport,
-    PlacementTransferRoundKind, PlacementTransferRoundReport, PlacementTransferSample,
-    PlacementVerificationClass, PlacementVerificationComparisonReport,
+    Operation, OperationStatus, Part, PartOrientation, PlacedPartInspectionReport,
+    PlacementExecutionReport, PlacementExecutionRun, PlacementExecutionStage,
+    PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
+    PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
+    PlacementTransferCalibrationReport, PlacementTransferRoundKind, PlacementTransferRoundReport,
+    PlacementTransferSample, PlacementVerificationClass, PlacementVerificationComparisonReport,
     PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel,
     PlanarXyDirectionResponseSurface, Pose, Residuals, SensorReading, SourceComponentClass,
     SourceComponentModelPrediction, SourceComponentShadowReport, StripFeederInventoryLane,
@@ -22025,30 +22025,11 @@ fn placement_transfer_sample(
             return Err(format!("required placement stage {stage:?} did not pass"));
         }
     }
-    let (inspection, model_cv_center_delta_mm) = if let Some(comparison) =
-        report.top_inspection_comparison.as_ref()
-    {
-        let delta = comparison
-            .center_delta_mm
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| "learned and deterministic centers cannot be compared".to_string())?;
-        if !comparison.occupancy_agreement
-            || comparison.prediction.class != PlacementVerificationClass::ComponentFlat
-            || !comparison.prediction.confidence_gate_passed
-            || delta > profile.maximum_model_cv_center_delta_mm
-        {
-            return Err("learned and deterministic placement results do not agree".into());
-        }
-        (&comparison.deterministic, Some(delta))
-    } else {
-        (
-            report
-                .top_inspection
-                .as_ref()
-                .ok_or_else(|| "placement has no top-camera inspection".to_string())?,
-            None,
-        )
-    };
+    let (inspection, model_cv_center_delta_mm) = placement_transfer_top_inspection(
+        report.top_inspection.as_ref(),
+        report.top_inspection_comparison.as_ref(),
+        profile,
+    )?;
     if !inspection.detected
         || !inspection.target_registered
         || !inspection.confidence.is_finite()
@@ -22094,6 +22075,36 @@ fn placement_transfer_sample(
         held_centering_residual_mm,
         model_cv_center_delta_mm,
     })
+}
+
+fn placement_transfer_top_inspection<'a>(
+    active: Option<&'a PlacedPartInspectionReport>,
+    comparison: Option<&PlacementVerificationComparisonReport>,
+    profile: &velocitypnp_domain::PlacementTransferCalibrationProfile,
+) -> Result<(&'a PlacedPartInspectionReport, Option<f64>), String> {
+    let active = active.ok_or_else(|| "placement has no top-camera inspection".to_string())?;
+    let Some(comparison) = comparison else {
+        return Ok((active, None));
+    };
+    let delta = comparison
+        .center_delta_mm
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "learned and deterministic centers cannot be compared".to_string())?;
+    let deterministic = &comparison.deterministic;
+    if !comparison.control_authorized
+        || comparison.review_required
+        || !comparison.occupancy_agreement
+        || comparison.prediction.class != PlacementVerificationClass::ComponentFlat
+        || !comparison.prediction.confidence_gate_passed
+        || delta > profile.maximum_model_cv_center_delta_mm
+        || !deterministic.detected
+        || !deterministic.target_registered
+        || !deterministic.confidence.is_finite()
+        || deterministic.confidence < profile.minimum_deterministic_confidence
+    {
+        return Err("learned and deterministic placement results do not agree".into());
+    }
+    Ok((active, Some(delta)))
 }
 
 fn commit_placement_transfer_report(
@@ -34687,6 +34698,40 @@ mod tests {
         assert!(result.active.passed);
         assert!((result.active.offset_x_mm.unwrap() - 0.03125).abs() < 1e-9);
         assert!((result.active.offset_y_mm.unwrap() + 0.03125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn placement_transfer_uses_the_promoted_pose_after_cv_agreement() {
+        let mut result = build_placement_verification_artifacts(
+            placement_crop(),
+            &placed_part_artifacts(true),
+            placement_prediction(PlacementVerificationClass::ComponentFlat),
+            0.8,
+            1.6,
+            0.0,
+            0.4,
+            PartOrientation::AxisSymmetric,
+        )
+        .unwrap();
+        result.comparison.deterministic.rotation_error_deg = Some(-11.0);
+        result.comparison.deterministic.passed = false;
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let transfer = profile.placement_transfer_calibration.unwrap();
+
+        let (inspection, center_delta_mm) = placement_transfer_top_inspection(
+            Some(&result.active),
+            Some(&result.comparison),
+            &transfer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            inspection.algorithm_version,
+            PLACEMENT_VERIFICATION_CONTROL_ALGORITHM
+        );
+        assert_eq!(inspection.rotation_error_deg, Some(1.0));
+        assert!(center_delta_mm.unwrap() <= transfer.maximum_model_cv_center_delta_mm);
     }
 
     #[test]
