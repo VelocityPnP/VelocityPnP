@@ -9421,6 +9421,28 @@ async fn select_source_component_pick_center(
         analysis.report.deterministic_occupancy,
     )
     .map(str::to_owned);
+    let deterministic_component_center_machine_mm =
+        match source_component_deterministic_machine_center(
+            &analysis.crop,
+            analysis.report.deterministic_center_px,
+            nominal_pocket_machine_mm,
+            &prepared.registration,
+            deterministic_center_machine_mm,
+        ) {
+            Ok(center) => center,
+            Err(error) => {
+                rejection = Some(error);
+                deterministic_center_machine_mm
+            }
+        };
+    let deterministic_nominal_offset_mm = (deterministic_component_center_machine_mm[0]
+        - nominal_pocket_machine_mm[0])
+        .hypot(deterministic_component_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
+    if deterministic_nominal_offset_mm > maximum_offset_mm && rejection.is_none() {
+        rejection = Some(format!(
+            "CV source-component center correction {deterministic_nominal_offset_mm:.3} mm exceeds the configured bound"
+        ));
+    }
     let learned_measurement = if learned_control_ready && rejection.is_none() {
         match source_component_crop_pixel_to_machine(
             &analysis.crop,
@@ -9431,8 +9453,9 @@ async fn select_source_component_pick_center(
             Ok(center_machine_mm) => {
                 let nominal_offset_mm = (center_machine_mm[0] - nominal_pocket_machine_mm[0])
                     .hypot(center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-                let cv_delta_mm = (center_machine_mm[0] - deterministic_center_machine_mm[0])
-                    .hypot(center_machine_mm[1] - deterministic_center_machine_mm[1]);
+                let cv_delta_mm = (center_machine_mm[0]
+                    - deterministic_component_center_machine_mm[0])
+                    .hypot(center_machine_mm[1] - deterministic_component_center_machine_mm[1]);
                 if nominal_offset_mm > maximum_offset_mm {
                     rejection = Some(format!(
                         "learned source-component center correction {nominal_offset_mm:.3} mm exceeds the configured bound"
@@ -9494,7 +9517,7 @@ async fn select_source_component_pick_center(
             .findings
             .push(format!("pickup control rejected this prediction: {error}"));
         (
-            deterministic_center_machine_mm,
+            deterministic_component_center_machine_mm,
             "the source-component control gate rejected motion".into(),
         )
     } else {
@@ -9503,8 +9526,8 @@ async fn select_source_component_pick_center(
                 .into(),
         );
         (
-            deterministic_center_machine_mm,
-            "the source-component model was inconclusive; bounded top-camera CV supplied the pickup center"
+            deterministic_component_center_machine_mm,
+            "the source-component model was inconclusive; bounded component CV supplied the pickup center"
                 .into(),
         )
     };
@@ -9553,6 +9576,24 @@ async fn select_source_component_pick_center(
             observed_empty: confirmed_empty,
         }),
         learned_control_authorized,
+    })
+}
+
+fn source_component_deterministic_machine_center(
+    crop: &GrayFrame,
+    deterministic_center_px: Option<[f64; 2]>,
+    nominal_pocket_machine_mm: [f64; 2],
+    registration: &StripFeederRegistration,
+    fallback_center_machine_mm: [f64; 2],
+) -> Result<[f64; 2], String> {
+    deterministic_center_px.map_or(Ok(fallback_center_machine_mm), |center_px| {
+        source_component_crop_pixel_to_machine(
+            crop,
+            center_px,
+            nominal_pocket_machine_mm,
+            registration,
+        )
+        .map_err(|error| error.to_string())
     })
 }
 
@@ -36810,6 +36851,31 @@ mod tests {
             report.review_required,
         );
         assert_eq!(&preview.pixels[303..306], &[245, 40, 210]);
+    }
+
+    #[test]
+    fn source_pick_maps_the_component_cv_center_instead_of_pocket_texture() {
+        let registration = test_pickup_registration(Utc::now());
+        let crop = GrayFrame {
+            width: 350,
+            height: 300,
+            pixels: vec![127; 350 * 300],
+        };
+        let nominal = [152.5, 140.5];
+        let broad_pocket_texture_center = [153.7, 140.5];
+
+        let center = source_component_deterministic_machine_center(
+            &crop,
+            Some([175.0, 150.0]),
+            nominal,
+            &registration,
+            broad_pocket_texture_center,
+        )
+        .unwrap();
+
+        assert!((center[0] - nominal[0]).abs() < 1e-12);
+        assert!((center[1] - nominal[1]).abs() < 1e-12);
+        assert_ne!(center, broad_pocket_texture_center);
     }
 
     #[test]
