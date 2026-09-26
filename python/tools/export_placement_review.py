@@ -71,12 +71,15 @@ def export_review(database: Path, board_instance_id: str, output: Path) -> dict:
             finite_coordinate(inspection, "expected_center_x_px", width),
             finite_coordinate(inspection, "expected_center_y_px", height),
         ]
-        estimated = [
-            finite_coordinate(inspection, "center_x_px", width),
-            finite_coordinate(inspection, "center_y_px", height),
-        ]
-        if inspection.get("detected") is not True:
-            raise ValueError(f"inspection did not detect a part: {identifier}")
+        detected = inspection.get("detected") is True
+        estimated = (
+            [
+                finite_coordinate(inspection, "center_x_px", width),
+                finite_coordinate(inspection, "center_y_px", height),
+            ]
+            if detected
+            else None
+        )
         image_name = f"{reference}-{identifier}.png"
         images.append((image_name, data))
         samples.append(
@@ -86,6 +89,7 @@ def export_review(database: Path, board_instance_id: str, output: Path) -> dict:
                 "recorded_at": recorded_at,
                 "status": execution["status"],
                 "inspection_passed": inspection.get("passed") is True,
+                "part_detected": detected,
                 "image": f"images/{image_name}",
                 "width": width,
                 "height": height,

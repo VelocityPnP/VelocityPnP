@@ -73,20 +73,22 @@ function element(name, attributes) {
 
 function annotate(svg, sample, close) {
   const [tx, ty] = sample.target_px;
-  const [ex, ey] = sample.estimated_px;
+  const estimated = sample.estimated_px;
   let box = [0, 0, sample.width, sample.height];
   if (close) {
-    const centerX = (tx + ex) / 2;
-    const centerY = (ty + ey) / 2;
-    const spanX = Math.max(220, Math.abs(tx - ex) + 100);
-    const spanY = Math.max(160, Math.abs(ty - ey) + 100);
+    const centerX = estimated ? (tx + estimated[0]) / 2 : tx;
+    const centerY = estimated ? (ty + estimated[1]) / 2 : ty;
+    const spanX = estimated ? Math.max(220, Math.abs(tx - estimated[0]) + 100) : 220;
+    const spanY = estimated ? Math.max(160, Math.abs(ty - estimated[1]) + 100) : 160;
     box = [centerX - spanX / 2, centerY - spanY / 2, spanX, spanY];
   }
   svg.setAttribute("viewBox", box.join(" "));
   svg.replaceChildren();
   svg.append(element("image", {href: sample.image, x: 0, y: 0, width: sample.width, height: sample.height}));
-  svg.append(element("line", {x1: tx, y1: ty, x2: ex, y2: ey,
-    stroke: "#fff", "stroke-width": 2, "stroke-dasharray": "4 4"}));
+  if (estimated) {
+    svg.append(element("line", {x1: tx, y1: ty, x2: estimated[0], y2: estimated[1],
+      stroke: "#fff", "stroke-width": 2, "stroke-dasharray": "4 4"}));
+  }
   svg.append(element("circle", {cx: tx, cy: ty, r: 9, fill: "none",
     stroke: "#05232b", "stroke-width": 5}));
   svg.append(element("circle", {cx: tx, cy: ty, r: 9, fill: "none",
@@ -97,8 +99,10 @@ function annotate(svg, sample, close) {
                                    [tx, ty + 11, tx, ty + 15]]) {
     svg.append(element("line", {x1, y1, x2, y2, stroke: "#3fe1ff", "stroke-width": 3}));
   }
-  svg.append(element("circle", {cx: ex, cy: ey, r: 6, fill: "#ffb43b",
-    stroke: "#301b02", "stroke-width": 2}));
+  if (estimated) {
+    svg.append(element("circle", {cx: estimated[0], cy: estimated[1], r: 6,
+      fill: "#ffb43b", stroke: "#301b02", "stroke-width": 2}));
+  }
 }
 
 function number(value, unit) {
@@ -111,7 +115,7 @@ function show(index) {
   location.hash = encodeURIComponent(sample.reference);
   document.getElementById("title").textContent = `${selected + 1} / ${samples.length} · ${sample.reference}`;
   document.getElementById("details").textContent =
-    `${sample.inspection_passed ? "Inspection passed" : "Inspection flagged"} · ` +
+    `${sample.part_detected ? (sample.inspection_passed ? "Inspection passed" : "Inspection flagged") : "Part not detected"} · ` +
     `X ${number(sample.offset_x_mm, "mm")} · Y ${number(sample.offset_y_mm, "mm")} · ` +
     `rotation ${number(sample.rotation_error_deg, "°")}`;
   document.getElementById("raw").href = sample.image;
@@ -133,7 +137,9 @@ async function start() {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = sample.reference;
-    button.title = sample.inspection_passed ? "Inspection passed" : "Inspection flagged";
+    button.title = sample.part_detected
+      ? (sample.inspection_passed ? "Inspection passed" : "Inspection flagged")
+      : "Part not detected";
     if (!sample.inspection_passed) button.classList.add("failed");
     button.addEventListener("click", () => show(index));
     list.append(button);
