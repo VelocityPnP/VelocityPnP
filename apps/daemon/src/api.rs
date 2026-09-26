@@ -21677,6 +21677,7 @@ async fn start_placement_transfer_run(
         .filter(|(_, step)| step.nozzle_id == body.nozzle_id)
         .map(|(index, step)| (index as u32, step))
         .collect::<Vec<_>>();
+    let minimum_target_count = profile.minimum_target_count() as usize;
     let maximum_target_count = profile.maximum_target_count() as usize;
     let mut selected = if body.placement_references.is_empty() {
         let mut best = Vec::new();
@@ -21717,14 +21718,14 @@ async fn start_placement_transfer_run(
         }
         selected
     };
-    if selected.len() < maximum_target_count {
+    if selected.len() < minimum_target_count {
         return Err(ApiError::bad_request(format!(
-            "placement-transfer calibration needs {maximum_target_count} compatible unused targets for at most {} parts; only {} were selected",
-            profile.maximum_target_count(),
+            "placement-transfer calibration needs at least {minimum_target_count} compatible unused targets to measure and verify a correction; only {} were selected",
             selected.len(),
         )));
     }
     selected.truncate(maximum_target_count);
+    let selected_target_count = selected.len();
     let first = selected[0].1.clone();
     if selected
         .iter()
@@ -21776,9 +21777,9 @@ async fn start_placement_transfer_run(
                 && pocket.occupancy == StripPocketOccupancy::Occupied
         })
         .count();
-    if available_pockets < maximum_target_count {
+    if available_pockets < selected_target_count {
         return Err(ApiError::bad_request(format!(
-            "placement-transfer calibration can consume {maximum_target_count} parts, but the feeder registration has only {available_pockets} available occupied pockets"
+            "placement-transfer calibration can consume {selected_target_count} parts, but the feeder registration has only {available_pockets} available occupied pockets"
         )));
     }
     state
@@ -21791,6 +21792,18 @@ async fn start_placement_transfer_run(
             .store
             .put_calibration(&snapshot)
             .map_err(ApiError::internal)?;
+    }
+    let mut findings = vec![
+        format!(
+            "preflight reserved no resources; the run can consume at most {selected_target_count} parts and targets"
+        ),
+        "this calibration uses production pickup and placement but does not promote or qualify the feeder"
+            .into(),
+    ];
+    if selected_target_count < maximum_target_count {
+        findings.push(format!(
+            "the run has {selected_target_count} of {maximum_target_count} possible targets; it will stop without a result if another adjustment round is needed"
+        ));
     }
     let report = PlacementTransferCalibrationReport {
         algorithm_version: PLACEMENT_TRANSFER_ALGORITHM.into(),
@@ -21812,13 +21825,7 @@ async fn start_placement_transfer_run(
         passed: false,
         committed: false,
         artifact_fingerprint: None,
-        findings: vec![
-            format!(
-                "preflight reserved no resources; the run can consume at most {maximum_target_count} parts and targets"
-            ),
-            "this calibration uses production pickup and placement but does not promote or qualify the feeder"
-                .into(),
-        ],
+        findings,
     };
     let operation = Operation::pending("calibration.placement_transfer");
     let now = Utc::now();
@@ -21862,7 +21869,7 @@ async fn start_placement_transfer_run(
             },
             message: if id == "preflight" {
                 format!(
-                    "Validated {maximum_target_count} targets and {available_pockets} occupied pockets"
+                    "Validated {selected_target_count} targets and {available_pockets} occupied pockets"
                 )
             } else {
                 "Waiting for placement evidence".into()
@@ -33177,70 +33184,25 @@ async fn acquire_physical_placement_part(
             .calibration_rotation_reference(prepared.lease_id, nozzle_id.clone())
             .await
             .map_err(|error| error.to_string())?;
-        let initial_vision_passed = initial.report.passed;
-        let (_, mut alignment) = if initial_vision_passed {
-            align_held_part(
-                state,
-                prepared,
-                &bare,
-                initial,
-                bottom_pose,
-                &camera_profile,
-                &camera_path,
-                target_rotation_deg,
-                true,
-                None,
-            )
-            .await?
-        } else {
-            let nominal_rotation_deg = -held_part_rotation_error_deg(
-                prepared.source_rotation_deg,
-                target_rotation_deg,
-                prepared.part_orientation,
+        if !initial.report.passed {
+            return Err(
+                "bottom vision did not confirm a usable held-part pose; placement is not allowed"
+                    .into(),
             );
-            if nominal_rotation_deg.abs() > pickup.alignment_max_rotation_correction_deg {
-                return Err(format!(
-                    "nominal placement rotation {nominal_rotation_deg:.3} degrees exceeds the configured bound"
-                ));
-            }
-            state
-                .machine
-                .calibration_rotate_nozzle(
-                    prepared.lease_id,
-                    prepared.run.nozzle_id.clone(),
-                    nominal_rotation_deg,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            let inspection = initial.report.clone();
-            (
-                initial,
-                HeldPartAlignmentReport {
-                    algorithm_version: "held_part_alignment.production_vacuum_fallback.v1".into(),
-                    orientation: prepared.part_orientation,
-                    source_rotation_deg: prepared.source_rotation_deg,
-                    target_rotation_deg,
-                    commanded_x_mm: 0.0,
-                    commanded_y_mm: 0.0,
-                    commanded_rotation_deg: nominal_rotation_deg,
-                    final_centering_residual_mm: None,
-                    final_rotation_residual_deg: Some(0.0),
-                    final_resolved_rotation_deg: Some(target_rotation_deg),
-                    passed: true,
-                    observations: vec![HeldPartAlignmentObservation {
-                        iteration: 0,
-                        head_machine_mm: [bottom_pose.x_mm, bottom_pose.y_mm],
-                        nozzle_rotation_offset_deg: nominal_rotation_deg,
-                        inspection,
-                    }],
-                    artifact_names: vec![HELD_PART_INITIAL_INSPECTION_ARTIFACT.into()],
-                    findings: vec![
-                        "production placement used the calibrated vacuum hold and nominal package rotation because bottom vision did not detect a usable pose"
-                            .into(),
-                    ],
-                },
-            )
-        };
+        }
+        let (_, mut alignment) = align_held_part(
+            state,
+            prepared,
+            &bare,
+            initial,
+            bottom_pose,
+            &camera_profile,
+            &camera_path,
+            target_rotation_deg,
+            true,
+            None,
+        )
+        .await?;
         if !alignment.passed {
             let final_inspection = alignment
                 .observations

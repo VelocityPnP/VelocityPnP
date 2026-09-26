@@ -555,6 +555,16 @@ impl PlacementTransferCalibrationProfile {
     pub fn maximum_target_count(&self) -> u32 {
         self.samples_per_round * (self.maximum_adjustment_rounds + 1)
     }
+
+    /// Targets needed to measure a correction and check it once.
+    pub fn minimum_target_count(&self) -> u32 {
+        self.samples_per_round
+            * if self.maximum_adjustment_rounds == 0 {
+                1
+            } else {
+                2
+            }
+    }
 }
 
 fn default_board_release_retry_depth_mm() -> f64 {
@@ -1528,5 +1538,16 @@ mod tests {
                 >= vacuum.fiducial_protected_radius_mm
         );
         assert!(profile.bounds.z_max_mm >= z.controller_max_mm);
+    }
+
+    #[test]
+    fn placement_transfer_can_run_one_adjust_and_check_pair() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let transfer = profile.placement_transfer_calibration.unwrap();
+
+        assert_eq!(transfer.samples_per_round, 3);
+        assert_eq!(transfer.minimum_target_count(), 6);
+        assert_eq!(transfer.maximum_target_count(), 9);
     }
 }
