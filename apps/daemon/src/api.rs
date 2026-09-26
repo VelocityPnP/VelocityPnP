@@ -24,15 +24,15 @@ use uuid::Uuid;
 use velocitypnp_domain::{
     calculate_vacuum_classification_thresholds, classify_placement_outcome,
     estimate_placement_process, lumen_calibration_artifacts, lumen_calibration_workflow,
-    summarize_visual_homing_validation, ApproachSide, AutomatedCalibrationConfig,
-    AutomatedCalibrationRun, BoardDesign, BoardInstance, BoardRegistrationFiducialObservation,
-    BoardRegistrationHypothesis, BoardRegistrationRun, BoardSide, BoardSurfaceFiducialView,
-    BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun, BoardSurfaceParallaxObservation,
-    BottomCameraMappingReport, CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck,
-    CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
-    CalibrationSnapshot, CalibrationStepId, CameraPixelFormat, CameraProfile,
-    CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
-    HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
+    summarize_placement_transfer_round, summarize_visual_homing_validation, ApproachSide,
+    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BoardInstance,
+    BoardRegistrationFiducialObservation, BoardRegistrationHypothesis, BoardRegistrationRun,
+    BoardSide, BoardSurfaceFiducialView, BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun,
+    BoardSurfaceParallaxObservation, BottomCameraMappingReport, CalibrationArtifactId,
+    CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus,
+    CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId,
+    CameraPixelFormat, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
+    CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
     HeldPartAlignmentReport, HeldPartClass, HeldPartInspectionReport, HeldPartModelPrediction,
     HeldPartRotationCapture, HeldPartShadowReport, InspectionReport, InspectionStatus,
     InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
@@ -44,27 +44,29 @@ use velocitypnp_domain::{
     Operation, OperationStatus, Part, PartOrientation, PlacementExecutionReport,
     PlacementExecutionRun, PlacementExecutionStage, PlacementExecutionStageReport,
     PlacementOutcomeDisposition, PlacementOutcomeRecord, PlacementPickupAttemptReport,
-    PlacementProcessEstimate, PlacementReleaseAttemptReport, PlacementVerificationClass,
-    PlacementVerificationComparisonReport, PlanarCameraCalibrationReport,
-    PlanarCameraCalibrationSample, PlanarCameraModel, PlanarXyDirectionResponseSurface, Pose,
-    Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
-    SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
-    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupBenchmarkCycle,
-    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
-    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
-    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
-    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
-    StripFeederVisionReport, StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample,
-    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
-    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
-    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
-    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
-    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
-    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
-    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
-    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
-    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
-    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
+    PlacementProcessEstimate, PlacementReleaseAttemptReport, PlacementTransferCalibrationReport,
+    PlacementTransferRoundKind, PlacementTransferRoundReport, PlacementTransferSample,
+    PlacementVerificationClass, PlacementVerificationComparisonReport,
+    PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel,
+    PlanarXyDirectionResponseSurface, Pose, Residuals, SensorReading, SourceComponentClass,
+    SourceComponentModelPrediction, SourceComponentShadowReport, StripFeederInventoryLane,
+    StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
+    StripFeederPickupBenchmarkCycle, StripFeederPickupDisposition,
+    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
+    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
+    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
+    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
+    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
+    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
+    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
+    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
+    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
+    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
+    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
+    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
+    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
+    WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -1305,6 +1307,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/artifact-runs",
             post(start_calibration_artifact_run),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/placement-transfer-runs",
+            post(start_placement_transfer_run),
         )
         .route(
             "/api/v1/calibrations/{id}/vacuum-probe",
@@ -9267,6 +9273,9 @@ struct PreparedStripFeederPickup {
     head_reference: CalibratedHeadReference,
     height_model: Option<NozzleHeightModel>,
     height_model_has_working_plane_transfer: bool,
+    /// Additional, qualified transfer correction. Placement XY subtracts this
+    /// value together with the nozzle height-model correction.
+    placement_transfer_correction_mm: [f64; 2],
     reference_contact: VacuumProbeReport,
     vacuum_characterization: VacuumSensorCharacterizationReport,
     top_camera_model: PlanarCameraModel,
@@ -10056,6 +10065,7 @@ async fn start_strip_feeder_pickup_qualification(
         head_reference,
         height_model,
         height_model_has_working_plane_transfer,
+        placement_transfer_correction_mm: [0.0, 0.0],
         reference_contact,
         vacuum_characterization,
         top_camera_model,
@@ -16474,7 +16484,7 @@ async fn record_nozzle_height_observation(
         CalibrationArtifactId::NozzleAxisRunoutN2,
     ]
     .iter()
-    .all(|id| snapshot.artifacts.contains_key(id));
+    .all(|id| crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, *id));
     let nozzle_z_mm = body
         .nozzle_z_mm
         .filter(|value| value.is_finite())
@@ -17410,6 +17420,43 @@ fn calibrated_nozzle_height_model(
         ));
     }
     Ok(Some(model))
+}
+
+fn calibrated_placement_transfer_correction(
+    state: &AppState,
+    snapshot: &CalibrationSnapshot,
+    nozzle_id: &str,
+) -> ApiResult<[f64; 2]> {
+    let artifact_id = CalibrationArtifactId::placement_transfer(nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("placement nozzle is unknown"))?;
+    if !snapshot.artifacts.contains_key(&artifact_id) {
+        // Existing snapshots predate this artifact. Their correction remains
+        // in the nozzle-height model until a transfer run is committed.
+        return Ok([0.0, 0.0]);
+    }
+    if !crate::calibration_artifacts::artifact_tree_is_current(state, snapshot, artifact_id) {
+        return Err(ApiError::bad_request(format!(
+            "physical placement requires a current {nozzle_id} placement-transfer calibration"
+        )));
+    }
+    let report: PlacementTransferCalibrationReport = serde_json::from_value(
+        crate::calibration_artifacts::artifact_result_value(snapshot, artifact_id)
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(|_| ApiError::bad_request("stored placement-transfer report is invalid"))?;
+    if !report.passed
+        || !report.committed
+        || report.nozzle_id != nozzle_id
+        || !report
+            .final_correction_mm
+            .iter()
+            .all(|value| value.is_finite())
+    {
+        return Err(ApiError::bad_request(
+            "stored placement-transfer calibration is not usable",
+        ));
+    }
+    Ok(report.final_correction_mm)
 }
 
 fn has_calibrated_working_plane_transfer(
@@ -18577,8 +18624,7 @@ fn persist_vacuum_characterization_report(
             .completed_steps
             .remove(&CalibrationStepId::VacuumSensorCharacterization);
     }
-    snapshot.production_ready =
-        calibration_is_production_ready(&snapshot, state.machine.status().simulated);
+    snapshot.production_ready = calibration_is_production_ready(state, &snapshot);
     state
         .store
         .put_calibration(&snapshot)
@@ -19211,8 +19257,7 @@ fn persist_local_xy_direction_response(
             .completed_steps
             .remove(&CalibrationStepId::LocalXyDirectionResponse);
     }
-    snapshot.production_ready =
-        calibration_is_production_ready(&snapshot, state.machine.status().simulated);
+    snapshot.production_ready = calibration_is_production_ready(state, &snapshot);
     state
         .store
         .put_calibration(&snapshot)
@@ -19354,8 +19399,7 @@ async fn attach_planar_xy_direction_response(
     snapshot
         .completed_steps
         .insert(CalibrationStepId::LocalXyDirectionResponse);
-    snapshot.production_ready =
-        calibration_is_production_ready(&snapshot, state.machine.status().simulated);
+    snapshot.production_ready = calibration_is_production_ready(&state, &snapshot);
     state
         .store
         .put_calibration(&snapshot)
@@ -20508,6 +20552,7 @@ async fn start_calibration_run(
         visual_homing_report: None,
         head_geometry_report: None,
         installed_geometry_report: None,
+        placement_transfer_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -20723,6 +20768,7 @@ async fn start_head_geometry_run(
         visual_homing_report: Some(visual_homing_report),
         head_geometry_report: None,
         installed_geometry_report: None,
+        placement_transfer_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -20892,6 +20938,7 @@ async fn start_calibration_artifact_run(
         visual_homing_report: None,
         head_geometry_report: None,
         installed_geometry_report: None,
+        placement_transfer_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -21360,6 +21407,7 @@ async fn start_installed_geometry_run(
         visual_homing_report: None,
         head_geometry_report: None,
         installed_geometry_report: None,
+        placement_transfer_report: None,
         failure: None,
         simulated: machine.simulated,
     };
@@ -21390,6 +21438,1011 @@ fn calibration_artifact_check_id(id: CalibrationArtifactId) -> String {
         .and_then(|value| value.as_str().map(str::to_string))
         .map(|value| format!("artifact_{value}"))
         .unwrap_or_else(|| "artifact_unknown".into())
+}
+
+const PLACEMENT_TRANSFER_ALGORITHM: &str = "placement_transfer.v1";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartPlacementTransferRunRequest {
+    lease_id: Uuid,
+    job_id: Uuid,
+    nozzle_id: String,
+    #[serde(default)]
+    placement_references: Vec<String>,
+    confirmed_external_safety_checks: bool,
+    confirmed_targets_empty: bool,
+}
+
+fn same_placement_transfer_group(left: &PlanStep, right: &PlanStep) -> bool {
+    left.board_instance_id == right.board_instance_id
+        && left.part_key == right.part_key
+        && left.feeder_id == right.feeder_id
+        && left.nozzle_id == right.nozzle_id
+        && left.part_orientation == right.part_orientation
+        && (left.feeder_part_rotation_deg - right.feeder_part_rotation_deg).abs() <= 1e-9
+        && (left.board_place.rotation_deg - right.board_place.rotation_deg).abs() <= 1e-9
+        && (left.placement_surface_offset_mm - right.placement_surface_offset_mm).abs() <= 1e-9
+        && (left.placement_seating_offset_mm - right.placement_seating_offset_mm).abs() <= 1e-9
+        && left.placement_release_seating_offsets_mm == right.placement_release_seating_offsets_mm
+}
+
+fn placement_target_centroid(steps: &[(u32, PlanStep)]) -> [f64; 2] {
+    let count = steps.len() as f64;
+    [
+        steps
+            .iter()
+            .map(|(_, step)| step.board_place.x_mm)
+            .sum::<f64>()
+            / count,
+        steps
+            .iter()
+            .map(|(_, step)| step.board_place.y_mm)
+            .sum::<f64>()
+            / count,
+    ]
+}
+
+fn balance_placement_transfer_targets(
+    mut steps: Vec<(u32, PlanStep)>,
+    samples_per_round: usize,
+) -> Vec<(u32, PlanStep)> {
+    steps.sort_by(|left, right| {
+        left.1
+            .board_place
+            .x_mm
+            .total_cmp(&right.1.board_place.x_mm)
+            .then_with(|| left.1.board_place.y_mm.total_cmp(&right.1.board_place.y_mm))
+    });
+    let round_count = steps.len() / samples_per_round;
+    let mut rounds = vec![Vec::with_capacity(samples_per_round); round_count];
+    for (index, step) in steps.into_iter().enumerate() {
+        rounds[index % round_count].push(step);
+    }
+    rounds.into_iter().flatten().collect()
+}
+
+async fn start_placement_transfer_run(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartPlacementTransferRunRequest>,
+) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    if !body.confirmed_external_safety_checks || !body.confirmed_targets_empty {
+        return Err(ApiError::bad_request(
+            "placement-transfer calibration requires confirmation that the selected targets are empty, the PCB and feeders are fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    let profile = state
+        .profile
+        .placement_transfer_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define placement-transfer calibration")
+        })?
+        .clone();
+    profile.validate().map_err(ApiError::bad_request)?;
+    if !matches!(body.nozzle_id.as_str(), "N1" | "N2") {
+        return Err(ApiError::bad_request(
+            "placement-transfer nozzle must be N1 or N2",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let artifacts_changed =
+        crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+            .map_err(ApiError::bad_request)?;
+    let runtime_artifact = CalibrationArtifactId::runtime_tip_transform(&body.nozzle_id).unwrap();
+    let vacuum_artifact = CalibrationArtifactId::vacuum_characterization(&body.nozzle_id).unwrap();
+    for required in [
+        CalibrationArtifactId::TopCameraPlanarModel,
+        runtime_artifact,
+        vacuum_artifact,
+    ] {
+        if !crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, required) {
+            return Err(ApiError::bad_request(format!(
+                "placement-transfer calibration requires current {required:?} evidence"
+            )));
+        }
+    }
+    let transfer_artifact = CalibrationArtifactId::placement_transfer(&body.nozzle_id).unwrap();
+    let initial_correction_mm = if crate::calibration_artifacts::artifact_tree_is_current(
+        &state,
+        &snapshot,
+        transfer_artifact,
+    ) {
+        calibrated_placement_transfer_correction(&state, &snapshot, &body.nozzle_id)?
+    } else {
+        [0.0, 0.0]
+    };
+    let machine = state.machine.status();
+    machine
+        .assert_lease(body.lease_id, Utc::now())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if machine.simulated || machine.state != MachineState::Ready || !machine.homed {
+        return Err(ApiError::bad_request(
+            "placement-transfer calibration requires a physical, ready, homed machine",
+        ));
+    }
+    if machine.calibration_revision != Some(calibration_id) {
+        return Err(ApiError::bad_request(format!(
+            "placement-transfer calibration requires fine XYZ homing with calibration {calibration_id}"
+        )));
+    }
+
+    let admission_guard = state.workspace_scan_admission_lock.lock().await;
+    ensure_no_active_workspace_scans(&state)?;
+    ensure_no_active_board_registrations(&state)?;
+    ensure_no_active_board_surface_measurements(&state)?;
+    ensure_no_active_strip_feeder_holdouts(&state)?;
+    ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    ensure_no_active_placement_executions(&state)?;
+    ensure_no_active_job_executions(&state)?;
+    if state
+        .store
+        .list_calibration_runs()
+        .map_err(ApiError::internal)?
+        .iter()
+        .any(|run| {
+            matches!(
+                run.status,
+                CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+            )
+        })
+    {
+        return Err(ApiError::bad_request(
+            "another calibration run is already active",
+        ));
+    }
+
+    let job = state
+        .store
+        .get_job(body.job_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement-transfer job not found"))?;
+    let boards = state
+        .store
+        .list_boards()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|board| (board.id, board))
+        .collect::<HashMap<_, _>>();
+    let feeders = state.store.list_feeders().map_err(ApiError::internal)?;
+    let parts = state
+        .store
+        .list_parts()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|part| (part.key.clone(), part))
+        .collect::<HashMap<_, _>>();
+    let plan = plan_job(&job, &boards, &feeders, &parts, &state.profile);
+    if !plan.report.ready {
+        return Err(ApiError::bad_request(format!(
+            "placement-transfer job preflight failed: {}",
+            plan.report.errors.join("; ")
+        )));
+    }
+    let indexed = plan
+        .steps
+        .into_iter()
+        .enumerate()
+        .filter(|(_, step)| step.nozzle_id == body.nozzle_id)
+        .map(|(index, step)| (index as u32, step))
+        .collect::<Vec<_>>();
+    let maximum_target_count = profile.maximum_target_count() as usize;
+    let mut selected = if body.placement_references.is_empty() {
+        let mut best = Vec::new();
+        for (_, anchor) in &indexed {
+            let group = indexed
+                .iter()
+                .filter(|(_, step)| {
+                    same_placement_transfer_group(anchor, step)
+                        && validate_guarded_board_target_unused(&state, step).is_ok()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if group.len() > best.len() {
+                best = group;
+            }
+        }
+        best
+    } else {
+        let requested = body.placement_references.iter().collect::<BTreeSet<_>>();
+        if requested.len() != body.placement_references.len() {
+            return Err(ApiError::bad_request(
+                "placement-transfer target references must be unique",
+            ));
+        }
+        let mut selected = Vec::new();
+        for reference in &body.placement_references {
+            let matches = indexed
+                .iter()
+                .filter(|(_, step)| step.placement_reference == *reference)
+                .cloned()
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return Err(ApiError::bad_request(format!(
+                    "placement-transfer target {reference} is missing or ambiguous"
+                )));
+            }
+            selected.push(matches[0].clone());
+        }
+        selected
+    };
+    if selected.len() < maximum_target_count {
+        return Err(ApiError::bad_request(format!(
+            "placement-transfer calibration needs {maximum_target_count} compatible unused targets for at most {} parts; only {} were selected",
+            profile.maximum_target_count(),
+            selected.len(),
+        )));
+    }
+    selected.truncate(maximum_target_count);
+    let first = selected[0].1.clone();
+    if selected
+        .iter()
+        .any(|(_, step)| !same_placement_transfer_group(&first, step))
+    {
+        return Err(ApiError::bad_request(
+            "placement-transfer targets must use one board, part, feeder, nozzle, rotation, surface, and release schedule",
+        ));
+    }
+    if body.placement_references.is_empty() {
+        selected = balance_placement_transfer_targets(selected, profile.samples_per_round as usize);
+    }
+    let baseline_centroid =
+        placement_target_centroid(&selected[..profile.samples_per_round as usize]);
+    for round in selected.chunks(profile.samples_per_round as usize).skip(1) {
+        let centroid = placement_target_centroid(round);
+        if (centroid[0] - baseline_centroid[0]).hypot(centroid[1] - baseline_centroid[1])
+            > profile.maximum_round_centroid_separation_mm
+        {
+            return Err(ApiError::bad_request(
+                "placement-transfer round centroids exceed the profile separation limit",
+            ));
+        }
+    }
+    let mut feeder_registration_id = None;
+    for (_, step) in &selected {
+        validate_guarded_board_surface(&state, step, calibration_id)?;
+        validate_guarded_board_target_unused(&state, step)?;
+        let registration = validate_production_strip_feeder(&state, step, calibration_id)?;
+        if registration.status != StripFeederRegistrationStatus::Ready {
+            return Err(ApiError::bad_request(
+                "placement-transfer calibration requires an already-ready feeder; it does not qualify feeders",
+            ));
+        }
+        if feeder_registration_id.is_some_and(|registration_id| registration_id != registration.id)
+        {
+            return Err(ApiError::bad_request(
+                "placement-transfer targets resolved to different feeder registrations",
+            ));
+        }
+        feeder_registration_id = Some(registration.id);
+    }
+    let feeder_registration_id = feeder_registration_id.unwrap();
+    let registration = state
+        .store
+        .get_strip_feeder_registration(feeder_registration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::bad_request("placement feeder registration disappeared"))?;
+    let available_pockets = registration
+        .pockets
+        .iter()
+        .filter(|pocket| {
+            pocket.status == StripFeederPocketStatus::Available
+                && pocket.occupancy == StripPocketOccupancy::Occupied
+        })
+        .count();
+    if available_pockets < maximum_target_count {
+        return Err(ApiError::bad_request(format!(
+            "placement-transfer calibration can consume {maximum_target_count} parts, but the feeder registration has only {available_pockets} available occupied pockets"
+        )));
+    }
+    state
+        .machine
+        .renew_lease(body.lease_id, CALIBRATION_LEASE_SECONDS)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if artifacts_changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+    let report = PlacementTransferCalibrationReport {
+        algorithm_version: PLACEMENT_TRANSFER_ALGORITHM.into(),
+        profile: profile.clone(),
+        job_id: body.job_id,
+        board_instance_id: first.board_instance_id,
+        feeder_id: first.feeder_id,
+        feeder_registration_id,
+        part_key: first.part_key.clone(),
+        nozzle_id: first.nozzle_id.clone(),
+        nominal_rotation_deg: first.board_place.rotation_deg,
+        target_references: selected
+            .iter()
+            .map(|(_, step)| step.placement_reference.clone())
+            .collect(),
+        initial_correction_mm,
+        final_correction_mm: initial_correction_mm,
+        rounds: Vec::new(),
+        passed: false,
+        committed: false,
+        artifact_fingerprint: None,
+        findings: vec![
+            format!(
+                "preflight reserved no resources; the run can consume at most {maximum_target_count} parts and targets"
+            ),
+            "this calibration uses production pickup and placement but does not promote or qualify the feeder"
+                .into(),
+        ],
+    };
+    let operation = Operation::pending("calibration.placement_transfer");
+    let now = Utc::now();
+    let run = AutomatedCalibrationRun {
+        id: Uuid::new_v4(),
+        calibration_id,
+        operation_id: operation.id,
+        profile_id: snapshot.profile_id.clone(),
+        created_at: now,
+        updated_at: now,
+        status: CalibrationRunStatus::Pending,
+        phase: CalibrationRunPhase::Pending,
+        config: AutomatedCalibrationConfig {
+            camera_sample_count: default_camera_sample_count(),
+            tooling_sample_count: default_tooling_sample_count(),
+            visual_homing_sample_count: default_visual_homing_sample_count(),
+            excursion_x_mm: default_calibration_excursion(),
+            excursion_y_mm: default_calibration_excursion(),
+            excursion_feed_mm_per_min: default_calibration_excursion_feed(),
+            visual_homing_p95_limit_mm: default_visual_homing_p95_limit(),
+        },
+        checks: [
+            ("preflight", "Validate targets and feeder inventory"),
+            ("measure", "Measure guarded placement offsets"),
+            ("verify", "Verify the provisional correction"),
+            ("commit", "Commit qualified transfer evidence"),
+        ]
+        .into_iter()
+        .map(|(id, title)| CalibrationCheck {
+            id: id.into(),
+            title: title.into(),
+            source: if id == "preflight" {
+                CalibrationCheckSource::Operator
+            } else {
+                CalibrationCheckSource::Vision
+            },
+            status: if id == "preflight" {
+                CalibrationCheckStatus::Passed
+            } else {
+                CalibrationCheckStatus::Pending
+            },
+            message: if id == "preflight" {
+                format!(
+                    "Validated {maximum_target_count} targets and {available_pockets} occupied pockets"
+                )
+            } else {
+                "Waiting for placement evidence".into()
+            },
+            evidence: Value::Null,
+        })
+        .collect(),
+        camera_reports: BTreeMap::new(),
+        visual_homing_samples: Vec::new(),
+        visual_homing_report: None,
+        head_geometry_report: None,
+        installed_geometry_report: None,
+        placement_transfer_report: Some(report),
+        failure: None,
+        simulated: false,
+    };
+    state
+        .store
+        .put_operation(&operation)
+        .and_then(|_| state.store.put_calibration_run(&run))
+        .map_err(ApiError::internal)?;
+    drop(admission_guard);
+    let response = StartCalibrationRunResponse {
+        run: run.clone(),
+        operation: operation.clone(),
+    };
+    let task_state = state.clone();
+    let run_id = run.id;
+    let lease_id = body.lease_id;
+    let job_id = body.job_id;
+    spawn_prepared_operation(state, operation, async move {
+        execute_placement_transfer_run(task_state, run_id, lease_id, job_id, selected).await
+    });
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn execute_placement_transfer_child(
+    state: &AppState,
+    prepared: PreparedGuardedPlacementExecution,
+) -> Result<(PlacementExecutionRun, Result<Option<String>, String>), String> {
+    let PreparedGuardedPlacementExecution {
+        lease_id,
+        mut operation,
+        run,
+        step,
+        motion_planner,
+        physical,
+    } = prepared;
+    operation.status = OperationStatus::Running;
+    operation.updated_at = Utc::now();
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(|error| error.to_string())?;
+    let result = execute_guarded_placement_task(
+        state.clone(),
+        run.clone(),
+        step,
+        lease_id,
+        motion_planner,
+        physical,
+        false,
+    )
+    .await;
+    operation.status = if result.is_ok() {
+        OperationStatus::Succeeded
+    } else {
+        OperationStatus::Failed
+    };
+    operation.message = match &result {
+        Ok(message) => message.clone(),
+        Err(message) => Some(message.clone()),
+    };
+    operation.updated_at = Utc::now();
+    state
+        .store
+        .put_operation(&operation)
+        .map_err(|error| error.to_string())?;
+    let finished = state
+        .store
+        .get_placement_execution(run.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "placement-transfer child execution disappeared".to_string())?;
+    Ok((finished, result))
+}
+
+fn placement_transfer_sample(
+    state: &AppState,
+    execution: &PlacementExecutionRun,
+    expected_step: &PlanStep,
+    profile: &velocitypnp_domain::PlacementTransferCalibrationProfile,
+) -> Result<PlacementTransferSample, String> {
+    let report = execution
+        .report
+        .as_ref()
+        .ok_or_else(|| "placement execution has no report".to_string())?;
+    if report.simulated
+        || report.board_instance_id != Some(expected_step.board_instance_id)
+        || report.placement_reference != expected_step.placement_reference
+        || report.part_key != expected_step.part_key
+        || report.feeder_id != expected_step.feeder_id
+        || report.nozzle_id != expected_step.nozzle_id
+    {
+        return Err("placement execution does not match the calibration target".into());
+    }
+    let target = report
+        .board_target_registration
+        .as_ref()
+        .filter(|target| target.passed && target.registered)
+        .ok_or_else(|| "local board-target registration did not pass".to_string())?;
+    if !target
+        .correction_x_mm
+        .zip(target.correction_y_mm)
+        .is_some_and(|(x, y)| x.is_finite() && y.is_finite())
+    {
+        return Err("local board-target correction is invalid".into());
+    }
+    let pickup = report
+        .pickup_report
+        .as_ref()
+        .ok_or_else(|| "placement has no pickup and release report".to_string())?;
+    let alignment = pickup
+        .alignment
+        .as_ref()
+        .filter(|alignment| alignment.passed)
+        .ok_or_else(|| "bottom-camera alignment did not pass".to_string())?;
+    let held_centering_residual_mm = alignment
+        .final_centering_residual_mm
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "bottom-camera alignment residual is invalid".to_string())?;
+    let held_limit_mm = state
+        .profile
+        .strip_feeder_pickup
+        .as_ref()
+        .map(|pickup| pickup.alignment_translation_tolerance_mm)
+        .ok_or_else(|| "active profile has no strip-feeder pickup".to_string())?;
+    if held_centering_residual_mm > held_limit_mm {
+        return Err(format!(
+            "bottom-camera residual {held_centering_residual_mm:.3} mm exceeds the {held_limit_mm:.3} mm limit"
+        ));
+    }
+    if !pickup.released
+        || !pickup
+            .nozzle_release_verification
+            .as_ref()
+            .is_some_and(|release| release.passed && release.nozzle_clear)
+    {
+        return Err("release and clear-nozzle evidence did not pass".into());
+    }
+    for stage in [
+        PlacementExecutionStage::BoardTargetRegistration,
+        PlacementExecutionStage::BottomInspection,
+        PlacementExecutionStage::Release,
+    ] {
+        if !report
+            .stages
+            .iter()
+            .any(|item| item.stage == stage && item.passed)
+        {
+            return Err(format!("required placement stage {stage:?} did not pass"));
+        }
+    }
+    let (inspection, model_cv_center_delta_mm) = if let Some(comparison) =
+        report.top_inspection_comparison.as_ref()
+    {
+        let delta = comparison
+            .center_delta_mm
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| "learned and deterministic centers cannot be compared".to_string())?;
+        if !comparison.occupancy_agreement
+            || comparison.prediction.class != PlacementVerificationClass::ComponentFlat
+            || !comparison.prediction.confidence_gate_passed
+            || delta > profile.maximum_model_cv_center_delta_mm
+        {
+            return Err("learned and deterministic placement results do not agree".into());
+        }
+        (&comparison.deterministic, Some(delta))
+    } else {
+        (
+            report
+                .top_inspection
+                .as_ref()
+                .ok_or_else(|| "placement has no top-camera inspection".to_string())?,
+            None,
+        )
+    };
+    if !inspection.detected
+        || !inspection.target_registered
+        || !inspection.confidence.is_finite()
+        || inspection.confidence < profile.minimum_deterministic_confidence
+    {
+        return Err("deterministic top vision did not detect one registered package".into());
+    }
+    if inspection
+        .placement_condition
+        .is_some_and(|condition| condition != PlacementVerificationClass::ComponentFlat)
+    {
+        return Err("top vision did not classify one flat package".into());
+    }
+    let observed_part_offset_mm = [
+        inspection
+            .offset_x_mm
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| "top-camera X offset is invalid".to_string())?,
+        inspection
+            .offset_y_mm
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| "top-camera Y offset is invalid".to_string())?,
+    ];
+    let rotation_error_deg = inspection
+        .rotation_error_deg
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "top-camera rotation error is invalid".to_string())?;
+    if rotation_error_deg.abs() > profile.maximum_rotation_error_deg {
+        return Err(format!(
+            "placement rotation error {rotation_error_deg:+.2} degrees exceeds the profile limit"
+        ));
+    }
+    Ok(PlacementTransferSample {
+        execution_id: execution.id,
+        placement_reference: report.placement_reference.clone(),
+        target_machine_mm: [report.board_place.x_mm, report.board_place.y_mm],
+        observed_part_offset_mm,
+        radial_part_offset_mm: observed_part_offset_mm[0].hypot(observed_part_offset_mm[1]),
+        // The placement transform subtracts this stored term. Therefore the
+        // stored delta has the same sign as the physical part displacement.
+        stored_correction_delta_mm: observed_part_offset_mm,
+        rotation_error_deg,
+        held_centering_residual_mm,
+        model_cv_center_delta_mm,
+    })
+}
+
+fn commit_placement_transfer_report(
+    state: &AppState,
+    run_id: Uuid,
+    calibration_id: Uuid,
+    report: &PlacementTransferCalibrationReport,
+) -> Result<String, String> {
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "calibration snapshot not found".to_string())?;
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(state, &mut snapshot)?;
+    let artifact_id = CalibrationArtifactId::placement_transfer(&report.nozzle_id)
+        .ok_or_else(|| "placement-transfer nozzle is unknown".to_string())?;
+    let final_round = report
+        .rounds
+        .last()
+        .ok_or_else(|| "placement-transfer report has no final round".to_string())?;
+    let mut artifact_report = report.clone();
+    artifact_report.passed = true;
+    artifact_report.committed = true;
+    artifact_report.artifact_fingerprint = None;
+    crate::calibration_artifacts::record_captured_artifact(
+        state,
+        &mut snapshot,
+        artifact_id,
+        Some(run_id),
+        serde_json::to_value(&artifact_report).map_err(|error| error.to_string())?,
+    )?;
+    snapshot
+        .completed_steps
+        .remove(&CalibrationStepId::Validation);
+    snapshot.residuals.remove(&CalibrationStepId::Validation);
+    if !snapshot.values.is_object() {
+        snapshot.values = json!({});
+    }
+    let values = snapshot.values.as_object_mut().unwrap();
+    values.remove(CalibrationStepId::Validation.as_str());
+    let transfer = values
+        .entry(CalibrationStepId::PlacementTransfer.as_str())
+        .or_insert_with(|| json!({"reports": {}}));
+    if !transfer.get("reports").is_some_and(Value::is_object) {
+        transfer["reports"] = json!({});
+    }
+    transfer["reports"][&report.nozzle_id] =
+        serde_json::to_value(&artifact_report).map_err(|error| error.to_string())?;
+    let radial = final_round
+        .samples
+        .iter()
+        .map(|sample| sample.radial_part_offset_mm)
+        .collect::<Vec<_>>();
+    let rms_mm =
+        (radial.iter().map(|value| value * value).sum::<f64>() / radial.len() as f64).sqrt();
+    snapshot.residuals.insert(
+        CalibrationStepId::PlacementTransfer,
+        Residuals {
+            sample_count: radial.len() as u32,
+            rms_mm,
+            p95_mm: final_round.summary.p95_radial_part_offset_mm,
+            max_mm: radial.into_iter().fold(0.0, f64::max),
+        },
+    );
+    let all_nozzles_qualified = [
+        CalibrationArtifactId::PlacementTransferN1,
+        CalibrationArtifactId::PlacementTransferN2,
+    ]
+    .iter()
+    .all(|id| crate::calibration_artifacts::artifact_tree_is_current(state, &snapshot, *id));
+    if all_nozzles_qualified {
+        snapshot
+            .completed_steps
+            .insert(CalibrationStepId::PlacementTransfer);
+    } else {
+        snapshot
+            .completed_steps
+            .remove(&CalibrationStepId::PlacementTransfer);
+    }
+    snapshot.production_ready = false;
+    let fingerprint = snapshot
+        .artifacts
+        .get(&artifact_id)
+        .map(|artifact| artifact.fingerprint.clone())
+        .ok_or_else(|| "placement-transfer artifact was not recorded".to_string())?;
+    state
+        .store
+        .put_calibration(&snapshot)
+        .map_err(|error| error.to_string())?;
+    Ok(fingerprint)
+}
+
+async fn execute_placement_transfer_run(
+    state: AppState,
+    run_id: Uuid,
+    lease_id: Uuid,
+    job_id: Uuid,
+    targets: Vec<(u32, PlanStep)>,
+) -> Result<Option<String>, String> {
+    let mut run = state
+        .store
+        .get_calibration_run(run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "placement-transfer run not found".to_string())?;
+    let mut transfer = run
+        .placement_transfer_report
+        .take()
+        .ok_or_else(|| "placement-transfer run has no report".to_string())?;
+    run.status = CalibrationRunStatus::Running;
+    set_run_phase(
+        &state,
+        &mut run,
+        CalibrationRunPhase::PlacementTransferCalibration,
+    )?;
+    let profile = transfer.profile.clone();
+    let samples_per_round = profile.samples_per_round as usize;
+    let initial_correction = transfer.initial_correction_mm;
+    let mut candidate = initial_correction;
+
+    for (round_index, target_round) in targets.chunks(samples_per_round).enumerate() {
+        let kind = if round_index == 0 {
+            PlacementTransferRoundKind::Baseline
+        } else {
+            PlacementTransferRoundKind::Check
+        };
+        let mut samples = Vec::with_capacity(samples_per_round);
+        for (step_index, step) in target_round {
+            let prepared = match prepare_guarded_placement_execution(
+                &state,
+                job_id,
+                StartGuardedPlacementExecutionRequest {
+                    lease_id,
+                    calibration_id: run.calibration_id,
+                    step_index: *step_index,
+                    confirmed_external_safety_checks: true,
+                },
+                Some(step.placement_reference.as_str()),
+                Some(candidate),
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    transfer.findings.push(format!(
+                        "could not prepare {}: {}",
+                        step.placement_reference, error.message
+                    ));
+                    run.placement_transfer_report = Some(transfer);
+                    return fail_calibration_run(
+                        &state,
+                        &mut run,
+                        "placement-transfer preparation failed before the next placement".into(),
+                    );
+                }
+            };
+            let (execution, child_result) =
+                match execute_placement_transfer_child(&state, prepared).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        transfer.findings.push(format!(
+                            "could not finish the child placement record: {error}"
+                        ));
+                        run.placement_transfer_report = Some(transfer);
+                        return fail_calibration_run(
+                            &state,
+                            &mut run,
+                            "placement-transfer child execution failed".into(),
+                        );
+                    }
+                };
+            let sample = match placement_transfer_sample(&state, &execution, step, &profile) {
+                Ok(sample) => sample,
+                Err(error) => {
+                    transfer.findings.push(format!(
+                        "stopped after {}: {error}",
+                        step.placement_reference
+                    ));
+                    if let Err(child_error) = child_result {
+                        transfer.findings.push(format!(
+                            "child placement {} also reported: {child_error}",
+                            execution.id
+                        ));
+                    }
+                    run.placement_transfer_report = Some(transfer);
+                    return reject_calibration_run(
+                        &state,
+                        &mut run,
+                        "placement evidence did not pass the calibration measurement gates".into(),
+                    );
+                }
+            };
+            samples.push(sample);
+            update_run_check(
+                &mut run,
+                "measure",
+                CalibrationCheckStatus::Pending,
+                "Collecting guarded placement measurements",
+                json!({
+                    "round": round_index,
+                    "completed_samples": samples.len(),
+                    "required_samples": samples_per_round,
+                }),
+            );
+            run.placement_transfer_report = Some(transfer.clone());
+            persist_calibration_run(&state, &mut run)?;
+        }
+        let vectors = samples
+            .iter()
+            .map(|sample| sample.observed_part_offset_mm)
+            .collect::<Vec<_>>();
+        let summary = match summarize_placement_transfer_round(&vectors) {
+            Some(summary) => summary,
+            None => {
+                transfer
+                    .findings
+                    .push("the completed round did not produce a finite summary".into());
+                run.placement_transfer_report = Some(transfer);
+                return fail_calibration_run(
+                    &state,
+                    &mut run,
+                    "placement-transfer summary is invalid".into(),
+                );
+            }
+        };
+        let passed = summary.robust_observed_part_offset_magnitude_mm
+            <= profile.mean_part_offset_limit_mm
+            && summary.p95_radial_part_offset_mm <= profile.p95_radial_limit_mm;
+        let stable = summary.maximum_sample_deviation_mm <= profile.maximum_sample_deviation_mm
+            && (passed || summary.common_direction);
+        let round = PlacementTransferRoundReport {
+            round_index: round_index as u32,
+            kind,
+            applied_correction_mm: candidate,
+            samples,
+            summary: summary.clone(),
+            passed,
+            findings: vec![format!(
+                "physical part offset center X{:+.3} Y{:+.3} mm; p95 radial {:.3} mm",
+                summary.robust_observed_part_offset_mm[0],
+                summary.robust_observed_part_offset_mm[1],
+                summary.p95_radial_part_offset_mm,
+            )],
+        };
+        transfer.rounds.push(round);
+        transfer.final_correction_mm = candidate;
+        run.placement_transfer_report = Some(transfer.clone());
+        update_run_check(
+            &mut run,
+            if round_index == 0 {
+                "measure"
+            } else {
+                "verify"
+            },
+            if passed {
+                CalibrationCheckStatus::Passed
+            } else if stable {
+                CalibrationCheckStatus::Pending
+            } else {
+                CalibrationCheckStatus::Failed
+            },
+            if passed {
+                "Placement offsets meet the profile limits"
+            } else if stable {
+                "Placement offsets are stable and require a bounded correction"
+            } else {
+                "Placement offsets are not stable enough to calculate a correction"
+            },
+            serde_json::to_value(&summary).unwrap_or(Value::Null),
+        );
+        persist_calibration_run(&state, &mut run)?;
+        if !stable {
+            transfer.findings.push(
+                "round spread or direction consistency failed; no correction was committed".into(),
+            );
+            run.placement_transfer_report = Some(transfer.clone());
+            return reject_calibration_run(
+                &state,
+                &mut run,
+                "placement offsets are not stable enough for adjustment".into(),
+            );
+        }
+        if passed {
+            transfer.final_correction_mm = candidate;
+            transfer.passed = true;
+            let fingerprint = match commit_placement_transfer_report(
+                &state,
+                run.id,
+                run.calibration_id,
+                &transfer,
+            ) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    transfer.findings.push(format!(
+                        "could not commit the qualified correction: {error}"
+                    ));
+                    run.placement_transfer_report = Some(transfer);
+                    return fail_calibration_run(
+                        &state,
+                        &mut run,
+                        "qualified placement-transfer evidence could not be committed".into(),
+                    );
+                }
+            };
+            transfer.committed = true;
+            transfer.artifact_fingerprint = Some(fingerprint.clone());
+            transfer.findings.push(if round_index == 0 {
+                "baseline passed; committed a zero-change qualification".into()
+            } else {
+                "an independent check round passed; committed the provisional correction".into()
+            });
+            let nozzle_id = transfer.nozzle_id.clone();
+            run.placement_transfer_report = Some(transfer);
+            update_run_check(
+                &mut run,
+                "verify",
+                CalibrationCheckStatus::Passed,
+                "Independent placement evidence meets the profile limits",
+                Value::Null,
+            );
+            update_run_check(
+                &mut run,
+                "commit",
+                CalibrationCheckStatus::Passed,
+                "Committed qualified placement-transfer evidence",
+                json!({"artifact_fingerprint": fingerprint}),
+            );
+            run.status = CalibrationRunStatus::Succeeded;
+            run.phase = CalibrationRunPhase::Complete;
+            run.failure = None;
+            persist_calibration_run(&state, &mut run)?;
+            return Ok(Some(format!(
+                "Placement-transfer calibration passed for {nozzle_id}"
+            )));
+        }
+        if round_index as u32 >= profile.maximum_adjustment_rounds {
+            transfer.findings.push(
+                "all bounded adjustment rounds were used; no correction was committed".into(),
+            );
+            run.placement_transfer_report = Some(transfer);
+            return reject_calibration_run(
+                &state,
+                &mut run,
+                "placement-transfer check did not converge within the adjustment limit".into(),
+            );
+        }
+        let delta = summary.robust_observed_part_offset_mm;
+        let delta_magnitude = delta[0].hypot(delta[1]);
+        if delta_magnitude > profile.maximum_adjustment_mm {
+            transfer.findings.push(format!(
+                "suggested correction magnitude {delta_magnitude:.3} mm exceeds the profile bound"
+            ));
+            run.placement_transfer_report = Some(transfer);
+            return reject_calibration_run(
+                &state,
+                &mut run,
+                "suggested placement-transfer correction is out of bounds".into(),
+            );
+        }
+        candidate = [candidate[0] + delta[0], candidate[1] + delta[1]];
+        if candidate[0].hypot(candidate[1]) > profile.maximum_cumulative_correction_mm {
+            transfer.findings.push(format!(
+                "candidate cumulative correction X{:+.3} Y{:+.3} mm exceeds the profile bound",
+                candidate[0], candidate[1],
+            ));
+            run.placement_transfer_report = Some(transfer);
+            return reject_calibration_run(
+                &state,
+                &mut run,
+                "cumulative placement-transfer correction is out of bounds".into(),
+            );
+        }
+        transfer.findings.push(format!(
+            "testing provisional correction X{:+.3} Y{:+.3} mm on new targets",
+            candidate[0], candidate[1],
+        ));
+        transfer.final_correction_mm = candidate;
+        run.placement_transfer_report = Some(transfer.clone());
+        persist_calibration_run(&state, &mut run)?;
+    }
+    run.placement_transfer_report = Some(transfer);
+    fail_calibration_run(
+        &state,
+        &mut run,
+        "placement-transfer run exhausted its validated targets without a result".into(),
+    )
 }
 
 fn calibration_artifact_nozzle_id(id: &CalibrationArtifactId) -> Option<&'static str> {
@@ -26956,8 +28009,7 @@ fn record_automated_calibration_step(
         .unwrap()
         .insert(step_name(step).into(), values);
     snapshot.completed_steps.insert(step);
-    snapshot.production_ready =
-        calibration_is_production_ready(&snapshot, state.machine.status().simulated);
+    snapshot.production_ready = calibration_is_production_ready(state, &snapshot);
     state
         .store
         .put_calibration(&snapshot)
@@ -26982,8 +28034,10 @@ async fn invalidate_calibration_step(
     Ok(Json(snapshot))
 }
 
-fn calibration_is_production_ready(snapshot: &CalibrationSnapshot, simulated: bool) -> bool {
-    if simulated || snapshot.completed_steps.len() != lumen_calibration_workflow().len() {
+fn calibration_is_production_ready(state: &AppState, snapshot: &CalibrationSnapshot) -> bool {
+    if state.machine.status().simulated
+        || snapshot.completed_steps.len() != lumen_calibration_workflow().len()
+    {
         return false;
     }
     let within = |step, p95, count| {
@@ -26992,7 +28046,14 @@ fn calibration_is_production_ready(snapshot: &CalibrationSnapshot, simulated: bo
             .get(&step)
             .is_some_and(|value| value.p95_mm <= p95 && value.sample_count >= count)
     };
-    within(CalibrationStepId::VisualHoming, 0.05, 30)
+    let placement_transfer_current = [
+        CalibrationArtifactId::PlacementTransferN1,
+        CalibrationArtifactId::PlacementTransferN2,
+    ]
+    .iter()
+    .all(|id| crate::calibration_artifacts::artifact_tree_is_current(state, snapshot, *id));
+    placement_transfer_current
+        && within(CalibrationStepId::VisualHoming, 0.05, 30)
         && within(CalibrationStepId::MotionGeometry, 0.05, 30)
         && within(CalibrationStepId::NozzleRunout, 0.05, 12)
         && within(CalibrationStepId::Validation, 0.10, 100)
@@ -27826,6 +28887,7 @@ async fn execute_job_execution_loop(
                 confirmed_external_safety_checks: true,
             },
             Some(run.steps[step_position].placement_reference.as_str()),
+            None,
         )
         .await;
         let prepared = match prepared {
@@ -27868,6 +28930,7 @@ async fn execute_job_execution_loop(
             prepared.lease_id,
             prepared.motion_planner,
             prepared.physical,
+            true,
         )
         .await;
         match &child_result {
@@ -28176,6 +29239,7 @@ async fn resume_job_execution(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StartGuardedPlacementExecutionRequest {
     lease_id: Uuid,
     calibration_id: Uuid,
@@ -28229,7 +29293,7 @@ async fn start_guarded_placement_execution(
     Json(body): Json<StartGuardedPlacementExecutionRequest>,
 ) -> ApiResult<(StatusCode, Json<StartGuardedPlacementExecutionResponse>)> {
     ensure_no_active_job_executions(&state)?;
-    let prepared = prepare_guarded_placement_execution(&state, job_id, body, None).await?;
+    let prepared = prepare_guarded_placement_execution(&state, job_id, body, None, None).await?;
     let response = StartGuardedPlacementExecutionResponse {
         execution: prepared.run.clone(),
         operation: prepared.operation.clone(),
@@ -28245,6 +29309,7 @@ async fn start_guarded_placement_execution(
             prepared.lease_id,
             prepared.motion_planner,
             prepared.physical,
+            true,
         ),
     );
     Ok((StatusCode::ACCEPTED, Json(response)))
@@ -28347,6 +29412,22 @@ async fn prepare_retained_part_recovery(
     ensure_no_active_strip_feeder_holdouts(state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(state)?;
     ensure_no_active_placement_executions(state)?;
+    if state
+        .store
+        .list_calibration_runs()
+        .map_err(ApiError::internal)?
+        .iter()
+        .any(|run| {
+            matches!(
+                run.status,
+                CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+            )
+        })
+    {
+        return Err(ApiError::bad_request(
+            "retained-part recovery cannot start during an active calibration run",
+        ));
+    }
     let job_motion_is_active = state
         .store
         .list_job_executions()
@@ -28623,6 +29704,8 @@ fn prepare_retained_part_physical_context(
         .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
     let head_reference = calibrated_head_reference(&snapshot, visual.pixel_error_to_machine_mm)?;
     let height_model = calibrated_nozzle_height_model(&snapshot, &step.nozzle_id)?;
+    let placement_transfer_correction_mm =
+        calibrated_placement_transfer_correction(state, &snapshot, &step.nozzle_id)?;
     let height_model_has_working_plane_transfer = height_model
         .as_ref()
         .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
@@ -28681,6 +29764,7 @@ fn prepare_retained_part_physical_context(
         head_reference,
         height_model,
         height_model_has_working_plane_transfer,
+        placement_transfer_correction_mm,
         reference_contact,
         vacuum_characterization,
         top_camera_model,
@@ -28704,6 +29788,7 @@ async fn prepare_guarded_placement_execution(
     job_id: Uuid,
     body: StartGuardedPlacementExecutionRequest,
     expected_placement_reference: Option<&str>,
+    provisional_placement_transfer_correction_mm: Option<[f64; 2]>,
 ) -> ApiResult<PreparedGuardedPlacementExecution> {
     if !body.confirmed_external_safety_checks {
         return Err(ApiError::bad_request(
@@ -28732,6 +29817,23 @@ async fn prepare_guarded_placement_execution(
     ensure_no_active_strip_feeder_holdouts(state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(state)?;
     ensure_no_active_placement_executions(state)?;
+    if provisional_placement_transfer_correction_mm.is_none()
+        && state
+            .store
+            .list_calibration_runs()
+            .map_err(ApiError::internal)?
+            .iter()
+            .any(|run| {
+                matches!(
+                    run.status,
+                    CalibrationRunStatus::Pending | CalibrationRunStatus::Running
+                )
+            })
+    {
+        return Err(ApiError::bad_request(
+            "production placement cannot start during an active calibration run",
+        ));
+    }
     let job = state
         .store
         .get_job(job_id)
@@ -28815,6 +29917,7 @@ async fn prepare_guarded_placement_execution(
             feeder_registration,
             &step,
             body.lease_id,
+            provisional_placement_transfer_correction_mm,
         )?)
     };
     let store_result = state
@@ -28989,6 +30092,7 @@ fn prepare_physical_placement_pickup(
     registration: StripFeederRegistration,
     step: &PlanStep,
     lease_id: Uuid,
+    provisional_placement_transfer_correction_mm: Option<[f64; 2]>,
 ) -> ApiResult<PreparedStripFeederPickup> {
     let pickup_profile = state.profile.strip_feeder_pickup.as_ref().ok_or_else(|| {
         ApiError::bad_request("active profile does not define strip-feeder pickup")
@@ -29088,6 +30192,18 @@ fn prepare_physical_placement_pickup(
         .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
     let head_reference = calibrated_head_reference(&snapshot, visual.pixel_error_to_machine_mm)?;
     let height_model = calibrated_nozzle_height_model(&snapshot, &step.nozzle_id)?;
+    let placement_transfer_correction_mm = match provisional_placement_transfer_correction_mm {
+        Some(correction) => correction,
+        None => calibrated_placement_transfer_correction(state, &snapshot, &step.nozzle_id)?,
+    };
+    if !placement_transfer_correction_mm
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(ApiError::bad_request(
+            "placement-transfer correction is not finite",
+        ));
+    }
     let height_model_has_working_plane_transfer = height_model
         .as_ref()
         .is_some_and(|model| has_calibrated_working_plane_transfer(&snapshot, model));
@@ -29166,6 +30282,7 @@ fn prepare_physical_placement_pickup(
         head_reference,
         height_model,
         height_model_has_working_plane_transfer,
+        placement_transfer_correction_mm,
         reference_contact,
         vacuum_characterization,
         top_camera_model,
@@ -29827,11 +30944,7 @@ async fn execute_physical_retained_part_recovery(
     });
     persist_placement_progress(state, run, report)?;
 
-    let height_correction = prepared
-        .height_model
-        .as_ref()
-        .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
-        .ok_or_else(|| "recovery placement Z is outside the height model".to_string())?;
+    let height_correction = placement_height_correction(prepared, step.board_place.z_mm)?;
     let [place_head_x_mm, place_head_y_mm] = resolved_physical_place_head_xy(
         [step.board_place.x_mm, step.board_place.y_mm],
         local_target_correction_mm,
@@ -30128,6 +31241,7 @@ async fn execute_guarded_placement_task(
     lease_id: Uuid,
     motion_planner: MotionPlanner,
     physical: Option<PreparedStripFeederPickup>,
+    promote_feeder: bool,
 ) -> Result<Option<String>, String> {
     let _motion_guard = state.workspace_scan_motion_lock.lock().await;
     run.status = OperationStatus::Running;
@@ -30226,7 +31340,7 @@ async fn execute_guarded_placement_task(
                 },
                 step.placement_reference
             ));
-            if let Some(prepared) = physical.as_ref() {
+            if let Some(prepared) = physical.as_ref().filter(|_| promote_feeder) {
                 if let Err(error) = promote_strip_feeder_after_placement(
                     &state,
                     prepared.registration.id,
@@ -30538,6 +31652,26 @@ fn resolved_physical_place_head_xy(
     ])
 }
 
+fn placement_height_correction(
+    prepared: &PreparedStripFeederPickup,
+    nozzle_z_mm: f64,
+) -> Result<[f64; 2], String> {
+    let base = prepared
+        .height_model
+        .as_ref()
+        .and_then(|model| model.tip_offset_correction_at(nozzle_z_mm))
+        .ok_or_else(|| "placement Z is outside the calibrated height model".to_string())?;
+    let correction = [
+        base[0] + prepared.placement_transfer_correction_mm[0],
+        base[1] + prepared.placement_transfer_correction_mm[1],
+    ];
+    correction
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(correction)
+        .ok_or_else(|| "combined placement-transfer correction is invalid".to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_physical_guarded_placement(
     state: &AppState,
@@ -30679,11 +31813,7 @@ async fn execute_physical_guarded_placement(
     let placement_result: Result<(), String> = async {
         let z_kinematics = state.profile.z_kinematics.as_ref().unwrap();
         let vacuum = state.profile.vacuum_calibration.as_ref().unwrap();
-        let height_correction = prepared
-            .height_model
-            .as_ref()
-            .and_then(|model| model.tip_offset_correction_at(step.board_place.z_mm))
-            .ok_or_else(|| "placement Z is outside the calibrated height model".to_string())?;
+        let height_correction = placement_height_correction(prepared, step.board_place.z_mm)?;
         let [place_head_x_mm, place_head_y_mm] = resolved_physical_place_head_xy(
             [step.board_place.x_mm, step.board_place.y_mm],
             local_target_correction_mm,
@@ -31049,11 +32179,7 @@ async fn release_part_at_board_and_verify(
         let (attempt_level, attempt_contact) = if attempt == 1 {
             (place_level, place_contact)
         } else {
-            let height_correction = prepared
-                .height_model
-                .as_ref()
-                .and_then(|model| model.tip_offset_correction_at(nozzle_z_mm))
-                .ok_or_else(|| "placement release Z is outside the height model".to_string())?;
+            let height_correction = placement_height_correction(prepared, nozzle_z_mm)?;
             let [head_x_mm, head_y_mm] = resolved_physical_place_head_xy(
                 [step.board_place.x_mm, step.board_place.y_mm],
                 local_target_correction_mm,
@@ -35128,6 +36254,7 @@ mod tests {
             visual_homing_report: None,
             head_geometry_report: None,
             installed_geometry_report: None,
+            placement_transfer_report: None,
             failure: None,
             simulated: true,
         }
@@ -38481,6 +39608,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn placement_transfer_requires_all_operator_confirmations() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/placement-transfer-runs",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "job_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "confirmed_external_safety_checks": true,
+                            "confirmed_targets_empty": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("targets are empty"));
+        assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn placement_transfer_request_rejects_a_correction_override() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/placement-transfer-runs",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "job_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "confirmed_external_safety_checks": true,
+                            "confirmed_targets_empty": true,
+                            "correction_mm": [0.0, 0.25],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn public_placement_request_rejects_a_transfer_override() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/jobs/{}/placement-executions",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "calibration_id": Uuid::new_v4(),
+                            "step_index": 0,
+                            "confirmed_external_safety_checks": true,
+                            "provisional_placement_transfer_correction_mm": [0.0, 0.25],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
     async fn retained_part_recovery_requires_all_operator_confirmations() {
         let response = router(test_state())
             .oneshot(
@@ -38667,6 +39884,23 @@ mod tests {
         // not added as a move without a following bottom-camera capture.
         assert!((place_xy[0] - 244.203_447_951_116_3).abs() < 1e-9);
         assert!((place_xy[1] - 216.114_020_147_658_87).abs() < 1e-9);
+
+        let corrected_place_xy = resolved_physical_place_head_xy(
+            [400.0, 300.0],
+            [0.09, 0.02],
+            CurrentTipOffset {
+                x_mm: 156.0,
+                y_mm: 84.0,
+            },
+            // A prior +0.25 mm physical Y placement error is added to the
+            // stored correction. Subtraction in the transform moves the
+            // next head command by -0.25 mm in machine Y.
+            [0.50, -0.05],
+            &alignment,
+        )
+        .unwrap();
+        assert!((corrected_place_xy[0] - place_xy[0]).abs() < 1e-9);
+        assert!((corrected_place_xy[1] - (place_xy[1] - 0.25)).abs() < 1e-9);
     }
 
     #[test]

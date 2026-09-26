@@ -108,6 +108,7 @@ function calibrationRun(
     visual_homing_report: null,
     head_geometry_report: null,
     installed_geometry_report: null,
+    placement_transfer_report: null,
     failure: status === "rejected"
       ? "top-camera reproducibility did not meet its profile thresholds"
       : null,

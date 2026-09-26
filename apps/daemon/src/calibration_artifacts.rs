@@ -80,6 +80,8 @@ pub fn plan_artifacts(
             CalibrationArtifactId::LocalXyDirectionResponse,
             CalibrationArtifactId::VacuumCharacterizationN1,
             CalibrationArtifactId::VacuumCharacterizationN2,
+            CalibrationArtifactId::PlacementTransferN1,
+            CalibrationArtifactId::PlacementTransferN2,
         ]
     } else {
         targets.to_vec()
@@ -974,6 +976,29 @@ fn expected_inputs(
                 );
             }
         }
+        PlacementTransferN1 | PlacementTransferN2 => {
+            add(&mut inputs, "top_camera_profile", &top_profile()?);
+            add(
+                &mut inputs,
+                "placement_transfer_profile",
+                &state
+                    .profile
+                    .placement_transfer_calibration
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "active profile has no placement-transfer calibration".to_string()
+                    })?,
+            );
+            add(
+                &mut inputs,
+                "strip_feeder_pickup_profile",
+                &state
+                    .profile
+                    .strip_feeder_pickup
+                    .as_ref()
+                    .ok_or_else(|| "active profile has no strip-feeder pickup".to_string())?,
+            );
+        }
     }
     if matches!(id, NozzleHeightN1 | NozzleHeightN2) {
         add(
@@ -1120,6 +1145,7 @@ fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
         RuntimeTipTransformN1 | RuntimeTipTransformN2 => "runtime_tip_transform.v1",
         VacuumContactN1 | VacuumContactN2 => "vacuum_contact_probe.v3",
         VacuumCharacterizationN1 | VacuumCharacterizationN2 => "vacuum_sensor_characterization.v1",
+        PlacementTransferN1 | PlacementTransferN2 => "placement_transfer.v1",
     }
 }
 
@@ -1194,6 +1220,13 @@ mod tests {
             vacuum_n2.dependencies,
             [CalibrationArtifactId::VacuumContactN2]
         );
+        let transfer_n1 = &definitions[&CalibrationArtifactId::PlacementTransferN1];
+        assert!(transfer_n1
+            .dependencies
+            .contains(&CalibrationArtifactId::RuntimeTipTransformN1));
+        assert!(!transfer_n1
+            .dependencies
+            .contains(&CalibrationArtifactId::RuntimeTipTransformN2));
     }
 
     #[test]

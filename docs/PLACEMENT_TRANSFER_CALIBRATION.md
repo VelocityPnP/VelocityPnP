@@ -27,31 +27,32 @@ The guarded production placement path already supplies the required evidence:
 - a top-camera result image and placement center estimate; and
 - persistent execution and image records.
 
-The nozzle height model already has a per-nozzle working-plane correction.
-`NozzleHeightModel::observe_post_correction_residual` updates this term. The
-current manual nozzle-height observation endpoint uses the same operation.
+Legacy corrections remain in the nozzle height model. New qualified
+corrections are separate placement-transfer artifacts. Runtime placement adds
+the two terms. This avoids invalidating vacuum evidence when this step runs.
 
 The new step must call the guarded placement implementation. It must not copy
 the pickup, alignment, release, or inspection motion into a second executor.
 
 ## Coordinate contract
 
-`PlacedPartInspectionReport.offset_x_mm` and `offset_y_mm` are recenter
-commands. They describe the machine correction that would move the observed
-part center onto the registered target. They are not signed physical part
-displacements.
+`PlacedPartInspectionReport.offset_x_mm` and `offset_y_mm` are signed physical
+part-center displacements from the registered target. They are not direct head
+move commands.
 
 The calibration algorithm must use these values directly:
 
 ```text
-candidate working-plane correction
-    = current working-plane correction
-    + robust mean of top-inspection recenter commands
+candidate placement-transfer correction
+    = current placement-transfer correction
+    + robust center of top-inspection physical part offsets
 ```
 
-The web interface must show these as `recenter X/Y`. If it also shows physical
-part displacement, it must label that value separately and use the opposite
-sign. Stored reports must not use an unlabeled `Y error` field.
+The placement transform subtracts this stored correction when it calculates
+the head position. Thus, a positive physical Y error causes a negative Y head
+move on the next round. The web interface must show `physical part offset` and
+`stored correction delta` separately. Stored reports must not use an unlabeled
+`Y error` field.
 
 ## Run sequence
 
@@ -118,7 +119,7 @@ A placement can supply an XY sample only when all these checks pass:
 - the release sensor and bottom camera confirm release;
 - the nozzle is clear;
 - deterministic top vision detected one flat package;
-- the estimated center and recenter command are finite;
+- the estimated center and physical part offset are finite;
 - rotation is within the calibration limit; and
 - learned and deterministic placement results agree when a learned model is
   active.
@@ -133,9 +134,9 @@ infer a correction from a failed detection.
 
 ## Adjustment policy
 
-For each round, calculate a robust center from its recenter vectors. Report
-the vector for every sample, the robust center, radial residuals, and the
-maximum distance from the robust center.
+For each round, calculate a robust center from its physical offset vectors.
+Report the vector for every sample, the robust center, radial residuals, and
+the maximum distance from the robust center.
 
 Reject the round when:
 
@@ -144,14 +145,16 @@ Reject the round when:
 - one suggested adjustment exceeds the configured bound; or
 - the measurements do not have one common direction.
 
-Apply the full robust recenter vector as the first candidate. The profile must
-bound each candidate and the cumulative correction. Do not silently clamp an
-out-of-range result. A result outside the bound indicates a calibration or
-measurement fault.
+Add the full robust physical offset vector to the stored correction. The
+placement transform subtracts that correction from the next head command. The
+profile must bound each candidate and the cumulative correction. Do not
+silently clamp an out-of-range result. A result outside the bound indicates a
+calibration or measurement fault.
 
-A check round passes only when its mean recenter magnitude and its p95 radial
-residual are within profile limits. Suggested initial limits are 0.05 mm for
-the mean and 0.10 mm for p95. These limits must be profile data, not API input.
+A check round passes only when its mean physical offset magnitude and its p95
+radial residual are within profile limits. Suggested initial limits are 0.05
+mm for the mean and 0.10 mm for p95. These limits must be profile data, not API
+input.
 
 Rotation remains an acceptance measurement in version 1. Do not adjust nozzle
 rotation from symmetric resistor images.
@@ -161,10 +164,10 @@ rotation from symmetric resistor images.
 Do not write a candidate correction into the calibration snapshot before its
 check round passes.
 
-Add an internal `working_plane_correction_delta_mm` to the prepared placement
-context. Only the placement-transfer runner can set it. The normal production
-API cannot accept this override. The physical placement transform applies the
-delta at the same point as the stored nozzle working-plane correction.
+Add an internal provisional placement-transfer correction to the prepared
+placement context. Only the placement-transfer runner can set it. The normal
+production API cannot accept this override. The physical placement transform
+applies it with the stored nozzle working-plane correction.
 
 This rule gives these properties:
 
@@ -173,9 +176,9 @@ This rule gives these properties:
 - production placement cannot use an unverified correction; and
 - the check images measure the exact candidate that will be committed.
 
-After a check passes, update the nozzle height model once. Recompute its
-runtime tip transform. Then record qualification evidence against the new
-runtime transform.
+After a check passes, store the correction in the matching placement-transfer
+artifact. Do not mutate the nozzle height model or invalidate its dependent
+vacuum artifacts.
 
 ## Calibration model
 
@@ -193,7 +196,7 @@ avoids a dependency cycle. Production-readiness checks must explicitly require
 current placement-transfer evidence for each production nozzle.
 
 Add `CalibrationStepId::PlacementTransfer`. It depends on the nozzle height
-model and vacuum thresholds. Final `Validation` depends on
+model and vacuum sensor characterization. Final `Validation` depends on
 `PlacementTransfer`.
 
 Add `CalibrationRunPhase::PlacementTransferCalibration` and a typed
@@ -201,10 +204,10 @@ Add `CalibrationRunPhase::PlacementTransferCalibration` and a typed
 report contains:
 
 - job, board, feeder, part, nozzle, and target IDs;
-- initial and final working-plane corrections;
+- initial and final placement-transfer corrections;
 - per-round candidate deltas;
 - child placement execution IDs;
-- recenter vectors and measurement gates;
+- physical offset vectors, stored correction deltas, and measurement gates;
 - before-and-after summary statistics;
 - the committed artifact fingerprint; and
 - a passed, rejected, or interrupted result.
@@ -227,7 +230,7 @@ The calibration page must show:
 - the selected part, nozzle, feeder, board, and target count;
 - the maximum part consumption before start;
 - each placement and its evidence status;
-- baseline and check recenter vectors;
+- baseline and check physical offset vectors;
 - the provisional and committed corrections;
 - intended and detected center overlays; and
 - the reason for a stop or rejection.

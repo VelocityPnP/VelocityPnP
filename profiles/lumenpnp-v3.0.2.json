@@ -204,6 +204,19 @@
     "alignment_rotation_tolerance_deg": 2.0,
     "alignment_max_rotation_correction_deg": 180.0
   },
+  "placement_transfer_calibration": {
+    "samples_per_round": 3,
+    "maximum_adjustment_rounds": 2,
+    "mean_part_offset_limit_mm": 0.05,
+    "p95_radial_limit_mm": 0.10,
+    "maximum_sample_deviation_mm": 0.10,
+    "maximum_adjustment_mm": 0.35,
+    "maximum_cumulative_correction_mm": 0.60,
+    "maximum_rotation_error_deg": 4.0,
+    "minimum_deterministic_confidence": 0.65,
+    "maximum_model_cv_center_delta_mm": 0.10,
+    "maximum_round_centroid_separation_mm": 15.0
+  },
   "local_xy_direction_response": {
     "datum_approach_distance_mm": 5.0,
     "datum_approach_feed_mm_per_min": 300.0,

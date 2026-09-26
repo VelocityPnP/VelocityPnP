@@ -382,6 +382,8 @@ p { line-height: 1.5; }
 .compact-notice { margin: 0 0 16px; }
 .button-cluster { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .button-cluster > button { flex: 1 1 130px; }
+.placement-transfer-controls { display: grid; gap: 8px; margin: 12px 0; border: 1px solid var(--line); border-radius: 7px; padding: 12px; background: #0c1512; }
+.placement-transfer-controls > small { color: var(--muted); font-size: 10px; line-height: 1.5; }
 .calibration-summary > small { display: block; margin-top: 12px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .calibration-run { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
 .run-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
@@ -465,6 +467,13 @@ p { line-height: 1.5; }
   background: #080c0b;
 }
 .run-result a { display: inline-block; margin: 4px 12px 4px 0; font-size: 12px; }
+.target-overlay { color: #ff45dc; }
+.detected-overlay { color: #45e58a; }
+.placement-transfer-round { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.placement-transfer-samples { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.placement-transfer-samples a { margin: 0; border: 1px solid var(--line); border-radius: 6px; padding: 6px; color: var(--muted); text-decoration: none; }
+.placement-transfer-samples img { display: block; width: 100%; margin-bottom: 5px; border-radius: 4px; background: #080c0b; }
+.placement-transfer-samples span { display: block; font: 10px/1.4 var(--mono); }
 .workflow { display: grid; gap: 8px; }
 .workflow-step {
   min-width: 0;

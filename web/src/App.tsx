@@ -569,6 +569,10 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
   const requestDialog = useDialog();
   const [steps, setSteps] = useState<CalibrationStep[]>([]);
   const [snapshots, setSnapshots] = useState<CalibrationSnapshot[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [placementJobId, setPlacementJobId] = useState("");
+  const [placementNozzleId, setPlacementNozzleId] = useState<"N1" | "N2">("N1");
+  const [placementReferences, setPlacementReferences] = useState("");
   const [active, setActive] = useState<CalibrationSnapshot | null>(null);
   const [activeRun, setActiveRun] = useState<AutomatedCalibrationRun | null>(null);
   const [artifactPlan, setArtifactPlan] = useState<CalibrationArtifactPlan | null>(null);
@@ -579,7 +583,17 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
   const load = useCallback(async () => {
     try {
       const [workflow, values] = await Promise.all([api.workflow(), api.calibrations()]);
-      setSteps(workflow); setSnapshots(values); setActive((current) => values.find((v) => v.id === current?.id) ?? values[0] ?? null);
+      setSteps(workflow); setSnapshots(values);
+      setActive((current) => values.find((v) => v.id === current?.id) ?? values[0] ?? null);
+      void api.jobs().then((jobValues) => {
+        setJobs(jobValues);
+        setPlacementJobId((current) =>
+          jobValues.some((job) => job.id === current) ? current : jobValues[0]?.id ?? ""
+        );
+      }).catch(() => {
+        setJobs([]);
+        setPlacementJobId("");
+      });
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }, [setError]);
   useEffect(() => { void load(); }, [load]);
@@ -834,6 +848,29 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setStarting(false); }
   };
+  const calibratePlacementTransfer = async () => {
+    if (!active || !placementJobId) return;
+    const references = placementReferences
+      .split(/[\s,]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (await requestDialog({
+      title: `Calibrate ${placementNozzleId} placement transfer?`,
+      message: "This operation consumes parts and empty PCB targets. With the current profile it can consume up to nine of each. Confirm the selected targets are empty, the PCB and feeders are fixed, both nozzles are level, the travel path is clear, and power isolation is reachable. Leave the target list empty to let the server select compatible unused targets.",
+      confirmLabel: "Start placement calibration",
+    }) === null) return;
+    setStarting(true); setError(null);
+    try {
+      const lease = await api.acquireOrRenewLease(
+        "VelocityPnP placement transfer", 3600,
+      );
+      const started = await api.startPlacementTransferCalibration(
+        active.id, lease.id, placementJobId, placementNozzleId, references,
+      );
+      setActiveRun(started.run);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setStarting(false); }
+  };
 
   const runActive = Boolean(activeRun && ["pending", "running"].includes(activeRun.status));
   const actionActive = Boolean(
@@ -869,6 +906,16 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
       && active?.artifacts.tooling_n1
       && status.state === "ready" && status.homed,
   );
+  const canCalibratePlacementTransfer = Boolean(
+    active
+      && placementJobId
+      && status.state === "ready"
+      && status.homed
+      && status.calibration_revision === active.id
+      && active.artifacts.top_camera_planar_model
+      && active.artifacts[`runtime_tip_transform_${placementNozzleId.toLowerCase()}` as "runtime_tip_transform_n1" | "runtime_tip_transform_n2"]
+      && active.artifacts[`vacuum_characterization_${placementNozzleId.toLowerCase()}` as "vacuum_characterization_n1" | "vacuum_characterization_n2"],
+  );
 
   return <div className="calibration-layout">
     <section className="card calibration-summary">
@@ -889,6 +936,19 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
           <button className="secondary" disabled={controlsBusy || !canCalibrateInstalledGeometry} onClick={() => void calibrateInstalledGeometry()}>Calibrate cameras and plates</button>
           <button className="secondary" disabled={controlsBusy} onClick={() => void recomputeDerived()}>Recompute derived transforms</button>
           <button className="secondary" disabled={controlsBusy || !artifactPlan?.items.some((item) => item.action === "recapture" && ["nozzle_axis_runout_n1", "nozzle_axis_runout_n2", "nozzle_height_n1", "nozzle_height_n2"].includes(item.artifact))} onClick={() => void capturePlannedGeometry()}>Capture planned nozzle geometry</button>
+        </div>
+        <div className="placement-transfer-controls">
+          <strong>Placement-transfer calibration</strong>
+          <select value={placementJobId} onChange={(event) => setPlacementJobId(event.target.value)} aria-label="Placement calibration job">
+            {jobs.length === 0 && <option value="">No jobs available</option>}
+            {jobs.map((job) => <option value={job.id} key={job.id}>{job.name}</option>)}
+          </select>
+          <select value={placementNozzleId} onChange={(event) => setPlacementNozzleId(event.target.value as "N1" | "N2")} aria-label="Placement calibration nozzle">
+            <option value="N1">N1</option><option value="N2">N2</option>
+          </select>
+          <input value={placementReferences} onChange={(event) => setPlacementReferences(event.target.value)} placeholder="Optional targets: R1, R2, ..." aria-label="Placement calibration targets" />
+          <button className="secondary" disabled={controlsBusy || !canCalibratePlacementTransfer} onClick={() => void calibratePlacementTransfer()}>Calibrate placement transfer</button>
+          <small>Uses guarded pick and place. It never returns parts to feeder pockets. Automatic selection validates up to nine compatible unused targets before motion.</small>
         </div>
         {!machineReady && <small>Complete connection and preflight before starting calibration.</small>}
       </>}
@@ -945,6 +1005,7 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
         {activeRun.phase === "installed_plate_geometry" && <p>Registering installed plates, then scanning candidate holes; occupied and ambiguous targets are skipped</p>}
         {activeRun.phase === "vacuum_contact_calibration" && <p>Finding a bounded contact reference for each nozzle</p>}
         {activeRun.phase === "vacuum_sensor_characterization" && <p>Comparing pump-off, open, sealed, and release sensor distributions</p>}
+        {activeRun.phase === "placement_transfer_calibration" && <p>Measuring guarded placements and checking a provisional XY transfer correction on new targets</p>}
         <div className="calibration-checks">{displayedChecks.map((check) => <div key={check.id} className={`check-${check.status} ${currentCheck?.id === check.id ? "check-current" : ""}`}><span>{check.status === "passed" ? "✓" : check.status === "failed" ? "!" : currentCheck?.id === check.id ? "↻" : "·"}</span><div><strong>{check.title}</strong><small>{check.message}</small></div></div>)}</div>
         {activeRun.visual_homing_report && <p className="run-result">Independent return p95 <strong>{activeRun.visual_homing_report.independent_return.p95_mm.toFixed(4)} mm</strong></p>}
         {activeRun.head_geometry_report && <div className="run-result">
@@ -960,6 +1021,18 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
           <p>Installed plates <strong>{activeRun.installed_geometry_report.plate_geometry.qualified_plate_count} qualified</strong>; {activeRun.installed_geometry_report.plate_geometry.detected_targets} / {activeRun.installed_geometry_report.plate_geometry.attempted_targets} candidate holes visible</p>
           {activeRun.installed_geometry_report.plate_geometry.registrations.map((registration) => <p key={registration.plate_id}>{pretty(registration.workspace_position)} {pretty(registration.role)} registration <strong>{registration.passed ? "passed" : "not found"}</strong>{registration.offset_x_mm !== null && registration.offset_y_mm !== null ? ` at ${registration.offset_x_mm.toFixed(3)} mm X, ${registration.offset_y_mm.toFixed(3)} mm Y` : ""}{registration.seeded_from_plate_id ? `; seeded from ${pretty(registration.seeded_from_plate_id)}` : ""}</p>)}
           {activeRun.installed_geometry_report.plate_geometry.limitations.map((limitation) => <p key={limitation}>{limitation}</p>)}
+        </div>}
+        {activeRun.placement_transfer_report && <div className="run-result placement-transfer-result">
+          <p>{activeRun.placement_transfer_report.nozzle_id} {activeRun.placement_transfer_report.part_key}: initial correction <strong>X{activeRun.placement_transfer_report.initial_correction_mm[0].toFixed(3)} Y{activeRun.placement_transfer_report.initial_correction_mm[1].toFixed(3)} mm</strong>; {activeRun.placement_transfer_report.committed ? "committed" : "provisional"} correction <strong>X{activeRun.placement_transfer_report.final_correction_mm[0].toFixed(3)} Y{activeRun.placement_transfer_report.final_correction_mm[1].toFixed(3)} mm</strong></p>
+          <p>Overlay legend: <strong className="target-overlay">magenta is the registered target</strong>; <strong className="detected-overlay">green is the detected placed part</strong>.</p>
+          {activeRun.placement_transfer_report.rounds.map((round) => <div className="placement-transfer-round" key={round.round_index}>
+            <p><strong>{pretty(round.kind)} {round.round_index + 1}</strong>: physical part offset center X{round.summary.robust_observed_part_offset_mm[0].toFixed(3)} Y{round.summary.robust_observed_part_offset_mm[1].toFixed(3)} mm; p95 {round.summary.p95_radial_part_offset_mm.toFixed(3)} mm; applied correction X{round.applied_correction_mm[0].toFixed(3)} Y{round.applied_correction_mm[1].toFixed(3)} mm.</p>
+            <div className="placement-transfer-samples">{round.samples.map((sample) => <a href={`/api/v1/placement-executions/${sample.execution_id}/artifacts/board-placement-inspection.png`} target="_blank" rel="noreferrer" key={sample.execution_id}>
+              <img src={`/api/v1/placement-executions/${sample.execution_id}/artifacts/board-placement-inspection.png`} alt={`${sample.placement_reference} target and detected placement overlay`} />
+              <span>{sample.placement_reference}: physical X{sample.observed_part_offset_mm[0].toFixed(3)} Y{sample.observed_part_offset_mm[1].toFixed(3)} mm</span>
+            </a>)}</div>
+          </div>)}
+          {activeRun.placement_transfer_report.findings.map((finding) => <p key={finding}>{finding}</p>)}
         </div>}
         {activeRun.failure && !runSuperseded && <div className="notice">{formatErrorMessage(activeRun.failure)}</div>}
       </div>}

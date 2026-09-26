@@ -1,4 +1,4 @@
-use crate::Residuals;
+use crate::{PlacementTransferCalibrationProfile, Residuals};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +20,7 @@ pub enum CalibrationStepId {
     NozzleRunout,
     NozzleHeightModel,
     VacuumSensorCharacterization,
+    PlacementTransfer,
     ZPlanes,
     VacuumThresholds,
     Validation,
@@ -41,6 +42,7 @@ impl CalibrationStepId {
             Self::NozzleRunout => "nozzle_runout",
             Self::NozzleHeightModel => "nozzle_height_model",
             Self::VacuumSensorCharacterization => "vacuum_sensor_characterization",
+            Self::PlacementTransfer => "placement_transfer",
             Self::ZPlanes => "z_planes",
             Self::VacuumThresholds => "vacuum_thresholds",
             Self::Validation => "validation",
@@ -83,9 +85,10 @@ pub fn lumen_calibration_workflow() -> Vec<CalibrationStepDefinition> {
         step(MotionGeometry, "Installed-plate motion geometry", "Measure scale, skew, and bed residuals from all visible staging and build-plate holes.", &[TopCameraIntrinsics], true, false, Automated),
         step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to the installed-plate machine geometry at the camera working plane.", &[MotionGeometry], true, false, Automated),
         step(VacuumSensorCharacterization, "Vacuum sensor characterization", "Measure pump-off, open-nozzle, sealed-reference, and release distributions per nozzle and installed tip.", &[NozzleHeightModel], true, false, Automated),
+        step(PlacementTransfer, "Placement-transfer calibration", "Use guarded placements to measure and verify the per-nozzle XY transfer from bottom-camera alignment to the top-camera board target.", &[NozzleHeightModel, VacuumSensorCharacterization], true, true, Automated),
         step(ZPlanes, "Z planes", "Capture safe, board, feeder, discard, and camera-clearance planes.", &[NozzleHeightModel], true, false, Planned),
         step(VacuumThresholds, "Known-part vacuum thresholds", "Learn known-part pressure distributions per nozzle, tip, and applicable part class.", &[ZPlanes, VacuumSensorCharacterization], true, false, Planned),
-        step(Validation, "Known-board validation", "Measure homing, geometry, pick, alignment, and placement acceptance metrics.", &[NozzleHeightModel, VacuumThresholds], true, true, Planned),
+        step(Validation, "Known-board validation", "Measure homing, geometry, pick, alignment, and placement acceptance metrics.", &[PlacementTransfer, VacuumThresholds], true, true, Planned),
     ]
 }
 
@@ -153,6 +156,8 @@ pub enum CalibrationArtifactId {
     VacuumContactN2,
     VacuumCharacterizationN1,
     VacuumCharacterizationN2,
+    PlacementTransferN1,
+    PlacementTransferN2,
 }
 
 impl CalibrationArtifactId {
@@ -192,6 +197,14 @@ impl CalibrationArtifactId {
         match nozzle_id.as_bytes() {
             b"N1" => Some(Self::VacuumCharacterizationN1),
             b"N2" => Some(Self::VacuumCharacterizationN2),
+            _ => None,
+        }
+    }
+
+    pub const fn placement_transfer(nozzle_id: &str) -> Option<Self> {
+        match nozzle_id.as_bytes() {
+            b"N1" => Some(Self::PlacementTransferN1),
+            b"N2" => Some(Self::PlacementTransferN2),
             _ => None,
         }
     }
@@ -457,6 +470,30 @@ pub fn lumen_calibration_artifacts() -> Vec<CalibrationArtifactDefinition> {
             true,
             90,
         ),
+        artifact(
+            PlacementTransferN1,
+            "N1 placement-transfer calibration",
+            &[
+                RuntimeTipTransformN1,
+                TopCameraPlanarModel,
+                VacuumCharacterizationN1,
+            ],
+            Captured,
+            true,
+            540,
+        ),
+        artifact(
+            PlacementTransferN2,
+            "N2 placement-transfer calibration",
+            &[
+                RuntimeTipTransformN2,
+                TopCameraPlanarModel,
+                VacuumCharacterizationN2,
+            ],
+            Captured,
+            true,
+            540,
+        ),
     ]
 }
 
@@ -505,6 +542,7 @@ pub enum CalibrationRunPhase {
     InstalledPlateGeometry,
     VacuumContactCalibration,
     VacuumSensorCharacterization,
+    PlacementTransferCalibration,
     Complete,
 }
 
@@ -533,6 +571,132 @@ pub struct CalibrationCheck {
     pub message: String,
     #[serde(default)]
     pub evidence: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementTransferRoundKind {
+    Baseline,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementTransferSample {
+    pub execution_id: Uuid,
+    pub placement_reference: String,
+    pub target_machine_mm: [f64; 2],
+    /// Physical part-center displacement from the registered target.
+    pub observed_part_offset_mm: [f64; 2],
+    pub radial_part_offset_mm: f64,
+    /// Delta added to the transfer correction. The placement transform
+    /// subtracts this value when it calculates the physical head position.
+    pub stored_correction_delta_mm: [f64; 2],
+    pub rotation_error_deg: f64,
+    pub held_centering_residual_mm: f64,
+    #[serde(default)]
+    pub model_cv_center_delta_mm: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementTransferRoundSummary {
+    pub sample_count: u32,
+    pub robust_observed_part_offset_mm: [f64; 2],
+    pub robust_observed_part_offset_magnitude_mm: f64,
+    pub p95_radial_part_offset_mm: f64,
+    pub maximum_sample_deviation_mm: f64,
+    pub common_direction: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementTransferRoundReport {
+    pub round_index: u32,
+    pub kind: PlacementTransferRoundKind,
+    /// Total placement-transfer correction used by this round.
+    pub applied_correction_mm: [f64; 2],
+    pub samples: Vec<PlacementTransferSample>,
+    pub summary: PlacementTransferRoundSummary,
+    pub passed: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementTransferCalibrationReport {
+    pub algorithm_version: String,
+    pub profile: PlacementTransferCalibrationProfile,
+    pub job_id: Uuid,
+    pub board_instance_id: Uuid,
+    pub feeder_id: Uuid,
+    pub feeder_registration_id: Uuid,
+    pub part_key: String,
+    pub nozzle_id: String,
+    pub nominal_rotation_deg: f64,
+    pub target_references: Vec<String>,
+    pub initial_correction_mm: [f64; 2],
+    pub final_correction_mm: [f64; 2],
+    pub rounds: Vec<PlacementTransferRoundReport>,
+    pub passed: bool,
+    pub committed: bool,
+    #[serde(default)]
+    pub artifact_fingerprint: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+pub fn summarize_placement_transfer_round(
+    observed_part_offsets_mm: &[[f64; 2]],
+) -> Option<PlacementTransferRoundSummary> {
+    if observed_part_offsets_mm.is_empty()
+        || observed_part_offsets_mm
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let median = |axis: usize| {
+        let mut values = observed_part_offsets_mm
+            .iter()
+            .map(|value| value[axis])
+            .collect::<Vec<_>>();
+        values.sort_by(f64::total_cmp);
+        let middle = values.len() / 2;
+        if values.len() % 2 == 0 {
+            0.5 * (values[middle - 1] + values[middle])
+        } else {
+            values[middle]
+        }
+    };
+    let robust_observed_part_offset_mm = [median(0), median(1)];
+    let robust_observed_part_offset_magnitude_mm =
+        robust_observed_part_offset_mm[0].hypot(robust_observed_part_offset_mm[1]);
+    let mut radial = observed_part_offsets_mm
+        .iter()
+        .map(|value| value[0].hypot(value[1]))
+        .collect::<Vec<_>>();
+    radial.sort_by(f64::total_cmp);
+    let p95_index = ((radial.len() - 1) as f64 * 0.95).ceil() as usize;
+    let maximum_sample_deviation_mm = observed_part_offsets_mm
+        .iter()
+        .map(|value| {
+            (value[0] - robust_observed_part_offset_mm[0])
+                .hypot(value[1] - robust_observed_part_offset_mm[1])
+        })
+        .fold(0.0, f64::max);
+    let common_direction = robust_observed_part_offset_magnitude_mm <= f64::EPSILON
+        || observed_part_offsets_mm.iter().all(|value| {
+            value[0] * robust_observed_part_offset_mm[0]
+                + value[1] * robust_observed_part_offset_mm[1]
+                >= 0.0
+        });
+    Some(PlacementTransferRoundSummary {
+        sample_count: observed_part_offsets_mm.len() as u32,
+        robust_observed_part_offset_mm,
+        robust_observed_part_offset_magnitude_mm,
+        p95_radial_part_offset_mm: radial[p95_index],
+        maximum_sample_deviation_mm,
+        common_direction,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1540,6 +1704,8 @@ pub struct AutomatedCalibrationRun {
     pub head_geometry_report: Option<HeadGeometryReport>,
     #[serde(default)]
     pub installed_geometry_report: Option<InstalledGeometryCalibrationReport>,
+    #[serde(default)]
+    pub placement_transfer_report: Option<PlacementTransferCalibrationReport>,
     pub failure: Option<String>,
     pub simulated: bool,
 }
@@ -1697,6 +1863,10 @@ impl CalibrationSnapshot {
                 CalibrationArtifactId::VacuumCharacterizationN1,
                 CalibrationArtifactId::VacuumCharacterizationN2,
             ],
+            CalibrationStepId::PlacementTransfer => vec![
+                CalibrationArtifactId::PlacementTransferN1,
+                CalibrationArtifactId::PlacementTransferN2,
+            ],
             _ => Vec::new(),
         };
         self.invalidate_artifacts_from(&artifact_roots);
@@ -1728,6 +1898,24 @@ impl CalibrationSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_transfer_summary_preserves_physical_offset_sign() {
+        let summary =
+            summarize_placement_transfer_round(&[[-0.24, 0.11], [-0.26, 0.09], [-0.25, 0.10]])
+                .unwrap();
+        assert_eq!(summary.robust_observed_part_offset_mm, [-0.25, 0.10]);
+        assert!(summary.common_direction);
+        assert!(summary.maximum_sample_deviation_mm < 0.03);
+    }
+
+    #[test]
+    fn placement_transfer_summary_reports_opposed_measurements() {
+        let summary =
+            summarize_placement_transfer_round(&[[0.20, 0.0], [0.22, 0.01], [-0.21, 0.0]]).unwrap();
+        assert!(!summary.common_direction);
+        assert!(summary.maximum_sample_deviation_mm > 0.4);
+    }
 
     #[test]
     fn camera_change_invalidates_downstream_but_not_homing() {

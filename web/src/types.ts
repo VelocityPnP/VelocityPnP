@@ -179,6 +179,8 @@ export type CalibrationArtifactId =
   | "vacuum_contact_n2"
   | "vacuum_characterization_n1"
   | "vacuum_characterization_n2"
+  | "placement_transfer_n1"
+  | "placement_transfer_n2"
   | "top_camera_planar_model"
   | "bottom_camera_planar_model"
   | "installed_plate_geometry";
@@ -589,8 +591,72 @@ export interface AutomatedCalibrationRun {
   visual_homing_report: VisualHomingValidationReport | null;
   head_geometry_report: HeadGeometryReport | null;
   installed_geometry_report: InstalledGeometryCalibrationReport | null;
+  placement_transfer_report: PlacementTransferCalibrationReport | null;
   failure: string | null;
   simulated: boolean;
+}
+
+export interface PlacementTransferCalibrationProfile {
+  samples_per_round: number;
+  maximum_adjustment_rounds: number;
+  mean_part_offset_limit_mm: number;
+  p95_radial_limit_mm: number;
+  maximum_sample_deviation_mm: number;
+  maximum_adjustment_mm: number;
+  maximum_cumulative_correction_mm: number;
+  maximum_rotation_error_deg: number;
+  minimum_deterministic_confidence: number;
+  maximum_model_cv_center_delta_mm: number;
+  maximum_round_centroid_separation_mm: number;
+}
+
+export interface PlacementTransferSample {
+  execution_id: string;
+  placement_reference: string;
+  target_machine_mm: [number, number];
+  observed_part_offset_mm: [number, number];
+  radial_part_offset_mm: number;
+  stored_correction_delta_mm: [number, number];
+  rotation_error_deg: number;
+  held_centering_residual_mm: number;
+  model_cv_center_delta_mm: number | null;
+}
+
+export interface PlacementTransferRoundReport {
+  round_index: number;
+  kind: "baseline" | "check";
+  applied_correction_mm: [number, number];
+  samples: PlacementTransferSample[];
+  summary: {
+    sample_count: number;
+    robust_observed_part_offset_mm: [number, number];
+    robust_observed_part_offset_magnitude_mm: number;
+    p95_radial_part_offset_mm: number;
+    maximum_sample_deviation_mm: number;
+    common_direction: boolean;
+  };
+  passed: boolean;
+  findings: string[];
+}
+
+export interface PlacementTransferCalibrationReport {
+  algorithm_version: string;
+  profile: PlacementTransferCalibrationProfile;
+  job_id: string;
+  board_instance_id: string;
+  feeder_id: string;
+  feeder_registration_id: string;
+  part_key: string;
+  nozzle_id: string;
+  nominal_rotation_deg: number;
+  target_references: string[];
+  initial_correction_mm: [number, number];
+  final_correction_mm: [number, number];
+  rounds: PlacementTransferRoundReport[];
+  passed: boolean;
+  committed: boolean;
+  artifact_fingerprint: string | null;
+  findings: string[];
 }
 
 export interface BoardDesign {

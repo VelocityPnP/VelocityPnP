@@ -190,6 +190,8 @@ pub struct MachineProfile {
     #[serde(default)]
     pub strip_feeder_pickup: Option<StripFeederPickupProfile>,
     #[serde(default)]
+    pub placement_transfer_calibration: Option<PlacementTransferCalibrationProfile>,
+    #[serde(default)]
     pub local_xy_direction_response: Option<LocalXyDirectionResponseProfile>,
     #[serde(default)]
     pub installed_geometry_calibration: Option<InstalledGeometryCalibrationProfile>,
@@ -504,6 +506,55 @@ pub struct StripFeederPickupProfile {
     pub alignment_translation_tolerance_mm: f64,
     pub alignment_rotation_tolerance_deg: f64,
     pub alignment_max_rotation_correction_deg: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementTransferCalibrationProfile {
+    pub samples_per_round: u32,
+    pub maximum_adjustment_rounds: u32,
+    pub mean_part_offset_limit_mm: f64,
+    pub p95_radial_limit_mm: f64,
+    pub maximum_sample_deviation_mm: f64,
+    pub maximum_adjustment_mm: f64,
+    pub maximum_cumulative_correction_mm: f64,
+    pub maximum_rotation_error_deg: f64,
+    pub minimum_deterministic_confidence: f64,
+    pub maximum_model_cv_center_delta_mm: f64,
+    pub maximum_round_centroid_separation_mm: f64,
+}
+
+impl PlacementTransferCalibrationProfile {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let limits = [
+            self.mean_part_offset_limit_mm,
+            self.p95_radial_limit_mm,
+            self.maximum_sample_deviation_mm,
+            self.maximum_adjustment_mm,
+            self.maximum_cumulative_correction_mm,
+            self.maximum_rotation_error_deg,
+            self.maximum_round_centroid_separation_mm,
+        ];
+        if !(2..=10).contains(&self.samples_per_round)
+            || self.maximum_adjustment_rounds > 2
+            || limits
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+            || self.mean_part_offset_limit_mm > self.p95_radial_limit_mm
+            || self.p95_radial_limit_mm > self.maximum_adjustment_mm
+            || self.maximum_adjustment_mm > self.maximum_cumulative_correction_mm
+            || !self.minimum_deterministic_confidence.is_finite()
+            || !(0.0..=1.0).contains(&self.minimum_deterministic_confidence)
+            || !self.maximum_model_cv_center_delta_mm.is_finite()
+            || self.maximum_model_cv_center_delta_mm <= 0.0
+        {
+            return Err("placement-transfer calibration profile is invalid");
+        }
+        Ok(())
+    }
+
+    pub fn maximum_target_count(&self) -> u32 {
+        self.samples_per_round * (self.maximum_adjustment_rounds + 1)
+    }
 }
 
 fn default_board_release_retry_depth_mm() -> f64 {
