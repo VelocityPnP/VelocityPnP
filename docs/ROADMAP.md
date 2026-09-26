@@ -197,6 +197,8 @@ The project is organized by measurable gates rather than calendar estimates.
   commit-identified source trees
 - [x] Publish versioned Apache-2.0 runtime packages in a separate model-zoo
   repository with model cards, checksums, and evaluation records
+- [x] Publish immutable reviewed-dataset packages beside the model catalog,
+  with label records, images, audit data, checksums, and model links
 - [ ] Add application-managed model download, cache, checksum, and selection
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles

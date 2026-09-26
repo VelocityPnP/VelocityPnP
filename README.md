@@ -87,7 +87,8 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for prerequisites and commands.
 See [docs/HANDOFF.md](docs/HANDOFF.md) for the current local runtime state and
 the next motion-performance, web-interface, and model-distribution work.
 
-Model weights are not stored in this repository. Local training data and model
-packages are below the ignored `datasets/` tree. The daemon accepts explicit
-model package directories and verifies each manifest, contract, license, file
-size, and checksum before inference.
+Model weights are not stored in this repository. Local working data and model
+packages are below the ignored `datasets/` tree. Final reviewed datasets and
+model packages are immutable release assets in the private model repository.
+The daemon accepts explicit model package directories and verifies each
+manifest, contract, license, file size, and checksum before inference.

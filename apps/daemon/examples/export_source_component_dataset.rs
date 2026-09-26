@@ -80,9 +80,11 @@ struct ReviewedDraftManifest {
 #[derive(Debug, Deserialize)]
 struct ReviewedDraftSample {
     id: String,
-    source_sha256: String,
+    source_sha256: Option<String>,
     width_px: u32,
     height_px: u32,
+    #[serde(default)]
+    image_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,6 +98,8 @@ struct ReviewedGroundTruthSample {
     outline_px: Option<[[f64; 2]; 4]>,
     label_source: String,
     review_note: String,
+    #[serde(default, skip_serializing)]
+    source_image_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,7 +110,7 @@ struct ReviewedGroundTruthManifest {
 
 struct ReviewedDataset {
     root: PathBuf,
-    draft_manifest_sha256: String,
+    draft_manifest_sha256: Option<String>,
     ground_truth_manifest_sha256: String,
     draft_by_id: BTreeMap<String, ReviewedDraftSample>,
     ground_truth_by_id: BTreeMap<String, ReviewedGroundTruthSample>,
@@ -115,11 +119,23 @@ struct ReviewedDataset {
 #[derive(Debug, Deserialize, Serialize)]
 struct CarriedGroundTruthManifest {
     schema_version: u32,
-    source_dataset: String,
-    source_draft_manifest_sha256: String,
-    source_ground_truth_manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_dataset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_draft_manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_ground_truth_manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_datasets: Vec<ReviewedDatasetProvenance>,
     classes: Vec<String>,
     samples: Vec<CarriedGroundTruthSample>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ReviewedDatasetProvenance {
+    path: String,
+    draft_manifest_sha256: Option<String>,
+    ground_truth_manifest_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +151,7 @@ struct CarriedGroundTruthSample {
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let mut positional = Vec::new();
-    let mut reviewed_root = None;
+    let mut reviewed_roots = Vec::new();
     let mut capture_run = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -144,7 +160,7 @@ fn main() -> Result<()> {
             let path = arguments
                 .get(index)
                 .context("--carry-reviewed requires a dataset directory")?;
-            reviewed_root = Some(PathBuf::from(path));
+            reviewed_roots.push(PathBuf::from(path));
         } else if arguments[index] == "--capture-run" {
             index += 1;
             let id = arguments
@@ -165,7 +181,7 @@ fn main() -> Result<()> {
          --capture-run CAPTURE_UUID"
     );
     ensure!(
-        capture_run.is_none() || reviewed_root.is_none(),
+        capture_run.is_none() || reviewed_roots.is_empty(),
         "a single-capture holdout cannot carry prior training labels"
     );
     let database = PathBuf::from(&positional[0]);
@@ -178,10 +194,10 @@ fn main() -> Result<()> {
                 .with_context(|| format!("invalid evaluation registration {value}"))
         })
         .collect::<Result<BTreeSet<_>>>()?;
-    let reviewed = reviewed_root
-        .as_deref()
-        .map(load_reviewed_dataset)
-        .transpose()?;
+    let reviewed = reviewed_roots
+        .iter()
+        .map(|root| load_reviewed_dataset(root))
+        .collect::<Result<Vec<_>>>()?;
     ensure!(database.is_file(), "database does not exist");
     ensure!(
         !output.join("manifest.draft.json").exists(),
@@ -451,7 +467,7 @@ fn main() -> Result<()> {
     let mut models: BTreeMap<Uuid, (PlanarCameraModel, bool)> = BTreeMap::new();
     let mut samples = Vec::new();
     let mut carried_samples = Vec::new();
-    for source in sources {
+    'sources: for source in sources {
         let proposed_split =
             if capture_run.is_some() || evaluation_groups.contains(&source.registration.id) {
                 "eval"
@@ -481,12 +497,12 @@ fn main() -> Result<()> {
             model
         };
         if legacy_affine {
-            if let Some(reviewed) = &reviewed {
+            for reviewed_dataset in &reviewed {
                 if let Some(carried) =
-                    carry_frozen_reviewed_sample(reviewed, &id, &source_sha256, &output)?
+                    carry_frozen_reviewed_sample(reviewed_dataset, &id, &source_sha256, &output)?
                 {
                     carried_samples.push(carried);
-                    continue;
+                    continue 'sources;
                 }
             }
         }
@@ -498,11 +514,13 @@ fn main() -> Result<()> {
             &source.registration,
         )?;
         let encoded_crop = encode_gray_png(&artifacts.crop)?;
-        let carried = if let Some(reviewed) = &reviewed {
-            carry_reviewed_sample(reviewed, &id, &source_sha256, &encoded_crop)?
-        } else {
-            None
-        };
+        let mut carried = None;
+        for reviewed_dataset in &reviewed {
+            carried = carry_reviewed_sample(reviewed_dataset, &id, &source_sha256, &encoded_crop)?;
+            if carried.is_some() {
+                break;
+            }
+        }
         if let Some(carried) = carried {
             let image_path = &carried.ground_truth.image_path;
             let image_output = output.join(image_path);
@@ -572,15 +590,22 @@ fn main() -> Result<()> {
         )
     });
     carried_samples.sort_by(|first, second| first.ground_truth.id.cmp(&second.ground_truth.id));
-    let carried_manifest_name = reviewed
-        .as_ref()
-        .map(|_| "manifest.carried-ground-truth.json".to_string());
-    if let Some(reviewed) = &reviewed {
+    let carried_manifest_name =
+        (!reviewed.is_empty()).then(|| "manifest.carried-ground-truth.json".to_string());
+    if !reviewed.is_empty() {
         let carried = CarriedGroundTruthManifest {
             schema_version: 1,
-            source_dataset: reviewed.root.display().to_string(),
-            source_draft_manifest_sha256: reviewed.draft_manifest_sha256.clone(),
-            source_ground_truth_manifest_sha256: reviewed.ground_truth_manifest_sha256.clone(),
+            source_dataset: None,
+            source_draft_manifest_sha256: None,
+            source_ground_truth_manifest_sha256: None,
+            source_datasets: reviewed
+                .iter()
+                .map(|dataset| ReviewedDatasetProvenance {
+                    path: dataset.root.display().to_string(),
+                    draft_manifest_sha256: dataset.draft_manifest_sha256.clone(),
+                    ground_truth_manifest_sha256: dataset.ground_truth_manifest_sha256.clone(),
+                })
+                .collect(),
             classes: vec!["component_flat".into(), "component_on_edge".into()],
             samples: carried_samples.clone(),
         };
@@ -598,7 +623,7 @@ fn main() -> Result<()> {
         schema_version: 1,
         name: if capture_run.is_some() {
             "velocitypnp-source-components-capture-holdout-draft".into()
-        } else if reviewed.is_some() {
+        } else if !reviewed.is_empty() {
             "velocitypnp-source-components-v2-draft".into()
         } else {
             "velocitypnp-source-components-v1-draft".into()
@@ -732,21 +757,35 @@ fn placement_registration(
 fn load_reviewed_dataset(root: &Path) -> Result<ReviewedDataset> {
     let draft_path = root.join("manifest.draft.json");
     let ground_truth_path = root.join("manifest.ground-truth.json");
-    let draft_bytes =
-        fs::read(&draft_path).with_context(|| format!("cannot read {}", draft_path.display()))?;
     let ground_truth_bytes = fs::read(&ground_truth_path)
         .with_context(|| format!("cannot read {}", ground_truth_path.display()))?;
-    let draft: ReviewedDraftManifest = serde_json::from_slice(&draft_bytes)?;
     let ground_truth: ReviewedGroundTruthManifest = serde_json::from_slice(&ground_truth_bytes)?;
     ensure!(
         ground_truth.classes == ["component_flat", "component_on_edge"],
         "reviewed dataset uses different classes"
     );
-    let mut draft_by_id = draft
-        .samples
-        .into_iter()
-        .map(|sample| (sample.id.clone(), sample))
-        .collect::<BTreeMap<_, _>>();
+    let draft_bytes = draft_path
+        .is_file()
+        .then(|| fs::read(&draft_path))
+        .transpose()
+        .with_context(|| format!("cannot read {}", draft_path.display()))?;
+    let mut draft_by_id = if let Some(bytes) = &draft_bytes {
+        let draft: ReviewedDraftManifest = serde_json::from_slice(bytes)?;
+        draft
+            .samples
+            .into_iter()
+            .map(|mut sample| {
+                sample.image_sha256 = None;
+                (sample.id.clone(), sample)
+            })
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        ground_truth
+            .samples
+            .iter()
+            .map(|sample| merged_reviewed_metadata(root, sample))
+            .collect::<Result<BTreeMap<_, _>>>()?
+    };
     let carried_path = root.join("manifest.carried-ground-truth.json");
     if carried_path.is_file() {
         let carried: CarriedGroundTruthManifest = serde_json::from_slice(
@@ -763,9 +802,10 @@ fn load_reviewed_dataset(root: &Path) -> Result<ReviewedDataset> {
                 id.clone(),
                 ReviewedDraftSample {
                     id: id.clone(),
-                    source_sha256: sample.source_sha256,
+                    source_sha256: Some(sample.source_sha256),
                     width_px: sample.width_px,
                     height_px: sample.height_px,
+                    image_sha256: Some(sample.image_sha256),
                 },
             );
             ensure!(prior.is_none(), "reviewed metadata repeats sample {id}");
@@ -788,11 +828,55 @@ fn load_reviewed_dataset(root: &Path) -> Result<ReviewedDataset> {
     );
     Ok(ReviewedDataset {
         root: root.to_path_buf(),
-        draft_manifest_sha256: hex_sha256(&draft_bytes),
+        draft_manifest_sha256: draft_bytes.as_deref().map(hex_sha256),
         ground_truth_manifest_sha256: hex_sha256(&ground_truth_bytes),
         draft_by_id,
         ground_truth_by_id,
     })
+}
+
+fn merged_reviewed_metadata(
+    root: &Path,
+    sample: &ReviewedGroundTruthSample,
+) -> Result<(String, ReviewedDraftSample)> {
+    let expected_image_sha256 = sample.source_image_sha256.as_deref().with_context(|| {
+        format!(
+            "reviewed sample {} has no draft metadata or source image checksum",
+            sample.id
+        )
+    })?;
+    let image_path = Path::new(&sample.image_path);
+    ensure!(
+        !image_path.is_absolute()
+            && image_path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "reviewed sample {} has an unsafe image path",
+        sample.id
+    );
+    let image = fs::read(root.join(image_path)).with_context(|| {
+        format!(
+            "cannot read reviewed image {}",
+            root.join(image_path).display()
+        )
+    })?;
+    ensure!(
+        hex_sha256(&image) == expected_image_sha256,
+        "reviewed sample {} image checksum changed",
+        sample.id
+    );
+    let frame = decode_gray_png(&image)
+        .with_context(|| format!("reviewed sample {} is not a valid PNG", sample.id))?;
+    Ok((
+        sample.id.clone(),
+        ReviewedDraftSample {
+            id: sample.id.clone(),
+            source_sha256: None,
+            width_px: frame.width,
+            height_px: frame.height,
+            image_sha256: Some(expected_image_sha256.into()),
+        },
+    ))
 }
 
 fn carry_reviewed_sample(
@@ -808,8 +892,10 @@ fn carry_reviewed_sample(
         .ground_truth_by_id
         .get(id)
         .with_context(|| format!("reviewed sample {id} has no ground truth"))?;
-    if draft.source_sha256 != source_sha256 {
-        return Ok(None);
+    if let Some(expected_source_sha256) = &draft.source_sha256 {
+        if expected_source_sha256 != source_sha256 {
+            return Ok(None);
+        }
     }
     let image_path = Path::new(&ground_truth.image_path);
     ensure!(
@@ -825,6 +911,12 @@ fn carry_reviewed_sample(
             reviewed.root.join(image_path).display()
         )
     })?;
+    if let Some(expected_image_sha256) = &draft.image_sha256 {
+        ensure!(
+            hex_sha256(&prior_image) == *expected_image_sha256,
+            "reviewed sample {id} image checksum changed"
+        );
+    }
     if prior_image != encoded_crop {
         return Ok(None);
     }
@@ -846,7 +938,7 @@ fn carry_frozen_reviewed_sample(
     let Some(draft) = reviewed.draft_by_id.get(id) else {
         return Ok(None);
     };
-    if draft.source_sha256 != source_sha256 {
+    if draft.source_sha256.as_deref() != Some(source_sha256) {
         return Ok(None);
     }
     let ground_truth = reviewed
@@ -1321,15 +1413,16 @@ mod tests {
         let id = "prior".to_string();
         let reviewed = ReviewedDataset {
             root: root.clone(),
-            draft_manifest_sha256: "draft".into(),
+            draft_manifest_sha256: Some("draft".into()),
             ground_truth_manifest_sha256: "ground-truth".into(),
             draft_by_id: BTreeMap::from([(
                 id.clone(),
                 ReviewedDraftSample {
                     id: id.clone(),
-                    source_sha256: "source".into(),
+                    source_sha256: Some("source".into()),
                     width_px: 20,
                     height_px: 10,
+                    image_sha256: None,
                 },
             )]),
             ground_truth_by_id: BTreeMap::from([(
@@ -1344,6 +1437,7 @@ mod tests {
                     outline_px: Some([[2.0, 2.0], [18.0, 2.0], [18.0, 8.0], [2.0, 8.0]]),
                     label_source: "second_review".into(),
                     review_note: String::new(),
+                    source_image_sha256: None,
                 },
             )]),
         };
@@ -1433,7 +1527,70 @@ mod tests {
 
         let reviewed = load_reviewed_dataset(&root).unwrap();
         assert_eq!(reviewed.draft_by_id.len(), 2);
-        assert_eq!(reviewed.draft_by_id["old"].source_sha256, "old-source");
+        assert_eq!(
+            reviewed.draft_by_id["old"].source_sha256.as_deref(),
+            Some("old-source")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn merged_reviewed_dataset_loads_from_final_image_checksums() {
+        let root =
+            std::env::temp_dir().join(format!("velocitypnp-reviewed-merged-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("images/train")).unwrap();
+        let frame = velocitypnp_vision::GrayFrame {
+            width: 4,
+            height: 3,
+            pixels: vec![127; 12],
+        };
+        let image = encode_gray_png(&frame).unwrap();
+        fs::write(root.join("images/train/merged.png"), &image).unwrap();
+        fs::write(
+            root.join("manifest.ground-truth.json"),
+            serde_json::to_vec(&json!({
+                "classes": ["component_flat", "component_on_edge"],
+                "samples": [{
+                    "id": "merged",
+                    "split": "train",
+                    "image_path": "images/train/merged.png",
+                    "part_key": null,
+                    "included": true,
+                    "class_name": null,
+                    "outline_px": null,
+                    "label_source": "first_review",
+                    "review_note": "",
+                    "source_image_sha256": hex_sha256(&image)
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let reviewed = load_reviewed_dataset(&root).unwrap();
+        assert!(reviewed.draft_manifest_sha256.is_none());
+        assert_eq!(reviewed.draft_by_id["merged"].source_sha256, None);
+        assert_eq!(reviewed.draft_by_id["merged"].width_px, 4);
+        assert_eq!(reviewed.draft_by_id["merged"].height_px, 3);
+        assert!(
+            carry_reviewed_sample(&reviewed, "merged", "new-source", &image)
+                .unwrap()
+                .is_some()
+        );
+        assert!(carry_reviewed_sample(
+            &reviewed,
+            "merged",
+            "new-source",
+            &encode_gray_png(&velocitypnp_vision::GrayFrame {
+                width: 4,
+                height: 3,
+                pixels: vec![126; 12],
+            })
+            .unwrap(),
+        )
+        .unwrap()
+        .is_none());
 
         fs::remove_dir_all(root).unwrap();
     }

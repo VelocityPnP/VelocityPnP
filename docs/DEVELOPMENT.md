@@ -811,8 +811,12 @@ cargo run -p velocitypnpd --example export_source_component_dataset -- \
   --carry-reviewed datasets/source-components-v1
 ```
 
-The exporter carries a label only when the source ID, source SHA-256 digest,
-and generated image bytes all match. It writes verified labels to
+Repeat `--carry-reviewed` from newest to oldest when a combined training
+dataset does not contain all raw-source metadata. The exporter uses the first
+matching label. A normal export requires the source ID, source SHA-256 digest,
+and generated image bytes to match. A combined dataset can carry a label when
+the source ID and final image SHA-256 digest match. Legacy affine crops still
+require raw-source metadata. The exporter writes verified labels to
 `manifest.carried-ground-truth.json`. The draft manifest and `review.html`
 contain only new samples. The finalizer checks the carried image hashes and
 combines the carried and newly reviewed labels in the final dataset.
@@ -1710,9 +1714,10 @@ cargo run -p velocitypnp-model \
   "$MODEL" "$DATASET" eval
 ```
 
-Raw captures and normalized samples are below `datasets/`, which Git ignores.
-Keep them across restarts. Their image hashes and registration IDs provide the
-source identity needed for later grouped train and evaluation splits.
+Raw captures and working samples are below `datasets/`, which Git ignores.
+Their image hashes and registration IDs provide the source identity needed for
+later grouped train and evaluation splits. Publish each finalized reviewed
+dataset as an immutable asset in the private model repository.
 
 ### Automatic board registration
 

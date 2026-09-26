@@ -49,10 +49,18 @@ The retained image shows a resistor and a correct learned pose, but all local
 source checkpoints classify it as empty. Deterministic vision selected the
 tape edge. This is a source-model regression, not placement evidence.
 
-The all-history source export has 595 unique images. It carried 213 prior
-labels and needs review for 382 images. The local review page is served from
-`datasets/source-components-v5-all`. Do not restart placement-transfer motion
+The all-history source export has 595 unique images. The corrected export
+carries all 259 prior labels and needs review for 336 new images. The local
+review page is served from `datasets/source-components-v7-all`. The earlier
+382-image page repeated 46 reviewed images because the combined v4 manifest
+did not contain raw-source metadata. Do not restart placement-transfer motion
 with the current source model.
+
+The private model repository release `datasets-2026-09-26.1` stores immutable
+packages for the three model training datasets and the newer September 20
+feeder dataset. Each package contains final labels, reviewed images, review
+records, checksums, and a dataset card. Published model catalog entries now
+name their exact dataset package.
 
 Nine N1 pickups after the latest vacuum calibration have bottom-camera part
 confirmation. Their open-nozzle median was 237 counts, their held-part median
