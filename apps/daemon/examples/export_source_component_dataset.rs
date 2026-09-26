@@ -22,7 +22,6 @@ use velocitypnp_vision::{
 
 const SOURCE_ARTIFACT: &str = "source-pocket-before.png";
 const MAX_ARCHIVED_FEEDER_MATCH_DISTANCE_MM: f64 = 2.0;
-const MIN_ARCHIVED_FEEDER_MATCH_SEPARATION_MM: f64 = 1.0;
 
 #[derive(Debug, Serialize)]
 struct DatasetManifest {
@@ -286,7 +285,7 @@ fn main() -> Result<()> {
             continue;
         };
         ensure!(media_type == "image/png", "source artifact is not a PNG");
-        let registration = placement_registration(&report, &by_feeder, &registrations)?;
+        let registration = placement_registration(&report, &by_id, &by_feeder, &registrations)?;
         let camera_pose = report
             .source_pose_inspection
             .as_ref()
@@ -622,6 +621,8 @@ fn main() -> Result<()> {
             "reviewed legacy-calibration images keep their prior crop when the source hash matches"
                 .into(),
             "new legacy-calibration images use the retained affine working-plane mapping".into(),
+            "legacy placement reports without registration IDs use the nearest pocket geometry"
+                .into(),
             "accept or correct every evaluation label before scoring a model".into(),
             "OBB rotation is axis-only and does not resolve 180-degree polarity".into(),
             "operator review assigns on-edge components to a separate class".into(),
@@ -667,9 +668,16 @@ fn main() -> Result<()> {
 
 fn placement_registration(
     report: &PlacementExecutionReport,
+    by_id: &BTreeMap<Uuid, StripFeederRegistration>,
     by_feeder: &BTreeMap<Uuid, StripFeederRegistration>,
     registrations: &[StripFeederRegistration],
 ) -> Result<StripFeederRegistration> {
+    if let Some(registration_id) = report.feeder_registration_id {
+        return by_id
+            .get(&registration_id)
+            .cloned()
+            .with_context(|| format!("registration {registration_id} is absent"));
+    }
     if let Some(registration) = by_feeder.get(&report.feeder_id) {
         return Ok(registration.clone());
     }
@@ -677,15 +685,29 @@ fn placement_registration(
         .iter()
         .filter(|registration| registration.part_key.as_deref() == Some(&report.part_key))
         .filter_map(|registration| {
+            let reference = report
+                .source_pose_inspection
+                .as_ref()
+                .map(|inspection| inspection.candidate_nominal_center_machine_mm)
+                .unwrap_or([report.feeder_pick.x_mm, report.feeder_pick.y_mm]);
+            let pocket_distance_mm = registration
+                .pocket_centers_machine_mm
+                .iter()
+                .map(|center| (reference[0] - center[0]).hypot(reference[1] - center[1]))
+                .min_by(f64::total_cmp);
             let [start, end] = registration.pick_centerline_machine_mm;
             let delta_x = end[0] - start[0];
             let delta_y = end[1] - start[1];
             let length = delta_x.hypot(delta_y);
             (length > f64::EPSILON).then(|| {
-                let relative_x = report.feeder_pick.x_mm - start[0];
-                let relative_y = report.feeder_pick.y_mm - start[1];
+                let relative_x = reference[0] - start[0];
+                let relative_y = reference[1] - start[1];
+                let centerline_distance_mm =
+                    (relative_x * delta_y - relative_y * delta_x).abs() / length;
                 (
-                    (relative_x * delta_y - relative_y * delta_x).abs() / length,
+                    pocket_distance_mm
+                        .map(|distance_mm| distance_mm.min(centerline_distance_mm))
+                        .unwrap_or(centerline_distance_mm),
                     registration,
                 )
             })
@@ -694,23 +716,16 @@ fn placement_registration(
     matches.sort_by(|left, right| left.0.total_cmp(&right.0));
     let Some((distance_mm, registration)) = matches.first() else {
         anyhow::bail!(
-            "archived feeder {} has no registration with matching part and centerline",
+            "archived feeder {} has no registration with matching part and pickup geometry",
             report.feeder_id
         );
     };
     ensure!(
         *distance_mm <= MAX_ARCHIVED_FEEDER_MATCH_DISTANCE_MM,
-        "archived feeder {} is {:.3} mm from its nearest registration centerline",
+        "archived feeder {} is {:.3} mm from its nearest registration pickup geometry",
         report.feeder_id,
         distance_mm
     );
-    if let Some((next_distance_mm, _)) = matches.get(1) {
-        ensure!(
-            next_distance_mm - distance_mm >= MIN_ARCHIVED_FEEDER_MATCH_SEPARATION_MM,
-            "archived feeder {} has ambiguous registration geometry",
-            report.feeder_id
-        );
-    }
     Ok((*registration).clone())
 }
 

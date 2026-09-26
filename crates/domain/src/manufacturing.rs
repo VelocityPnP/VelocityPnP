@@ -1489,6 +1489,10 @@ pub struct PlacementExecutionReport {
     pub placement_reference: String,
     pub part_key: String,
     pub feeder_id: Uuid,
+    /// Exact strip-feeder registration used for this pickup. Older reports
+    /// can omit this field and require geometric provenance recovery.
+    #[serde(default)]
+    pub feeder_registration_id: Option<Uuid>,
     pub nozzle_id: String,
     #[serde(default)]
     pub part_orientation: PartOrientation,
