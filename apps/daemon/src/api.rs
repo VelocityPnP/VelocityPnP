@@ -9304,6 +9304,21 @@ fn source_empty_observation_is_confirmed(
     model_reported_empty && deterministic_occupancy == StripPocketOccupancy::Empty
 }
 
+fn source_component_class_rejection(
+    class: SourceComponentClass,
+    confidence_gate_passed: bool,
+    deterministic_occupancy: StripPocketOccupancy,
+) -> Option<&'static str> {
+    if source_empty_observation_is_confirmed(
+        confidence_gate_passed && class == SourceComponentClass::Empty,
+        deterministic_occupancy,
+    ) {
+        Some("the source-component model and top-camera CV confirm an empty source pocket")
+    } else {
+        None
+    }
+}
+
 async fn select_source_component_pick_center(
     state: &AppState,
     prepared: &PreparedStripFeederPickup,
@@ -9391,15 +9406,12 @@ async fn select_source_component_pick_center(
         model_reported_empty,
         analysis.report.deterministic_occupancy,
     );
-    let mut rejection = if model_reported_empty {
-        Some("the source-component model reports an empty qualification pocket".into())
-    } else if prediction.confidence_gate_passed
-        && prediction.class == SourceComponentClass::ComponentOnEdge
-    {
-        Some("the source-component model reports a component on edge".into())
-    } else {
-        None
-    };
+    let mut rejection = source_component_class_rejection(
+        prediction.class,
+        prediction.confidence_gate_passed,
+        analysis.report.deterministic_occupancy,
+    )
+    .map(str::to_owned);
     let learned_measurement = if learned_control_ready && rejection.is_none() {
         match source_component_crop_pixel_to_machine(
             &analysis.crop,
@@ -9442,7 +9454,7 @@ async fn select_source_component_pick_center(
         .retain(|finding| !finding.contains("shadow evidence"));
     if model_reported_empty && !confirmed_empty {
         analysis.report.findings.push(
-            "the learned empty result lacks agreeing deterministic CV evidence; the pocket must remain under review"
+            "the learned empty result lacks agreeing top-camera CV evidence; bounded CV controls pickup if it confirms a part"
                 .into(),
         );
     }
@@ -12862,16 +12874,19 @@ fn planned_available_strip_feeder_pocket(
 fn placement_available_strip_feeder_pocket(
     registration: &StripFeederRegistration,
     planned_pick: Pose,
+    prefer_selected_pocket: bool,
 ) -> Option<&StripFeederPocketState> {
-    registration
-        .selected_pocket_index
+    let selected = prefer_selected_pocket
+        .then_some(registration.selected_pocket_index)
+        .flatten()
         .and_then(|selected_index| {
             registration.pockets.iter().find(|pocket| {
                 pocket.pocket_index == selected_index
                     && pocket.status == StripFeederPocketStatus::Available
                     && pocket.occupancy == StripPocketOccupancy::Occupied
             })
-        })
+        });
+    selected
         .or_else(|| planned_available_strip_feeder_pocket(registration, planned_pick))
         .or_else(|| registration.next_available_pocket(None))
 }
@@ -28984,8 +28999,12 @@ fn prepare_physical_placement_pickup(
         .transit_motion
         .validate(state.profile.maximum_feed_mm_per_min)
         .map_err(ApiError::bad_request)?;
-    let selected_pocket = placement_available_strip_feeder_pocket(&registration, step.feeder_pick)
-        .ok_or_else(|| ApiError::bad_request("strip feeder has no available occupied pocket"))?;
+    let selected_pocket = placement_available_strip_feeder_pocket(
+        &registration,
+        step.feeder_pick,
+        registration.active_feeder_id == Some(step.feeder_id),
+    )
+    .ok_or_else(|| ApiError::bad_request("strip feeder has no available occupied pocket"))?;
     let selected_pocket_index = selected_pocket.pocket_index;
     let nominal_center = selected_pocket.nominal_center_machine_mm;
     let latest_holdout = registration
@@ -34205,6 +34224,7 @@ mod tests {
                 y_mm: 100.0,
                 ..Pose::ORIGIN
             },
+            true,
         )
         .unwrap();
 
@@ -34229,10 +34249,36 @@ mod tests {
                 y_mm: 0.0,
                 ..Pose::ORIGIN
             },
+            true,
         )
         .unwrap();
 
         assert_eq!(selected.pocket_index, 3);
+    }
+
+    #[test]
+    fn fallback_registration_prefers_the_planned_pocket() {
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        registration.selected_pocket_index = Some(3);
+
+        let selected = placement_available_strip_feeder_pocket(
+            &registration,
+            Pose {
+                x_mm: 10.0,
+                y_mm: 4.0,
+                ..Pose::ORIGIN
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(selected.pocket_index, 1);
     }
 
     fn test_pickup_registration(now: chrono::DateTime<Utc>) -> StripFeederRegistration {
@@ -35545,6 +35591,41 @@ mod tests {
             true,
             StripPocketOccupancy::Empty,
         ));
+    }
+
+    #[test]
+    fn source_class_gate_falls_back_on_empty_disagreement() {
+        for occupancy in [
+            StripPocketOccupancy::Occupied,
+            StripPocketOccupancy::Uncertain,
+        ] {
+            assert_eq!(
+                source_component_class_rejection(SourceComponentClass::Empty, true, occupancy),
+                None,
+            );
+        }
+        assert!(source_component_class_rejection(
+            SourceComponentClass::Empty,
+            true,
+            StripPocketOccupancy::Empty,
+        )
+        .is_some());
+        assert_eq!(
+            source_component_class_rejection(
+                SourceComponentClass::ComponentOnEdge,
+                true,
+                StripPocketOccupancy::Occupied,
+            ),
+            None,
+        );
+        assert_eq!(
+            source_component_class_rejection(
+                SourceComponentClass::Empty,
+                false,
+                StripPocketOccupancy::Empty,
+            ),
+            None,
+        );
     }
 
     #[test]
