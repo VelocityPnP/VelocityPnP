@@ -114,6 +114,8 @@ The project is organized by measurable gates rather than calendar estimates.
   fallback when connected-component segmentation cannot separate both pads
 - [x] Retry one missed pickup with a bounded correction learned from recent,
   agreeing placement residuals for the same job, nozzle, and part
+- [ ] Add first-class placement-transfer calibration with provisional XY
+  adjustment, independent check placements, and persistent evidence
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
 
 ## Gate 5 — Inspection and newer machines
