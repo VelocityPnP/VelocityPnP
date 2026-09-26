@@ -619,6 +619,45 @@ rectangularity, and point order. It writes the result and split assignments to
 the provenance-bearing `manifest.ground-truth.json`. Empty images have no
 outline. Rejected images stay in the manifest as excluded samples.
 
+For an independent feeder check, export one new source-capture run by itself:
+
+```bash
+cargo run --release -p velocitypnpd \
+  --example export_source_component_dataset -- \
+  velocitypnp.db datasets/source-components-holdout \
+  --capture-run CAPTURE_UUID
+```
+
+This mode puts every image in the evaluation split and gives the capture its
+own group ID. It does not include older images, even when the feeder
+registration was used in training. Review the images as above. Finish the
+review with `--eval-only`:
+
+```bash
+cargo run --release -p velocitypnpd \
+  --example finalize_source_component_dataset -- \
+  datasets/source-components-holdout review-refined-decisions.json \
+  --eval-only
+```
+
+Do not use an evaluation-only dataset for model fitting.
+
+After the holdout has been scored, it can enter a later training set. Move a
+different, reviewed feeder group to evaluation so marked flat, empty, and
+on-edge pockets are checked. For the September 2026 retrain:
+
+```bash
+python3 python/tools/build_source_component_retrain_dataset.py \
+  datasets/source-components-v3 \
+  datasets/source-components-holdout-2026-09-20 \
+  datasets/source-components-v4 \
+  --eval-group 7caf2f45-0b4f-43eb-9dce-e2413ee99481
+```
+
+The builder records source hashes, keeps capture groups in one split, and
+rejects exact image copies across splits. The former holdout is no longer an
+independent test. Capture a new one before deployment.
+
 ### Source-component model training
 
 VelocityPnP uses its own compact PyTorch model for pocket occupancy and
@@ -654,6 +693,10 @@ source, environment, parameter, metric, and artifact hashes. Classifier
 calibration gives extra weight to empty pockets that look occupied. It selects
 only from checkpoints with the fewest reviewed empty-pocket false detections.
 It then uses the combined held-out and training classification error rate.
+For a controlled comparison, `--classifier-selection eval-first` ranks
+evaluation false positives, then evaluation class errors, then training false
+positives. The model manifest records the policy and both false-positive
+counts. Neither policy replaces a new independent test before deployment.
 
 The laptop can validate data and run small smoke tests. Use the pinned NVIDIA
 PyTorch container on an ARM64 DGX Spark for full runs:

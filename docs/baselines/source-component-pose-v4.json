@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "run": "source-component-pose-v4-controlled-retrain",
+  "status": "experimental_not_activated",
+  "completed_at": "2026-09-20T22:37:43.224724+00:00",
+  "dataset": {
+    "manifest_sha256": "051e9aee3621aa418f772d56997e1329a7552debb271173532c67e48556c458c",
+    "content_sha256": "91d49eb0b886cf1c4593e982e3479a931f75ee71deb59b68a0e30f585ccdf205",
+    "train_samples": 181,
+    "evaluation_samples": 66,
+    "train_class_counts": {
+      "empty": 38,
+      "component_flat": 125,
+      "component_on_edge": 18
+    },
+    "evaluation_class_counts": {
+      "empty": 20,
+      "component_flat": 43,
+      "component_on_edge": 3
+    },
+    "marked_evaluation_group": "7caf2f45-0b4f-43eb-9dce-e2413ee99481",
+    "recent_capture_in_train": "66e1c957-87b6-4bd5-bca0-738606c0ceee"
+  },
+  "controlled_runs": [
+    {
+      "name": "source-component-pose-v4-baseline",
+      "selection_policy": "all-zero-fp",
+      "hard_negative_weight": 8.0,
+      "evaluation_class_errors": 15,
+      "evaluation_empty_false_positives": 0,
+      "evaluation_on_edge_correct": 1,
+      "training_on_edge_correct": 0
+    },
+    {
+      "name": "source-component-pose-v4-eval-first",
+      "selection_policy": "eval-first",
+      "hard_negative_weight": 8.0,
+      "evaluation_class_errors": 3,
+      "evaluation_empty_false_positives": 0,
+      "evaluation_on_edge_correct": 2,
+      "training_on_edge_correct": 2
+    },
+    {
+      "name": "source-component-pose-v4-eval-first-neg2",
+      "selection_policy": "eval-first",
+      "hard_negative_weight": 2.0,
+      "evaluation_class_errors": 2,
+      "evaluation_empty_false_positives": 0,
+      "evaluation_on_edge_correct": 2,
+      "training_on_edge_correct": 3
+    }
+  ],
+  "best_validation_run": {
+    "name": "source-component-pose-v4-eval-first-neg2",
+    "device": "NVIDIA GB10",
+    "best_base_epoch": 125,
+    "best_classifier_epoch": 30,
+    "evaluation_confusion": {
+      "empty": {"empty": 20},
+      "component_flat": {"empty": 1, "component_flat": 42},
+      "component_on_edge": {"empty": 1, "component_on_edge": 2}
+    },
+    "marked_group_flat_correct": 23,
+    "marked_group_flat_total": 23,
+    "recent_training_capture_flat_correct": 46,
+    "recent_training_capture_flat_total": 46,
+    "training_on_edge_correct": 3,
+    "training_on_edge_total": 18,
+    "mean_center_error_input_px": 1.0262198519447576,
+    "mean_oriented_iou": 0.8220951119734908,
+    "checkpoint_sha256": "e9c7c6335365457214c05c1c261478cd1e01b7e860119842c1a7e9ec4da8c838",
+    "onnx_sha256": "e97e723c68e31d7044220742562562d2d80e244f149c8ab0f0aa0177ae3ab072",
+    "tract_class_errors": 2,
+    "onnx_reference_parity": {
+      "max_log_probability_difference": 0.00000476837158203125,
+      "class_mismatches": 0,
+      "passed": true
+    },
+    "onnx_runtime_parity": {
+      "max_log_probability_difference": 0.00307464599609375,
+      "class_mismatches": 0,
+      "absolute_tolerance": 0.0001,
+      "passed": false
+    }
+  },
+  "limitations": [
+    "The recent 46-image capture was used for training and is not a test.",
+    "Only three on-edge images are in validation.",
+    "The best run misses 15 of 18 on-edge training images.",
+    "A new independent capture is required before activation or release.",
+    "ONNX Runtime exceeds strict numeric parity, with no class changes."
+  ]
+}

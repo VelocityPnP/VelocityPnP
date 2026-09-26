@@ -18,8 +18,11 @@ except ModuleNotFoundError:
 
 
 TRAINING_ROOT = Path(__file__).resolve().parents[1] / "training"
+TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
 if torch is not None:
     sys.path.insert(0, str(TRAINING_ROOT))
+    sys.path.insert(0, str(TOOLS_ROOT))
+    from train_source_component_pose import classifier_selection_score
     from velocitypnp_training import (
         ModelConfig,
         SourceComponentDataset,
@@ -33,6 +36,39 @@ if torch is not None:
 
 @unittest.skipIf(torch is None, "training dependencies are not installed")
 class SourceComponentPoseTests(unittest.TestCase):
+    def test_classifier_selection_ranks_eval_errors_first(self):
+        lower_eval_error = classifier_selection_score(
+            "eval-first",
+            {"false_positives": 0, "errors": 3},
+            {"false_positives": 4, "errors": 34},
+            0.23,
+            0.40,
+        )
+        zero_train_false_positive = classifier_selection_score(
+            "eval-first",
+            {"false_positives": 0, "errors": 15},
+            {"false_positives": 0, "errors": 34},
+            0.42,
+            0.71,
+        )
+        self.assertLess(lower_eval_error, zero_train_false_positive)
+
+        legacy_lower_eval_error = classifier_selection_score(
+            "all-zero-fp",
+            {"false_positives": 0, "errors": 3},
+            {"false_positives": 4, "errors": 34},
+            0.23,
+            0.40,
+        )
+        legacy_zero_train_false_positive = classifier_selection_score(
+            "all-zero-fp",
+            {"false_positives": 0, "errors": 15},
+            {"false_positives": 0, "errors": 34},
+            0.42,
+            0.71,
+        )
+        self.assertLess(legacy_zero_train_false_positive, legacy_lower_eval_error)
+
     def make_dataset(self, root: Path) -> None:
         records = []
         cases = [

@@ -107,9 +107,11 @@ struct CarriedGroundTruthSample {
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     ensure!(
-        arguments.len() == 2,
-        "usage: finalize_source_component_dataset DATASET_DIR REVIEW_FILE"
+        arguments.len() == 2 || (arguments.len() == 3 && arguments[2] == "--eval-only"),
+        "usage: finalize_source_component_dataset DATASET_DIR REVIEW_FILE \
+         [--eval-only]"
     );
+    let eval_only = arguments.len() == 3;
     let root = PathBuf::from(&arguments[0]);
     let review_input = resolve_review_path(&root, Path::new(&arguments[1]));
     let manifest_path = root.join("manifest.refined.json");
@@ -204,12 +206,22 @@ fn main() -> Result<()> {
         }
     }
 
-    for split in ["train", "eval"] {
+    for split in if eval_only {
+        &["eval"][..]
+    } else {
+        &["train", "eval"][..]
+    } {
         ensure!(
             samples
                 .iter()
-                .any(|sample| sample.included && sample.split == split),
+                .any(|sample| sample.included && sample.split == *split),
             "{split} split is empty"
+        );
+    }
+    if eval_only {
+        ensure!(
+            samples.iter().all(|sample| sample.split == "eval"),
+            "evaluation-only dataset contains a train sample"
         );
     }
 

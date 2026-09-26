@@ -142,6 +142,32 @@ def classification_loss(
     return occupancy_loss + edge_loss
 
 
+def classifier_selection_score(
+    policy: str,
+    eval_result: dict[str, float | int],
+    train_result: dict[str, float | int],
+    combined_error_rate: float,
+    selection_loss: float,
+) -> tuple[float, ...]:
+    eval_false_positives = int(eval_result["false_positives"])
+    train_false_positives = int(train_result["false_positives"])
+    if policy == "all-zero-fp":
+        return (
+            eval_false_positives + train_false_positives,
+            combined_error_rate,
+            selection_loss,
+        )
+    if policy == "eval-first":
+        return (
+            eval_false_positives,
+            int(eval_result["errors"]),
+            train_false_positives,
+            int(train_result["errors"]),
+            selection_loss,
+        )
+    raise ValueError(f"unknown classifier selection policy: {policy}")
+
+
 def calculate_loss(
     model: SourceComponentPoseModel,
     images: torch.Tensor,
@@ -316,6 +342,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-negative-occupied-probability", type=float, default=0.2)
     parser.add_argument("--hard-negative-weight", type=float, default=8.0)
     parser.add_argument("--classifier-train-selection-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--classifier-selection",
+        choices=("all-zero-fp", "eval-first"),
+        default="all-zero-fp",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--validate-only", action="store_true")
@@ -477,7 +508,7 @@ def main() -> None:
         weight_decay=0.01,
     )
     classifier_history: list[dict[str, Any]] = []
-    best_classifier_score = (math.inf, math.inf, math.inf)
+    best_classifier_score: tuple[float, ...] | None = None
     best_classifier_epoch = 0
     best_classifier_state: dict[str, torch.Tensor] | None = None
     stale_classifier_epochs = 0
@@ -511,9 +542,10 @@ def main() -> None:
             float(eval_classifier["errors"]) / len(eval_dataset)
             + float(train_unaugmented["errors"]) / len(train_evaluation_dataset)
         )
-        selection_score = (
-            int(eval_classifier["false_positives"])
-            + int(train_unaugmented["false_positives"]),
+        selection_score = classifier_selection_score(
+            args.classifier_selection,
+            eval_classifier,
+            train_unaugmented,
             combined_error_rate,
             selection_loss,
         )
@@ -529,7 +561,7 @@ def main() -> None:
                 "selection_score": list(selection_score),
             }
         )
-        if selection_score < best_classifier_score:
+        if best_classifier_score is None or selection_score < best_classifier_score:
             best_classifier_score = selection_score
             best_classifier_epoch = epoch
             best_classifier_state = {
@@ -543,6 +575,7 @@ def main() -> None:
             break
     if best_classifier_state is None:
         raise RuntimeError("classifier calibration did not produce a checkpoint")
+    selected_classifier = classifier_history[best_classifier_epoch - 1]
     model.load_state_dict(best_classifier_state)
     for parameter in model.parameters():
         parameter.requires_grad = True
@@ -620,14 +653,28 @@ def main() -> None:
             "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
             "pretrained_weights": False,
             "classifier_calibration": {
+                "selection_policy": args.classifier_selection,
                 "requested_epochs": args.classifier_epochs,
                 "completed_epochs": len(classifier_history),
                 "best_epoch": best_classifier_epoch,
                 "early_stopping_patience": args.classifier_patience,
                 "learning_rate": args.classifier_learning_rate,
                 "train_selection_weight": args.classifier_train_selection_weight,
-                "selection_false_positives": best_classifier_score[0],
-                "selection_combined_error_rate": best_classifier_score[1],
+                "selection_false_positives": (
+                    selected_classifier["eval_classification"]["false_positives"]
+                    + selected_classifier["train_unaugmented_classification"][
+                        "false_positives"
+                    ]
+                ),
+                "selection_eval_false_positives": selected_classifier[
+                    "eval_classification"
+                ]["false_positives"],
+                "selection_train_false_positives": selected_classifier[
+                    "train_unaugmented_classification"
+                ]["false_positives"],
+                "selection_combined_error_rate": selected_classifier[
+                    "combined_error_rate"
+                ],
                 "selection_errors": {
                     "eval": int(
                         classifier_history[best_classifier_epoch - 1][
@@ -640,7 +687,7 @@ def main() -> None:
                         ]["errors"]
                     ),
                 },
-                "selection_loss": best_classifier_score[2],
+                "selection_loss": selected_classifier["selection_loss"],
             },
             "hard_negative_mining": {
                 "occupied_probability": args.hard_negative_occupied_probability,

@@ -9,10 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use velocitypnp_domain::{
-    BottomCameraMappingReport, CalibrationArtifactId, CameraRole, PlacementExecutionReport,
-    PlanarCameraCalibrationReport, PlanarCameraModel, PlanarCameraModelKind, Pose,
-    StripFeederInventoryLane, StripFeederInventoryReport, StripFeederRegistration,
-    StripPocketOccupancy,
+    BottomCameraMappingReport, CalibrationArtifactId, CameraRole, OperationStatus,
+    PlacementExecutionReport, PlanarCameraCalibrationReport, PlanarCameraModel,
+    PlanarCameraModelKind, Pose, StripFeederInventoryLane, StripFeederInventoryReport,
+    StripFeederRegistration, StripPocketOccupancy,
 };
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
@@ -137,6 +137,7 @@ fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let mut positional = Vec::new();
     let mut reviewed_root = None;
+    let mut capture_run = None;
     let mut index = 0;
     while index < arguments.len() {
         if arguments[index] == "--carry-reviewed" {
@@ -145,16 +146,28 @@ fn main() -> Result<()> {
                 .get(index)
                 .context("--carry-reviewed requires a dataset directory")?;
             reviewed_root = Some(PathBuf::from(path));
+        } else if arguments[index] == "--capture-run" {
+            index += 1;
+            let id = arguments
+                .get(index)
+                .context("--capture-run requires a source capture UUID")?;
+            capture_run = Some(id.parse::<Uuid>()?);
         } else {
             positional.push(arguments[index].clone());
         }
         index += 1;
     }
     ensure!(
-        positional.len() >= 3,
+        (capture_run.is_some() && positional.len() == 2)
+            || (capture_run.is_none() && positional.len() >= 3),
         "usage: export_source_component_dataset DATABASE OUTPUT_DIR \
          EVAL_REGISTRATION_UUID [EVAL_REGISTRATION_UUID ...] \
-         [--carry-reviewed DATASET_DIR]"
+         [--carry-reviewed DATASET_DIR] | DATABASE OUTPUT_DIR \
+         --capture-run CAPTURE_UUID"
+    );
+    ensure!(
+        capture_run.is_none() || reviewed_root.is_none(),
+        "a single-capture holdout cannot carry prior training labels"
     );
     let database = PathBuf::from(&positional[0]);
     let output = PathBuf::from(&positional[1]);
@@ -200,6 +213,9 @@ fn main() -> Result<()> {
 
     let mut sources = Vec::new();
     for run in store.list_strip_feeder_pickup_qualifications()? {
+        if capture_run.is_some() {
+            break;
+        }
         let Some((media_type, image)) =
             store.get_strip_feeder_pickup_artifact(run.id, SOURCE_ARTIFACT)?
         else {
@@ -258,6 +274,9 @@ fn main() -> Result<()> {
         });
     }
     for run in store.list_placement_executions()? {
+        if capture_run.is_some() {
+            break;
+        }
         let Some(report) = run.report else {
             continue;
         };
@@ -317,6 +336,9 @@ fn main() -> Result<()> {
         });
     }
     for run in store.list_strip_feeder_live_holdouts()? {
+        if capture_run.is_some() {
+            break;
+        }
         let Some(report) = run.report else {
             continue;
         };
@@ -371,6 +393,16 @@ fn main() -> Result<()> {
         });
     }
     for run in store.list_strip_feeder_source_captures()? {
+        if capture_run.is_some_and(|selected| run.id != selected) {
+            continue;
+        }
+        if capture_run.is_some() {
+            ensure!(
+                run.status == OperationStatus::Succeeded,
+                "selected source capture {} did not succeed",
+                run.id
+            );
+        }
         for sample in run.samples {
             let registration = by_id
                 .get(&sample.registration_id)
@@ -421,11 +453,12 @@ fn main() -> Result<()> {
     let mut samples = Vec::new();
     let mut carried_samples = Vec::new();
     for source in sources {
-        let proposed_split = if evaluation_groups.contains(&source.registration.id) {
-            "eval"
-        } else {
-            "train"
-        };
+        let proposed_split =
+            if capture_run.is_some() || evaluation_groups.contains(&source.registration.id) {
+                "eval"
+            } else {
+                "train"
+            };
         let artifact_stem = source
             .source_artifact
             .strip_suffix(".png")
@@ -501,7 +534,7 @@ fn main() -> Result<()> {
         samples.push(DatasetSample {
             id,
             split: proposed_split.into(),
-            group_id: source.registration.id,
+            group_id: capture_run.unwrap_or(source.registration.id),
             source_kind: source.source_kind.into(),
             source_id: source.source_id,
             source_artifact: source.source_artifact,
@@ -517,7 +550,8 @@ fn main() -> Result<()> {
         });
     }
     ensure!(
-        samples.iter().any(|sample| sample.split == "train")
+        capture_run.is_some()
+            || samples.iter().any(|sample| sample.split == "train")
             || carried_samples
                 .iter()
                 .any(|sample| sample.ground_truth.split == "train"),
@@ -563,7 +597,9 @@ fn main() -> Result<()> {
     let carried_count = carried_samples.len();
     let manifest = DatasetManifest {
         schema_version: 1,
-        name: if reviewed.is_some() {
+        name: if capture_run.is_some() {
+            "velocitypnp-source-components-capture-holdout-draft".into()
+        } else if reviewed.is_some() {
             "velocitypnp-source-components-v2-draft".into()
         } else {
             "velocitypnp-source-components-v1-draft".into()
@@ -573,7 +609,11 @@ fn main() -> Result<()> {
         source_database: database.display().to_string(),
         classes: vec!["component_flat".into(), "component_on_edge".into()],
         evaluation_registration_ids: evaluation_groups.into_iter().collect(),
-        split_policy: "all images from one feeder registration stay in one split".into(),
+        split_policy: if capture_run.is_some() {
+            "all images from this new capture are evaluation-only".into()
+        } else {
+            "all images from one feeder registration stay in one split".into()
+        },
         carried_ground_truth_manifest: carried_manifest_name,
         carried_sample_count: carried_count,
         notes: vec![
