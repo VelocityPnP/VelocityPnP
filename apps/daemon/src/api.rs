@@ -21713,11 +21713,6 @@ async fn start_placement_transfer_run(
         validate_guarded_board_surface(&state, step, calibration_id)?;
         validate_guarded_board_target_unused(&state, step)?;
         let registration = validate_production_strip_feeder(&state, step, calibration_id)?;
-        if registration.status != StripFeederRegistrationStatus::Ready {
-            return Err(ApiError::bad_request(
-                "placement-transfer calibration requires an already-ready feeder; it does not qualify feeders",
-            ));
-        }
         if feeder_registration_id.is_some_and(|registration_id| registration_id != registration.id)
         {
             return Err(ApiError::bad_request(
@@ -35444,6 +35439,123 @@ mod tests {
             vision_review_required: false,
             findings: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn placement_transfer_accepts_a_feeder_with_a_current_live_holdout() {
+        let state = test_state();
+        let now = Utc::now();
+        let feeder_id = Uuid::new_v4();
+        let part_key = "R_0603:1k";
+        let mut registration = test_pickup_registration(now);
+        registration.part_key = Some(part_key.into());
+        registration.part_rotation_deg = Some(0.0);
+        registration.active_feeder_id = Some(feeder_id);
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        let holdout_id = Uuid::new_v4();
+        registration.latest_live_holdout_id = Some(holdout_id);
+
+        state
+            .store
+            .put_part(&Part {
+                id: Uuid::new_v4(),
+                key: part_key.into(),
+                manufacturer_part_number: None,
+                package: "R_0603".into(),
+                height_mm: Some(0.45),
+                body_width_mm: Some(0.8),
+                body_length_mm: Some(1.6),
+                placement_seating_offset_mm: Some(0.1),
+                placement_release: None,
+                compatible_tips: vec!["N045".into()],
+                vision_profile: None,
+                orientation: Some(PartOrientation::AxisSymmetric),
+            })
+            .unwrap();
+        state
+            .store
+            .put_feeder(&Feeder::Strip {
+                id: feeder_id,
+                name: registration.name.clone(),
+                part_key: part_key.into(),
+                first_pick: Pose::ORIGIN,
+                tape_pitch_mm: registration.tape_pitch_mm,
+                tape_width_mm: registration.tape_width_mm,
+                tape_rotation_deg: registration.tape_rotation_deg,
+                remaining: Some(4),
+            })
+            .unwrap();
+        state
+            .store
+            .put_strip_feeder_live_holdout(&StripFeederLiveHoldoutRun {
+                id: holdout_id,
+                operation_id: Uuid::new_v4(),
+                registration_id: registration.id,
+                profile_id: registration.profile_id.clone(),
+                calibration_id: registration.calibration_id,
+                status: OperationStatus::Succeeded,
+                created_at: now,
+                updated_at: now,
+                sample_count: 1,
+                pocket_index: 0,
+                requested_pocket_only: true,
+                predicted_pocket_machine_mm: [10.0, 0.0],
+                report: Some(velocitypnp_domain::StripFeederLiveHoldoutReport {
+                    algorithm_version: "test".into(),
+                    predicted_pocket_machine_mm: [10.0, 0.0],
+                    measured_pocket_machine_mm: Some([10.0, 0.0]),
+                    correction_x_mm: 0.0,
+                    correction_y_mm: 0.0,
+                    correction_magnitude_mm: 0.0,
+                    rotation_correction_deg: 0.0,
+                    sprocket_center_count: 4,
+                    sprocket_pitch_residual_p95_mm: 0.0,
+                    occupancy: StripPocketOccupancy::Occupied,
+                    occupancy_confidence: 1.0,
+                    confidence: 1.0,
+                    passed: true,
+                    artifact_name: "test.png".into(),
+                    source_frame_artifact_names: Vec::new(),
+                    source_frame_camera_poses: Vec::new(),
+                    findings: Vec::new(),
+                }),
+                message: None,
+            })
+            .unwrap();
+        state
+            .store
+            .put_strip_feeder_registration(&registration)
+            .unwrap();
+
+        let step = PlanStep {
+            board_instance_id: Uuid::new_v4(),
+            placement_reference: "R1".into(),
+            part_key: part_key.into(),
+            feeder_id,
+            nozzle_id: "N1".into(),
+            part_height_mm: 0.45,
+            body_width_mm: 0.8,
+            body_length_mm: 1.6,
+            part_orientation: PartOrientation::AxisSymmetric,
+            feeder_part_rotation_deg: 0.0,
+            placement_surface_offset_mm: 0.0,
+            placement_seating_offset_mm: 0.1,
+            placement_release_seating_offsets_mm: vec![0.1],
+            feeder_pick: Pose::ORIGIN,
+            board_place: Pose::ORIGIN,
+            safe_z_mm: 31.5,
+        };
+
+        let accepted =
+            validate_production_strip_feeder(&state, &step, registration.calibration_id).unwrap();
+        assert_eq!(
+            accepted.status,
+            StripFeederRegistrationStatus::LiveValidationRequired
+        );
     }
 
     fn test_inventory_lane(index: u32, x_mm: f64) -> StripFeederInventoryLane {
