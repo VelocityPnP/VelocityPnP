@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Feeder to placement trace review</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui, sans-serif; }
+  body { margin: 0; background: #101820; color: #eef4f8; }
+  header { background: #1b2a36; padding: 1rem 1.4rem; }
+  h1 { font-size: 1.5rem; margin: 0 0 .4rem; }
+  h2 { font-size: 1.25rem; margin: 0; }
+  h3 { font-size: 1.05rem; margin: 0 0 .4rem; }
+  p { margin: .4rem 0; line-height: 1.45; }
+  .note { color: #c8d5df; }
+  .warning { color: #ffcf79; }
+  .key { margin-right: 1rem; white-space: nowrap; }
+  .cyan { color: #3fe1ff; } .green { color: #8dff9b; }
+  .amber { color: #ffbb59; } .magenta { color: #ff7de8; }
+  main { display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 1rem; padding: 1rem; }
+  nav { max-height: calc(100vh - 3rem); overflow: auto; position: sticky; top: 1rem; align-self: start; }
+  #list { display: grid; grid-template-columns: repeat(2, 1fr); gap: .35rem; }
+  button, select, textarea { font: inherit; }
+  button, select { color: #eef4f8; background: #273c4c; border: 1px solid #557183; border-radius: .3rem; padding: .4rem .55rem; }
+  button { cursor: pointer; }
+  button:hover, button:focus-visible { border-color: #3fe1ff; }
+  button[aria-current="true"] { background: #245778; border-color: #3fe1ff; }
+  button.flagged { border-left: .3rem solid #ff8b75; }
+  button.reviewed { border-bottom: .25rem solid #8dff9b; }
+  #toolbar { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  #prior { background: #393426; border-left: .25rem solid #ffcf79; padding: .5rem .7rem; margin: .7rem 0; }
+  #prior:empty { display: none; }
+  #cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); gap: .8rem; }
+  article { min-width: 0; background: #1d2d39; border: 1px solid #344e5f; border-radius: .5rem; padding: .8rem; }
+  article p { color: #c8d5df; min-height: 2.6rem; }
+  article svg { display: block; width: 100%; height: auto; max-height: 30rem; background: #070b0e; border: 1px solid #557183; }
+  article svg.marking { cursor: crosshair; border-color: #ff7de8; }
+  .stage-controls { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .5rem; align-items: center; }
+  .stage-controls label { display: flex; gap: .3rem; align-items: center; }
+  a { color: #80dfff; }
+  textarea { width: 100%; min-height: 4rem; box-sizing: border-box; background: #182632; color: #eef4f8; border: 1px solid #557183; }
+  #review { margin-top: 1rem; }
+  #status { color: #ffcf79; min-height: 1.5rem; }
+  @media (max-width: 850px) {
+    main { grid-template-columns: 1fr; }
+    nav { position: static; max-height: 8rem; }
+    #list { grid-template-columns: repeat(auto-fill, minmax(4rem, 1fr)); }
+  }
+</style>
+<header>
+  <h1>Feeder → held part → placement</h1>
+  <p><span class="key cyan">◎ Cyan: model or target</span>
+     <span class="key green">◎ Green: deterministic CV</span>
+     <span class="key amber">● Amber: placed-part estimate</span>
+     <span class="key magenta">◎ Magenta: your correction</span></p>
+  <p class="note">The saved images share one placement execution ID, but each camera has its own pixel frame.
+    Click “Set center” and then the image to correct a center. Open the full image to see context.</p>
+  <p class="warning">Working hypothesis: top/bottom camera alignment transfer. A stored “recenter”
+    value is a motion command, not the signed physical placement error. The cause is not yet proven.</p>
+</header>
+<main>
+  <nav aria-label="Placements"><div id="list"></div></nav>
+  <section>
+    <div id="toolbar">
+      <button id="previous" type="button">← Previous</button>
+      <h2 id="title">Loading…</h2>
+      <button id="next" type="button">Next →</button>
+      <span id="progress" class="note"></span>
+    </div>
+    <p id="prior"></p>
+    <p id="status"></p>
+    <div id="cards"></div>
+    <section id="review">
+      <h3>Overall note</h3>
+      <textarea id="note" placeholder="What looks wrong? Include any possible source of error."></textarea>
+      <div class="stage-controls">
+        <button id="download" type="button">Download review JSON</button>
+        <label>Import review JSON <input id="import" type="file" accept="application/json,.json"></label>
+      </div>
+      <p class="note">Review choices save in this browser. Download JSON to keep a separate copy.</p>
+    </section>
+  </section>
+</main>
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const stages = [
+  {key: "feeder", title: "1 · Feeder pocket", marks: [["feeder", "Set part center"]]},
+  {key: "held_initial", title: "2 · Held part before alignment", marks: [["held_initial", "Set part center"]]},
+  {key: "held_final", title: "3 · Held part after alignment", marks: [["held_final", "Set part center"]]},
+  {key: "target_before", title: "4 · Registered board target", marks: [["target_before", "Set target center"]]},
+  {key: "result_after", title: "5 · Placement result", marks: [["target_after", "Set target center"], ["result_after", "Set part center"]]},
+];
+let manifest, samples, saved, selected = 0, pendingMark = null;
+let storageKey;
+
+function svgElement(name, attributes) {
+  const node = document.createElementNS(NS, name);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+  return node;
+}
+function decision(sample) {
+  return saved[sample.id] || {verdicts: {}, centers: {}, class_name: "unreviewed", note: ""};
+}
+function persist(sample, value) {
+  saved[sample.id] = value;
+  localStorage.setItem(storageKey, JSON.stringify(saved));
+  updateProgress();
+}
+function currentCenter(sample, key) {
+  const review = decision(sample);
+  if (review.centers[key]) return review.centers[key];
+  if (key === "target_after" && review.centers.target_before) {
+    const before = sample.centers.target_before;
+    const after = sample.centers.target_after;
+    return [after[0] + review.centers.target_before[0] - before[0],
+            after[1] + review.centers.target_before[1] - before[1]];
+  }
+  return sample.centers[key];
+}
+function marker(svg, center, color, ring = true, radius = 6) {
+  if (!center) return;
+  svg.append(svgElement("circle", {cx: center[0], cy: center[1], r: radius + 2,
+    fill: ring ? "none" : "#111", stroke: "#111", "stroke-width": 4}));
+  svg.append(svgElement("circle", {cx: center[0], cy: center[1], r: radius,
+    fill: ring ? "none" : color, stroke: color, "stroke-width": ring ? 2.5 : 1}));
+}
+function showImage(svg, sample, stage) {
+  const image = sample.images[stage.key];
+  svg.replaceChildren();
+  if (!image) return;
+  const c = sample.centers, key = stage.key;
+  let box = [0, 0, image.width, image.height];
+  if (key === "target_before" || key === "result_after") {
+    const target = key === "target_before" ? c.target_before : currentCenter(sample, "target_after");
+    const result = key === "result_after" ? c.result_after : target;
+    const mid = [(target[0] + result[0]) / 2, (target[1] + result[1]) / 2];
+    box = [mid[0] - 150, mid[1] - 110, 300, 220];
+  }
+  svg.setAttribute("viewBox", box.join(" "));
+  svg.append(svgElement("image", {href: image.path, x: 0, y: 0,
+    width: image.width, height: image.height}));
+  if (key === "feeder") {
+    marker(svg, c.feeder_cv, "#8dff9b");
+    marker(svg, c.feeder_model, "#3fe1ff");
+  } else if (key === "held_initial" || key === "held_final") {
+    marker(svg, c[`${key}_cv`], "#8dff9b");
+    marker(svg, c[`${key}_model`], "#3fe1ff");
+  } else if (key === "target_before") {
+    marker(svg, c.target_before, "#3fe1ff", true, 9);
+  } else {
+    marker(svg, c.target_after, "#3fe1ff", true, 9);
+    marker(svg, c.result_after, "#ffbb59", false, 5);
+  }
+  for (const [mark] of stage.marks) {
+    const revised = decision(sample).centers[mark];
+    if (revised) marker(svg, revised, "#ff7de8", mark.includes("target"), 10);
+  }
+  if (key === "result_after" && !decision(sample).centers.target_after
+      && decision(sample).centers.target_before) {
+    marker(svg, currentCenter(sample, "target_after"), "#ff7de8", true, 10);
+  }
+  svg.classList.toggle("marking", pendingMark?.stage === key);
+}
+function formatted(value, digits = 3) {
+  return typeof value === "number" ? value.toFixed(digits) : "unknown";
+}
+function pair(value) {
+  return Array.isArray(value) && value.every(v => typeof v === "number")
+    ? `X ${formatted(value[0])}, Y ${formatted(value[1])}` : "not recorded";
+}
+function stageDetail(sample, stage) {
+  const c = sample.centers;
+  switch (stage.key) {
+    case "feeder": return `${(sample.feeder || "Feeder").split(" - ")[0]}, pocket ${sample.pocket_index}. ` +
+      `${sample.source_model_controlled ? "Model center controlled pickup" : "CV center controlled pickup"}. ` +
+      `Model/CV separation ${formatted(sample.source_model_cv_delta_px, 1)} px. ` +
+      `Pickup ${pair(sample.pickup_center_machine_mm)} mm.`;
+    case "held_initial": return `Initial recenter command ${pair(sample.held_initial_recenter_mm)} mm.`;
+    case "held_final": return sample.images.held_final
+      ? `Alignment command ${pair(sample.held_alignment_command_mm)} mm. ` +
+        `Final center residual ${formatted(sample.held_final_residual_mm)} mm. ` +
+        `Model/CV center separation ${formatted(sample.held_final_model_cv_delta_px, 1)} px.`
+      : "No separate aligned frame was retained for this part.";
+    case "target_before": return `Local target recenter command ${pair(sample.target_recenter_mm)} mm. ` +
+      `Confidence ${formatted(sample.target_confidence, 2)}. ` +
+      `Intended board surface ${pair(sample.intended_surface_machine_mm)} mm; not a measured release point.`;
+    case "result_after": {
+      const dx = c.result_after[0] - c.target_after[0];
+      const dy = c.result_after[1] - c.target_after[1];
+      return `Part ${formatted(Math.abs(dx), 1)} px ${dx < 0 ? "left" : "right"}, ` +
+        `${formatted(Math.abs(dy), 1)} px ${dy < 0 ? "above" : "below"} target. ` +
+        `Stored recenter command ${pair(sample.result_recenter_mm)} mm. ` +
+        `Rotation error ${formatted(sample.result_rotation_error_deg, 2)}°.`;
+    }
+  }
+}
+function eventPoint(event, svg) {
+  const point = svg.createSVGPoint();
+  point.x = event.clientX; point.y = event.clientY;
+  const result = point.matrixTransform(svg.getScreenCTM().inverse());
+  return [result.x, result.y];
+}
+function markCenter(event, sample, stage, svg) {
+  if (pendingMark?.stage !== stage.key) return;
+  const image = sample.images[stage.key];
+  const [x, y] = eventPoint(event, svg);
+  if (x < 0 || y < 0 || x >= image.width || y >= image.height) return;
+  const value = decision(sample);
+  value.centers[pendingMark.key] = [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
+  persist(sample, value);
+  pendingMark = null;
+  document.getElementById("status").textContent = "Center saved in this browser.";
+  show();
+}
+function makeStage(sample, stage) {
+  const article = document.createElement("article");
+  const heading = document.createElement("h3"); heading.textContent = stage.title;
+  article.append(heading);
+  const image = sample.images[stage.key];
+  if (image) {
+    const svg = svgElement("svg", {role: "img", "aria-label": stage.title});
+    showImage(svg, sample, stage);
+    svg.addEventListener("click", event => markCenter(event, sample, stage, svg));
+    article.append(svg);
+    const raw = document.createElement("a");
+    raw.href = image.path; raw.target = "_blank"; raw.rel = "noopener";
+    raw.textContent = "Open full image";
+    article.append(raw);
+  }
+  const detail = document.createElement("p"); detail.textContent = stageDetail(sample, stage);
+  article.append(detail);
+  const controls = document.createElement("div"); controls.className = "stage-controls";
+  for (const [key, label] of stage.marks) {
+    if (!image) continue;
+    const set = document.createElement("button"); set.type = "button"; set.textContent = label;
+    set.addEventListener("click", () => {
+      pendingMark = {stage: stage.key, key};
+      document.getElementById("status").textContent = `Click ${stage.title} to set ${label.toLowerCase()}. Escape cancels.`;
+      show();
+    });
+    controls.append(set);
+    if (decision(sample).centers[key]) {
+      const clear = document.createElement("button"); clear.type = "button";
+      clear.textContent = "Reset mark";
+      clear.addEventListener("click", () => {
+        const value = decision(sample);
+        delete value.centers[key]; persist(sample, value); show();
+      });
+      controls.append(clear);
+    }
+  }
+  const label = document.createElement("label"); label.textContent = "Review ";
+  const verdict = document.createElement("select");
+  for (const [value, text] of [["unreviewed", "Not reviewed"], ["good", "Center looks right"],
+                               ["wrong_center", "Wrong center"], ["uncertain", "Uncertain"]]) {
+    const option = document.createElement("option"); option.value = value; option.textContent = text;
+    verdict.append(option);
+  }
+  verdict.value = decision(sample).verdicts[stage.key] || "unreviewed";
+  verdict.addEventListener("change", () => {
+    const value = decision(sample); value.verdicts[stage.key] = verdict.value;
+    persist(sample, value);
+  });
+  label.append(verdict); controls.append(label);
+  if (stage.key === "result_after") {
+    const state = document.createElement("label"); state.textContent = "Part state ";
+    const select = document.createElement("select");
+    for (const [value, text] of [["unreviewed", "Not reviewed"], ["flat", "Flat"],
+                                 ["on_edge", "On edge"], ["missing", "Missing"],
+                                 ["uncertain", "Uncertain"]]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = text;
+      select.append(option);
+    }
+    select.value = decision(sample).class_name;
+    select.addEventListener("change", () => {
+      const value = decision(sample); value.class_name = select.value; persist(sample, value);
+    });
+    state.append(select); controls.append(state);
+  }
+  article.append(controls);
+  return article;
+}
+function reviewed(value) {
+  return Object.values(value.verdicts || {}).some(v => v !== "unreviewed")
+    || value.class_name !== "unreviewed" || Boolean(value.note)
+    || Object.keys(value.centers || {}).length > 0;
+}
+function updateProgress() {
+  const count = samples.filter(sample => saved[sample.id] && reviewed(saved[sample.id])).length;
+  document.getElementById("progress").textContent = `${count} / ${samples.length} have review input`;
+  document.querySelectorAll("#list button").forEach((button, index) => {
+    button.classList.toggle("reviewed", Boolean(saved[samples[index].id] && reviewed(saved[samples[index].id])));
+  });
+}
+function show() {
+  const sample = samples[selected];
+  location.hash = encodeURIComponent(sample.reference);
+  document.getElementById("title").textContent = `${selected + 1} / ${samples.length} · ${sample.reference}`;
+  document.getElementById("prior").textContent = sample.prior_note ? `Earlier operator note: ${sample.prior_note}` : "";
+  document.getElementById("cards").replaceChildren(...stages.map(stage => makeStage(sample, stage)));
+  document.getElementById("note").value = decision(sample).note || "";
+  document.querySelectorAll("#list button").forEach((button, index) =>
+    button.setAttribute("aria-current", String(index === selected)));
+  updateProgress();
+}
+function navigate(delta) {
+  pendingMark = null;
+  document.getElementById("status").textContent = "";
+  selected = (selected + delta + samples.length) % samples.length;
+  show();
+}
+function download() {
+  const decisions = samples.map(sample => ({execution_id: sample.id, reference: sample.reference,
+    ...decision(sample)}));
+  const content = {board_instance_id: manifest.board_instance_id,
+    exported_at: new Date().toISOString(), decisions};
+  const url = URL.createObjectURL(new Blob([JSON.stringify(content, null, 2) + "\n"],
+    {type: "application/json"}));
+  const link = document.createElement("a"); link.href = url;
+  link.download = "placement-trace-decisions.json"; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function importFile(file) {
+  const content = JSON.parse(await file.text());
+  if (content.board_instance_id !== manifest.board_instance_id || !Array.isArray(content.decisions))
+    throw new Error("Review file is for another board or has no decisions");
+  const known = new Set(samples.map(sample => sample.id));
+  const replacement = {};
+  for (const value of content.decisions) {
+    if (!known.has(value.execution_id)) throw new Error("Review file has an unknown execution ID");
+    replacement[value.execution_id] = {verdicts: value.verdicts || {},
+      centers: value.centers || {}, class_name: value.class_name || "unreviewed", note: value.note || ""};
+  }
+  saved = replacement;
+  localStorage.setItem(storageKey, JSON.stringify(saved));
+  document.getElementById("status").textContent = "Review JSON imported.";
+  show();
+}
+async function start() {
+  const response = await fetch("manifest.json");
+  if (!response.ok) throw new Error(`manifest: HTTP ${response.status}`);
+  manifest = await response.json(); samples = manifest.samples;
+  if (!samples.length) throw new Error("No placement traces found");
+  storageKey = `placement-trace-review:${manifest.board_instance_id}:v1`;
+  saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+  const list = document.getElementById("list");
+  samples.forEach((sample, index) => {
+    const button = document.createElement("button"); button.type = "button";
+    button.textContent = sample.reference;
+    if (!sample.inspection_passed) button.classList.add("flagged");
+    button.addEventListener("click", () => {selected = index; pendingMark = null; show();});
+    list.append(button);
+  });
+  const requested = decodeURIComponent(location.hash.slice(1));
+  const initial = samples.findIndex(sample => sample.reference === requested);
+  selected = initial < 0 ? 0 : initial; show();
+  document.getElementById("previous").addEventListener("click", () => navigate(-1));
+  document.getElementById("next").addEventListener("click", () => navigate(1));
+  document.getElementById("download").addEventListener("click", download);
+  document.getElementById("note").addEventListener("input", event => {
+    const sample = samples[selected], value = decision(sample);
+    value.note = event.target.value; persist(sample, value);
+  });
+  document.getElementById("import").addEventListener("change", async event => {
+    if (!event.target.files.length) return;
+    try {await importFile(event.target.files[0]);}
+    catch (error) {document.getElementById("status").textContent = `Import failed: ${error.message}`;}
+    event.target.value = "";
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") {pendingMark = null; document.getElementById("status").textContent = "Mark canceled."; show();}
+    if (["TEXTAREA", "SELECT", "INPUT"].includes(event.target.tagName)) return;
+    if (event.key === "ArrowLeft") navigate(-1);
+    if (event.key === "ArrowRight") navigate(1);
+  });
+}
+start().catch(error => {
+  document.getElementById("title").textContent = `Could not load review: ${error.message}`;
+});
+</script>
+</html>
