@@ -635,6 +635,11 @@ pub struct PlacementTransferCalibrationReport {
     pub initial_correction_mm: [f64; 2],
     pub final_correction_mm: [f64; 2],
     pub rounds: Vec<PlacementTransferRoundReport>,
+    /// Validated samples from the next round that were collected before the
+    /// run stopped. A continuation can reuse these samples without making a
+    /// second placement on an occupied target.
+    #[serde(default)]
+    pub pending_round_samples: Vec<PlacementTransferSample>,
     pub passed: bool,
     pub committed: bool,
     #[serde(default)]
@@ -1612,6 +1617,31 @@ pub enum VacuumSignalPolarity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VacuumKnownPartValidationSample {
+    pub execution_id: Uuid,
+    pub placement_reference: String,
+    pub open_nozzle: VacuumStateStatistics,
+    pub held_part: VacuumStateStatistics,
+    pub released: VacuumStateStatistics,
+    pub bottom_vision_confirmed: bool,
+    pub acquire_classification_passed: bool,
+    pub release_classification_passed: bool,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VacuumKnownPartValidationReport {
+    pub algorithm_version: String,
+    pub nozzle_id: String,
+    pub tip_id: String,
+    pub sensor_id: String,
+    pub part_key: String,
+    pub samples: Vec<VacuumKnownPartValidationSample>,
+    pub passed: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VacuumSensorCharacterizationReport {
     pub nozzle_id: String,
     pub tip_id: String,
@@ -1632,6 +1662,8 @@ pub struct VacuumSensorCharacterizationReport {
     pub minimum_distribution_gap_counts: i64,
     pub reference_seal_validated: bool,
     pub known_part_validated: bool,
+    #[serde(default)]
+    pub known_part_validation: Option<VacuumKnownPartValidationReport>,
     pub passed: bool,
     pub observed_at: DateTime<Utc>,
 }

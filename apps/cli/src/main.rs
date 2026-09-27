@@ -516,6 +516,16 @@ enum Command {
         #[arg(long)]
         confirm_safety_checks: bool,
     },
+    /// Validate current vacuum thresholds with completed known-part picks.
+    VacuumValidateKnownPart {
+        calibration: Uuid,
+        #[arg(long)]
+        nozzle: String,
+        #[arg(long)]
+        part_key: String,
+        #[arg(long, required = true, num_args = 3..)]
+        execution: Vec<Uuid>,
+    },
     CalibrateXyDirectionResponse {
         calibration: Uuid,
         #[arg(long, env = "VELOCITYPNP_LEASE")]
@@ -1684,6 +1694,26 @@ async fn main() -> Result<()> {
             run_operation(&client, base, operation).await?;
             let snapshot = get(&client, &format!("{base}/calibrations/{calibration}")).await?;
             snapshot["values"]["vacuum_sensor_characterization"][&nozzle].clone()
+        }
+        Command::VacuumValidateKnownPart {
+            calibration,
+            nozzle,
+            part_key,
+            execution,
+        } => {
+            if !matches!(nozzle.as_str(), "N1" | "N2") {
+                bail!("--nozzle must be N1 or N2");
+            }
+            post(
+                &client,
+                &format!("{base}/calibrations/{calibration}/vacuum-known-part-validation"),
+                Some(json!({
+                    "nozzle_id": nozzle,
+                    "part_key": part_key,
+                    "execution_ids": execution,
+                })),
+            )
+            .await?
         }
         Command::CalibrateXyDirectionResponse {
             calibration,

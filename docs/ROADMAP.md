@@ -76,6 +76,9 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Pass the revised vacuum probe on both nozzles without visible tip compression
 - [x] Add automatic reference-seal vacuum characterization per nozzle/tip
 - [ ] Validate known-part vacuum classification per nozzle/tip and part class
+  - [x] Validate N1/N045 with 0603 1 kOhm resistors from three successful
+    placement-transfer picks
+  - [ ] Validate N2 and other production part classes
 - [ ] Set and pass empirically justified full-bed and nozzle accuracy and
   repeatability gates
 

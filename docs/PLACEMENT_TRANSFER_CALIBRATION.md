@@ -16,8 +16,10 @@ validation must use different placements and must not change the correction.
 
 The daemon implements the placement-transfer artifact, report, endpoint,
 provisional correction, bounded rounds, and continuation of a rejected run.
-The continuation accepts only recomputed, compatible evidence from completed
-rounds. Normal production requests cannot supply a correction override.
+The continuation accepts recomputed, compatible evidence from completed
+rounds and validated partial-round samples. This prevents a failed later
+sample from causing a second placement on an occupied target. Normal
+production requests cannot supply a correction override.
 
 The 2026-09-26 N1 hardware run completed one three-part baseline. Its robust
 physical part offset was X+0.091 and Y+0.091 mm. The p95 radial offset was
@@ -25,19 +27,23 @@ physical part offset was X+0.091 and Y+0.091 mm. The p95 radial offset was
 limit, so the runner prepared the provisional X+0.091 and Y+0.091 mm
 correction.
 
-No corrected check placement completed. The first run found an empty source
-pocket. A continued run then found a resistor, but the source model called it
-empty while deterministic vision selected the tape edge. The source-control
-gate stopped before pickup. No placement-transfer artifact was committed.
+The 2026-09-27 corrected check completed R29, R32, and R26 with the provisional
+correction. Their signed offsets were X-0.062/Y+0.025,
+X-0.053/Y+0.038, and X+0.030/Y-0.056 mm. All radial errors were at most
+0.067 mm. The robust residual was X-0.053/Y+0.025 mm, or 0.059 mm.
+
+The check did not pass. The left and right board columns had opposite residual
+directions, and maximum sample deviation was 0.116 mm. This exceeds the
+0.100 mm stability limit. No placement-transfer artifact was committed. The
+result does not support a second global offset adjustment.
 
 The remaining work is:
 
-1. review and retrain the source-component model with all retained feeder
-   images;
-2. complete a three-part corrected check on unused targets;
-3. review its intended and detected center overlays;
-4. run separate validation placements that do not change the correction; and
-5. add the calibration controls and progress views to the web interface.
+1. determine whether the opposing residuals come from local target
+   registration, board geometry, or a spatial transfer term;
+2. repeat calibration with new unused targets after that cause is resolved;
+3. run separate validation placements that do not change the correction; and
+4. add the calibration controls and progress views to the web interface.
 
 Release and seating height are also separate. The existing placement-process
 estimate controls those values. Placement-transfer calibration reports release
@@ -145,11 +151,16 @@ A placement can supply an XY sample only when all these checks pass:
 - the final held-part residual is within the profile limit;
 - the release sensor and bottom camera confirm release;
 - the nozzle is clear;
-- deterministic top vision detected one flat package;
+- the active inspection detected one flat package;
 - the estimated center and physical part offset are finite;
 - rotation is within the calibration limit; and
-- learned and deterministic placement results agree when a learned model is
-  active.
+- a promoted learned result passed its occupancy and confidence control gates
+  when it supplied the active center.
+
+The paired deterministic center remains diagnostic evidence. It does not
+reject a promoted learned center only because the two localization methods
+disagree. This is required when deterministic thresholding locks onto a pad or
+tape edge while the reviewed learned box remains on the package.
 
 An execution does not have to pass the normal production center tolerance to
 supply a calibration sample. A large but well-measured offset is the input to

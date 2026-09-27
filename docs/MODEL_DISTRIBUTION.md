@@ -6,7 +6,9 @@ set in `models.lock.json`. Model weights stay outside Git.
 
 ## Validate and cache
 
-The current lock is cache-only because all three packages are candidates:
+The current lock is cache-only because all three packages are candidates. Lock
+schema v2 gives each package its own immutable release tag, so one model can
+advance without republishing the other roles:
 
 ```sh
 python3 python/tools/model_cache.py validate models.lock.json
@@ -19,7 +21,9 @@ The default cache is `$XDG_CACHE_HOME/velocitypnp/models`. If
 select a different cache. A private model repository requires an authenticated
 GitHub CLI.
 
-The cache uses the package SHA-256 as its directory key. A sync verifies the
+The cache uses the package SHA-256 as its directory key. The current source
+component pin is `source-component-pose/2026-09-27.1`; the held-part and
+placement pins remain at `2026-09-14.1`. A sync verifies the
 archive size and checksum, package inventory, training manifest, runtime
 contract, dataset digest, checkpoint, and ONNX digest. A corrupt cached archive
 or package moves to a quarantine directory before a verified replacement is

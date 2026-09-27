@@ -2060,9 +2060,22 @@ runner calculates robust distribution separation, signal polarity, and
 separate acquire and release thresholds. Both nozzle/tool branches must pass
 before the `vacuum_sensor_characterization` workflow step is complete.
 
-These thresholds classify the fixed reference seal only. They do not claim
-that a production part is held. Known-part distributions remain a later,
-part-aware calibration after feeder pickup Z is available.
+Reference-seal thresholds do not by themselves claim that a production part
+is held. Validate them with at least three successful placement executions for
+one nozzle, tip, sensor, and part class:
+
+```bash
+velocitypnp vacuum-validate-known-part CALIBRATION_UUID \
+  --nozzle N1 \
+  --part-key 'Resistor_SMD:R_0603_1608Metric:R_Small' \
+  --execution EXECUTION_1 EXECUTION_2 EXECUTION_3
+```
+
+The offline check requires full separation of the open and held sample
+distributions at the stored acquire threshold. It also requires passed bottom
+vision, retained vacuum, a released sensor state, and a clear nozzle. A pass
+stores the exact execution evidence in the vacuum characterization and sets
+`known_part_validated` for that nozzle, tip, sensor, and part class.
 
 The automated head-geometry pass also holds each centered nozzle at fixed X/Y
 and captures it at the profile Z heights. Bounded X/Y probes measure the local

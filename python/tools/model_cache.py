@@ -17,7 +17,7 @@ from typing import Any, Callable
 import uuid
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PACKAGE_SCHEMA_VERSION = 1
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -80,7 +80,7 @@ def validate_lock(document: object) -> dict[str, Any]:
 
     catalog = document["catalog"]
     require(isinstance(catalog, dict), "catalog must be an object")
-    exact_keys(catalog, {"repository", "commit", "release_tag"}, "catalog")
+    exact_keys(catalog, {"repository", "commit"}, "catalog")
     repository = catalog["repository"]
     require(
         isinstance(repository, str)
@@ -92,9 +92,6 @@ def validate_lock(document: object) -> dict[str, Any]:
         and GIT_COMMIT.fullmatch(catalog["commit"]),
         "catalog commit is invalid",
     )
-    release_tag = catalog["release_tag"]
-    require(isinstance(release_tag, str) and release_tag, "release tag is invalid")
-
     models = document["models"]
     require(isinstance(models, list) and models, "models must be a non-empty list")
     roles: set[str] = set()
@@ -109,6 +106,7 @@ def validate_lock(document: object) -> dict[str, Any]:
                 "status",
                 "contract_version",
                 "package_root",
+                "release_tag",
                 "dataset_content_sha256",
                 "manifest_sha256",
                 "onnx_sha256",
@@ -135,6 +133,11 @@ def validate_lock(document: object) -> dict[str, Any]:
         )
         expected_root = f"{parts[0]}-{parts[1]}"
         require(model["package_root"] == expected_root, f"{model_id} root is invalid")
+        release_tag = model["release_tag"]
+        require(
+            isinstance(release_tag, str) and release_tag,
+            f"{model_id} release tag is invalid",
+        )
         for field in (
             "dataset_content_sha256",
             "manifest_sha256",

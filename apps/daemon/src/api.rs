@@ -56,8 +56,9 @@ use velocitypnp_domain::{
     StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
     StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
     StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
-    StripPocketOccupancy, VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport,
-    VacuumSignalPolarity, VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    StripPocketOccupancy, VacuumKnownPartValidationReport, VacuumKnownPartValidationSample,
+    VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport, VacuumSignalPolarity,
+    VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
     VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
     WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
     WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
@@ -1319,6 +1320,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/vacuum-characterization",
             post(start_vacuum_characterization),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/vacuum-known-part-validation",
+            post(validate_known_part_vacuum),
         )
         .route("/api/v1/calibrations/{id}/fine-home", post(start_fine_home))
         .route(
@@ -18581,6 +18586,7 @@ fn build_vacuum_characterization_report(
         minimum_distribution_gap_counts,
         reference_seal_validated: thresholds.passed,
         known_part_validated: false,
+        known_part_validation: None,
         passed: thresholds.passed,
         observed_at: Utc::now(),
     })
@@ -18670,6 +18676,193 @@ fn persist_vacuum_characterization_report(
         .store
         .put_calibration(&snapshot)
         .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidateKnownPartVacuumRequest {
+    nozzle_id: String,
+    part_key: String,
+    execution_ids: Vec<Uuid>,
+}
+
+fn vacuum_distribution_is_open(
+    characterization: &VacuumSensorCharacterizationReport,
+    statistics: &VacuumStateStatistics,
+) -> bool {
+    match characterization.signal_polarity {
+        VacuumSignalPolarity::LowerIsMoreVacuum => {
+            statistics.p05_raw_value > characterization.acquire_threshold_raw_value
+        }
+        VacuumSignalPolarity::HigherIsMoreVacuum => {
+            statistics.p95_raw_value < characterization.acquire_threshold_raw_value
+        }
+    }
+}
+
+fn vacuum_distribution_is_acquired(
+    characterization: &VacuumSensorCharacterizationReport,
+    statistics: &VacuumStateStatistics,
+) -> bool {
+    match characterization.signal_polarity {
+        VacuumSignalPolarity::LowerIsMoreVacuum => {
+            statistics.p95_raw_value <= characterization.acquire_threshold_raw_value
+        }
+        VacuumSignalPolarity::HigherIsMoreVacuum => {
+            statistics.p05_raw_value >= characterization.acquire_threshold_raw_value
+        }
+    }
+}
+
+async fn validate_known_part_vacuum(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<ValidateKnownPartVacuumRequest>,
+) -> ApiResult<Json<VacuumKnownPartValidationReport>> {
+    if !matches!(body.nozzle_id.as_str(), "N1" | "N2") {
+        return Err(ApiError::bad_request(
+            "known-part vacuum validation nozzle must be N1 or N2",
+        ));
+    }
+    if body.part_key.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "known-part vacuum validation requires a part key",
+        ));
+    }
+    let unique_ids = body.execution_ids.iter().copied().collect::<BTreeSet<_>>();
+    if unique_ids.len() != body.execution_ids.len() || unique_ids.len() < 3 {
+        return Err(ApiError::bad_request(
+            "known-part vacuum validation requires at least 3 unique placement executions",
+        ));
+    }
+    let mut snapshot = state
+        .store
+        .get_calibration(calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+        .map_err(ApiError::bad_request)?;
+    let artifact_id = CalibrationArtifactId::vacuum_characterization(&body.nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("known-part vacuum nozzle is unknown"))?;
+    if !crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, artifact_id) {
+        return Err(ApiError::bad_request(
+            "known-part validation requires current vacuum characterization evidence",
+        ));
+    }
+    let mut characterization: VacuumSensorCharacterizationReport = snapshot
+        .values
+        .get(CalibrationStepId::VacuumSensorCharacterization.as_str())
+        .and_then(|reports| reports.get(&body.nozzle_id))
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("vacuum characterization report is missing"))
+        .and_then(|value| {
+            serde_json::from_value(value).map_err(|error| ApiError::bad_request(error.to_string()))
+        })?;
+
+    let mut samples = Vec::with_capacity(body.execution_ids.len());
+    for execution_id in body.execution_ids {
+        let execution = state
+            .store
+            .get_placement_execution(execution_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("placement execution not found"))?;
+        if execution.calibration_id != calibration_id
+            || execution.status != OperationStatus::Succeeded
+        {
+            return Err(ApiError::bad_request(format!(
+                "placement execution {execution_id} is not a successful run from this calibration"
+            )));
+        }
+        let placement = execution.report.as_ref().ok_or_else(|| {
+            ApiError::bad_request(format!("placement execution {execution_id} has no report"))
+        })?;
+        let pickup = placement.pickup_report.as_ref().ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "placement execution {execution_id} has no pickup report"
+            ))
+        })?;
+        if placement.simulated
+            || !placement.passed
+            || placement.nozzle_id != body.nozzle_id
+            || placement.part_key != body.part_key
+            || pickup.tip_id != characterization.tip_id
+            || pickup.sensor_id != characterization.sensor_id
+        {
+            return Err(ApiError::bad_request(format!(
+                "placement execution {execution_id} does not match the vacuum validation scope"
+            )));
+        }
+        let open_nozzle = VacuumStateStatistics::from_raw(pickup.open_nozzle_raw_values.clone())
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "placement execution {execution_id} has no open-nozzle samples"
+                ))
+            })?;
+        let held_part = VacuumStateStatistics::from_raw(pickup.held_raw_values.clone())
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "placement execution {execution_id} has no held-part samples"
+                ))
+            })?;
+        let released = VacuumStateStatistics::from_raw(pickup.release_raw_values.clone())
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "placement execution {execution_id} has no release samples"
+                ))
+            })?;
+        let bottom_vision_confirmed = pickup
+            .alignment
+            .as_ref()
+            .is_some_and(|alignment| alignment.passed)
+            && pickup
+                .inspection
+                .as_ref()
+                .is_some_and(|inspection| inspection.passed)
+            && pickup.vacuum_held_after_transfer;
+        let acquire_classification_passed =
+            vacuum_distribution_is_open(&characterization, &open_nozzle)
+                && vacuum_distribution_is_acquired(&characterization, &held_part);
+        let release_classification_passed = pickup.released
+            && pickup
+                .nozzle_release_verification
+                .as_ref()
+                .is_some_and(|release| release.passed && release.nozzle_clear)
+            && vacuum_value_is_released(&characterization, released.median_raw_value);
+        samples.push(VacuumKnownPartValidationSample {
+            execution_id,
+            placement_reference: placement.placement_reference.clone(),
+            open_nozzle,
+            held_part,
+            released,
+            bottom_vision_confirmed,
+            acquire_classification_passed,
+            release_classification_passed,
+            passed: bottom_vision_confirmed
+                && acquire_classification_passed
+                && release_classification_passed,
+        });
+    }
+    let passed = samples.iter().all(|sample| sample.passed);
+    let report = VacuumKnownPartValidationReport {
+        algorithm_version: "vacuum_known_part_validation.v1".into(),
+        nozzle_id: body.nozzle_id,
+        tip_id: characterization.tip_id.clone(),
+        sensor_id: characterization.sensor_id.clone(),
+        part_key: body.part_key,
+        samples,
+        passed,
+        observed_at: Utc::now(),
+    };
+    characterization.known_part_validated = passed;
+    characterization.known_part_validation = Some(report.clone());
+    persist_vacuum_characterization_report(&state, calibration_id, &characterization)
+        .map_err(ApiError::internal)?;
+    Ok(Json(report))
 }
 
 #[derive(Deserialize)]
@@ -21537,7 +21730,7 @@ fn balance_placement_transfer_targets(
             .total_cmp(&right.1.board_place.x_mm)
             .then_with(|| left.1.board_place.y_mm.total_cmp(&right.1.board_place.y_mm))
     });
-    let round_count = steps.len() / samples_per_round;
+    let round_count = (steps.len() / samples_per_round).max(1);
     let mut rounds = vec![Vec::with_capacity(samples_per_round); round_count];
     for (index, step) in steps.into_iter().enumerate() {
         rounds[index % round_count].push(step);
@@ -21598,6 +21791,7 @@ fn validate_placement_transfer_continuation(
     }
     if transfer.rounds.is_empty()
         || transfer.rounds.len() > profile.maximum_adjustment_rounds as usize
+        || transfer.pending_round_samples.len() >= profile.samples_per_round as usize
     {
         return Err("placement-transfer continuation has no remaining adjustment round".into());
     }
@@ -21652,7 +21846,114 @@ fn validate_placement_transfer_continuation(
     if !placement_transfer_offsets_match(transfer.final_correction_mm, expected_correction) {
         return Err("placement-transfer continuation correction does not match its rounds".into());
     }
+    let completed_ids = transfer
+        .rounds
+        .iter()
+        .flat_map(|round| round.samples.iter().map(|sample| sample.execution_id))
+        .collect::<BTreeSet<_>>();
+    let mut pending_ids = BTreeSet::new();
+    let mut pending_references = BTreeSet::new();
+    for sample in &transfer.pending_round_samples {
+        if completed_ids.contains(&sample.execution_id)
+            || !pending_ids.insert(sample.execution_id)
+            || !pending_references.insert(sample.placement_reference.as_str())
+            || sample
+                .observed_part_offset_mm
+                .into_iter()
+                .chain(sample.stored_correction_delta_mm)
+                .any(|value| !value.is_finite())
+            || !sample.radial_part_offset_mm.is_finite()
+            || !sample.rotation_error_deg.is_finite()
+            || !sample.held_centering_residual_mm.is_finite()
+        {
+            return Err(
+                "placement-transfer continuation has invalid partial-round evidence".into(),
+            );
+        }
+    }
     Ok(transfer.clone())
+}
+
+fn recover_placement_transfer_pending_samples(
+    state: &AppState,
+    prior_run: &AutomatedCalibrationRun,
+    transfer: &mut PlacementTransferCalibrationReport,
+    indexed_steps: &[(u32, PlanStep)],
+    profile: &velocitypnp_domain::PlacementTransferCalibrationProfile,
+) -> Result<usize, String> {
+    let mut known_execution_ids = transfer
+        .rounds
+        .iter()
+        .flat_map(|round| round.samples.iter().map(|sample| sample.execution_id))
+        .chain(
+            transfer
+                .pending_round_samples
+                .iter()
+                .map(|sample| sample.execution_id),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut known_references = transfer
+        .rounds
+        .iter()
+        .flat_map(|round| {
+            round
+                .samples
+                .iter()
+                .map(|sample| sample.placement_reference.clone())
+        })
+        .chain(
+            transfer
+                .pending_round_samples
+                .iter()
+                .map(|sample| sample.placement_reference.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    let eligible_references = transfer
+        .target_references
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let remaining = profile.samples_per_round as usize - transfer.pending_round_samples.len();
+    let mut executions = state
+        .store
+        .list_placement_executions()
+        .map_err(|error| error.to_string())?;
+    executions.sort_by_key(|execution| execution.created_at);
+    let mut recovered = 0;
+    for execution in executions {
+        if recovered == remaining
+            || execution.job_id != transfer.job_id
+            || execution.calibration_id != prior_run.calibration_id
+            || execution.status != OperationStatus::Succeeded
+            || execution.created_at < prior_run.created_at
+            || execution.updated_at > prior_run.updated_at
+            || known_execution_ids.contains(&execution.id)
+        {
+            continue;
+        }
+        let Some(report) = execution.report.as_ref() else {
+            continue;
+        };
+        if !eligible_references.contains(&report.placement_reference)
+            || known_references.contains(&report.placement_reference)
+        {
+            continue;
+        }
+        let Some((_, step)) = indexed_steps
+            .iter()
+            .find(|(_, step)| step.placement_reference == report.placement_reference)
+        else {
+            continue;
+        };
+        let Ok(sample) = placement_transfer_sample(state, &execution, step, profile) else {
+            continue;
+        };
+        known_execution_ids.insert(sample.execution_id);
+        known_references.insert(sample.placement_reference.clone());
+        transfer.pending_round_samples.push(sample);
+        recovered += 1;
+    }
+    Ok(recovered)
 }
 
 async fn start_placement_transfer_run(
@@ -21715,7 +22016,7 @@ async fn start_placement_transfer_run(
     } else {
         [0.0, 0.0]
     };
-    let continuation = match body.continuation_run_id {
+    let (mut continuation, continuation_source) = match body.continuation_run_id {
         Some(run_id) => {
             let prior = state
                 .store
@@ -21724,18 +22025,17 @@ async fn start_placement_transfer_run(
                 .ok_or_else(|| {
                     ApiError::not_found("placement-transfer continuation run not found")
                 })?;
-            Some(
-                validate_placement_transfer_continuation(
-                    &prior,
-                    calibration_id,
-                    &body.nozzle_id,
-                    &profile,
-                    initial_correction_mm,
-                )
-                .map_err(ApiError::bad_request)?,
+            let report = validate_placement_transfer_continuation(
+                &prior,
+                calibration_id,
+                &body.nozzle_id,
+                &profile,
+                initial_correction_mm,
             )
+            .map_err(ApiError::bad_request)?;
+            (Some(report), Some(prior))
         }
-        None => None,
+        None => (None, None),
     };
     let machine = state.machine.status();
     machine
@@ -21811,16 +22111,30 @@ async fn start_placement_transfer_run(
         .filter(|(_, step)| step.nozzle_id == body.nozzle_id)
         .map(|(index, step)| (index as u32, step))
         .collect::<Vec<_>>();
+    if let (Some(transfer), Some(prior)) = (continuation.as_mut(), continuation_source.as_ref()) {
+        let recovered =
+            recover_placement_transfer_pending_samples(&state, prior, transfer, &indexed, &profile)
+                .map_err(ApiError::internal)?;
+        if recovered > 0 {
+            transfer.findings.push(format!(
+                "recovered {recovered} validated placement sample(s) from the interrupted round"
+            ));
+        }
+    }
     let completed_round_count = continuation
         .as_ref()
         .map_or(0, |report| report.rounds.len());
+    let pending_sample_count = continuation
+        .as_ref()
+        .map_or(0, |report| report.pending_round_samples.len());
     let minimum_target_count = if continuation.is_some() {
-        profile.samples_per_round as usize
+        profile.samples_per_round as usize - pending_sample_count
     } else {
         profile.minimum_target_count() as usize
     };
     let maximum_target_count = profile.samples_per_round as usize
-        * (profile.maximum_adjustment_rounds as usize + 1 - completed_round_count);
+        * (profile.maximum_adjustment_rounds as usize + 1 - completed_round_count)
+        - pending_sample_count;
     let mut selected = if body.placement_references.is_empty() {
         let mut best = Vec::new();
         for (_, anchor) in &indexed {
@@ -21917,7 +22231,14 @@ async fn start_placement_transfer_run(
     for (_, step) in &selected {
         validate_guarded_board_surface(&state, step, calibration_id)?;
         validate_guarded_board_target_unused(&state, step)?;
-        let registration = validate_production_strip_feeder(&state, step, calibration_id)?;
+        let registration = validate_production_strip_feeder_with_preference(
+            &state,
+            step,
+            calibration_id,
+            continuation
+                .as_ref()
+                .map(|report| report.feeder_registration_id),
+        )?;
         if feeder_registration_id.is_some_and(|registration_id| registration_id != registration.id)
         {
             return Err(ApiError::bad_request(
@@ -21993,6 +22314,7 @@ async fn start_placement_transfer_run(
             .rounds
             .iter()
             .flat_map(|round| round.samples.iter())
+            .chain(prior.pending_round_samples.iter())
             .map(|sample| sample.placement_reference.clone())
             .collect()
     });
@@ -22021,6 +22343,9 @@ async fn start_placement_transfer_run(
         rounds: continuation
             .as_ref()
             .map_or_else(Vec::new, |prior| prior.rounds.clone()),
+        pending_round_samples: continuation
+            .as_ref()
+            .map_or_else(Vec::new, |prior| prior.pending_round_samples.clone()),
         passed: false,
         committed: false,
         artifact_fingerprint: None,
@@ -22306,19 +22631,19 @@ fn placement_transfer_top_inspection<'a>(
         .center_delta_mm
         .filter(|value| value.is_finite())
         .ok_or_else(|| "learned and deterministic centers cannot be compared".to_string())?;
-    let deterministic = &comparison.deterministic;
     if !comparison.control_authorized
-        || comparison.review_required
         || !comparison.occupancy_agreement
         || comparison.prediction.class != PlacementVerificationClass::ComponentFlat
         || !comparison.prediction.confidence_gate_passed
-        || delta > profile.maximum_model_cv_center_delta_mm
-        || !deterministic.detected
-        || !deterministic.target_registered
-        || !deterministic.confidence.is_finite()
-        || deterministic.confidence < profile.minimum_deterministic_confidence
     {
-        return Err("learned and deterministic placement results do not agree".into());
+        return Err("the promoted placement result did not pass its control gates".into());
+    }
+    if !active.detected
+        || !active.target_registered
+        || !active.confidence.is_finite()
+        || active.confidence < profile.minimum_deterministic_confidence
+    {
+        return Err("the promoted placement result is not a usable measurement".into());
     }
     Ok((active, Some(delta)))
 }
@@ -22437,29 +22762,45 @@ async fn execute_placement_transfer_run(
     )?;
     let profile = transfer.profile.clone();
     let samples_per_round = profile.samples_per_round as usize;
-    let starting_round_index = transfer.rounds.len();
+    let mut round_index = transfer.rounds.len();
     let mut candidate = transfer.final_correction_mm;
+    let mut targets = targets.into_iter();
+    let mut first_round = true;
 
-    for (relative_round_index, target_round) in targets.chunks(samples_per_round).enumerate() {
-        let round_index = starting_round_index + relative_round_index;
+    loop {
         let kind = if round_index == 0 {
             PlacementTransferRoundKind::Baseline
         } else {
             PlacementTransferRoundKind::Check
         };
-        let mut samples = Vec::with_capacity(samples_per_round);
-        for (step_index, step) in target_round {
+        let mut samples = if first_round {
+            first_round = false;
+            std::mem::take(&mut transfer.pending_round_samples)
+        } else {
+            Vec::with_capacity(samples_per_round)
+        };
+        while samples.len() < samples_per_round {
+            let Some((step_index, step)) = targets.next() else {
+                transfer.pending_round_samples = samples;
+                run.placement_transfer_report = Some(transfer);
+                return fail_calibration_run(
+                    &state,
+                    &mut run,
+                    "placement-transfer run ended before the next round was complete".into(),
+                );
+            };
             let prepared = match prepare_guarded_placement_execution(
                 &state,
                 job_id,
                 StartGuardedPlacementExecutionRequest {
                     lease_id,
                     calibration_id: run.calibration_id,
-                    step_index: *step_index,
+                    step_index,
                     confirmed_external_safety_checks: true,
                 },
                 Some(step.placement_reference.as_str()),
                 Some(candidate),
+                Some(transfer.feeder_registration_id),
             )
             .await
             {
@@ -22469,6 +22810,7 @@ async fn execute_placement_transfer_run(
                         "could not prepare {}: {}",
                         step.placement_reference, error.message
                     ));
+                    transfer.pending_round_samples = samples;
                     run.placement_transfer_report = Some(transfer);
                     return fail_calibration_run(
                         &state,
@@ -22484,6 +22826,7 @@ async fn execute_placement_transfer_run(
                         transfer.findings.push(format!(
                             "could not finish the child placement record: {error}"
                         ));
+                        transfer.pending_round_samples = samples;
                         run.placement_transfer_report = Some(transfer);
                         return fail_calibration_run(
                             &state,
@@ -22492,7 +22835,7 @@ async fn execute_placement_transfer_run(
                         );
                     }
                 };
-            let sample = match placement_transfer_sample(&state, &execution, step, &profile) {
+            let sample = match placement_transfer_sample(&state, &execution, &step, &profile) {
                 Ok(sample) => sample,
                 Err(error) => {
                     transfer.findings.push(format!(
@@ -22505,6 +22848,7 @@ async fn execute_placement_transfer_run(
                             execution.id
                         ));
                     }
+                    transfer.pending_round_samples = samples;
                     run.placement_transfer_report = Some(transfer);
                     return reject_calibration_run(
                         &state,
@@ -22514,6 +22858,7 @@ async fn execute_placement_transfer_run(
                 }
             };
             samples.push(sample);
+            transfer.pending_round_samples = samples.clone();
             update_run_check(
                 &mut run,
                 "measure",
@@ -22528,6 +22873,7 @@ async fn execute_placement_transfer_run(
             run.placement_transfer_report = Some(transfer.clone());
             persist_calibration_run(&state, &mut run)?;
         }
+        transfer.pending_round_samples.clear();
         let vectors = samples
             .iter()
             .map(|sample| sample.observed_part_offset_mm)
@@ -22700,13 +23046,8 @@ async fn execute_placement_transfer_run(
         transfer.final_correction_mm = candidate;
         run.placement_transfer_report = Some(transfer.clone());
         persist_calibration_run(&state, &mut run)?;
+        round_index += 1;
     }
-    run.placement_transfer_report = Some(transfer);
-    fail_calibration_run(
-        &state,
-        &mut run,
-        "placement-transfer run exhausted its validated targets without a result".into(),
-    )
 }
 
 fn calibration_artifact_nozzle_id(id: &CalibrationArtifactId) -> Option<&'static str> {
@@ -29152,6 +29493,7 @@ async fn execute_job_execution_loop(
             },
             Some(run.steps[step_position].placement_reference.as_str()),
             None,
+            None,
         )
         .await;
         let prepared = match prepared {
@@ -29557,7 +29899,8 @@ async fn start_guarded_placement_execution(
     Json(body): Json<StartGuardedPlacementExecutionRequest>,
 ) -> ApiResult<(StatusCode, Json<StartGuardedPlacementExecutionResponse>)> {
     ensure_no_active_job_executions(&state)?;
-    let prepared = prepare_guarded_placement_execution(&state, job_id, body, None, None).await?;
+    let prepared =
+        prepare_guarded_placement_execution(&state, job_id, body, None, None, None).await?;
     let response = StartGuardedPlacementExecutionResponse {
         execution: prepared.run.clone(),
         operation: prepared.operation.clone(),
@@ -30053,6 +30396,7 @@ async fn prepare_guarded_placement_execution(
     body: StartGuardedPlacementExecutionRequest,
     expected_placement_reference: Option<&str>,
     provisional_placement_transfer_correction_mm: Option<[f64; 2]>,
+    preferred_feeder_registration_id: Option<Uuid>,
 ) -> ApiResult<PreparedGuardedPlacementExecution> {
     if !body.confirmed_external_safety_checks {
         return Err(ApiError::bad_request(
@@ -30137,7 +30481,12 @@ async fn prepare_guarded_placement_execution(
             "job plan order changed after execution started; operator review is required",
         ));
     }
-    let feeder_registration = validate_production_strip_feeder(state, &step, body.calibration_id)?;
+    let feeder_registration = validate_production_strip_feeder_with_preference(
+        state,
+        &step,
+        body.calibration_id,
+        preferred_feeder_registration_id,
+    )?;
     if !status.simulated {
         if feeder_registration.calibration_id != body.calibration_id {
             return Err(ApiError::bad_request(
@@ -30565,10 +30914,20 @@ fn prepare_physical_placement_pickup(
     })
 }
 
+#[cfg(test)]
 fn validate_production_strip_feeder(
     state: &AppState,
     step: &PlanStep,
     calibration_id: Uuid,
+) -> ApiResult<StripFeederRegistration> {
+    validate_production_strip_feeder_with_preference(state, step, calibration_id, None)
+}
+
+fn validate_production_strip_feeder_with_preference(
+    state: &AppState,
+    step: &PlanStep,
+    calibration_id: Uuid,
+    preferred_registration_id: Option<Uuid>,
 ) -> ApiResult<StripFeederRegistration> {
     let feeder = state
         .store
@@ -30586,42 +30945,61 @@ fn validate_production_strip_feeder(
         .store
         .list_strip_feeder_registrations()
         .map_err(ApiError::internal)?;
-    let registration = registrations
-        .iter()
-        .find(|registration| {
-            registration.calibration_id == calibration_id
-                && registration.active_feeder_id == Some(step.feeder_id)
-        })
-        .cloned()
-        .or_else(|| {
+    let registration = preferred_registration_id
+        .and_then(|id| {
             registrations
-                .into_iter()
-                .filter(|registration| {
-                    registration.calibration_id == calibration_id
+                .iter()
+                .find(|registration| {
+                    registration.id == id
+                        && registration.calibration_id == calibration_id
                         && registration.part_key.as_deref() == Some(step.part_key.as_str())
                         && registration.status != StripFeederRegistrationStatus::VisionDraft
                 })
-                .filter_map(|registration| {
-                    let maximum_distance_mm = 0.5 * registration.tape_pitch_mm;
-                    let distance_mm = registration
-                        .pockets
-                        .iter()
-                        .filter(|pocket| {
-                            pocket.status == StripFeederPocketStatus::Available
-                                && pocket.occupancy == StripPocketOccupancy::Occupied
-                        })
-                        .map(|pocket| {
-                            let center = pocket
-                                .measured_center_machine_mm
-                                .unwrap_or(pocket.nominal_center_machine_mm);
-                            (center[0] - step.feeder_pick.x_mm)
-                                .hypot(center[1] - step.feeder_pick.y_mm)
-                        })
-                        .min_by(f64::total_cmp)?;
-                    (distance_mm <= maximum_distance_mm).then_some((distance_mm, registration))
-                })
-                .min_by(|left, right| left.0.total_cmp(&right.0))
-                .map(|(_, registration)| registration)
+                .cloned()
+        })
+        .or_else(|| {
+            preferred_registration_id.is_none().then(|| {
+                registrations
+                    .iter()
+                    .find(|registration| {
+                        registration.calibration_id == calibration_id
+                            && registration.active_feeder_id == Some(step.feeder_id)
+                    })
+                    .cloned()
+            })?
+        })
+        .or_else(|| {
+            preferred_registration_id.is_none().then(|| {
+                registrations
+                    .iter()
+                    .filter(|registration| {
+                        registration.calibration_id == calibration_id
+                            && registration.part_key.as_deref() == Some(step.part_key.as_str())
+                            && registration.status != StripFeederRegistrationStatus::VisionDraft
+                    })
+                    .filter_map(|registration| {
+                        let maximum_distance_mm = 0.5 * registration.tape_pitch_mm;
+                        let distance_mm = registration
+                            .pockets
+                            .iter()
+                            .filter(|pocket| {
+                                pocket.status == StripFeederPocketStatus::Available
+                                    && pocket.occupancy == StripPocketOccupancy::Occupied
+                            })
+                            .map(|pocket| {
+                                let center = pocket
+                                    .measured_center_machine_mm
+                                    .unwrap_or(pocket.nominal_center_machine_mm);
+                                (center[0] - step.feeder_pick.x_mm)
+                                    .hypot(center[1] - step.feeder_pick.y_mm)
+                            })
+                            .min_by(f64::total_cmp)?;
+                        (distance_mm <= maximum_distance_mm)
+                            .then_some((distance_mm, registration.clone()))
+                    })
+                    .min_by(|left, right| left.0.total_cmp(&right.0))
+                    .map(|(_, registration)| registration)
+            })?
         })
         .ok_or_else(|| {
             ApiError::bad_request("placement feeder has no current vision registration")
@@ -34875,7 +35253,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_transfer_uses_the_promoted_pose_after_cv_agreement() {
+    fn placement_transfer_uses_promoted_pose_when_cv_center_diverges() {
         let mut result = build_placement_verification_artifacts(
             placement_crop(),
             &placed_part_artifacts(true),
@@ -34892,6 +35270,7 @@ mod tests {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let transfer = profile.placement_transfer_calibration.unwrap();
+        result.comparison.center_delta_mm = Some(transfer.maximum_model_cv_center_delta_mm + 0.15);
 
         let (inspection, center_delta_mm) = placement_transfer_top_inspection(
             Some(&result.active),
@@ -34905,7 +35284,7 @@ mod tests {
             PLACEMENT_VERIFICATION_CONTROL_ALGORITHM
         );
         assert_eq!(inspection.rotation_error_deg, Some(1.0));
-        assert!(center_delta_mm.unwrap() <= transfer.maximum_model_cv_center_delta_mm);
+        assert!(center_delta_mm.unwrap() > transfer.maximum_model_cv_center_delta_mm);
     }
 
     #[test]
@@ -34957,6 +35336,7 @@ mod tests {
                 passed: false,
                 findings: Vec::new(),
             }],
+            pending_round_samples: Vec::new(),
             passed: false,
             committed: false,
             artifact_fingerprint: None,
@@ -35780,7 +36160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn placement_transfer_accepts_a_feeder_with_a_current_live_holdout() {
+    async fn placement_transfer_pins_its_current_feeder_registration() {
         let state = test_state();
         let now = Utc::now();
         let feeder_id = Uuid::new_v4();
@@ -35788,7 +36168,7 @@ mod tests {
         let mut registration = test_pickup_registration(now);
         registration.part_key = Some(part_key.into());
         registration.part_rotation_deg = Some(0.0);
-        registration.active_feeder_id = Some(feeder_id);
+        registration.active_feeder_id = None;
         registration.ensure_pocket_state();
         for pocket in &mut registration.pockets {
             pocket.occupancy = StripPocketOccupancy::Occupied;
@@ -35869,6 +36249,18 @@ mod tests {
             .put_strip_feeder_registration(&registration)
             .unwrap();
 
+        let mut stale_registration = registration.clone();
+        stale_registration.id = Uuid::new_v4();
+        stale_registration.latest_live_holdout_id = None;
+        for pocket in &mut stale_registration.pockets {
+            pocket.nominal_center_machine_mm[0] = 0.0;
+            pocket.measured_center_machine_mm = Some(pocket.nominal_center_machine_mm);
+        }
+        state
+            .store
+            .put_strip_feeder_registration(&stale_registration)
+            .unwrap();
+
         let step = PlanStep {
             board_instance_id: Uuid::new_v4(),
             placement_reference: "R1".into(),
@@ -35888,8 +36280,21 @@ mod tests {
             safe_z_mm: 31.5,
         };
 
-        let accepted =
-            validate_production_strip_feeder(&state, &step, registration.calibration_id).unwrap();
+        let error = validate_production_strip_feeder(&state, &step, registration.calibration_id)
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "placement feeder has no current live pocket position"
+        );
+
+        let accepted = validate_production_strip_feeder_with_preference(
+            &state,
+            &step,
+            registration.calibration_id,
+            Some(registration.id),
+        )
+        .unwrap();
+        assert_eq!(accepted.id, registration.id);
         assert_eq!(
             accepted.status,
             StripFeederRegistrationStatus::LiveValidationRequired
@@ -40631,6 +41036,34 @@ mod tests {
             3,
             &[232; 10],
         ));
+    }
+
+    #[tokio::test]
+    async fn known_part_vacuum_requires_three_unique_executions() {
+        let execution_id = Uuid::new_v4();
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/vacuum-known-part-validation",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "nozzle_id": "N1",
+                            "part_key": "test-part",
+                            "execution_ids": [execution_id, execution_id],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

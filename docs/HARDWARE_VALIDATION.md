@@ -3580,15 +3580,28 @@ not used by normal production placement. A corrected three-part check and a
 separate validation set remain required. Known-part vacuum classification and
 a larger reliability run also remain open.
 
-The latest N1 vacuum calibration was created at
+The latest N1 reference-seal vacuum calibration was created at
 `2026-09-26T16:35:42.540Z`. Nine later pickups used the same calibration and
 had bottom-camera part confirmation. Open-nozzle medians ranged from 236 to
 237.5 counts, with a median of 237. Held-part medians ranged from 228 to 231
 counts, with a median of 228. The signal delta ranged from 6 to 9 counts, with
 a median of 8. All nine passed the 231.092-count acquire threshold. This
-retrospective result supports the threshold. It does not set the stored
-`known_part_validated` field because no controlled known-part calibration run
-was done.
+retrospective result supports the threshold.
+
+On 2026-09-27, controlled N1 known-part validation used placement executions
+`754c84de-71fc-435a-8ffc-311c88a15b15`,
+`4f228421-a2a1-4b6f-9ce3-10ba9a7f3478`, and
+`36e92261-51cd-4b1c-ada1-4e751688848a`. All three held 0603 resistors. Their
+open distributions were 236 to 238 counts, held distributions were 228 to
+229, and released distributions were 255. Bottom vision confirmed all held
+parts. Release vision confirmed a clear nozzle. The stored N1/N045 report now
+sets `known_part_validated` to true.
+
+The corrected placement-transfer check used R29, R32, and R26. Their radial
+errors were 0.067, 0.065, and 0.063 mm. The check still rejected the global
+correction because the robust residual was 0.059 mm, maximum sample deviation
+was 0.116 mm, and the left and right targets had opposing residual directions.
+No N1 placement-transfer artifact was committed.
 
 One earlier calibration attempt placed R30 on its side. Its bottom-camera
 classification was uncertain, but the old fallback continued to placement.

@@ -1,21 +1,21 @@
 # Session handoff
 
 This document records the current hardware, vision, and model state through
-2026-09-26. Verify live state again before each new session.
+2026-09-27. Verify live state again before each new session.
 
 ## Live state
 
-- The physical daemon is running on loopback port 4080. At the last check, the
-  machine was connected, homed, ready, and fault-free at safe Z. It had a
-  session lease. Recheck status and get a new operator safety confirmation
-  before more motion.
+- The physical daemon is running on loopback port 4080 from verified cached
+  model packages. It was restarted after the last physical run, so the machine
+  is not connected or homed. Connect, preflight, home, and fine home before
+  more motion. Get a new operator safety confirmation first.
 - The database contains the motion, camera, pickup, board-registration, and
   full-workspace qualification evidence. The stored camera profiles use
   top-camera MJPEG at 30 FPS with zero initial discard and bottom-camera YUYV
   at 10 FPS with 20 initial discard frames.
-- Coarse home `63e7428e-0480-4ffd-8cc2-d262e14e57be` and N2 fine home
-  `2109e395-9064-431f-b681-23a0eb7541af` passed after the latest daemon
-  restart. Fine home reset the datum contact from Z59.100 to Z59.200.
+- Coarse home `74ad599c-67c3-44fc-a4e0-caa6f6ff550a` and N2 fine home
+  `9329b313-51ad-4260-a984-09639d5ea7d9` passed before the last physical run.
+  Fine home reset the datum contact from Z59.100 to Z59.200.
 - Calibration `77f004b5-04d3-44b1-921b-9218df91e6a0` and board instance
   `763a44ae-2765-4839-8f46-930002525330` are active.
 - The last recorded states for lights, both vacuum outputs, and blowoff are
@@ -28,12 +28,38 @@ The active local model packages are:
 
 | Purpose | Contract | ONNX SHA-256 |
 | --- | --- | --- |
-| Source component | `source-component-pose.v2` | `e97e723c68e31d7044220742562562d2d80e244f149c8ab0f0aa0177ae3ab072` |
+| Source component | `source-component-pose.v2` | `1a51fed884de8a2098126b753199c54d78c6e86cd52a333b1ec7276ed641f18a` |
 | Held part | `held-part-pose.v1` | `6e3a50e742b5e6968dbf080a02fbb1d7cb24a5f16b23f4ab8879ffb27e3d08f4` |
 | Placement verification | `placement-verification.v1` | `eb5302231998b3a0dba92c2746c76bfc3ebc82c45c347c5b0d49568eb63ba232` |
 
-The active model directories are below the ignored local `datasets/` tree.
-They persist across reboots on this computer, but Git does not contain them.
+The active model directories are below
+`~/.cache/velocitypnp/models/packages/`. `models.lock.json` pins their package
+and payload checksums.
+
+## 2026-09-27 N1 transfer and vacuum validation
+
+Source-component v6 is active in the daemon from published package
+`source-component-pose/2026-09-27.1`. Two live holdouts passed before
+placement. The model remains a catalog candidate because its independent
+on-edge and localization gates are still open.
+
+Placement-transfer check run `c125d3bb-4499-4965-ad43-2d865a5fa087`
+completed R29, R32, and R26 with provisional correction X+0.091/Y+0.091 mm.
+Their residuals were X-0.062/Y+0.025, X-0.053/Y+0.038, and
+X+0.030/Y-0.056 mm. All radial errors were at most 0.067 mm. The robust
+residual magnitude was 0.059 mm, maximum sample deviation was 0.116 mm, and
+the residual directions opposed. The calibration rejected the global
+constant correction and committed no placement-transfer artifact.
+
+N1 known-part vacuum validation passed with those three resistor picks. Open
+samples were 236 to 238 counts, held samples were 228 to 229, and release
+samples were 255. Bottom vision confirmed all three parts and the release
+checks confirmed a clear nozzle. The calibration stores
+`vacuum_known_part_validation.v1` and sets `known_part_validated` for N1/N045
+and the 0603 resistor class.
+
+Feeder pocket 14 had no vacuum transition and is marked for review. R26, R29,
+and R32 now have physical board contact and must not be reused.
 
 ## 2026-09-26 placement-transfer and model work
 
@@ -45,9 +71,9 @@ that value as a provisional correction but did not commit it.
 
 The first check stopped before pickup at feeder 7 pocket 10. Continuation run
 `9d1a443a-0a38-4032-a712-b9225968d2ac` stopped before pickup at pocket 14.
-The retained image shows a resistor and a correct learned pose, but all local
-source checkpoints classify it as empty. Deterministic vision selected the
-tape edge. This is a source-model regression, not placement evidence.
+The retained image showed a resistor and a correct learned pose, but the prior
+source model classified it as empty while deterministic vision selected the
+tape edge. Source-component v6 supersedes that model for the current runtime.
 
 The finalized all-history source dataset has 595 unique images. It includes
 567 images: 336 flat components, 51 on-edge components, and 180 empty pockets.
@@ -57,8 +83,7 @@ SHA-256 is
 `1bb55a902dd9fd93732108883e26b0d42ac613d99ea0347e371935f6d5a03e7a`.
 The final local dataset is `datasets/source-components-v8-model-seeded`.
 The earlier 382-image page repeated 46 reviewed images because the combined v4
-manifest did not contain raw-source metadata. Do not restart
-placement-transfer motion with the current source model.
+manifest did not contain raw-source metadata.
 
 The private model repository release `datasets-2026-09-26.1` stores immutable
 packages for the three model training datasets and the newer September 20
@@ -66,12 +91,11 @@ feeder dataset. Each package contains final labels, reviewed images, review
 records, checksums, and a dataset card. Published model catalog entries now
 name their exact dataset package.
 
-Nine N1 pickups after the latest vacuum calibration have bottom-camera part
-confirmation. Their open-nozzle median was 237 counts, their held-part median
-was 228 counts, and their held range was 228 to 231 counts. None were false
-negatives at the 231.092-count acquire threshold. This is useful retrospective
-evidence, but the stored calibration still needs a controlled known-part
-validation.
+Nine earlier N1 pickups after the latest vacuum calibration have bottom-camera
+part confirmation. Their open-nozzle median was 237 counts, their held-part
+median was 228 counts, and their held range was 228 to 231 counts. None were false
+negatives at the 231.092-count acquire threshold. The controlled three-part
+validation on 2026-09-27 now supplies the stored known-part result.
 
 A clean training clone at commit `61b44e1` is on `svl-spark` at
 `/home/tsmith/velocitypnp-training/clean-20260926`. Clean held-part and
@@ -80,10 +104,9 @@ and metrics byte for byte. Their new manifests record `dirty: false`. The
 source retrain must wait for the new feeder decisions and a new independent
 holdout. See `docs/baselines/model-reproduction-2026-09-26.md`.
 
-The current board has physical contacts at R7, R9-R14, R17-R18, R25, R27-R28,
-R30-R31, and R40. R30 is on its side. R17 has no detected result center. Do
-not reuse any of these targets. R26, R29, and R32 remain the intended
-180-degree continuation targets.
+The current board has physical contacts at R7, R9-R14, R17-R18, R25-R32, and
+R40. R30 is on its side. R17 has no detected result center. Do not reuse any
+of these targets.
 
 The database backup before this work is
 `/tmp/velocitypnp-before-placement-transfer-20260926.db`. Its SHA-256 is
@@ -97,9 +120,10 @@ held-part, and placement-verification packages. The model-zoo catalog records
 package, manifest, checkpoint, ONNX, dataset, and training-source checksums.
 Raw training images remain in separate storage.
 
-This repository pins those packages in `models.lock.json`. The lock is
-cache-only because all three models remain candidates and all three training
-manifests record a dirty source worktree. Run
+This repository pins source-component v6 and the existing held and placement
+packages in `models.lock.json`. Lock schema v2 permits each role to use its own
+immutable release. The lock is cache-only because all three models remain
+candidates. Run
 `python3 python/tools/model_cache.py sync models.lock.json` to download and
 verify them. The tool uses a content-addressed local cache and cannot activate
 this candidate lock.

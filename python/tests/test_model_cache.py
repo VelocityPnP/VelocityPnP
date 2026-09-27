@@ -98,6 +98,7 @@ class ModelCacheTests(unittest.TestCase):
             "status": "approved",
             "contract_version": "velocitypnp.test.v1",
             "package_root": package_root,
+            "release_tag": "models-test",
             "dataset_content_sha256": dataset_checksum,
             "manifest_sha256": sha256_bytes(manifest_bytes),
             "onnx_sha256": sha256_bytes(onnx),
@@ -124,12 +125,11 @@ class ModelCacheTests(unittest.TestCase):
         policy: str,
     ) -> None:
         document = {
-            "schema_version": 1,
+            "schema_version": 2,
             "selection_policy": policy,
             "catalog": {
                 "repository": "test/models",
                 "commit": "1" * 40,
-                "release_tag": "models-test",
             },
             "models": [model],
         }
