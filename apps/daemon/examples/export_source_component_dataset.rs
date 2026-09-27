@@ -1355,7 +1355,6 @@ corner to resize it, or drag the round handle to rotate it.</p>
 <div id="frame"><img id="image"><svg id="overlay">
 <line id="rotate-line"></line><polygon id="box"></polygon>
 <g id="handles"></g></svg></div>
-<pre id="meta"></pre>
 <textarea id="note" placeholder="Optional correction note"></textarea>
 <div class="controls">
 <select id="class-name"><option value="component_flat">Flat component</option>
@@ -1368,6 +1367,7 @@ corner to resize it, or drag the round handle to rotate it.</p>
 <button id="next">Next</button>
 <button id="download">Download decisions</button>
 </div>
+<pre id="meta"></pre>
 </main>
 <script>
 const manifest = {data};
