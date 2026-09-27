@@ -11,9 +11,10 @@ use uuid::Uuid;
 use velocitypnp_domain::{
     BottomCameraMappingReport, CalibrationArtifactId, CameraRole, OperationStatus,
     PlacementExecutionReport, PlanarCameraCalibrationReport, PlanarCameraModel,
-    PlanarCameraModelKind, Pose, StripFeederInventoryLane, StripFeederInventoryReport,
-    StripFeederRegistration, StripPocketOccupancy,
+    PlanarCameraModelKind, Pose, SourceComponentModelPrediction, StripFeederInventoryLane,
+    StripFeederInventoryReport, StripFeederRegistration, StripPocketOccupancy,
 };
+use velocitypnp_model::SourceComponentModel;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
     decode_gray_png, draft_strip_feeder_source_component, encode_gray_png,
@@ -56,6 +57,8 @@ struct DatasetSample {
     evidence: Vec<String>,
     draft_state: String,
     draft: StripFeederSourceComponentDraft,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_proposal: Option<SourceComponentModelPrediction>,
 }
 
 struct SourceSample {
@@ -148,11 +151,32 @@ struct CarriedGroundTruthSample {
     image_sha256: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ReviewDecision {
+    decision: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    class_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outline_px: Option<[[f64; 2]; 4]>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ReviewDecisions {
+    schema_version: u32,
+    dataset: String,
+    exported_at: String,
+    decisions: BTreeMap<String, ReviewDecision>,
+}
+
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let mut positional = Vec::new();
     let mut reviewed_roots = Vec::new();
     let mut capture_run = None;
+    let mut proposal_model_root = None;
+    let mut review_decisions_path = None;
     let mut index = 0;
     while index < arguments.len() {
         if arguments[index] == "--carry-reviewed" {
@@ -167,6 +191,26 @@ fn main() -> Result<()> {
                 .get(index)
                 .context("--capture-run requires a source capture UUID")?;
             capture_run = Some(id.parse::<Uuid>()?);
+        } else if arguments[index] == "--proposal-model" {
+            index += 1;
+            let path = arguments
+                .get(index)
+                .context("--proposal-model requires a model package directory")?;
+            ensure!(
+                proposal_model_root.is_none(),
+                "--proposal-model was repeated"
+            );
+            proposal_model_root = Some(PathBuf::from(path));
+        } else if arguments[index] == "--carry-decisions" {
+            index += 1;
+            let path = arguments
+                .get(index)
+                .context("--carry-decisions requires a review decision file")?;
+            ensure!(
+                review_decisions_path.is_none(),
+                "--carry-decisions was repeated"
+            );
+            review_decisions_path = Some(PathBuf::from(path));
         } else {
             positional.push(arguments[index].clone());
         }
@@ -177,12 +221,13 @@ fn main() -> Result<()> {
             || (capture_run.is_none() && positional.len() >= 3),
         "usage: export_source_component_dataset DATABASE OUTPUT_DIR \
          EVAL_REGISTRATION_UUID [EVAL_REGISTRATION_UUID ...] \
-         [--carry-reviewed DATASET_DIR] | DATABASE OUTPUT_DIR \
-         --capture-run CAPTURE_UUID"
+         [--carry-reviewed DATASET_DIR] [--proposal-model MODEL_DIR] \
+         [--carry-decisions REVIEW_JSON] | DATABASE OUTPUT_DIR \
+         --capture-run CAPTURE_UUID [--proposal-model MODEL_DIR]"
     );
     ensure!(
-        capture_run.is_none() || reviewed_roots.is_empty(),
-        "a single-capture holdout cannot carry prior training labels"
+        capture_run.is_none() || (reviewed_roots.is_empty() && review_decisions_path.is_none()),
+        "a single-capture holdout cannot carry prior labels or review decisions"
     );
     let database = PathBuf::from(&positional[0]);
     let output = PathBuf::from(&positional[1]);
@@ -198,6 +243,31 @@ fn main() -> Result<()> {
         .iter()
         .map(|root| load_reviewed_dataset(root))
         .collect::<Result<Vec<_>>>()?;
+    let proposal_model = proposal_model_root
+        .as_deref()
+        .map(SourceComponentModel::load)
+        .transpose()?;
+    let review_decisions_bytes = review_decisions_path
+        .as_deref()
+        .map(fs::read)
+        .transpose()
+        .context("cannot read carried review decisions")?;
+    let review_decisions = review_decisions_bytes
+        .as_deref()
+        .map(serde_json::from_slice::<ReviewDecisions>)
+        .transpose()
+        .context("cannot decode carried review decisions")?;
+    if let Some(review) = &review_decisions {
+        ensure!(
+            review.schema_version == 1,
+            "unsupported review decision schema"
+        );
+        ensure!(
+            review.dataset == "velocitypnp-source-components-v2-draft",
+            "review decisions are for unexpected dataset {}",
+            review.dataset
+        );
+    }
     ensure!(database.is_file(), "database does not exist");
     ensure!(
         !output.join("manifest.draft.json").exists(),
@@ -548,6 +618,24 @@ fn main() -> Result<()> {
             (StripPocketOccupancy::Empty, false, _) => "negative_auto",
             _ => "needs_review",
         };
+        let has_completed_review = review_decisions
+            .as_ref()
+            .and_then(|review| review.decisions.get(&id))
+            .is_some_and(|decision| decision.decision != "unreviewed");
+        let model_proposal = if has_completed_review {
+            None
+        } else {
+            proposal_model
+                .as_ref()
+                .map(|model| {
+                    model.predict_gray(
+                        artifacts.crop.width,
+                        artifacts.crop.height,
+                        &artifacts.crop.pixels,
+                    )
+                })
+                .transpose()?
+        };
         samples.push(DatasetSample {
             id,
             split: proposed_split.into(),
@@ -564,6 +652,7 @@ fn main() -> Result<()> {
             evidence: source.evidence,
             draft_state: draft_state.into(),
             draft: artifacts.report,
+            model_proposal,
         });
     }
     ensure!(
@@ -590,6 +679,20 @@ fn main() -> Result<()> {
         )
     });
     carried_samples.sort_by(|first, second| first.ground_truth.id.cmp(&second.ground_truth.id));
+    let draft_ids = samples
+        .iter()
+        .map(|sample| sample.id.clone())
+        .collect::<BTreeSet<_>>();
+    let carried_ids = carried_samples
+        .iter()
+        .map(|sample| sample.ground_truth.id.clone())
+        .collect::<BTreeSet<_>>();
+    let (initial_decisions, ignored_carried_decisions, unfinished_carried_decisions) =
+        if let Some(review) = &review_decisions {
+            partition_review_decisions(review, &draft_ids, &carried_ids)?
+        } else {
+            (BTreeMap::new(), 0, 0)
+        };
     let carried_manifest_name =
         (!reviewed.is_empty()).then(|| "manifest.carried-ground-truth.json".to_string());
     if !reviewed.is_empty() {
@@ -642,6 +745,8 @@ fn main() -> Result<()> {
         carried_sample_count: carried_count,
         notes: vec![
             "draft labels are weak supervision, not ground truth".into(),
+            "unfinished labels use the learned model proposal when one is available".into(),
+            "model confidence gates are metadata and do not suppress review proposals".into(),
             "reviewed labels are carried only when source and crop hashes match".into(),
             "reviewed legacy-calibration images keep their prior crop when the source hash matches"
                 .into(),
@@ -657,14 +762,40 @@ fn main() -> Result<()> {
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::write(output.join("manifest.draft.json"), &manifest_json)?;
-    fs::write(output.join("review.html"), review_html(&manifest)?)?;
+    fs::write(
+        output.join("review.html"),
+        review_html(&manifest, &initial_decisions)?,
+    )?;
+    if let (Some(review), Some(original)) = (&review_decisions, &review_decisions_bytes) {
+        fs::write(
+            output.join("review-decisions.partial.original.json"),
+            original,
+        )?;
+        fs::write(
+            output.join("review-decisions.partial.json"),
+            serde_json::to_vec_pretty(&ReviewDecisions {
+                schema_version: review.schema_version,
+                dataset: review.dataset.clone(),
+                exported_at: review.exported_at.clone(),
+                decisions: initial_decisions.clone(),
+            })?,
+        )?;
+    }
+    let model_seeded = manifest
+        .samples
+        .iter()
+        .filter(|sample| sample.model_proposal.is_some())
+        .count();
     fs::write(
         output.join("README.txt"),
         format!(
             "Open review.html in a browser. Review only the new draft labels.\n\
              {carried_count} prior reviewed labels were carried without another review.\n\
+             {} completed decisions were restored.\n\
+             {model_seeded} unfinished labels were seeded by the learned model.\n\
              Use On side for a component that is standing on an edge.\n\
-             Use Download decisions to save the review result.\n"
+             Use Download decisions to save the review result.\n",
+            initial_decisions.len()
         ),
     )?;
 
@@ -687,6 +818,17 @@ fn main() -> Result<()> {
         evaluation,
         supported,
     );
+    println!(
+        "restored {} completed decisions, seeded {} unfinished samples with the model, and ignored {} decisions already carried as ground truth",
+        initial_decisions.len(),
+        model_seeded,
+        ignored_carried_decisions,
+    );
+    if unfinished_carried_decisions > 0 {
+        println!(
+            "ignored {unfinished_carried_decisions} unfinished decisions for samples already carried as ground truth"
+        );
+    }
     println!("review {}", output.join("review.html").display());
     Ok(())
 }
@@ -1137,8 +1279,46 @@ fn nearest_source_frame_index(camera_poses: &[Pose], pocket_machine_mm: [f64; 2]
         .map(|(index, _)| index)
 }
 
-fn review_html(manifest: &DatasetManifest) -> Result<String> {
+fn partition_review_decisions(
+    review: &ReviewDecisions,
+    draft_ids: &BTreeSet<String>,
+    carried_ids: &BTreeSet<String>,
+) -> Result<(BTreeMap<String, ReviewDecision>, usize, usize)> {
+    let mut current = BTreeMap::new();
+    let mut completed_carried = 0;
+    let mut unfinished_carried = 0;
+    for (id, decision) in &review.decisions {
+        ensure!(
+            matches!(
+                decision.decision.as_str(),
+                "accept" | "adjust" | "empty" | "reject" | "unreviewed"
+            ),
+            "review decision {id} has unknown state {}",
+            decision.decision
+        );
+        if draft_ids.contains(id) {
+            if decision.decision != "unreviewed" {
+                current.insert(id.clone(), decision.clone());
+            }
+        } else if carried_ids.contains(id) {
+            if decision.decision == "unreviewed" {
+                unfinished_carried += 1;
+            } else {
+                completed_carried += 1;
+            }
+        } else {
+            anyhow::bail!("review decision {id} is absent from the exported dataset");
+        }
+    }
+    Ok((current, completed_carried, unfinished_carried))
+}
+
+fn review_html(
+    manifest: &DatasetManifest,
+    initial_decisions: &BTreeMap<String, ReviewDecision>,
+) -> Result<String> {
     let data = serde_json::to_string(manifest)?;
+    let initial_data = serde_json::to_string(initial_decisions)?;
     let title = json!(manifest.name).to_string();
     Ok(format!(
         r##"<!doctype html>
@@ -1191,9 +1371,16 @@ corner to resize it, or drag the round handle to rotate it.</p>
 </main>
 <script>
 const manifest = {data};
-const key = {title} + ":review";
-const saved = JSON.parse(localStorage.getItem(key) || "{{}}");
-const requested = Number(new URLSearchParams(location.search).get("index") || 0);
+const initialDecisions = {initial_data};
+const key = {title} + ":" + manifest.generated_at + ":review";
+const stored = JSON.parse(localStorage.getItem(key) || "{{}}");
+const saved = {{...initialDecisions, ...stored}};
+const requestedIndex = new URLSearchParams(location.search).get("index");
+const firstUnreviewed = manifest.samples.findIndex(sample =>
+  !saved[sample.id] || saved[sample.id].decision === "unreviewed");
+const requested = requestedIndex === null
+  ? (firstUnreviewed < 0 ? 0 : firstUnreviewed)
+  : Number(requestedIndex);
 let index = Math.max(0, Math.min(manifest.samples.length - 1, requested));
 let drag = null, boxState = null;
 const image = document.querySelector("#image");
@@ -1206,6 +1393,8 @@ const note = document.querySelector("#note");
 const className = document.querySelector("#class-name");
 function store() {{ localStorage.setItem(key, JSON.stringify(saved)); }}
 function initialOutline(sample) {{
+  if (sample.model_proposal?.pose?.valid)
+    return sample.model_proposal.pose.outline_px;
   if (sample.draft.outline_px) return sample.draft.outline_px;
   const center = sample.draft.center_px ||
     [sample.width_px / 2, sample.height_px / 2];
@@ -1258,9 +1447,11 @@ function renderBox() {{
 function current() {{
   const sample = manifest.samples[index];
   const result = saved[sample.id] || {{decision: "unreviewed", note: ""}};
+  const proposedClass = sample.model_proposal?.class === "component_on_edge"
+    ? "component_on_edge" : "component_flat";
   return {{...result,
     class_name: result.class_name ||
-      (result.decision === "on_edge" ? "component_on_edge" : "component_flat"),
+      (result.decision === "on_edge" ? "component_on_edge" : proposedClass),
     outline_px: result.outline_px || initialOutline(sample)}};
 }}
 function show() {{
@@ -1287,7 +1478,9 @@ function show() {{
     draft_state: sample.draft_state,
     occupancy: sample.draft.occupancy,
     confidence: sample.draft.occupancy_confidence,
-    measured_size_mm: sample.draft.measured_size_mm
+    measured_size_mm: sample.draft.measured_size_mm,
+    proposal_source: sample.model_proposal ? "learned_model" : "deterministic",
+    model_proposal: sample.model_proposal || null
   }}, null, 2);
 }}
 function persist(decision = current().decision) {{
@@ -1593,5 +1786,59 @@ mod tests {
         .is_none());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partial_review_keeps_only_completed_current_decisions() {
+        let decision = |state: &str| ReviewDecision {
+            decision: state.into(),
+            note: String::new(),
+            class_name: None,
+            outline_px: None,
+        };
+        let review = ReviewDecisions {
+            schema_version: 1,
+            dataset: "velocitypnp-source-components-v2-draft".into(),
+            exported_at: "2026-09-26T00:00:00Z".into(),
+            decisions: BTreeMap::from([
+                ("current-complete".into(), decision("accept")),
+                ("current-unfinished".into(), decision("unreviewed")),
+                ("carried-complete".into(), decision("empty")),
+                ("carried-unfinished".into(), decision("unreviewed")),
+            ]),
+        };
+        let draft_ids = BTreeSet::from(["current-complete".into(), "current-unfinished".into()]);
+        let carried_ids = BTreeSet::from(["carried-complete".into(), "carried-unfinished".into()]);
+
+        let (current, completed_carried, unfinished_carried) =
+            partition_review_decisions(&review, &draft_ids, &carried_ids).unwrap();
+
+        assert_eq!(current.len(), 1);
+        assert_eq!(current["current-complete"].decision, "accept");
+        assert_eq!(completed_carried, 1);
+        assert_eq!(unfinished_carried, 1);
+    }
+
+    #[test]
+    fn partial_review_rejects_unknown_sample_ids() {
+        let review = ReviewDecisions {
+            schema_version: 1,
+            dataset: "velocitypnp-source-components-v2-draft".into(),
+            exported_at: "2026-09-26T00:00:00Z".into(),
+            decisions: BTreeMap::from([(
+                "unknown".into(),
+                ReviewDecision {
+                    decision: "accept".into(),
+                    note: String::new(),
+                    class_name: None,
+                    outline_px: None,
+                },
+            )]),
+        };
+
+        let error =
+            partition_review_decisions(&review, &BTreeSet::new(), &BTreeSet::new()).unwrap_err();
+
+        assert!(error.to_string().contains("unknown"));
     }
 }

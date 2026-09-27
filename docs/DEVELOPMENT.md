@@ -821,6 +821,27 @@ require raw-source metadata. The exporter writes verified labels to
 contain only new samples. The finalizer checks the carried image hashes and
 combines the carried and newly reviewed labels in the final dataset.
 
+The exporter can restore a partial review and use a model package to propose
+boxes for the unfinished samples:
+
+```bash
+cargo run --release -p velocitypnpd \
+  --example export_source_component_dataset -- \
+  velocitypnp.db datasets/source-components-next \
+  EVAL_REGISTRATION_UUID \
+  --carry-reviewed datasets/source-components-v2 \
+  --carry-decisions /path/to/review-decisions-partial.json \
+  --proposal-model /path/to/source-component-model-package
+```
+
+Completed current decisions remain operator labels. An `unreviewed` entry is
+not a completed decision. The model proposes the class and oriented box for
+each unfinished sample. Its confidence gate is review metadata and does not
+hide the proposal. The deterministic result remains in the manifest for
+comparison. Decisions for samples already carried as ground truth are ignored.
+An unknown sample ID stops the export. The output keeps the original partial
+file and a filtered file that contains only completed current decisions.
+
 New live-pocket holdouts retain one unannotated frame from each camera pose as
 `source-pocket-frame-NNN.png`. The holdout report records the matching camera
 poses. The four offset poses measure tape geometry and can show only part of a
