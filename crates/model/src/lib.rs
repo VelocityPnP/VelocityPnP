@@ -279,11 +279,12 @@ impl SourceComponentModel {
         );
         ensure!(pose_values.len() == 6, "pose output must have six values");
         ensure!(
-            class_values
-                .iter()
-                .chain(&pose_values)
-                .all(|value| value.is_finite()),
-            "source-component model returned a non-finite value"
+            class_values_are_usable(&class_values),
+            "source-component model returned invalid class values: {class_values:?}"
+        );
+        ensure!(
+            pose_values.iter().all(|value| value.is_finite()),
+            "source-component model returned non-finite pose values: {pose_values:?}"
         );
 
         let probabilities = softmax_three(class_values.try_into().unwrap());
@@ -488,6 +489,15 @@ fn softmax_three(values: [f32; 3]) -> [f32; 3] {
     exponentials.map(|value| value / sum)
 }
 
+fn class_values_are_usable(values: &[f32]) -> bool {
+    // Tract can represent a saturated log-sigmoid as negative infinity. This
+    // is a valid log-probability of zero, provided another class is finite.
+    values.iter().any(|value| value.is_finite())
+        && values
+            .iter()
+            .all(|value| value.is_finite() || *value == f32::NEG_INFINITY)
+}
+
 fn decode_pose(values: [f32; 6], letterbox: &Letterbox) -> Result<SourceComponentPosePrediction> {
     let angle_norm = values[4].hypot(values[5]);
     ensure!(angle_norm > 1e-6, "model angle has no direction");
@@ -637,6 +647,22 @@ mod tests {
         let probabilities = softmax_three([-2.0, 3.0, 1.0]);
         assert!((probabilities.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         assert!(probabilities[1] > probabilities[2]);
+    }
+
+    #[test]
+    fn negative_infinite_class_log_probability_is_usable() {
+        let values = [f32::NEG_INFINITY, -3.0e-6, -12.0];
+        assert!(class_values_are_usable(&values));
+        let probabilities = softmax_three(values);
+        assert_eq!(probabilities[0], 0.0);
+        assert!(probabilities[1] > probabilities[2]);
+    }
+
+    #[test]
+    fn class_values_reject_invalid_non_finite_combinations() {
+        assert!(!class_values_are_usable(&[f32::NEG_INFINITY; 3]));
+        assert!(!class_values_are_usable(&[0.0, f32::INFINITY, -1.0]));
+        assert!(!class_values_are_usable(&[0.0, f32::NAN, -1.0]));
     }
 
     #[test]

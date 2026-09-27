@@ -55,7 +55,9 @@ fn main() -> Result<()> {
             &fs::read(&image_path)
                 .with_context(|| format!("cannot read {}", image_path.display()))?,
         )?;
-        let prediction = model.predict_gray(frame.width, frame.height, &frame.pixels)?;
+        let prediction = model
+            .predict_gray(frame.width, frame.height, &frame.pixels)
+            .with_context(|| format!("cannot evaluate source-component sample {}", sample.id))?;
         sample_count += 1;
         if prediction.class != expected {
             class_mismatches.push(json!({

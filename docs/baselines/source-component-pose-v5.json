@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "run": "source-component-pose-v5-eval-first-neg2",
+  "status": "candidate_not_activated",
+  "completed_at": "2026-09-27T01:23:58.469046+00:00",
+  "dataset": {
+    "manifest_sha256": "8c1b0fc3549a572d832e5c2b112b797e42211f479021a0878f32dc21eecd4766",
+    "content_sha256": "e108470370b3aebf0ac986b710c9755ad11cb844d5ae3a0a09ff345029ea8673",
+    "train_samples": 501,
+    "evaluation_samples": 66,
+    "train_class_counts": {
+      "empty": 160,
+      "component_flat": 293,
+      "component_on_edge": 48
+    },
+    "evaluation_class_counts": {
+      "empty": 20,
+      "component_flat": 43,
+      "component_on_edge": 3
+    }
+  },
+  "source": {
+    "git_commit": "0d6427d4e929f45f02c5fb3ccb2f36677ab51e22",
+    "dirty": false,
+    "training_source_sha256": "cd55c6ffe7aaf307315f8c992ebca4b12923c9fbeef869d44c7292ed32ae518e"
+  },
+  "training": {
+    "device": "NVIDIA GB10",
+    "seed": 0,
+    "completed_epochs": 184,
+    "best_epoch": 144,
+    "classifier_selection": "eval-first",
+    "classifier_completed_epochs": 39,
+    "classifier_best_epoch": 14,
+    "hard_negative_weight": 2.0,
+    "hard_negative_occupied_probability": 0.2
+  },
+  "artifacts": {
+    "manifest_sha256": "a12e60a72dc5cd49ee02b84b27ed68e810d0f2e88f069885cb2796d47aa6232f",
+    "checkpoint_sha256": "9c409a78243dac3bef90037698e7d3368cc17f66c24b937e5b5250f77bb792a7",
+    "onnx_sha256": "332f60a98933fab6c3d33bd4acaacfd2d7be2efefa38c8bd53cf0c3bcc96f0ae"
+  },
+  "evaluation": {
+    "occupancy_precision": 1.0,
+    "occupancy_recall": 0.9782608695652174,
+    "class_confusion": {
+      "empty": {
+        "empty": 20
+      },
+      "component_flat": {
+        "empty": 1,
+        "component_flat": 42
+      },
+      "component_on_edge": {
+        "component_on_edge": 3
+      }
+    },
+    "mean_center_error_input_px": 0.46954178340409114,
+    "maximum_center_error_input_px": 2.403501510620117,
+    "mean_angle_error_degrees_mod_180": 1.0717584289848423,
+    "mean_oriented_iou": 0.8866860339991236,
+    "missed_sample": "placement_execution-bddba929-60cb-49ec-a1b5-6af479cd5739"
+  },
+  "training_evaluation": {
+    "class_errors": 19,
+    "false_positives": 1,
+    "component_flat_correct": 292,
+    "component_flat_total": 293,
+    "component_on_edge_correct": 31,
+    "component_on_edge_total": 48,
+    "mean_center_error_input_px": 0.7288985262977238,
+    "mean_oriented_iou": 0.8710408682832357
+  },
+  "comparison_to_v4": {
+    "evaluation_class_errors": {
+      "v4": 2,
+      "v5": 1
+    },
+    "evaluation_mean_center_error_input_px": {
+      "v4": 1.0262198519447576,
+      "v5": 0.46954178340409114
+    },
+    "evaluation_mean_oriented_iou": {
+      "v4": 0.8220951119734908,
+      "v5": 0.8866860339991236
+    },
+    "training_on_edge_correct": {
+      "v4": 3,
+      "v4_total": 18,
+      "v5": 31,
+      "v5_total": 48
+    }
+  },
+  "reproducibility": {
+    "repeat_checkpoint_identical": true,
+    "repeat_onnx_identical": true,
+    "repeat_training_history_identical": true,
+    "repeat_classifier_history_identical": true
+  },
+  "onnx_reference_parity": {
+    "sample_count": 66,
+    "maximum_log_probability_difference": 0.000026702880859375,
+    "maximum_pose_difference": 5.364418029785156e-7,
+    "class_mismatches": 0,
+    "absolute_tolerance": 0.0001,
+    "passed": true
+  },
+  "tract_runtime": {
+    "runtime": "tract-onnx-0.22",
+    "evaluation_class_errors": 1,
+    "evaluation_mean_center_error_source_px": 0.8552453358021508,
+    "training_class_errors": 19,
+    "training_mean_center_error_source_px": 1.351659411199725,
+    "saturated_log_probability_sample": "inventory_source_capture-18cbc03a-700a-43b1-93bc-72979b63075e-lane-002-pocket-002",
+    "saturated_log_probability": "empty"
+  },
+  "limitations": [
+    "The reused evaluation split guided v4 and v5 model selection.",
+    "Only three on-edge images are in the evaluation split.",
+    "The model misses 17 of 48 on-edge training images.",
+    "One flat evaluation image is classified as empty with high confidence.",
+    "A new independent feeder holdout is required before release or activation.",
+    "The model is not selected by a source-repository lockfile."
+  ]
+}
