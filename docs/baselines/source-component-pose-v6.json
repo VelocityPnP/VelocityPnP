@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "run": "source-component-pose-v6-eval-first-neg2",
+  "status": "independent_class_holdout_passed_candidate_not_activated",
+  "completed_at": "2026-09-27T16:53:46.478856+00:00",
+  "dataset": {
+    "manifest_sha256": "05220420c438f9c170221c222b0e204caa04d80814f21f2a0b8ce0a481ff909b",
+    "content_sha256": "d5ce0faad8bbadabff1c15c0940917887ec40ca6fc82f09139376207c880c9b2",
+    "train_samples": 502,
+    "evaluation_samples": 86,
+    "train_class_counts": {
+      "empty": 164,
+      "component_flat": 298,
+      "component_on_edge": 40
+    },
+    "evaluation_class_counts": {
+      "empty": 25,
+      "component_flat": 57,
+      "component_on_edge": 4
+    },
+    "focused_class_review_sha256": "039fa2cb18319f965119c3cb8f22a0e6957a0974bb7145cc20b521ed86b14669",
+    "focused_class_changes": {
+      "component_on_edge_to_component_flat": 8
+    }
+  },
+  "source": {
+    "git_commit": "0d6427d4e929f45f02c5fb3ccb2f36677ab51e22",
+    "dirty": false,
+    "training_source_sha256": "cd55c6ffe7aaf307315f8c992ebca4b12923c9fbeef869d44c7292ed32ae518e"
+  },
+  "training": {
+    "device": "NVIDIA GB10",
+    "seed": 0,
+    "completed_epochs": 131,
+    "best_epoch": 91,
+    "classifier_selection": "eval-first",
+    "classifier_completed_epochs": 49,
+    "classifier_best_epoch": 24,
+    "hard_negative_weight": 2.0,
+    "hard_negative_occupied_probability": 0.2
+  },
+  "artifacts": {
+    "manifest_sha256": "488e40d4daa4230232da7a179116970f28ddab4df7a0320af89d20e977883716",
+    "checkpoint_sha256": "84e6511a51a3f39c099c27c33a84bb505fe81223ed71703635ee25ad93011909",
+    "onnx_sha256": "1a51fed884de8a2098126b753199c54d78c6e86cd52a333b1ec7276ed641f18a"
+  },
+  "evaluation": {
+    "occupancy_precision": 1.0,
+    "occupancy_recall": 0.9508196721311475,
+    "class_confusion": {
+      "empty": {
+        "empty": 25
+      },
+      "component_flat": {
+        "empty": 2,
+        "component_flat": 55
+      },
+      "component_on_edge": {
+        "empty": 1,
+        "component_on_edge": 3
+      }
+    },
+    "mean_center_error_input_px": 0.557732491952474,
+    "maximum_center_error_input_px": 1.7041908502578735,
+    "mean_angle_error_degrees_mod_180": 1.0306777044815563,
+    "mean_oriented_iou": 0.8825989305018662
+  },
+  "training_evaluation": {
+    "class_errors": 25,
+    "false_positives": 0,
+    "component_flat_correct": 297,
+    "component_flat_total": 298,
+    "component_on_edge_correct": 16,
+    "component_on_edge_total": 40,
+    "mean_center_error_input_px": 0.845833158338189,
+    "mean_oriented_iou": 0.8592176315609255
+  },
+  "former_holdout_diagnostic": {
+    "capture_run": "f55b4efb-8be0-4d23-ac25-124406b50bc4",
+    "sample_count": 21,
+    "class_errors": 0,
+    "mean_center_error_source_px": 0.8585048073179967,
+    "independent": false,
+    "reason": "the failed v5 holdout entered v6 training after review"
+  },
+  "independent_holdout": {
+    "capture_run": "2ba264c4-025d-4a18-9d1d-c2d403a4cb31",
+    "source_scan": "403008fd-46d4-4ee6-9aa3-638e886ed7e4",
+    "draft_manifest_sha256": "91403269583660bc5e4083a7a539df25515b79fdb8d999eaabc06992c640068a",
+    "operator_review_sha256": "71122278dba4cc7cabacd7f25405b18fac3c87272d0798ce650918fe7714f821",
+    "filtered_review_sha256": "253a2bd1b3826864a7849c389a6ac1560ec7e64f871126738cae710702b2d9b6",
+    "ground_truth_manifest_sha256": "5453cacc58d2bf447573625fede471b77b0477d3b181d8cc48d5e3f518f6aa13",
+    "runtime": "tract-onnx-0.22",
+    "sample_count": 21,
+    "component_flat_count": 11,
+    "empty_count": 10,
+    "component_on_edge_count": 0,
+    "class_errors": 0,
+    "new_pocket_positions": {
+      "sample_count": 16,
+      "component_flat_count": 10,
+      "empty_count": 6,
+      "class_errors": 0
+    },
+    "repeated_control_positions": {
+      "sample_count": 5,
+      "component_flat_count": 1,
+      "empty_count": 4,
+      "class_errors": 0
+    },
+    "excluded_training_overlap_positions": 16,
+    "v5_comparison": {
+      "class_errors": 3,
+      "flat_as_on_edge_errors": 3
+    },
+    "passed": true,
+    "scope": "independent flat-versus-empty classification only",
+    "localization_independent": false
+  },
+  "reproducibility": {
+    "repeat_checkpoint_identical": true,
+    "repeat_onnx_identical": true,
+    "repeat_training_history_identical": true,
+    "repeat_classifier_history_identical": true,
+    "repeat_evaluation_records_identical": true,
+    "repeat_training_evaluation_records_identical": true
+  },
+  "onnx_reference_parity": {
+    "sample_count": 86,
+    "maximum_log_probability_difference": 0.00002765655517578125,
+    "maximum_pose_difference": 0.0000018477439880371094,
+    "class_mismatches": 0,
+    "absolute_tolerance": 0.0001,
+    "passed": true
+  },
+  "tract_runtime": {
+    "runtime": "tract-onnx-0.22",
+    "evaluation_class_errors": 3,
+    "evaluation_mean_center_error_source_px": 1.0154327211051823,
+    "former_holdout_class_errors": 0,
+    "former_holdout_mean_center_error_source_px": 0.8585048073179967
+  },
+  "limitations": [
+    "The evaluation split guided model selection and is not independent.",
+    "Only four on-edge images are in the evaluation split.",
+    "The model misses 24 of 40 on-edge training images.",
+    "The former independent holdout entered training after it exposed the v5 label defect.",
+    "The new holdout has no on-edge parts and does not validate on-edge recall.",
+    "Its accepted model-seeded boxes do not give an independent localization metric.",
+    "The model is not selected by a source-repository lockfile."
+  ]
+}

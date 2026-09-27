@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "run": "source-component-pose-v5-eval-first-neg2",
-  "status": "candidate_not_activated",
+  "status": "failed_independent_holdout",
   "completed_at": "2026-09-27T01:23:58.469046+00:00",
   "dataset": {
     "manifest_sha256": "8c1b0fc3549a572d832e5c2b112b797e42211f479021a0878f32dc21eecd4766",
@@ -114,12 +114,41 @@
     "saturated_log_probability_sample": "inventory_source_capture-18cbc03a-700a-43b1-93bc-72979b63075e-lane-002-pocket-002",
     "saturated_log_probability": "empty"
   },
+  "independent_holdout": {
+    "capture_run": "f55b4efb-8be0-4d23-ac25-124406b50bc4",
+    "sample_count": 21,
+    "class_errors": 6,
+    "class_confusion": {
+      "empty": {
+        "empty": 8,
+        "component_on_edge": 1
+      },
+      "component_flat": {
+        "component_flat": 6,
+        "component_on_edge": 5
+      },
+      "component_on_edge": {
+        "component_on_edge": 1
+      }
+    },
+    "mean_center_error_source_px": 0.3503844437381107,
+    "result": "failed",
+    "finding": "the model over-predicted on-edge parts in feeder 8"
+  },
+  "followup_holdout": {
+    "capture_run": "2ba264c4-025d-4a18-9d1d-c2d403a4cb31",
+    "sample_count": 21,
+    "class_errors": 3,
+    "flat_as_on_edge_errors": 3,
+    "result": "failed",
+    "finding": "a later capture reproduced the on-edge false-positive regression"
+  },
   "limitations": [
     "The reused evaluation split guided v4 and v5 model selection.",
     "Only three on-edge images are in the evaluation split.",
     "The model misses 17 of 48 on-edge training images.",
     "One flat evaluation image is classified as empty with high confidence.",
-    "A new independent feeder holdout is required before release or activation.",
+    "The independent feeder holdout failed with six class errors.",
     "The model is not selected by a source-repository lockfile."
   ]
 }
