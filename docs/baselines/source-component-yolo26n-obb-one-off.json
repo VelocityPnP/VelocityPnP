@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "run": "source-component-yolo26n-obb-one-off-2026-09-27",
+  "status": "comparison_complete_not_selected",
+  "completed_at": "2026-09-27T18:10:28.408556+00:00",
+  "purpose": "One-off comparison with source-component-pose-v6",
+  "source": {
+    "git_commit": "895098e0ceb3697b24d8213947a203352f407558",
+    "dirty_before_comparison_record": false,
+    "conversion_script_sha256": "dd8525ef360492663517bfeacb8599e6054b8d199d366488f5850d326e167b47",
+    "evaluation_script_sha256": "7aed352663b3154bdfd7083c0164d2c88386df004cbd2ef5702e20c247d4a3b1"
+  },
+  "dataset": {
+    "format": "Ultralytics YOLO OBB",
+    "training_manifest_sha256": "05220420c438f9c170221c222b0e204caa04d80814f21f2a0b8ce0a481ff909b",
+    "holdout_manifest_sha256": "5453cacc58d2bf447573625fede471b77b0477d3b181d8cc48d5e3f518f6aa13",
+    "train_samples": 502,
+    "validation_samples": 86,
+    "holdout_samples": 21,
+    "classes": {
+      "0": "component_flat",
+      "1": "component_on_edge"
+    },
+    "empty_representation": "empty label file"
+  },
+  "environment": {
+    "device": "NVIDIA GB10",
+    "container_image": "velocitypnp-yolo-one-off:8.4.154-headless",
+    "container_image_id": "sha256:44bbf074ed5724c3e6b88d33bf1d0089a562ebb9077dafb1a1b53d9d10bd024e",
+    "container_recipe_sha256": "a6bf4b4303e31d7db790754cacf8a556bfb4f513a85233b7f94a2fa6dfad8ba6",
+    "python": "3.12.3",
+    "torch": "2.14.0a0+4fdf77b940.nv26.08",
+    "ultralytics": "8.4.154",
+    "opencv": "5.0.0"
+  },
+  "license": {
+    "experiment": "AGPL-3.0",
+    "production_use_reviewed": false,
+    "note": "Ultralytics also offers an enterprise license."
+  },
+  "training": {
+    "architecture": "YOLO26n-obb",
+    "input_size_px": 192,
+    "pretrained": true,
+    "pretrained_artifact_sha256": "6f51c78197aacda4a33be77294065a9001675fb893f56227a179731b53dbd2b0",
+    "pretrained_artifact_size_bytes": 5907357,
+    "requested_epochs": 200,
+    "completed_epochs": 63,
+    "best_epoch": 23,
+    "early_stopping_patience": 40,
+    "batch_size": 32,
+    "seed": 0,
+    "deterministic": true,
+    "parameter_count": 2647914,
+    "elapsed_seconds": 54.7096,
+    "args_sha256": "8b5706b3afe84621ca91507b8d5364593e8578e098f649a83141427a08ce1151",
+    "results_sha256": "7b661bbec5686afb68836176b9aa4dd6dcc1825113c60d68c4f4cd11037695bf"
+  },
+  "artifacts": {
+    "checkpoint": {
+      "sha256": "ea8966aeaee656a276d365ec71735f65d6910eef277b189041f05cfd16788598",
+      "size_bytes": 5699676
+    },
+    "onnx": {
+      "sha256": "2e6c56c1c6f527cc647d023a836e1ba3b979615c40ac4fc92af883d476b7b899",
+      "size_bytes": 9932231,
+      "opset": 17,
+      "fixed_batch_size": 1
+    },
+    "pytorch_evaluation_sha256": "7b996b7001c56f89716ab294bc54b9101dcc3f4f2da6ebc382a2a3d562eea9b9",
+    "onnx_evaluation_sha256": "ae6c141d8bd82852efd31dc43b1ef5515d6ff49ac3b41d45fcaa6a15a3012a83"
+  },
+  "decision_policy": {
+    "selection": "highest-confidence oriented detection",
+    "no_detection": "empty",
+    "standard_threshold": 0.25,
+    "selected_threshold": 0.8,
+    "threshold_source": "validation split only",
+    "selection_order": [
+      "fewest validation class errors",
+      "fewest validation empty-pocket false positives",
+      "fewest validation occupied-pocket false negatives",
+      "highest threshold"
+    ],
+    "holdout_used_for_tuning": false,
+    "threshold_separation": {
+      "maximum_empty_detection_confidence": 0.7992091774940491,
+      "minimum_flat_detection_confidence": 0.8003615736961365,
+      "margin": 0.0011523962020874
+    }
+  },
+  "validation": {
+    "standard_threshold": {
+      "class_errors": 10,
+      "empty_false_positives": 10,
+      "occupied_false_negatives": 0
+    },
+    "selected_threshold": {
+      "class_errors": 2,
+      "empty_false_positives": 0,
+      "occupied_false_negatives": 2,
+      "occupancy_precision": 1.0,
+      "occupancy_recall": 0.9672131147540983,
+      "class_confusion": {
+        "empty": {
+          "empty": 25
+        },
+        "component_flat": {
+          "component_flat": 57
+        },
+        "component_on_edge": {
+          "empty": 2,
+          "component_on_edge": 2
+        }
+      }
+    },
+    "localization_on_all_61_occupied_samples": {
+      "threshold": 0.25,
+      "mean_center_error_input_px": 0.6282585303733165,
+      "maximum_center_error_input_px": 2.4581221226283483,
+      "mean_angle_error_degrees_mod_180": 0.9593091726370662,
+      "mean_oriented_iou": 0.8632480570508804
+    }
+  },
+  "holdout": {
+    "threshold": 0.8,
+    "sample_count": 21,
+    "component_flat_count": 11,
+    "empty_count": 10,
+    "component_on_edge_count": 0,
+    "class_errors": 0,
+    "empty_false_positives": 0,
+    "occupied_false_negatives": 0,
+    "occupancy_precision": 1.0,
+    "occupancy_recall": 1.0
+  },
+  "comparison_to_source_component_pose_v6": {
+    "validation": {
+      "yolo_class_errors": 2,
+      "v6_class_errors": 3,
+      "yolo_on_edge_correct": 2,
+      "v6_on_edge_correct": 3,
+      "on_edge_total": 4,
+      "yolo_flat_correct": 57,
+      "v6_flat_correct": 55,
+      "flat_total": 57,
+      "yolo_mean_center_error_input_px": 0.6282585303733165,
+      "v6_mean_center_error_input_px": 0.557732491952474,
+      "yolo_mean_angle_error_degrees_mod_180": 0.9593091726370662,
+      "v6_mean_angle_error_degrees_mod_180": 1.0306777044815563,
+      "yolo_mean_oriented_iou": 0.8632480570508804,
+      "v6_mean_oriented_iou": 0.8825989305018662
+    },
+    "holdout": {
+      "yolo_class_errors": 0,
+      "v6_class_errors": 0
+    },
+    "deployment": {
+      "yolo_parameter_count": 2647914,
+      "v6_parameter_count": 970911,
+      "yolo_onnx_size_bytes": 9932231,
+      "v6_onnx_size_bytes": 3922914,
+      "same_runtime_speed_comparison_available": false
+    }
+  },
+  "onnx_reference_parity": {
+    "sample_count": 107,
+    "class_mismatches": 0,
+    "maximum_confidence_difference": 0.003225862979888916,
+    "maximum_outline_coordinate_difference_source_px": 0.030059814453125
+  },
+  "decision": {
+    "selected": false,
+    "package_or_activate": false,
+    "reason": "The small accuracy gain does not offset weak on-edge recall, a narrow confidence margin, larger artifacts, a new runtime, and new license obligations."
+  },
+  "limitations": [
+    "The validation split guided training and threshold selection.",
+    "Only four on-edge images are in the validation split.",
+    "The holdout has no on-edge parts.",
+    "The holdout boxes were seeded by v6 and accepted during review.",
+    "Holdout localization favors v6 and is not an independent comparison.",
+    "Training was run once and does not establish reproducibility.",
+    "GPU timing is not comparable to the CPU tract runtime used by v6."
+  ]
+}
