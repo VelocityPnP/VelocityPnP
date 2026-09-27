@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct DraftManifest {
@@ -107,12 +107,15 @@ type RefinedLabel = (Option<String>, Option<[[f64; 2]; 4]>, String, bool);
 fn main() -> Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     ensure!(
-        arguments.len() == 1,
-        "usage: refine_source_component_dataset DATASET_DIR"
+        arguments.len() == 1 || arguments.len() == 2,
+        "usage: refine_source_component_dataset DATASET_DIR [REVIEW_FILE]"
     );
     let root = PathBuf::from(&arguments[0]);
     let manifest_path = root.join("manifest.draft.json");
-    let review_path = root.join("review-decisions.json");
+    let review_path = arguments
+        .get(1)
+        .map(|value| resolve_review_path(&root, Path::new(value)))
+        .unwrap_or_else(|| root.join("review-decisions.json"));
     let manifest_bytes = fs::read(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
     let review_bytes =
@@ -150,6 +153,7 @@ fn main() -> Result<()> {
             "review contains unknown sample {id}"
         );
     }
+    fs::write(root.join("review-decisions.json"), &review_bytes)?;
 
     let learned_extents = learn_accepted_extents(&manifest, &review, carried.as_ref())?;
     let learned_by_part = learned_extents
@@ -241,6 +245,14 @@ fn main() -> Result<()> {
         println!("review {}", root.join("review-refined.html").display());
     }
     Ok(())
+}
+
+fn resolve_review_path(root: &Path, review: &Path) -> PathBuf {
+    if review.is_absolute() {
+        review.to_path_buf()
+    } else {
+        root.join(review)
+    }
 }
 
 fn learn_accepted_extents(

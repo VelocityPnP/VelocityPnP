@@ -595,6 +595,14 @@ cargo run -p velocitypnpd --example refine_source_component_dataset -- \
   datasets/source-components-v1
 ```
 
+You can give the downloaded review as a second argument. The refiner copies
+it to `review-decisions.json` in the dataset before it writes derived files:
+
+```bash
+cargo run -p velocitypnpd --example refine_source_component_dataset -- \
+  datasets/source-components-v1 /path/to/review-decisions.json
+```
+
 The refinement keeps accepted labels and empty images unchanged. For each
 known part, it learns the median box extent from accepted examples and from
 verified carried ground truth. It applies that extent at the detected center

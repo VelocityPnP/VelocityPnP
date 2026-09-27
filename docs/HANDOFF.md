@@ -49,16 +49,16 @@ The retained image shows a resistor and a correct learned pose, but all local
 source checkpoints classify it as empty. Deterministic vision selected the
 tape edge. This is a source-model regression, not placement evidence.
 
-The all-history source export has 595 unique images. The current export carries
-all 259 prior labels and needs review for 336 new images. It restored 120
-completed decisions from `/tmp/review-decisions-partial.json`. The current
-source-component model seeded the remaining 216 boxes, including the one
-stored `unreviewed` entry. Its ONNX SHA-256 is the source-component digest in
-the table above. The local review page is served from
-`datasets/source-components-v8-model-seeded`. The earlier 382-image page
-repeated 46 reviewed images because the combined v4 manifest did not contain
-raw-source metadata. Do not restart placement-transfer motion with the current
-source model.
+The finalized all-history source dataset has 595 unique images. It includes
+567 images: 336 flat components, 51 on-edge components, and 180 empty pockets.
+The other 28 images are rejected. Of the 336 new labels, the review accepted
+198 parts, marked 122 pockets empty, and rejected 16 images. The stored review
+SHA-256 is
+`1bb55a902dd9fd93732108883e26b0d42ac613d99ea0347e371935f6d5a03e7a`.
+The final local dataset is `datasets/source-components-v8-model-seeded`.
+The earlier 382-image page repeated 46 reviewed images because the combined v4
+manifest did not contain raw-source metadata. Do not restart
+placement-transfer motion with the current source model.
 
 The private model repository release `datasets-2026-09-26.1` stores immutable
 packages for the three model training datasets and the newer September 20
