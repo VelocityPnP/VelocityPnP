@@ -14,8 +14,9 @@ validation must use different placements and must not change the correction.
 
 ## Implementation and hardware status
 
-The daemon implements the placement-transfer artifact, report, endpoint,
-provisional correction, bounded rounds, and continuation of a rejected run.
+The daemon implements the placement-transfer artifact, report, calibration and
+validation endpoints, provisional correction, bounded rounds, and continuation
+of a rejected calibration run.
 The continuation accepts recomputed, compatible evidence from completed
 rounds and validated partial-round samples. This prevents a failed later
 sample from causing a second placement on an occupied target. Normal
@@ -37,13 +38,40 @@ directions, and maximum sample deviation was 0.116 mm. This exceeds the
 0.100 mm stability limit. No placement-transfer artifact was committed. The
 result does not support a second global offset adjustment.
 
-The remaining work is:
+The 2026-10-02 run showed that the earlier decision policy mixed transfer bias
+with final process capability. Its zero-correction R33, R36, and R38 baseline
+had a 0.033 mm robust offset, 0.068 mm maximum sample deviation, and 0.1003 mm
+p95 radial offset. The robust offset and spread passed, but the p95 missed its
+0.100 mm limit by 0.0003 mm. Version 1 therefore tested an unnecessary
+X-0.010/Y-0.032 mm correction. The corrected check had no common residual
+direction. No artifact was committed.
 
-1. determine whether the opposing residuals come from local target
-   registration, board geometry, or a spatial transfer term;
-2. repeat calibration with new unused targets after that cause is resolved;
-3. run separate validation placements that do not change the correction; and
-4. add the calibration controls and progress views to the web interface.
+Version 2 separates these decisions. Calibration qualifies a small systematic
+offset with bounded spread. It records p95 variation but does not try to remove
+that variation with a constant correction. A separate validation-only run uses
+new targets, applies the stored correction, requires the p95 limit, and cannot
+change calibration. The web interface starts both modes and opens the active
+model overlay for each sample. Deterministic CV remains an optional diagnostic.
+
+The 2026-10-02 N1 version 2 run measured a zero-correction baseline on R24,
+R22, and R1. Its robust physical offset was X+0.029/Y-0.174 mm, its p95 radial
+error was 0.226 mm, and its maximum sample deviation was 0.049 mm. The check
+round applied that provisional correction to R23, R21, and R20. The corrected
+radial errors were 0.079, 0.038, and 0.071 mm. The corrected p95 was 0.079 mm.
+
+The run did not commit the correction. Its robust check center was
+X+0.036/Y-0.038 mm, or 0.052 mm, against the 0.050 mm systematic limit. Its
+maximum sample deviation was 0.100084 mm against the 0.100 mm spread limit.
+The measurements did not have one common direction. This is a narrow formal
+gate failure, not evidence for another global offset change. Independent
+validation could not run because there is no current committed N1 transfer
+artifact.
+
+The same run exposed poor source-pick centering in several feeder pockets.
+Calibration pickup can use a bounded retry grid and a 0.200 mm seating move.
+The Y-0.750 mm retry now runs before Y-0.500 mm because the smaller move often
+made partial contact and stopped the pocket after moving the part. These retry
+and seating changes apply only to placement-transfer calibration.
 
 Release and seating height are also separate. The existing placement-process
 estimate controls those values. Placement-transfer calibration reports release
@@ -51,7 +79,7 @@ failures, but it does not tune Z.
 
 ## Existing components
 
-The guarded production placement path already supplies the required evidence:
+The production placement path already supplies the required evidence:
 
 - a live top-camera source measurement;
 - initial and final bottom-camera held-part measurements;
@@ -64,7 +92,7 @@ Legacy corrections remain in the nozzle height model. New qualified
 corrections are separate placement-transfer artifacts. Runtime placement adds
 the two terms. This avoids invalidating vacuum evidence when this step runs.
 
-The new step must call the guarded placement implementation. It must not copy
+The new step must call the production placement implementation. It must not copy
 the pickup, alignment, release, or inspection motion into a second executor.
 
 ## Coordinate contract
@@ -103,6 +131,9 @@ independent check placements ---- fails ----> one more bounded round or stop
    |
    v
 commit correction and qualification evidence
+   |
+   v
+new validation placements ---- fails ----> keep correction; report capability
 ```
 
 Use three baseline placements and three check placements by default. Allow a
@@ -189,10 +220,16 @@ profile must bound each candidate and the cumulative correction. Do not
 silently clamp an out-of-range result. A result outside the bound indicates a
 calibration or measurement fault.
 
-A check round passes only when its mean physical offset magnitude and its p95
-radial residual are within profile limits. Suggested initial limits are 0.05
-mm for the mean and 0.10 mm for p95. These limits must be profile data, not API
-input.
+A calibration round passes when its robust physical offset and maximum sample
+deviation are within profile limits. The p95 radial result is retained as a
+process-capability diagnostic. If the systematic offset is outside its limit,
+the runner can adjust only when the samples have a common direction and bounded
+spread.
+
+A validation-only round passes only when the robust physical offset, maximum
+sample deviation, and p95 radial residual are all within profile limits. The
+initial profile uses 0.05 mm for systematic offset and 0.10 mm for p95. These
+limits and the validation sample count are profile data, not API input.
 
 Rotation remains an acceptance measurement in version 1. Do not adjust nozzle
 rotation from symmetric resistor images.
@@ -256,11 +293,15 @@ Add this endpoint:
 
 ```text
 POST /api/v1/calibrations/{id}/placement-transfer-runs
+POST /api/v1/calibrations/{id}/placement-transfer-validation-runs
 ```
 
 The request supplies the control lease, job, nozzle, optional ordered target
 references, and the external safety confirmation. It does not supply
 correction values or acceptance limits.
+
+The validation endpoint requires a current per-nozzle placement-transfer
+artifact. It rejects continuation input and never writes a correction.
 
 The existing calibration-run endpoints expose progress and the final report.
 The calibration page must show:
@@ -270,7 +311,8 @@ The calibration page must show:
 - each placement and its evidence status;
 - baseline and check physical offset vectors;
 - the provisional and committed corrections;
-- intended and detected center overlays; and
+- the active intended and detected center overlay, with deterministic CV as a
+  separate diagnostic; and
 - the reason for a stop or rejection.
 
 The start confirmation must say that the operation consumes parts and board
@@ -282,11 +324,11 @@ isolation is reachable.
 
 1. Add pure summary and adjustment types in the domain crate. Test sign,
    spread, limits, convergence, and insufficient evidence.
-2. Add the internal provisional correction to guarded placement. Test that
+2. Add the internal provisional correction to production placement. Test that
    normal production requests cannot set it.
 3. Add the persistent placement-transfer run and artifact records. Test that
    an interrupted run does not change the snapshot.
-4. Add the calibration endpoint and reuse the guarded executor for each child
+4. Add the calibration endpoint and reuse the production executor for each child
    placement.
 5. Add the calibration-page controls, progress, and image overlays.
 6. Run a same-part, same-angle hardware test. Compare the committed result

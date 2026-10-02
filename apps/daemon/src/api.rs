@@ -22,17 +22,18 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    calculate_vacuum_classification_thresholds, classify_placement_outcome,
-    estimate_placement_process, lumen_calibration_artifacts, lumen_calibration_workflow,
-    summarize_placement_transfer_round, summarize_visual_homing_validation, ApproachSide,
-    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BoardInstance,
-    BoardRegistrationFiducialObservation, BoardRegistrationHypothesis, BoardRegistrationRun,
-    BoardSide, BoardSurfaceFiducialView, BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun,
-    BoardSurfaceParallaxObservation, BottomCameraMappingReport, CalibrationArtifactId,
-    CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus,
-    CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId,
-    CameraPixelFormat, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
-    CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
+    assess_placement_transfer_round, calculate_vacuum_classification_thresholds,
+    classify_placement_outcome, estimate_placement_process, lumen_calibration_artifacts,
+    lumen_calibration_workflow, summarize_placement_transfer_round,
+    summarize_visual_homing_validation, ApproachSide, AutomatedCalibrationConfig,
+    AutomatedCalibrationRun, BoardDesign, BoardInstance, BoardRegistrationFiducialObservation,
+    BoardRegistrationHypothesis, BoardRegistrationRun, BoardSide, BoardSurfaceFiducialView,
+    BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun, BoardSurfaceParallaxObservation,
+    BottomCameraMappingReport, CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck,
+    CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
+    CalibrationSnapshot, CalibrationStepId, CameraPixelFormat, CameraProfile,
+    CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
+    HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
     HeldPartAlignmentReport, HeldPartClass, HeldPartInspectionReport, HeldPartModelPrediction,
     HeldPartRotationCapture, HeldPartShadowReport, InspectionReport, InspectionStatus,
     InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
@@ -46,28 +47,28 @@ use velocitypnp_domain::{
     PlacementExecutionStageReport, PlacementOutcomeDisposition, PlacementOutcomeRecord,
     PlacementPickupAttemptReport, PlacementProcessEstimate, PlacementReleaseAttemptReport,
     PlacementTransferCalibrationReport, PlacementTransferRoundKind, PlacementTransferRoundReport,
-    PlacementTransferSample, PlacementVerificationClass, PlacementVerificationComparisonReport,
-    PlanarCameraCalibrationReport, PlanarCameraCalibrationSample, PlanarCameraModel,
-    PlanarXyDirectionResponseSurface, Pose, Residuals, SensorReading, SourceComponentClass,
-    SourceComponentModelPrediction, SourceComponentShadowReport, StripFeederInventoryLane,
-    StripFeederInventoryReport, StripFeederInventorySummary, StripFeederLiveHoldoutRun,
-    StripFeederPickupBenchmarkCycle, StripFeederPickupDisposition,
-    StripFeederPickupQualificationReport, StripFeederPickupQualificationRun,
-    StripFeederPocketObservation, StripFeederPocketOutcome, StripFeederPocketState,
-    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
-    StripFeederSourceCaptureRun, StripFeederSourceCaptureSample, StripFeederVisionReport,
-    StripPocketOccupancy, VacuumKnownPartValidationReport, VacuumKnownPartValidationSample,
-    VacuumProbeReport, VacuumProbeSample, VacuumSensorCharacterizationReport, VacuumSignalPolarity,
-    VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
-    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
-    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
-    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
-    WorkspaceHeightMapSummary, WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport,
-    WorkspaceObjectClass, WorkspaceParallaxSummary, WorkspaceRasterTransform,
-    WorkspaceRefinementCompositeSummary, WorkspaceRefinementQualityThresholds,
-    WorkspaceScanEstimate, WorkspaceScanMode, WorkspaceScanRegion, WorkspaceScanReport,
-    WorkspaceScanStatus, WorkspaceScanTile, WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary,
-    WorkspaceSurfaceModel,
+    PlacementTransferRunMode, PlacementTransferSample, PlacementVerificationClass,
+    PlacementVerificationComparisonReport, PlanarCameraCalibrationReport,
+    PlanarCameraCalibrationSample, PlanarCameraModel, PlanarXyDirectionResponseSurface, Pose,
+    Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
+    SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
+    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupBenchmarkCycle,
+    StripFeederPickupDisposition, StripFeederPickupQualificationReport,
+    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
+    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
+    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
+    StripFeederVisionReport, StripPocketOccupancy, VacuumKnownPartValidationReport,
+    VacuumKnownPartValidationSample, VacuumProbeReport, VacuumProbeSample,
+    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
+    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
+    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
+    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
+    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
+    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
+    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
+    WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
+    WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
 };
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
@@ -145,7 +146,7 @@ const MAXIMUM_EXPECTED_PART_DIMENSION_RATIO: f64 = 1.50;
 const MAXIMUM_ROTATED_RETAINED_PART_DIMENSION_RATIO: f64 = 2.0;
 const MINIMUM_RETAINED_PART_RECOVERY_SEATING_OFFSET_MM: f64 = -0.5;
 const RETAINED_PART_RECOVERY_ALGORITHM: &str = "retained_part_recovery.v3";
-const PLACEMENT_EXECUTION_ALGORITHM: &str = "production_single_placement.v12";
+const PLACEMENT_EXECUTION_ALGORITHM: &str = "production_single_placement.v13";
 const MINIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 2;
 const MAXIMUM_PICKUP_FEEDBACK_SAMPLE_COUNT: usize = 3;
 const MAXIMUM_PICKUP_FEEDBACK_SPREAD_MM: f64 = 0.20;
@@ -1312,6 +1313,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/calibrations/{id}/placement-transfer-runs",
             post(start_placement_transfer_run),
+        )
+        .route(
+            "/api/v1/calibrations/{id}/placement-transfer-validation-runs",
+            post(start_placement_transfer_validation_run),
         )
         .route(
             "/api/v1/calibrations/{id}/vacuum-probe",
@@ -9281,6 +9286,10 @@ struct PreparedStripFeederPickup {
     /// Additional, qualified transfer correction. Placement XY subtracts this
     /// value together with the nozzle height-model correction.
     placement_transfer_correction_mm: [f64; 2],
+    calibration_pickup_retry_offsets_mm: Vec<[f64; 2]>,
+    calibration_pickup_seating_depth_mm: f64,
+    expected_part_size_mm: Option<[f64; 2]>,
+    expected_part_size_source: &'static str,
     reference_contact: VacuumProbeReport,
     vacuum_characterization: VacuumSensorCharacterizationReport,
     top_camera_model: PlanarCameraModel,
@@ -9323,7 +9332,9 @@ fn source_component_class_rejection(
     confidence_gate_passed: bool,
     deterministic_occupancy: StripPocketOccupancy,
 ) -> Option<&'static str> {
-    if source_empty_observation_is_confirmed(
+    if confidence_gate_passed && class == SourceComponentClass::ComponentOnEdge {
+        Some("the source-component model found a component on edge")
+    } else if source_empty_observation_is_confirmed(
         confidence_gate_passed && class == SourceComponentClass::Empty,
         deterministic_occupancy,
     ) {
@@ -9331,6 +9342,49 @@ fn source_component_class_rejection(
     } else {
         None
     }
+}
+
+fn source_component_pose_can_control(
+    prediction: &SourceComponentModelPrediction,
+    prior_inventory_occupancy: Option<StripPocketOccupancy>,
+    deterministic_occupancy: StripPocketOccupancy,
+) -> bool {
+    if !prediction.confidence_gate_passed || !prediction.pose.valid {
+        return false;
+    }
+    match prediction.class {
+        SourceComponentClass::ComponentFlat => true,
+        SourceComponentClass::Empty => {
+            prior_inventory_occupancy == Some(StripPocketOccupancy::Occupied)
+                && deterministic_occupancy == StripPocketOccupancy::Occupied
+        }
+        SourceComponentClass::ComponentOnEdge => false,
+    }
+}
+
+fn learned_source_component_measurement(
+    prediction: &SourceComponentModelPrediction,
+    center_machine_mm: [f64; 2],
+    nominal_pocket_machine_mm: [f64; 2],
+    deterministic_center_machine_mm: [f64; 2],
+    maximum_offset_mm: f64,
+) -> Result<Option<([f64; 2], f64, f64)>, String> {
+    if !prediction.confidence_gate_passed || !prediction.pose.valid {
+        return Ok(None);
+    }
+    if !center_machine_mm.into_iter().all(f64::is_finite) {
+        return Err("learned source-component center is invalid".into());
+    }
+    let nominal_offset_mm = (center_machine_mm[0] - nominal_pocket_machine_mm[0])
+        .hypot(center_machine_mm[1] - nominal_pocket_machine_mm[1]);
+    if nominal_offset_mm > maximum_offset_mm {
+        return Err(format!(
+            "learned source-component center correction {nominal_offset_mm:.3} mm exceeds the configured bound"
+        ));
+    }
+    let cv_delta_mm = (center_machine_mm[0] - deterministic_center_machine_mm[0])
+        .hypot(center_machine_mm[1] - deterministic_center_machine_mm[1]);
+    Ok(Some((center_machine_mm, nominal_offset_mm, cv_delta_mm)))
 }
 
 async fn select_source_component_pick_center(
@@ -9411,9 +9465,6 @@ async fn select_source_component_pick_center(
         .as_ref()
         .unwrap()
         .maximum_part_offset_mm;
-    let learned_flat = prediction.class == SourceComponentClass::ComponentFlat;
-    let learned_control_ready =
-        learned_flat && prediction.confidence_gate_passed && prediction.pose.valid;
     let model_reported_empty =
         prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty;
     let confirmed_empty = source_empty_observation_is_confirmed(
@@ -9426,55 +9477,44 @@ async fn select_source_component_pick_center(
         analysis.report.deterministic_occupancy,
     )
     .map(str::to_owned);
+    let deterministic_center_result = source_component_deterministic_machine_center(
+        &analysis.crop,
+        analysis.report.deterministic_center_px,
+        nominal_pocket_machine_mm,
+        &prepared.registration,
+        deterministic_center_machine_mm,
+    );
+    let deterministic_center_error = deterministic_center_result.as_ref().err().cloned();
     let deterministic_component_center_machine_mm =
-        match source_component_deterministic_machine_center(
-            &analysis.crop,
-            analysis.report.deterministic_center_px,
-            nominal_pocket_machine_mm,
-            &prepared.registration,
-            deterministic_center_machine_mm,
-        ) {
-            Ok(center) => center,
-            Err(error) => {
-                rejection = Some(error);
-                deterministic_center_machine_mm
-            }
-        };
+        deterministic_center_result.unwrap_or(deterministic_center_machine_mm);
     let deterministic_nominal_offset_mm = (deterministic_component_center_machine_mm[0]
         - nominal_pocket_machine_mm[0])
         .hypot(deterministic_component_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-    if deterministic_nominal_offset_mm > maximum_offset_mm && rejection.is_none() {
-        rejection = Some(format!(
-            "CV source-component center correction {deterministic_nominal_offset_mm:.3} mm exceeds the configured bound"
-        ));
-    }
-    let learned_measurement = if learned_control_ready && rejection.is_none() {
+    let learned_measurement = if source_component_pose_can_control(
+        prediction,
+        analysis.report.prior_inventory_occupancy,
+        analysis.report.deterministic_occupancy,
+    ) && rejection.is_none()
+    {
         match source_component_crop_pixel_to_machine(
             &analysis.crop,
             prediction.pose.center_px,
             nominal_pocket_machine_mm,
             &prepared.registration,
         ) {
-            Ok(center_machine_mm) => {
-                let nominal_offset_mm = (center_machine_mm[0] - nominal_pocket_machine_mm[0])
-                    .hypot(center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-                let cv_delta_mm = (center_machine_mm[0]
-                    - deterministic_component_center_machine_mm[0])
-                    .hypot(center_machine_mm[1] - deterministic_component_center_machine_mm[1]);
-                if nominal_offset_mm > maximum_offset_mm {
-                    rejection = Some(format!(
-                        "learned source-component center correction {nominal_offset_mm:.3} mm exceeds the configured bound"
-                    ));
+            Ok(center_machine_mm) => match learned_source_component_measurement(
+                prediction,
+                center_machine_mm,
+                nominal_pocket_machine_mm,
+                deterministic_component_center_machine_mm,
+                maximum_offset_mm,
+            ) {
+                Ok(measurement) => measurement,
+                Err(error) => {
+                    rejection = Some(error);
                     None
-                } else if cv_delta_mm > maximum_offset_mm {
-                    rejection = Some(format!(
-                        "learned and CV source-component centers differ by {cv_delta_mm:.3} mm, beyond the configured bound"
-                    ));
-                    None
-                } else {
-                    Some((center_machine_mm, nominal_offset_mm, cv_delta_mm))
                 }
-            }
+            },
             Err(error) => {
                 rejection = Some(error.to_string());
                 None
@@ -9483,6 +9523,15 @@ async fn select_source_component_pick_center(
     } else {
         None
     };
+    if learned_measurement.is_none() && rejection.is_none() {
+        if let Some(error) = deterministic_center_error.as_ref() {
+            rejection = Some(error.clone());
+        } else if deterministic_nominal_offset_mm > maximum_offset_mm {
+            rejection = Some(format!(
+                "CV source-component center correction {deterministic_nominal_offset_mm:.3} mm exceeds the configured bound"
+            ));
+        }
+    }
 
     analysis.report.algorithm_version = SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM.into();
     analysis
@@ -9491,7 +9540,7 @@ async fn select_source_component_pick_center(
         .retain(|finding| !finding.contains("shadow evidence"));
     if model_reported_empty && !confirmed_empty {
         analysis.report.findings.push(
-            "the learned empty result lacks agreeing top-camera CV evidence; bounded CV controls pickup if it confirms a part"
+            "the learned empty result conflicts with occupied inventory and top-camera occupancy evidence; the bounded learned pose can still control pickup"
                 .into(),
         );
     }
@@ -9503,17 +9552,28 @@ async fn select_source_component_pick_center(
     )) = learned_measurement
     {
         analysis.report.control_authorized = true;
-        analysis.report.review_required = false;
         analysis.report.findings.push(format!(
             "the learned flat-component center is authorized for this pickup; it is {learned_nominal_offset_mm:.3} mm from nominal and {learned_cv_delta_mm:.3} mm from CV"
         ));
-        (
-            learned_center_machine_mm,
+        if deterministic_center_error.is_some()
+            || deterministic_nominal_offset_mm > maximum_offset_mm
+            || learned_cv_delta_mm > maximum_offset_mm
+        {
+            analysis.report.findings.push(
+                "deterministic CV center evidence remains review-only; the bounded learned center controls pickup"
+                    .into(),
+            );
+        }
+        let method_finding = if model_reported_empty {
+            "occupied inventory and top-camera occupancy evidence overrode the learned empty class; the bounded learned pose supplied the pickup center"
+                .into()
+        } else {
             format!(
                 "the source-component model supplied the pickup center with {:.1}% class confidence",
                 100.0 * prediction.class_confidence
-            ),
-        )
+            )
+        };
+        (learned_center_machine_mm, method_finding)
     } else if let Some(error) = rejection.as_deref() {
         analysis.report.control_authorized = false;
         analysis.report.review_required = true;
@@ -10103,6 +10163,7 @@ async fn start_strip_feeder_pickup_qualification(
     };
     let task_state = state.clone();
     let artifact_target = TransferArtifactTarget::PickupQualification(run.id);
+    let expected_part_size_mm = registration.surveyed_part_size_mm;
     let prepared = PreparedStripFeederPickup {
         run,
         registration,
@@ -10112,6 +10173,10 @@ async fn start_strip_feeder_pickup_qualification(
         height_model,
         height_model_has_working_plane_transfer,
         placement_transfer_correction_mm: [0.0, 0.0],
+        calibration_pickup_retry_offsets_mm: Vec::new(),
+        calibration_pickup_seating_depth_mm: 0.0,
+        expected_part_size_mm,
+        expected_part_size_source: "feeder survey",
         reference_contact,
         vacuum_characterization,
         top_camera_model,
@@ -11312,14 +11377,14 @@ async fn execute_physical_strip_feeder_pickup(
         .map_err(|error| error.to_string())?;
         apply_expected_held_part_size_gate(
             &mut initial_inspection.report,
-            prepared.registration.surveyed_part_size_mm,
-            "feeder survey",
+            prepared.expected_part_size_mm,
+            prepared.expected_part_size_source,
         );
         apply_registered_orientation_fallback(
             &mut initial_inspection.report,
             prepared.part_orientation,
             prepared.source_rotation_deg,
-            prepared.registration.surveyed_part_size_mm,
+            prepared.expected_part_size_mm,
             pickup_profile,
         );
         persist_transfer_rgb_artifact(
@@ -21674,7 +21739,7 @@ fn calibration_artifact_check_id(id: CalibrationArtifactId) -> String {
         .unwrap_or_else(|| "artifact_unknown".into())
 }
 
-const PLACEMENT_TRANSFER_ALGORITHM: &str = "placement_transfer.v1";
+const PLACEMENT_TRANSFER_ALGORITHM: &str = "placement_transfer.v2";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21719,6 +21784,14 @@ fn placement_target_centroid(steps: &[(u32, PlanStep)]) -> [f64; 2] {
     ]
 }
 
+fn placement_point_centroid(points: &[[f64; 2]]) -> [f64; 2] {
+    let count = points.len() as f64;
+    [
+        points.iter().map(|point| point[0]).sum::<f64>() / count,
+        points.iter().map(|point| point[1]).sum::<f64>() / count,
+    ]
+}
+
 fn balance_placement_transfer_targets(
     mut steps: Vec<(u32, PlanStep)>,
     samples_per_round: usize,
@@ -21760,6 +21833,24 @@ fn placement_transfer_summaries_match(
         && (left.maximum_sample_deviation_mm - right.maximum_sample_deviation_mm).abs() <= 1e-9
 }
 
+fn placement_transfer_continuation_profiles_match(
+    prior: &velocitypnp_domain::PlacementTransferCalibrationProfile,
+    active: &velocitypnp_domain::PlacementTransferCalibrationProfile,
+) -> bool {
+    let mut prior_offsets = prior.pickup_retry_offsets_mm.clone();
+    let mut active_offsets = active.pickup_retry_offsets_mm.clone();
+    let compare_offset = |left: &[f64; 2], right: &[f64; 2]| {
+        left[0]
+            .total_cmp(&right[0])
+            .then_with(|| left[1].total_cmp(&right[1]))
+    };
+    prior_offsets.sort_by(compare_offset);
+    active_offsets.sort_by(compare_offset);
+    let mut normalized = prior.clone();
+    normalized.pickup_retry_offsets_mm = active.pickup_retry_offsets_mm.clone();
+    prior_offsets == active_offsets && normalized == *active
+}
+
 fn validate_placement_transfer_continuation(
     run: &AutomatedCalibrationRun,
     calibration_id: Uuid,
@@ -21777,7 +21868,8 @@ fn validate_placement_transfer_continuation(
         .as_ref()
         .ok_or_else(|| "continuation run has no placement-transfer report".to_string())?;
     if transfer.algorithm_version != PLACEMENT_TRANSFER_ALGORITHM
-        || transfer.profile != *profile
+        || transfer.mode != PlacementTransferRunMode::Calibration
+        || !placement_transfer_continuation_profiles_match(&transfer.profile, profile)
         || transfer.nozzle_id != nozzle_id
         || transfer.passed
         || transfer.committed
@@ -21789,7 +21881,7 @@ fn validate_placement_transfer_continuation(
     {
         return Err("placement-transfer continuation evidence is stale or incompatible".into());
     }
-    if transfer.rounds.is_empty()
+    if (transfer.rounds.is_empty() && transfer.pending_round_samples.is_empty())
         || transfer.rounds.len() > profile.maximum_adjustment_rounds as usize
         || transfer.pending_round_samples.len() >= profile.samples_per_round as usize
     {
@@ -21809,6 +21901,7 @@ fn validate_placement_transfer_continuation(
             .map(|sample| sample.observed_part_offset_mm)
             .collect::<Vec<_>>();
         let recomputed_summary = summarize_placement_transfer_round(&measured);
+        let assessment = assess_placement_transfer_round(summary, profile, false);
         if round.round_index != index as u32
             || round.kind != expected_kind
             || round.passed
@@ -21817,8 +21910,7 @@ fn validate_placement_transfer_continuation(
             || recomputed_summary
                 .as_ref()
                 .is_none_or(|recomputed| !placement_transfer_summaries_match(recomputed, summary))
-            || !summary.common_direction
-            || summary.maximum_sample_deviation_mm > profile.maximum_sample_deviation_mm
+            || !assessment.correction_supported
             || !placement_transfer_offsets_match(round.applied_correction_mm, expected_correction)
         {
             return Err(
@@ -21961,9 +22053,44 @@ async fn start_placement_transfer_run(
     Path(calibration_id): Path<Uuid>,
     Json(body): Json<StartPlacementTransferRunRequest>,
 ) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    start_placement_transfer_operation(
+        state,
+        calibration_id,
+        body,
+        PlacementTransferRunMode::Calibration,
+    )
+    .await
+}
+
+async fn start_placement_transfer_validation_run(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+    Json(body): Json<StartPlacementTransferRunRequest>,
+) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    start_placement_transfer_operation(
+        state,
+        calibration_id,
+        body,
+        PlacementTransferRunMode::Validation,
+    )
+    .await
+}
+
+async fn start_placement_transfer_operation(
+    state: AppState,
+    calibration_id: Uuid,
+    body: StartPlacementTransferRunRequest,
+    mode: PlacementTransferRunMode,
+) -> ApiResult<(StatusCode, Json<StartCalibrationRunResponse>)> {
+    let validation_only = mode == PlacementTransferRunMode::Validation;
     if !body.confirmed_external_safety_checks || !body.confirmed_targets_empty {
         return Err(ApiError::bad_request(
-            "placement-transfer calibration requires confirmation that the selected targets are empty, the PCB and feeders are fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+            "placement-transfer operation requires confirmation that the selected targets are empty, the PCB and feeders are fixed, both nozzles are level, the travel envelope is clear, and power isolation is reachable",
+        ));
+    }
+    if validation_only && body.continuation_run_id.is_some() {
+        return Err(ApiError::bad_request(
+            "placement-transfer validation cannot continue or adjust a calibration run",
         ));
     }
     let profile = state
@@ -22007,11 +22134,18 @@ async fn start_placement_transfer_run(
         }
     }
     let transfer_artifact = CalibrationArtifactId::placement_transfer(&body.nozzle_id).unwrap();
-    let initial_correction_mm = if crate::calibration_artifacts::artifact_tree_is_current(
+    let transfer_is_current = crate::calibration_artifacts::artifact_tree_is_current(
         &state,
         &snapshot,
         transfer_artifact,
-    ) {
+    );
+    if validation_only && !transfer_is_current {
+        return Err(ApiError::bad_request(format!(
+            "placement-transfer validation requires current {} calibration evidence",
+            body.nozzle_id
+        )));
+    }
+    let initial_correction_mm = if transfer_is_current {
         calibrated_placement_transfer_correction(&state, &snapshot, &body.nozzle_id)?
     } else {
         [0.0, 0.0]
@@ -22043,12 +22177,12 @@ async fn start_placement_transfer_run(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if machine.simulated || machine.state != MachineState::Ready || !machine.homed {
         return Err(ApiError::bad_request(
-            "placement-transfer calibration requires a physical, ready, homed machine",
+            "placement-transfer operation requires a physical, ready, homed machine",
         ));
     }
     if machine.calibration_revision != Some(calibration_id) {
         return Err(ApiError::bad_request(format!(
-            "placement-transfer calibration requires fine XYZ homing with calibration {calibration_id}"
+            "placement-transfer operation requires fine XYZ homing with calibration {calibration_id}"
         )));
     }
 
@@ -22127,14 +22261,20 @@ async fn start_placement_transfer_run(
     let pending_sample_count = continuation
         .as_ref()
         .map_or(0, |report| report.pending_round_samples.len());
-    let minimum_target_count = if continuation.is_some() {
+    let minimum_target_count = if validation_only {
+        profile.validation_samples as usize
+    } else if continuation.is_some() {
         profile.samples_per_round as usize - pending_sample_count
     } else {
         profile.minimum_target_count() as usize
     };
-    let maximum_target_count = profile.samples_per_round as usize
-        * (profile.maximum_adjustment_rounds as usize + 1 - completed_round_count)
-        - pending_sample_count;
+    let maximum_target_count = if validation_only {
+        profile.validation_samples as usize
+    } else {
+        profile.samples_per_round as usize
+            * (profile.maximum_adjustment_rounds as usize + 1 - completed_round_count)
+            - pending_sample_count
+    };
     let mut selected = if body.placement_references.is_empty() {
         let mut best = Vec::new();
         for (_, anchor) in &indexed {
@@ -22176,7 +22316,7 @@ async fn start_placement_transfer_run(
     };
     if selected.len() < minimum_target_count {
         return Err(ApiError::bad_request(format!(
-            "placement-transfer calibration needs at least {minimum_target_count} compatible unused targets to measure and verify a correction; only {} were selected",
+            "placement-transfer operation needs at least {minimum_target_count} compatible unused targets; only {} were selected",
             selected.len(),
         )));
     }
@@ -22191,53 +22331,88 @@ async fn start_placement_transfer_run(
             "placement-transfer targets must use one board, part, feeder, nozzle, rotation, surface, and release schedule",
         ));
     }
-    if body.placement_references.is_empty() {
+    if body.placement_references.is_empty() && !validation_only {
         selected = balance_placement_transfer_targets(selected, profile.samples_per_round as usize);
     }
-    let baseline_centroid = continuation.as_ref().map_or_else(
-        || placement_target_centroid(&selected[..profile.samples_per_round as usize]),
-        |report| {
-            let samples = &report.rounds[0].samples;
-            let count = samples.len() as f64;
-            [
-                samples
+    if !validation_only {
+        let samples_per_round = profile.samples_per_round as usize;
+        let mut next_selected = 0;
+        let mut check_centroids = Vec::new();
+        let baseline_centroid = match continuation.as_ref() {
+            Some(report) if !report.rounds.is_empty() => {
+                let points = report.rounds[0]
+                    .samples
                     .iter()
-                    .map(|sample| sample.target_machine_mm[0])
-                    .sum::<f64>()
-                    / count,
-                samples
+                    .map(|sample| sample.target_machine_mm)
+                    .collect::<Vec<_>>();
+                placement_point_centroid(&points)
+            }
+            Some(report) => {
+                let needed = samples_per_round - report.pending_round_samples.len();
+                let mut points = report
+                    .pending_round_samples
                     .iter()
-                    .map(|sample| sample.target_machine_mm[1])
-                    .sum::<f64>()
-                    / count,
-            ]
-        },
-    );
-    let selected_rounds_to_skip = usize::from(continuation.is_none());
-    for round in selected
-        .chunks(profile.samples_per_round as usize)
-        .skip(selected_rounds_to_skip)
-    {
-        let centroid = placement_target_centroid(round);
-        if (centroid[0] - baseline_centroid[0]).hypot(centroid[1] - baseline_centroid[1])
-            > profile.maximum_round_centroid_separation_mm
+                    .map(|sample| sample.target_machine_mm)
+                    .collect::<Vec<_>>();
+                points.extend(
+                    selected[..needed]
+                        .iter()
+                        .map(|(_, step)| [step.board_place.x_mm, step.board_place.y_mm]),
+                );
+                next_selected = needed;
+                placement_point_centroid(&points)
+            }
+            None => {
+                next_selected = samples_per_round;
+                placement_target_centroid(&selected[..samples_per_round])
+            }
+        };
+        if let Some(report) = continuation
+            .as_ref()
+            .filter(|report| !report.rounds.is_empty() && !report.pending_round_samples.is_empty())
         {
-            return Err(ApiError::bad_request(
-                "placement-transfer round centroids exceed the profile separation limit",
-            ));
+            let needed = samples_per_round - report.pending_round_samples.len();
+            let mut points = report
+                .pending_round_samples
+                .iter()
+                .map(|sample| sample.target_machine_mm)
+                .collect::<Vec<_>>();
+            points.extend(
+                selected[..needed]
+                    .iter()
+                    .map(|(_, step)| [step.board_place.x_mm, step.board_place.y_mm]),
+            );
+            check_centroids.push(placement_point_centroid(&points));
+            next_selected = needed;
+        }
+        check_centroids.extend(
+            selected[next_selected..]
+                .chunks(samples_per_round)
+                .map(placement_target_centroid),
+        );
+        for centroid in check_centroids {
+            if (centroid[0] - baseline_centroid[0]).hypot(centroid[1] - baseline_centroid[1])
+                > profile.maximum_round_centroid_separation_mm
+            {
+                return Err(ApiError::bad_request(
+                    "placement-transfer round centroids exceed the profile separation limit",
+                ));
+            }
         }
     }
     let mut feeder_registration_id = None;
     for (_, step) in &selected {
         validate_guarded_board_surface(&state, step, calibration_id)?;
         validate_guarded_board_target_unused(&state, step)?;
+        let preferred_registration_id = continuation
+            .as_ref()
+            .map(|report| report.feeder_registration_id)
+            .or(feeder_registration_id);
         let registration = validate_production_strip_feeder_with_preference(
             &state,
             step,
             calibration_id,
-            continuation
-                .as_ref()
-                .map(|report| report.feeder_registration_id),
+            preferred_registration_id,
         )?;
         if feeder_registration_id.is_some_and(|registration_id| registration_id != registration.id)
         {
@@ -22296,8 +22471,13 @@ async fn start_placement_transfer_run(
         format!(
             "preflight reserved no resources; the run can consume at most {selected_target_count} parts and targets"
         ),
-        "this calibration uses production pickup and placement but does not promote or qualify the feeder"
-            .into(),
+        if validation_only {
+            "this validation uses production pickup and placement and cannot change the stored correction"
+                .into()
+        } else {
+            "this calibration uses production pickup and placement but does not promote or qualify the feeder"
+                .into()
+        },
     ]);
     if let Some(run_id) = body.continuation_run_id {
         findings.push(format!(
@@ -22325,6 +22505,7 @@ async fn start_placement_transfer_run(
     );
     let report = PlacementTransferCalibrationReport {
         algorithm_version: PLACEMENT_TRANSFER_ALGORITHM.into(),
+        mode,
         profile: profile.clone(),
         job_id: body.job_id,
         board_instance_id: first.board_instance_id,
@@ -22351,7 +22532,11 @@ async fn start_placement_transfer_run(
         artifact_fingerprint: None,
         findings,
     };
-    let operation = Operation::pending("calibration.placement_transfer");
+    let operation = Operation::pending(if validation_only {
+        "calibration.placement_transfer_validation"
+    } else {
+        "calibration.placement_transfer"
+    });
     let now = Utc::now();
     let run = AutomatedCalibrationRun {
         id: Uuid::new_v4(),
@@ -22373,9 +22558,23 @@ async fn start_placement_transfer_run(
         },
         checks: [
             ("preflight", "Validate targets and feeder inventory"),
-            ("measure", "Measure guarded placement offsets"),
-            ("verify", "Verify the provisional correction"),
-            ("commit", "Commit qualified transfer evidence"),
+            ("measure", "Measure calibration placement offsets"),
+            (
+                "verify",
+                if validation_only {
+                    "Validate independent placement capability"
+                } else {
+                    "Verify the provisional correction"
+                },
+            ),
+            (
+                "commit",
+                if validation_only {
+                    "Retain the stored transfer correction"
+                } else {
+                    "Commit qualified transfer evidence"
+                },
+            ),
         ]
         .into_iter()
         .map(|(id, title)| CalibrationCheck {
@@ -22571,12 +22770,14 @@ fn placement_transfer_sample(
         report.top_inspection_comparison.as_ref(),
         profile,
     )?;
-    if !inspection.detected
+    if !inspection.passed
+        || !inspection.detected
         || !inspection.target_registered
         || !inspection.confidence.is_finite()
-        || inspection.confidence < profile.minimum_deterministic_confidence
+        || (inspection.algorithm_version == "placed_package_geometry.v3"
+            && inspection.confidence < profile.minimum_deterministic_confidence)
     {
-        return Err("deterministic top vision did not detect one registered package".into());
+        return Err("active top vision did not detect one registered package".into());
     }
     if inspection
         .placement_condition
@@ -22615,6 +22816,8 @@ fn placement_transfer_sample(
         rotation_error_deg,
         held_centering_residual_mm,
         model_cv_center_delta_mm,
+        inspection_artifact_name: inspection.artifact_name.clone(),
+        inspection_algorithm_version: inspection.algorithm_version.clone(),
     })
 }
 
@@ -22624,28 +22827,27 @@ fn placement_transfer_top_inspection<'a>(
     profile: &velocitypnp_domain::PlacementTransferCalibrationProfile,
 ) -> Result<(&'a PlacedPartInspectionReport, Option<f64>), String> {
     let active = active.ok_or_else(|| "placement has no top-camera inspection".to_string())?;
+    if !active.passed
+        || !active.detected
+        || !active.target_registered
+        || !active.confidence.is_finite()
+        || (active.algorithm_version == "placed_package_geometry.v3"
+            && active.confidence < profile.minimum_deterministic_confidence)
+    {
+        return Err("the active placement result is not a usable measurement".into());
+    }
     let Some(comparison) = comparison else {
         return Ok((active, None));
     };
-    let delta = comparison
-        .center_delta_mm
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| "learned and deterministic centers cannot be compared".to_string())?;
-    if !comparison.control_authorized
-        || !comparison.occupancy_agreement
-        || comparison.prediction.class != PlacementVerificationClass::ComponentFlat
-        || !comparison.prediction.confidence_gate_passed
+    if comparison.control_authorized
+        && (!comparison.occupancy_agreement
+            || comparison.prediction.class != PlacementVerificationClass::ComponentFlat
+            || !comparison.prediction.confidence_gate_passed)
     {
         return Err("the promoted placement result did not pass its control gates".into());
     }
-    if !active.detected
-        || !active.target_registered
-        || !active.confidence.is_finite()
-        || active.confidence < profile.minimum_deterministic_confidence
-    {
-        return Err("the promoted placement result is not a usable measurement".into());
-    }
-    Ok((active, Some(delta)))
+    let diagnostic_delta_mm = comparison.center_delta_mm.filter(|value| value.is_finite());
+    Ok((active, diagnostic_delta_mm))
 }
 
 fn commit_placement_transfer_report(
@@ -22654,6 +22856,9 @@ fn commit_placement_transfer_report(
     calibration_id: Uuid,
     report: &PlacementTransferCalibrationReport,
 ) -> Result<String, String> {
+    if report.mode != PlacementTransferRunMode::Calibration {
+        return Err("validation-only evidence cannot change placement calibration".into());
+    }
     let mut snapshot = state
         .store
         .get_calibration(calibration_id)
@@ -22761,14 +22966,22 @@ async fn execute_placement_transfer_run(
         CalibrationRunPhase::PlacementTransferCalibration,
     )?;
     let profile = transfer.profile.clone();
+    let validation_only = transfer.mode == PlacementTransferRunMode::Validation;
     let samples_per_round = profile.samples_per_round as usize;
+    let required_samples = if validation_only {
+        profile.validation_samples as usize
+    } else {
+        samples_per_round
+    };
     let mut round_index = transfer.rounds.len();
     let mut candidate = transfer.final_correction_mm;
     let mut targets = targets.into_iter();
     let mut first_round = true;
 
     loop {
-        let kind = if round_index == 0 {
+        let kind = if validation_only {
+            PlacementTransferRoundKind::Validation
+        } else if round_index == 0 {
             PlacementTransferRoundKind::Baseline
         } else {
             PlacementTransferRoundKind::Check
@@ -22777,9 +22990,9 @@ async fn execute_placement_transfer_run(
             first_round = false;
             std::mem::take(&mut transfer.pending_round_samples)
         } else {
-            Vec::with_capacity(samples_per_round)
+            Vec::with_capacity(required_samples)
         };
-        while samples.len() < samples_per_round {
+        while samples.len() < required_samples {
             let Some((step_index, step)) = targets.next() else {
                 transfer.pending_round_samples = samples;
                 run.placement_transfer_report = Some(transfer);
@@ -22863,11 +23076,11 @@ async fn execute_placement_transfer_run(
                 &mut run,
                 "measure",
                 CalibrationCheckStatus::Pending,
-                "Collecting guarded placement measurements",
+                "Collecting calibration placement measurements",
                 json!({
                     "round": round_index,
                     "completed_samples": samples.len(),
-                    "required_samples": samples_per_round,
+                    "required_samples": required_samples,
                 }),
             );
             run.placement_transfer_report = Some(transfer.clone());
@@ -22892,11 +23105,20 @@ async fn execute_placement_transfer_run(
                 );
             }
         };
-        let passed = summary.robust_observed_part_offset_magnitude_mm
-            <= profile.mean_part_offset_limit_mm
-            && summary.p95_radial_part_offset_mm <= profile.p95_radial_limit_mm;
-        let stable = summary.maximum_sample_deviation_mm <= profile.maximum_sample_deviation_mm
-            && (passed || summary.common_direction);
+        let assessment = assess_placement_transfer_round(&summary, &profile, validation_only);
+        let passed = assessment.qualified;
+        let mut round_findings = vec![format!(
+            "physical part offset center X{:+.3} Y{:+.3} mm; p95 radial {:.3} mm",
+            summary.robust_observed_part_offset_mm[0],
+            summary.robust_observed_part_offset_mm[1],
+            summary.p95_radial_part_offset_mm,
+        )];
+        if !assessment.process_variation_passed {
+            round_findings.push(format!(
+                "placement p95 {:.3} mm exceeds the {:.3} mm capability limit",
+                summary.p95_radial_part_offset_mm, profile.p95_radial_limit_mm,
+            ));
+        }
         let round = PlacementTransferRoundReport {
             round_index: round_index as u32,
             kind,
@@ -22904,12 +23126,7 @@ async fn execute_placement_transfer_run(
             samples,
             summary: summary.clone(),
             passed,
-            findings: vec![format!(
-                "physical part offset center X{:+.3} Y{:+.3} mm; p95 radial {:.3} mm",
-                summary.robust_observed_part_offset_mm[0],
-                summary.robust_observed_part_offset_mm[1],
-                summary.p95_radial_part_offset_mm,
-            )],
+            findings: round_findings,
         };
         transfer.rounds.push(round);
         transfer.final_correction_mm = candidate;
@@ -22923,22 +23140,41 @@ async fn execute_placement_transfer_run(
             },
             if passed {
                 CalibrationCheckStatus::Passed
-            } else if stable {
+            } else if assessment.correction_supported {
                 CalibrationCheckStatus::Pending
             } else {
                 CalibrationCheckStatus::Failed
             },
             if passed {
-                "Placement offsets meet the profile limits"
-            } else if stable {
+                if validation_only {
+                    "Independent placement capability meets the profile limits"
+                } else if assessment.process_variation_passed {
+                    "Systematic placement offset and process variation meet the profile limits"
+                } else {
+                    "Systematic placement offset is qualified; process variation remains a validation result"
+                }
+            } else if assessment.correction_supported {
                 "Placement offsets are stable and require a bounded correction"
+            } else if validation_only {
+                "Independent placement capability does not meet the profile limits"
             } else {
                 "Placement offsets are not stable enough to calculate a correction"
             },
             serde_json::to_value(&summary).unwrap_or(Value::Null),
         );
         persist_calibration_run(&state, &mut run)?;
-        if !stable {
+        if validation_only && !passed {
+            transfer.findings.push(
+                "independent validation did not pass; the stored correction was not changed".into(),
+            );
+            run.placement_transfer_report = Some(transfer);
+            return reject_calibration_run(
+                &state,
+                &mut run,
+                "independent placement capability did not meet the profile limits".into(),
+            );
+        }
+        if !passed && !assessment.correction_supported {
             transfer.findings.push(
                 "round spread or direction consistency failed; no correction was committed".into(),
             );
@@ -22952,6 +23188,34 @@ async fn execute_placement_transfer_run(
         if passed {
             transfer.final_correction_mm = candidate;
             transfer.passed = true;
+            if validation_only {
+                transfer.findings.push(
+                    "independent validation passed; the stored correction was not changed".into(),
+                );
+                let nozzle_id = transfer.nozzle_id.clone();
+                run.placement_transfer_report = Some(transfer);
+                update_run_check(
+                    &mut run,
+                    "verify",
+                    CalibrationCheckStatus::Passed,
+                    "Independent placement capability meets the profile limits",
+                    serde_json::to_value(&summary).unwrap_or(Value::Null),
+                );
+                update_run_check(
+                    &mut run,
+                    "commit",
+                    CalibrationCheckStatus::Passed,
+                    "Retained the qualified placement-transfer correction unchanged",
+                    Value::Null,
+                );
+                run.status = CalibrationRunStatus::Succeeded;
+                run.phase = CalibrationRunPhase::Complete;
+                run.failure = None;
+                persist_calibration_run(&state, &mut run)?;
+                return Ok(Some(format!(
+                    "Placement-transfer validation passed for {nozzle_id}"
+                )));
+            }
             let fingerprint = match commit_placement_transfer_report(
                 &state,
                 run.id,
@@ -30372,6 +30636,10 @@ fn prepare_retained_part_physical_context(
         height_model,
         height_model_has_working_plane_transfer,
         placement_transfer_correction_mm,
+        calibration_pickup_retry_offsets_mm: Vec::new(),
+        calibration_pickup_seating_depth_mm: 0.0,
+        expected_part_size_mm: Some([step.body_width_mm, step.body_length_mm]),
+        expected_part_size_source: "part definition",
         reference_contact,
         vacuum_characterization,
         top_camera_model,
@@ -30805,6 +31073,26 @@ fn prepare_physical_placement_pickup(
         .ok_or_else(|| ApiError::bad_request("active profile does not define visual homing"))?;
     let head_reference = calibrated_head_reference(&snapshot, visual.pixel_error_to_machine_mm)?;
     let height_model = calibrated_nozzle_height_model(&snapshot, &step.nozzle_id)?;
+    let calibration_pickup_retry_offsets_mm =
+        if provisional_placement_transfer_correction_mm.is_some() {
+            state
+                .profile
+                .placement_transfer_calibration
+                .as_ref()
+                .map_or_else(Vec::new, |profile| profile.pickup_retry_offsets_mm.clone())
+        } else {
+            Vec::new()
+        };
+    let calibration_pickup_seating_depth_mm =
+        if provisional_placement_transfer_correction_mm.is_some() {
+            state
+                .profile
+                .placement_transfer_calibration
+                .as_ref()
+                .map_or(0.0, |profile| profile.pickup_seating_depth_mm)
+        } else {
+            0.0
+        };
     let placement_transfer_correction_mm = match provisional_placement_transfer_correction_mm {
         Some(correction) => correction,
         None => calibrated_placement_transfer_correction(state, &snapshot, &step.nozzle_id)?,
@@ -30896,6 +31184,10 @@ fn prepare_physical_placement_pickup(
         height_model,
         height_model_has_working_plane_transfer,
         placement_transfer_correction_mm,
+        calibration_pickup_retry_offsets_mm,
+        calibration_pickup_seating_depth_mm,
+        expected_part_size_mm: Some([step.body_width_mm, step.body_length_mm]),
+        expected_part_size_source: "part definition",
         reference_contact,
         vacuum_characterization,
         top_camera_model,
@@ -31458,14 +31750,14 @@ async fn execute_physical_retained_part_recovery(
     .map_err(|error| error.to_string())?;
     apply_expected_held_part_size_gate(
         &mut initial.report,
-        prepared.registration.surveyed_part_size_mm,
-        "source feeder survey",
+        prepared.expected_part_size_mm,
+        prepared.expected_part_size_source,
     );
     apply_registered_orientation_fallback(
         &mut initial.report,
         prepared.part_orientation,
         prepared.source_rotation_deg,
-        prepared.registration.surveyed_part_size_mm,
+        prepared.expected_part_size_mm,
         pickup,
     );
     persist_placement_rgb_artifact(
@@ -31969,9 +32261,9 @@ async fn execute_guarded_placement_task(
                 stage: PlacementExecutionStage::Complete,
                 passed: true,
                 message: if physical.is_some() {
-                    "one guarded physical placement completed".into()
+                    "one production physical placement completed".into()
                 } else {
-                    "one guarded simulated placement completed".into()
+                    "one production simulated placement completed".into()
                 },
             });
             run.status = OperationStatus::Succeeded;
@@ -33059,14 +33351,14 @@ async fn release_part_at_board_and_verify(
         if attempt_index + 1 < release_offsets.len() {
             apply_expected_held_part_size_gate(
                 &mut inspection.report,
-                prepared.registration.surveyed_part_size_mm,
-                "feeder survey",
+                prepared.expected_part_size_mm,
+                prepared.expected_part_size_source,
             );
             apply_registered_orientation_fallback(
                 &mut inspection.report,
                 prepared.part_orientation,
                 step.board_place.rotation_deg,
-                prepared.registration.surveyed_part_size_mm,
+                prepared.expected_part_size_mm,
                 pickup,
             );
             let controller_angle_deg = state
@@ -33477,6 +33769,17 @@ async fn acquire_physical_placement_part(
             correction[0], correction[1],
         ));
     }
+    for offset in &prepared.calibration_pickup_retry_offsets_mm {
+        if !center_corrections.contains(offset) {
+            center_corrections.push(*offset);
+        }
+    }
+    if !prepared.calibration_pickup_retry_offsets_mm.is_empty() {
+        report.findings.push(format!(
+            "prepared {} calibration-only pickup search offsets after the vision center",
+            prepared.calibration_pickup_retry_offsets_mm.len(),
+        ));
+    }
     report.stages.push(PlacementExecutionStageReport {
         stage: PlacementExecutionStage::PickApproach,
         passed: true,
@@ -33583,6 +33886,31 @@ async fn acquire_physical_placement_part(
                 )
                 .await);
             }
+            if prepared.calibration_pickup_seating_depth_mm > 0.0 {
+                let seated_nozzle_z_mm = (contact.nozzle_z_mm
+                    - prepared.calibration_pickup_seating_depth_mm)
+                    .max(search.end_nozzle_z_mm);
+                if seated_nozzle_z_mm < contact.nozzle_z_mm - f64::EPSILON {
+                    let seated_controller_z_mm = z_kinematics
+                        .controller_z(nozzle_id, seated_nozzle_z_mm)
+                        .ok_or_else(|| {
+                            "calibration pickup seating depth is outside Z bounds".to_string()
+                        })?;
+                    move_vertical_at_current_xy(
+                        state,
+                        prepared.lease_id,
+                        seated_controller_z_mm,
+                        vacuum.z_feed_mm_per_min,
+                    )
+                    .await?;
+                    tokio::time::sleep(Duration::from_millis(vacuum.vacuum_settle_ms)).await;
+                    report.findings.push(format!(
+                        "calibration pickup seated {:.3} mm below the first vacuum transition",
+                        contact.nozzle_z_mm - seated_nozzle_z_mm,
+                    ));
+                    persist_placement_progress(state, run, report)?;
+                }
+            }
             acquired_probe = Some((
                 pickup_head,
                 level_target,
@@ -33606,7 +33934,7 @@ async fn acquire_physical_placement_part(
                 .await
                 .map_err(|error| error.to_string())?;
             report.findings.push(format!(
-                "pickup-center attempt {} found no vacuum transition; continuing to the learned correction",
+                "pickup-center attempt {} found no vacuum transition; continuing to the next bounded correction",
                 attempt_index + 1,
             ));
             persist_placement_progress(state, run, report)?;
@@ -33686,14 +34014,14 @@ async fn acquire_physical_placement_part(
         .map_err(|error| error.to_string())?;
         apply_expected_held_part_size_gate(
             &mut initial.report,
-            prepared.registration.surveyed_part_size_mm,
-            "feeder survey",
+            prepared.expected_part_size_mm,
+            prepared.expected_part_size_source,
         );
         apply_registered_orientation_fallback(
             &mut initial.report,
             prepared.part_orientation,
             prepared.source_rotation_deg,
-            prepared.registration.surveyed_part_size_mm,
+            prepared.expected_part_size_mm,
             pickup,
         );
         persist_transfer_rgb_artifact(
@@ -35253,6 +35581,41 @@ mod tests {
     }
 
     #[test]
+    fn placement_transfer_keeps_active_cv_when_model_needs_review() {
+        let mut prediction = placement_prediction(PlacementVerificationClass::ComponentFlat);
+        prediction.class_confidence = 0.595;
+        prediction.class_margin = 0.191;
+        prediction.confidence_gate_passed = false;
+        let result = build_placement_verification_artifacts(
+            placement_crop(),
+            &placed_part_artifacts(true),
+            prediction,
+            0.8,
+            1.6,
+            0.0,
+            0.4,
+            PartOrientation::AxisSymmetric,
+        )
+        .unwrap();
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let transfer = profile.placement_transfer_calibration.unwrap();
+
+        let (inspection, center_delta_mm) = placement_transfer_top_inspection(
+            Some(&result.active),
+            Some(&result.comparison),
+            &transfer,
+        )
+        .unwrap();
+
+        assert!(!result.comparison.control_authorized);
+        assert!(result.comparison.review_required);
+        assert_eq!(inspection.algorithm_version, "placed_package_geometry.v3");
+        assert!(inspection.passed);
+        assert!(center_delta_mm.is_some_and(|delta| delta.is_finite()));
+    }
+
+    #[test]
     fn placement_transfer_uses_promoted_pose_when_cv_center_diverges() {
         let mut result = build_placement_verification_artifacts(
             placement_crop(),
@@ -35270,6 +35633,7 @@ mod tests {
         let profile: MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let transfer = profile.placement_transfer_calibration.unwrap();
+        result.active.confidence = transfer.minimum_deterministic_confidence - 0.001;
         result.comparison.center_delta_mm = Some(transfer.maximum_model_cv_center_delta_mm + 0.15);
 
         let (inspection, center_delta_mm) = placement_transfer_top_inspection(
@@ -35309,6 +35673,8 @@ mod tests {
                 rotation_error_deg: 0.1,
                 held_centering_residual_mm: 0.02,
                 model_cv_center_delta_mm: Some(0.01),
+                inspection_artifact_name: BOARD_PLACEMENT_MODEL_INSPECTION_ARTIFACT.into(),
+                inspection_algorithm_version: PLACEMENT_VERIFICATION_CONTROL_ALGORITHM.into(),
             })
             .collect();
         let mut run = test_calibration_run(Uuid::new_v4());
@@ -35316,6 +35682,7 @@ mod tests {
         run.status = CalibrationRunStatus::Rejected;
         run.placement_transfer_report = Some(PlacementTransferCalibrationReport {
             algorithm_version: PLACEMENT_TRANSFER_ALGORITHM.into(),
+            mode: PlacementTransferRunMode::Calibration,
             profile: profile.clone(),
             job_id: Uuid::new_v4(),
             board_instance_id: Uuid::new_v4(),
@@ -35352,6 +35719,17 @@ mod tests {
         )
         .is_ok());
 
+        let mut reordered_profile = profile.clone();
+        reordered_profile.pickup_retry_offsets_mm.swap(0, 1);
+        assert!(validate_placement_transfer_continuation(
+            &run,
+            calibration_id,
+            nozzle_id,
+            &reordered_profile,
+            [0.0, 0.0],
+        )
+        .is_ok());
+
         run.placement_transfer_report
             .as_mut()
             .unwrap()
@@ -35364,6 +35742,20 @@ mod tests {
             [0.0, 0.0],
         )
         .is_err());
+
+        let transfer = run.placement_transfer_report.as_mut().unwrap();
+        let pending_sample = transfer.rounds[0].samples[0].clone();
+        transfer.rounds.clear();
+        transfer.pending_round_samples = vec![pending_sample];
+        transfer.final_correction_mm = [0.0, 0.0];
+        assert!(validate_placement_transfer_continuation(
+            &run,
+            calibration_id,
+            nozzle_id,
+            &profile,
+            [0.0, 0.0],
+        )
+        .is_ok());
     }
 
     #[test]
@@ -35406,6 +35798,18 @@ mod tests {
         apply_expected_held_part_size_gate(&mut report, Some([1.6989, 0.8997]), "feeder survey");
 
         assert!(report.passed);
+    }
+
+    #[test]
+    fn held_part_size_gate_prefers_authoritative_0603_dimensions() {
+        let mut authoritative = held_part_report(0.9831, 1.8534);
+        let mut bad_survey = authoritative.clone();
+
+        apply_expected_held_part_size_gate(&mut authoritative, Some([0.8, 1.6]), "part definition");
+        apply_expected_held_part_size_gate(&mut bad_survey, Some([1.599, 2.196]), "feeder survey");
+
+        assert!(authoritative.passed);
+        assert!(!bad_survey.passed);
     }
 
     #[test]
@@ -36287,11 +36691,22 @@ mod tests {
             "placement feeder has no current live pocket position"
         );
 
+        let mut first_step = step.clone();
+        first_step.feeder_pick.x_mm = 10.0;
+        let selected = validate_production_strip_feeder_with_preference(
+            &state,
+            &first_step,
+            registration.calibration_id,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.id, registration.id);
+
         let accepted = validate_production_strip_feeder_with_preference(
             &state,
             &step,
             registration.calibration_id,
-            Some(registration.id),
+            Some(selected.id),
         )
         .unwrap();
         assert_eq!(accepted.id, registration.id);
@@ -37582,6 +37997,77 @@ mod tests {
     }
 
     #[test]
+    fn source_model_center_controls_when_cv_center_is_invalid() {
+        let prediction = SourceComponentModelPrediction {
+            contract_version: "velocitypnp.source-component-pose.v2".into(),
+            model_artifact_sha256: "0".repeat(64),
+            runtime: "fixture".into(),
+            class: SourceComponentClass::ComponentFlat,
+            probabilities: velocitypnp_domain::SourceComponentClassProbabilities {
+                empty: 0.0006,
+                component_flat: 0.9993,
+                component_on_edge: 0.0001,
+            },
+            class_confidence: 0.9993,
+            class_margin: 0.9987,
+            confidence_gate_passed: true,
+            pose: velocitypnp_domain::SourceComponentPosePrediction {
+                center_px: [168.0, 144.1],
+                size_px: [42.1, 21.2],
+                rotation_deg_mod_180: 0.1,
+                outline_px: [
+                    [147.0, 133.5],
+                    [189.1, 133.5],
+                    [189.1, 154.7],
+                    [147.0, 154.7],
+                ],
+                valid: true,
+            },
+            findings: Vec::new(),
+        };
+        let nominal = [152.5, 140.5];
+        let learned = [152.51, 140.49];
+        let invalid_cv = [155.284, 140.5];
+
+        let measurement =
+            learned_source_component_measurement(&prediction, learned, nominal, invalid_cv, 0.4)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(measurement.0, learned);
+        assert!(measurement.1 < 0.02);
+        assert!(measurement.2 > 2.7);
+        assert!(learned_source_component_measurement(
+            &prediction,
+            [153.0, 140.5],
+            nominal,
+            invalid_cv,
+            0.4,
+        )
+        .is_err());
+
+        let empty_prediction = SourceComponentModelPrediction {
+            class: SourceComponentClass::Empty,
+            ..prediction.clone()
+        };
+        assert!(source_component_pose_can_control(
+            &empty_prediction,
+            Some(StripPocketOccupancy::Occupied),
+            StripPocketOccupancy::Occupied,
+        ));
+        assert!(!source_component_pose_can_control(
+            &empty_prediction,
+            Some(StripPocketOccupancy::Uncertain),
+            StripPocketOccupancy::Occupied,
+        ));
+        assert!(!source_component_pose_can_control(
+            &empty_prediction,
+            Some(StripPocketOccupancy::Occupied),
+            StripPocketOccupancy::Empty,
+        ));
+    }
+
+    #[test]
     fn source_empty_requires_learned_and_deterministic_agreement() {
         assert!(!source_empty_observation_is_confirmed(
             true,
@@ -37618,14 +38104,12 @@ mod tests {
             StripPocketOccupancy::Empty,
         )
         .is_some());
-        assert_eq!(
-            source_component_class_rejection(
-                SourceComponentClass::ComponentOnEdge,
-                true,
-                StripPocketOccupancy::Occupied,
-            ),
-            None,
-        );
+        assert!(source_component_class_rejection(
+            SourceComponentClass::ComponentOnEdge,
+            true,
+            StripPocketOccupancy::Occupied,
+        )
+        .is_some());
         assert_eq!(
             source_component_class_rejection(
                 SourceComponentClass::Empty,
@@ -40497,6 +40981,39 @@ mod tests {
                     .method("POST")
                     .uri(format!(
                         "/api/v1/calibrations/{}/placement-transfer-runs",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "lease_id": Uuid::new_v4(),
+                            "job_id": Uuid::new_v4(),
+                            "nozzle_id": "N1",
+                            "confirmed_external_safety_checks": true,
+                            "confirmed_targets_empty": false,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("targets are empty"));
+        assert!(message.contains("travel envelope"));
+    }
+
+    #[tokio::test]
+    async fn placement_transfer_validation_requires_all_operator_confirmations() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibrations/{}/placement-transfer-validation-runs",
                         Uuid::new_v4()
                     ))
                     .header(header::CONTENT_TYPE, "application/json")

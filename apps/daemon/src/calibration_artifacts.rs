@@ -1145,7 +1145,7 @@ fn algorithm_version(id: CalibrationArtifactId) -> &'static str {
         RuntimeTipTransformN1 | RuntimeTipTransformN2 => "runtime_tip_transform.v1",
         VacuumContactN1 | VacuumContactN2 => "vacuum_contact_probe.v3",
         VacuumCharacterizationN1 | VacuumCharacterizationN2 => "vacuum_sensor_characterization.v1",
-        PlacementTransferN1 | PlacementTransferN2 => "placement_transfer.v1",
+        PlacementTransferN1 | PlacementTransferN2 => "placement_transfer.v2",
     }
 }
 

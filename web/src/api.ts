@@ -205,6 +205,20 @@ export const api = {
       confirmed_targets_empty: true,
     },
   ),
+  startPlacementTransferValidation: (
+    snapshotId: string, leaseId: string, jobId: string,
+    nozzleId: "N1" | "N2", placementReferences: string[] = [],
+  ) => jsonPost<{ run: AutomatedCalibrationRun; operation: Operation }>(
+    `/calibrations/${snapshotId}/placement-transfer-validation-runs`,
+    {
+      lease_id: leaseId,
+      job_id: jobId,
+      nozzle_id: nozzleId,
+      placement_references: placementReferences,
+      confirmed_external_safety_checks: true,
+      confirmed_targets_empty: true,
+    },
+  ),
   vacuumProbe: (snapshotId: string, leaseId: string, nozzleId: "N1" | "N2") =>
     jsonPost<Operation>(`/calibrations/${snapshotId}/vacuum-probe`, {
       lease_id: leaseId,

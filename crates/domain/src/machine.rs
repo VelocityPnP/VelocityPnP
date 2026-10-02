@@ -511,6 +511,14 @@ pub struct StripFeederPickupProfile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacementTransferCalibrationProfile {
     pub samples_per_round: u32,
+    #[serde(default = "default_placement_transfer_validation_samples")]
+    pub validation_samples: u32,
+    #[serde(default)]
+    pub pickup_retry_offsets_mm: Vec<[f64; 2]>,
+    #[serde(default = "default_placement_transfer_pickup_retry_limit_mm")]
+    pub maximum_pickup_retry_offset_mm: f64,
+    #[serde(default)]
+    pub pickup_seating_depth_mm: f64,
     pub maximum_adjustment_rounds: u32,
     pub mean_part_offset_limit_mm: f64,
     pub p95_radial_limit_mm: f64,
@@ -533,8 +541,11 @@ impl PlacementTransferCalibrationProfile {
             self.maximum_cumulative_correction_mm,
             self.maximum_rotation_error_deg,
             self.maximum_round_centroid_separation_mm,
+            self.maximum_pickup_retry_offset_mm,
+            self.pickup_seating_depth_mm,
         ];
         if !(2..=10).contains(&self.samples_per_round)
+            || !(3..=20).contains(&self.validation_samples)
             || self.maximum_adjustment_rounds > 2
             || limits
                 .iter()
@@ -542,10 +553,18 @@ impl PlacementTransferCalibrationProfile {
             || self.mean_part_offset_limit_mm > self.p95_radial_limit_mm
             || self.p95_radial_limit_mm > self.maximum_adjustment_mm
             || self.maximum_adjustment_mm > self.maximum_cumulative_correction_mm
+            || self.maximum_pickup_retry_offset_mm > 1.0
+            || self.pickup_seating_depth_mm > 0.3
             || !self.minimum_deterministic_confidence.is_finite()
             || !(0.0..=1.0).contains(&self.minimum_deterministic_confidence)
             || !self.maximum_model_cv_center_delta_mm.is_finite()
             || self.maximum_model_cv_center_delta_mm <= 0.0
+            || self.pickup_retry_offsets_mm.len() > 8
+            || self.pickup_retry_offsets_mm.iter().any(|offset| {
+                !offset.iter().all(|value| value.is_finite())
+                    || offset[0].hypot(offset[1]) <= f64::EPSILON
+                    || offset[0].hypot(offset[1]) > self.maximum_pickup_retry_offset_mm
+            })
         {
             return Err("placement-transfer calibration profile is invalid");
         }
@@ -565,6 +584,14 @@ impl PlacementTransferCalibrationProfile {
                 2
             }
     }
+}
+
+fn default_placement_transfer_validation_samples() -> u32 {
+    5
+}
+
+fn default_placement_transfer_pickup_retry_limit_mm() -> f64 {
+    0.85
 }
 
 fn default_board_release_retry_depth_mm() -> f64 {
@@ -1547,6 +1574,14 @@ mod tests {
         let transfer = profile.placement_transfer_calibration.unwrap();
 
         assert_eq!(transfer.samples_per_round, 3);
+        assert_eq!(transfer.validation_samples, 3);
+        assert_eq!(transfer.pickup_retry_offsets_mm.len(), 8);
+        assert_eq!(transfer.maximum_pickup_retry_offset_mm, 0.85);
+        assert_eq!(transfer.pickup_seating_depth_mm, 0.2);
+        assert!(transfer.validate().is_ok());
+        let mut invalid = transfer.clone();
+        invalid.pickup_retry_offsets_mm.push([0.0, 0.90]);
+        assert!(invalid.validate().is_err());
         assert_eq!(transfer.minimum_target_count(), 6);
         assert_eq!(transfer.maximum_target_count(), 9);
     }

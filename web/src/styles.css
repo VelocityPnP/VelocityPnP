@@ -469,11 +469,14 @@ p { line-height: 1.5; }
 .run-result a { display: inline-block; margin: 4px 12px 4px 0; font-size: 12px; }
 .target-overlay { color: #ff45dc; }
 .detected-overlay { color: #45e58a; }
+.model-detected-overlay { color: #00f0ff; }
 .placement-transfer-round { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
 .placement-transfer-samples { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
-.placement-transfer-samples a { margin: 0; border: 1px solid var(--line); border-radius: 6px; padding: 6px; color: var(--muted); text-decoration: none; }
+.placement-transfer-sample { border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+.placement-transfer-samples a { margin: 0; color: var(--muted); text-decoration: none; }
 .placement-transfer-samples img { display: block; width: 100%; margin-bottom: 5px; border-radius: 4px; background: #080c0b; }
 .placement-transfer-samples span { display: block; font: 10px/1.4 var(--mono); }
+.placement-transfer-samples .diagnostic-link { margin-top: 5px; font-size: 10px; text-decoration: underline; }
 .workflow { display: grid; gap: 8px; }
 .workflow-step {
   min-width: 0;

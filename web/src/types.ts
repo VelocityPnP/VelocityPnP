@@ -598,6 +598,7 @@ export interface AutomatedCalibrationRun {
 
 export interface PlacementTransferCalibrationProfile {
   samples_per_round: number;
+  validation_samples: number;
   maximum_adjustment_rounds: number;
   mean_part_offset_limit_mm: number;
   p95_radial_limit_mm: number;
@@ -620,11 +621,13 @@ export interface PlacementTransferSample {
   rotation_error_deg: number;
   held_centering_residual_mm: number;
   model_cv_center_delta_mm: number | null;
+  inspection_artifact_name: string;
+  inspection_algorithm_version: string;
 }
 
 export interface PlacementTransferRoundReport {
   round_index: number;
-  kind: "baseline" | "check";
+  kind: "baseline" | "check" | "validation";
   applied_correction_mm: [number, number];
   samples: PlacementTransferSample[];
   summary: {
@@ -641,6 +644,7 @@ export interface PlacementTransferRoundReport {
 
 export interface PlacementTransferCalibrationReport {
   algorithm_version: string;
+  mode: "calibration" | "validation";
   profile: PlacementTransferCalibrationProfile;
   job_id: string;
   board_instance_id: string;

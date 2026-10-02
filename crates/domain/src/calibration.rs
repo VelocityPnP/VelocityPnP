@@ -85,7 +85,7 @@ pub fn lumen_calibration_workflow() -> Vec<CalibrationStepDefinition> {
         step(MotionGeometry, "Installed-plate motion geometry", "Measure scale, skew, and bed residuals from all visible staging and build-plate holes.", &[TopCameraIntrinsics], true, false, Automated),
         step(TopCameraScale, "Top camera working-plane scale", "Relate pixels to the installed-plate machine geometry at the camera working plane.", &[MotionGeometry], true, false, Automated),
         step(VacuumSensorCharacterization, "Vacuum sensor characterization", "Measure pump-off, open-nozzle, sealed-reference, and release distributions per nozzle and installed tip.", &[NozzleHeightModel], true, false, Automated),
-        step(PlacementTransfer, "Placement-transfer calibration", "Use guarded placements to measure and verify the per-nozzle XY transfer from bottom-camera alignment to the top-camera board target.", &[NozzleHeightModel, VacuumSensorCharacterization], true, true, Automated),
+        step(PlacementTransfer, "Placement-transfer calibration", "Use calibration pick-and-place cycles to measure and verify the per-nozzle XY transfer from bottom-camera alignment to the top-camera board target.", &[NozzleHeightModel, VacuumSensorCharacterization], true, true, Automated),
         step(ZPlanes, "Z planes", "Capture safe, board, feeder, discard, and camera-clearance planes.", &[NozzleHeightModel], true, false, Planned),
         step(VacuumThresholds, "Known-part vacuum thresholds", "Learn known-part pressure distributions per nozzle, tip, and applicable part class.", &[ZPlanes, VacuumSensorCharacterization], true, false, Planned),
         step(Validation, "Known-board validation", "Measure homing, geometry, pick, alignment, and placement acceptance metrics.", &[PlacementTransfer, VacuumThresholds], true, true, Planned),
@@ -578,6 +578,15 @@ pub struct CalibrationCheck {
 pub enum PlacementTransferRoundKind {
     Baseline,
     Check,
+    Validation,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementTransferRunMode {
+    #[default]
+    Calibration,
+    Validation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -595,6 +604,12 @@ pub struct PlacementTransferSample {
     pub held_centering_residual_mm: f64,
     #[serde(default)]
     pub model_cv_center_delta_mm: Option<f64>,
+    /// Artifact that shows the active placement estimate used by this sample.
+    #[serde(default)]
+    pub inspection_artifact_name: String,
+    /// Algorithm that supplied the active placement estimate.
+    #[serde(default)]
+    pub inspection_algorithm_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -623,6 +638,8 @@ pub struct PlacementTransferRoundReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacementTransferCalibrationReport {
     pub algorithm_version: String,
+    #[serde(default)]
+    pub mode: PlacementTransferRunMode,
     pub profile: PlacementTransferCalibrationProfile,
     pub job_id: Uuid,
     pub board_instance_id: Uuid,
@@ -702,6 +719,43 @@ pub fn summarize_placement_transfer_round(
         maximum_sample_deviation_mm,
         common_direction,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacementTransferRoundAssessment {
+    pub systematic_offset_passed: bool,
+    pub process_variation_passed: bool,
+    pub spread_passed: bool,
+    pub qualified: bool,
+    pub correction_supported: bool,
+}
+
+/// Assess calibration bias separately from final placement capability.
+///
+/// Calibration can remove a stable signed offset. It cannot remove random
+/// pickup, release, or adhesive variation. A validation-only run therefore
+/// applies the p95 capability limit, while a calibration round records it as
+/// a separate result.
+pub fn assess_placement_transfer_round(
+    summary: &PlacementTransferRoundSummary,
+    profile: &PlacementTransferCalibrationProfile,
+    require_process_capability: bool,
+) -> PlacementTransferRoundAssessment {
+    let systematic_offset_passed =
+        summary.robust_observed_part_offset_magnitude_mm <= profile.mean_part_offset_limit_mm;
+    let process_variation_passed = summary.p95_radial_part_offset_mm <= profile.p95_radial_limit_mm;
+    let spread_passed = summary.maximum_sample_deviation_mm <= profile.maximum_sample_deviation_mm;
+    PlacementTransferRoundAssessment {
+        systematic_offset_passed,
+        process_variation_passed,
+        spread_passed,
+        qualified: systematic_offset_passed
+            && spread_passed
+            && (!require_process_capability || process_variation_passed),
+        correction_supported: !systematic_offset_passed
+            && spread_passed
+            && summary.common_direction,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1947,6 +2001,29 @@ mod tests {
             summarize_placement_transfer_round(&[[0.20, 0.0], [0.22, 0.01], [-0.21, 0.0]]).unwrap();
         assert!(!summary.common_direction);
         assert!(summary.maximum_sample_deviation_mm > 0.4);
+    }
+
+    #[test]
+    fn placement_transfer_centered_hardware_scatter_does_not_request_a_correction() {
+        let profile: crate::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let profile = profile.placement_transfer_calibration.unwrap();
+        let summary = summarize_placement_transfer_round(&[
+            [0.011743399920763124, -0.03151762328908935],
+            [-0.04405640770529797, -0.09009860515234952],
+            [-0.010056523018328503, -0.012950158065848752],
+        ])
+        .unwrap();
+
+        let calibration = assess_placement_transfer_round(&summary, &profile, false);
+        let validation = assess_placement_transfer_round(&summary, &profile, true);
+
+        assert!(calibration.systematic_offset_passed);
+        assert!(calibration.spread_passed);
+        assert!(!calibration.process_variation_passed);
+        assert!(calibration.qualified);
+        assert!(!calibration.correction_supported);
+        assert!(!validation.qualified);
     }
 
     #[test]

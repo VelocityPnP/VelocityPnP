@@ -806,6 +806,42 @@ paths:
                 properties:
                   run: { $ref: "#/components/schemas/AutomatedCalibrationRun" }
                   operation: { $ref: "#/components/schemas/Operation" }
+  /calibrations/{id}/placement-transfer-runs:
+    post:
+      operationId: startPlacementTransferCalibration
+      description: >-
+        Uses calibration pick-and-place cycles to qualify a zero-change per-nozzle transfer or
+        to test a bounded provisional XY correction on new targets.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartPlacementTransferRunRequest" }
+      responses:
+        "202":
+          description: Persisted placement-transfer calibration run
+          content:
+            application/json: { schema: { type: object } }
+  /calibrations/{id}/placement-transfer-validation-runs:
+    post:
+      operationId: startPlacementTransferValidation
+      description: >-
+        Uses new pick-and-place cycles to validate the current stored correction.
+        This operation cannot change calibration.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartPlacementTransferRunRequest" }
+      responses:
+        "202":
+          description: Persisted placement-transfer validation run
+          content:
+            application/json: { schema: { type: object } }
   /calibrations/{id}/vacuum-probe:
     post:
       operationId: startVacuumProbe
@@ -4567,7 +4603,7 @@ components:
         status: { type: string, enum: [pending, running, succeeded, rejected, failed] }
         phase:
           type: string
-          enum: [pending, coarse_homing, actuator_checks, top_camera_reproducibility, tooling_verification, bottom_camera_reproducibility, visual_homing_validation, head_geometry_calibration, top_camera_planar_calibration, bottom_camera_planar_calibration, installed_plate_geometry, complete]
+          enum: [pending, coarse_homing, actuator_checks, top_camera_reproducibility, tooling_verification, bottom_camera_reproducibility, visual_homing_validation, head_geometry_calibration, local_xy_direction_response, top_camera_planar_calibration, bottom_camera_planar_calibration, installed_plate_geometry, vacuum_contact_calibration, vacuum_sensor_characterization, placement_transfer_calibration, complete]
         config: { type: object }
         checks:
           type: array
@@ -4588,8 +4624,32 @@ components:
           oneOf:
             - { type: object, additionalProperties: true }
             - { type: "null" }
+        placement_transfer_report:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: "null" }
         failure: { type: [string, "null"] }
         simulated: { type: boolean }
+    StartPlacementTransferRunRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - lease_id
+        - job_id
+        - nozzle_id
+        - confirmed_external_safety_checks
+        - confirmed_targets_empty
+      properties:
+        lease_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        nozzle_id: { type: string, enum: [N1, N2] }
+        continuation_run_id: { type: [string, "null"], format: uuid }
+        placement_references:
+          type: array
+          uniqueItems: true
+          items: { type: string, minLength: 1 }
+        confirmed_external_safety_checks: { type: boolean }
+        confirmed_targets_empty: { type: boolean }
     InspectionReport:
       type: object
       required: [id, job_id, created_at, status, findings]

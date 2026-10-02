@@ -206,6 +206,19 @@
   },
   "placement_transfer_calibration": {
     "samples_per_round": 3,
+    "validation_samples": 3,
+    "pickup_retry_offsets_mm": [
+      [0.0, -0.75],
+      [0.0, -0.50],
+      [0.0, 0.50],
+      [0.0, 0.75],
+      [-0.50, 0.0],
+      [0.50, 0.0],
+      [-0.35, -0.35],
+      [0.35, -0.35]
+    ],
+    "maximum_pickup_retry_offset_mm": 0.85,
+    "pickup_seating_depth_mm": 0.20,
     "maximum_adjustment_rounds": 2,
     "mean_part_offset_limit_mm": 0.05,
     "p95_radial_limit_mm": 0.10,
