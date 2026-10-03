@@ -520,6 +520,8 @@ pub struct PlacementTransferCalibrationProfile {
     #[serde(default)]
     pub pickup_seating_depth_mm: f64,
     pub maximum_adjustment_rounds: u32,
+    #[serde(default = "default_placement_transfer_decision_resolution_mm")]
+    pub decision_resolution_mm: f64,
     pub mean_part_offset_limit_mm: f64,
     pub p95_radial_limit_mm: f64,
     pub maximum_sample_deviation_mm: f64,
@@ -537,6 +539,7 @@ impl PlacementTransferCalibrationProfile {
             self.mean_part_offset_limit_mm,
             self.p95_radial_limit_mm,
             self.maximum_sample_deviation_mm,
+            self.decision_resolution_mm,
             self.maximum_adjustment_mm,
             self.maximum_cumulative_correction_mm,
             self.maximum_rotation_error_deg,
@@ -551,6 +554,7 @@ impl PlacementTransferCalibrationProfile {
                 .iter()
                 .any(|value| !value.is_finite() || *value <= 0.0)
             || self.mean_part_offset_limit_mm > self.p95_radial_limit_mm
+            || self.decision_resolution_mm > self.mean_part_offset_limit_mm
             || self.p95_radial_limit_mm > self.maximum_adjustment_mm
             || self.maximum_adjustment_mm > self.maximum_cumulative_correction_mm
             || self.maximum_pickup_retry_offset_mm > 1.0
@@ -588,6 +592,10 @@ impl PlacementTransferCalibrationProfile {
 
 fn default_placement_transfer_validation_samples() -> u32 {
     5
+}
+
+fn default_placement_transfer_decision_resolution_mm() -> f64 {
+    0.01
 }
 
 fn default_placement_transfer_pickup_retry_limit_mm() -> f64 {

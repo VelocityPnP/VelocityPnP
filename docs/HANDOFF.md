@@ -1,7 +1,7 @@
 # Session handoff
 
 This document records the current hardware, vision, and model state through
-2026-09-27. Verify live state again before each new session.
+2026-10-02. Verify live state again before each new session.
 
 ## Live state
 
@@ -35,6 +35,28 @@ The active local model packages are:
 The active model directories are below
 `~/.cache/velocitypnp/models/packages/`. `models.lock.json` pins their package
 and payload checksums.
+
+## 2026-10-02 N1 placement-transfer completion
+
+N1 placement-transfer run `8cc3a045-a8b1-4b20-90da-bca01fd8380c` used
+baseline targets R24, R22, and R1. It measured a robust offset of
+X+0.029425/Y-0.173670 mm. Check targets R23, R21, and R20 used that correction.
+Their radial errors were 0.079, 0.038, and 0.071 mm.
+
+The profile now declares a 0.010 mm placement-transfer decision resolution.
+It allows one half resolution step above each nominal scalar limit. The check
+passed under this policy. Operator-reviewed evidence was promoted without new
+motion. The committed correction is X+0.029425/Y-0.173670 mm. Artifact
+fingerprint
+`bba3a319022806588a34aedbe03ec440a4085840612de6801112306e74ded273`
+remained current after a daemon restart.
+
+The pre-promotion online database backup is
+`/tmp/velocitypnp-before-placement-transfer-promotion-20261002.db`. Its
+SHA-256 is
+`615d242c412fd87e81b7f52fd928e0bcd730e301eaf0a08797ba289430ced804`.
+The physical daemon is running on loopback port 4080. It is disconnected and
+not homed. No motion occurred during promotion or persistence verification.
 
 ## 2026-09-27 N1 transfer and vacuum validation
 

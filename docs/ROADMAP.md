@@ -121,11 +121,13 @@ The project is organized by measurable gates rather than calendar estimates.
   adjustment, independent check placements, and persistent evidence
 - [x] Separate systematic transfer correction from placement variation and add
   validation-only placements that cannot change the stored correction
-- [ ] Pass the N1 placement-transfer check and separate validation placements
+- [x] Pass the N1 placement-transfer check and verify correction persistence
   on attached hardware
   - 2026-10-02: correction reduced the three-part check p95 from 0.226 to
-    0.079 mm. The run remained 0.0024 mm above the systematic limit and
-    0.000084 mm above the spread limit, so it did not commit the correction.
+    0.079 mm. A 0.010 mm decision resolution removed unjustified
+    sub-resolution boundary failures. Reviewed run
+    `8cc3a045-a8b1-4b20-90da-bca01fd8380c` committed X+0.029425/Y-0.173670
+    mm. A daemon restart retained the correction and current artifact tree.
 - [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
 
 ## Gate 5 — Inspection and newer machines

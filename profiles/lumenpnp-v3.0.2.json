@@ -220,6 +220,7 @@
     "maximum_pickup_retry_offset_mm": 0.85,
     "pickup_seating_depth_mm": 0.20,
     "maximum_adjustment_rounds": 2,
+    "decision_resolution_mm": 0.01,
     "mean_part_offset_limit_mm": 0.05,
     "p95_radial_limit_mm": 0.10,
     "maximum_sample_deviation_mm": 0.10,

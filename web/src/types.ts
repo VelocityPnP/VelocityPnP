@@ -600,6 +600,7 @@ export interface PlacementTransferCalibrationProfile {
   samples_per_round: number;
   validation_samples: number;
   maximum_adjustment_rounds: number;
+  decision_resolution_mm: number;
   mean_part_offset_limit_mm: number;
   p95_radial_limit_mm: number;
   maximum_sample_deviation_mm: number;

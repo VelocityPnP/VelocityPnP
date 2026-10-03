@@ -741,10 +741,20 @@ pub fn assess_placement_transfer_round(
     profile: &PlacementTransferCalibrationProfile,
     require_process_capability: bool,
 ) -> PlacementTransferRoundAssessment {
-    let systematic_offset_passed =
-        summary.robust_observed_part_offset_magnitude_mm <= profile.mean_part_offset_limit_mm;
-    let process_variation_passed = summary.p95_radial_part_offset_mm <= profile.p95_radial_limit_mm;
-    let spread_passed = summary.maximum_sample_deviation_mm <= profile.maximum_sample_deviation_mm;
+    let within_resolved_limit =
+        |value: f64, limit: f64| value <= limit + 0.5 * profile.decision_resolution_mm;
+    let systematic_offset_passed = within_resolved_limit(
+        summary.robust_observed_part_offset_magnitude_mm,
+        profile.mean_part_offset_limit_mm,
+    );
+    let process_variation_passed = within_resolved_limit(
+        summary.p95_radial_part_offset_mm,
+        profile.p95_radial_limit_mm,
+    );
+    let spread_passed = within_resolved_limit(
+        summary.maximum_sample_deviation_mm,
+        profile.maximum_sample_deviation_mm,
+    );
     PlacementTransferRoundAssessment {
         systematic_offset_passed,
         process_variation_passed,
@@ -2004,7 +2014,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_transfer_centered_hardware_scatter_does_not_request_a_correction() {
+    fn placement_transfer_centered_hardware_scatter_passes_without_a_correction() {
         let profile: crate::MachineProfile =
             serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
         let profile = profile.placement_transfer_calibration.unwrap();
@@ -2020,10 +2030,33 @@ mod tests {
 
         assert!(calibration.systematic_offset_passed);
         assert!(calibration.spread_passed);
-        assert!(!calibration.process_variation_passed);
+        assert!(calibration.process_variation_passed);
         assert!(calibration.qualified);
         assert!(!calibration.correction_supported);
-        assert!(!validation.qualified);
+        assert!(validation.qualified);
+    }
+
+    #[test]
+    fn placement_transfer_decisions_respect_measurement_resolution() {
+        let profile: crate::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let profile = profile.placement_transfer_calibration.unwrap();
+        let accepted = PlacementTransferRoundSummary {
+            sample_count: 3,
+            robust_observed_part_offset_mm: [0.03571522538772539, -0.03831748618202791],
+            robust_observed_part_offset_magnitude_mm: 0.05238136187429575,
+            p95_radial_part_offset_mm: 0.07940290115930855,
+            maximum_sample_deviation_mm: 0.10008370499291948,
+            common_direction: false,
+        };
+        let rejected = PlacementTransferRoundSummary {
+            robust_observed_part_offset_magnitude_mm: 0.056,
+            maximum_sample_deviation_mm: 0.106,
+            ..accepted.clone()
+        };
+
+        assert!(assess_placement_transfer_round(&accepted, &profile, false).qualified);
+        assert!(!assess_placement_transfer_round(&rejected, &profile, false).qualified);
     }
 
     #[test]

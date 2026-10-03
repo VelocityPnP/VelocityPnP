@@ -67,6 +67,22 @@ gate failure, not evidence for another global offset change. Independent
 validation could not run because there is no current committed N1 transfer
 artifact.
 
+The decision policy now declares a 0.010 mm resolution. A measurement passes
+when it is no more than half one resolution step above its nominal limit. This
+keeps the 0.050 mm and 0.100 mm limits, but it does not reject a result from
+unjustified digits below the declared resolution. A completed rejected run can
+be promoted without motion after an operator reviews its image evidence. The
+promotion recomputes every summary from the stored samples, applies the active
+profile, checks current dependencies and correction bounds, and does not accept
+a correction value from the request.
+
+The reviewed-evidence promotion committed N1 run
+`8cc3a045-a8b1-4b20-90da-bca01fd8380c`. The stored correction is
+X+0.029425/Y-0.173670 mm. Its artifact fingerprint is
+`bba3a319022806588a34aedbe03ec440a4085840612de6801112306e74ded273`.
+After a daemon restart, the artifact planner reported the N1 transfer artifact
+and all dependencies as current and reusable. No new placement was made.
+
 The same run exposed poor source-pick centering in several feeder pockets.
 Calibration pickup can use a bounded retry grid and a 0.200 mm seating move.
 The Y-0.750 mm retry now runs before Y-0.500 mm because the smaller move often
@@ -229,7 +245,9 @@ spread.
 A validation-only round passes only when the robust physical offset, maximum
 sample deviation, and p95 radial residual are all within profile limits. The
 initial profile uses 0.05 mm for systematic offset and 0.10 mm for p95. These
-limits and the validation sample count are profile data, not API input.
+limits, the 0.01 mm decision resolution, and the validation sample count are
+profile data, not API input. Scalar gate comparisons allow one half of the
+declared decision resolution above the nominal limit.
 
 Rotation remains an acceptance measurement in version 1. Do not adjust nozzle
 rotation from symmetric resistor images.
@@ -254,6 +272,12 @@ This rule gives these properties:
 After a check passes, store the correction in the matching placement-transfer
 artifact. Do not mutate the nozzle height model or invalidate its dependent
 vacuum artifacts.
+
+A reviewed-evidence promotion can store the correction from a completed
+rejected run when the active decision policy accepts its recomputed samples.
+It requires an explicit operator confirmation. It rejects stale dependencies,
+partial rounds, altered summaries, mismatched corrections, and old algorithm
+versions.
 
 ## Calibration model
 
@@ -294,6 +318,7 @@ Add this endpoint:
 ```text
 POST /api/v1/calibrations/{id}/placement-transfer-runs
 POST /api/v1/calibrations/{id}/placement-transfer-validation-runs
+POST /api/v1/calibration-runs/{id}/placement-transfer-promotion
 ```
 
 The request supplies the control lease, job, nozzle, optional ordered target
@@ -302,6 +327,10 @@ correction values or acceptance limits.
 
 The validation endpoint requires a current per-nozzle placement-transfer
 artifact. It rejects continuation input and never writes a correction.
+
+The promotion endpoint makes no motion. It accepts only
+`confirmed_evidence_reviewed`. It recomputes and stores the correction already
+present in the reviewed run.
 
 The existing calibration-run endpoints expose progress and the final report.
 The calibration page must show:

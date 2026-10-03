@@ -1319,6 +1319,10 @@ pub fn router(state: AppState) -> Router {
             post(start_placement_transfer_validation_run),
         )
         .route(
+            "/api/v1/calibration-runs/{id}/placement-transfer-promotion",
+            post(promote_placement_transfer_run),
+        )
+        .route(
             "/api/v1/calibrations/{id}/vacuum-probe",
             post(start_vacuum_probe),
         )
@@ -21755,6 +21759,12 @@ struct StartPlacementTransferRunRequest {
     confirmed_targets_empty: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromotePlacementTransferRunRequest {
+    confirmed_evidence_reviewed: bool,
+}
+
 fn same_placement_transfer_group(left: &PlanStep, right: &PlanStep) -> bool {
     left.board_instance_id == right.board_instance_id
         && left.part_key == right.part_key
@@ -21964,6 +21974,210 @@ fn validate_placement_transfer_continuation(
         }
     }
     Ok(transfer.clone())
+}
+
+fn prepare_placement_transfer_promotion(
+    run: &AutomatedCalibrationRun,
+    profile: &velocitypnp_domain::PlacementTransferCalibrationProfile,
+    active_initial_correction_mm: [f64; 2],
+) -> Result<PlacementTransferCalibrationReport, String> {
+    if run.status != CalibrationRunStatus::Rejected {
+        return Err("placement-transfer promotion requires a rejected run".into());
+    }
+    let mut transfer = run
+        .placement_transfer_report
+        .clone()
+        .ok_or_else(|| "promotion run has no placement-transfer report".to_string())?;
+    if transfer.algorithm_version != PLACEMENT_TRANSFER_ALGORITHM
+        || transfer.mode != PlacementTransferRunMode::Calibration
+        || !placement_transfer_continuation_profiles_match(&transfer.profile, profile)
+        || transfer.passed
+        || transfer.committed
+        || transfer.artifact_fingerprint.is_some()
+        || !transfer.pending_round_samples.is_empty()
+        || transfer.rounds.is_empty()
+        || !placement_transfer_offsets_match(
+            transfer.initial_correction_mm,
+            active_initial_correction_mm,
+        )
+    {
+        return Err("placement-transfer promotion evidence is stale or incompatible".into());
+    }
+
+    let mut expected_correction = transfer.initial_correction_mm;
+    let final_round_index = transfer.rounds.len() - 1;
+    for (index, round) in transfer.rounds.iter_mut().enumerate() {
+        let expected_kind = if index == 0 {
+            PlacementTransferRoundKind::Baseline
+        } else {
+            PlacementTransferRoundKind::Check
+        };
+        let measured = round
+            .samples
+            .iter()
+            .map(|sample| sample.observed_part_offset_mm)
+            .collect::<Vec<_>>();
+        let recomputed_summary = summarize_placement_transfer_round(&measured)
+            .ok_or_else(|| "placement-transfer promotion summary is invalid".to_string())?;
+        if round.round_index != index as u32
+            || round.kind != expected_kind
+            || round.passed
+            || round.samples.len() != profile.samples_per_round as usize
+            || !placement_transfer_summaries_match(&recomputed_summary, &round.summary)
+            || !placement_transfer_offsets_match(round.applied_correction_mm, expected_correction)
+        {
+            return Err("placement-transfer promotion has unusable round evidence".into());
+        }
+
+        let assessment = assess_placement_transfer_round(&round.summary, profile, false);
+        if index == final_round_index {
+            if !assessment.qualified {
+                return Err(
+                    "placement-transfer evidence does not pass the active decision policy".into(),
+                );
+            }
+            round.passed = true;
+            round.findings.push(format!(
+                "accepted at {:.3} mm decision resolution after operator evidence review",
+                profile.decision_resolution_mm,
+            ));
+        } else {
+            if !assessment.correction_supported {
+                return Err(
+                    "placement-transfer promotion has an unsupported correction round".into(),
+                );
+            }
+            let delta = round.summary.robust_observed_part_offset_mm;
+            if delta[0].hypot(delta[1]) > profile.maximum_adjustment_mm {
+                return Err("placement-transfer promotion correction is out of bounds".into());
+            }
+            expected_correction = [
+                expected_correction[0] + delta[0],
+                expected_correction[1] + delta[1],
+            ];
+            if expected_correction[0].hypot(expected_correction[1])
+                > profile.maximum_cumulative_correction_mm
+            {
+                return Err(
+                    "placement-transfer promotion cumulative correction is out of bounds".into(),
+                );
+            }
+        }
+    }
+    if !placement_transfer_offsets_match(transfer.final_correction_mm, expected_correction) {
+        return Err("placement-transfer promotion correction does not match its rounds".into());
+    }
+
+    transfer.profile = profile.clone();
+    transfer.passed = true;
+    transfer.findings.push(format!(
+        "operator-reviewed evidence passed the active {:.3} mm decision resolution; no new placements were made",
+        profile.decision_resolution_mm,
+    ));
+    Ok(transfer)
+}
+
+async fn promote_placement_transfer_run(
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+    Json(body): Json<PromotePlacementTransferRunRequest>,
+) -> ApiResult<Json<AutomatedCalibrationRun>> {
+    if !body.confirmed_evidence_reviewed {
+        return Err(ApiError::bad_request(
+            "placement-transfer promotion requires confirmation that the stored image evidence was reviewed",
+        ));
+    }
+    let profile = state
+        .profile
+        .placement_transfer_calibration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::bad_request("active profile does not define placement-transfer calibration")
+        })?
+        .clone();
+    profile.validate().map_err(ApiError::bad_request)?;
+    let mut run = state
+        .store
+        .get_calibration_run(run_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("placement-transfer run not found"))?;
+    let mut snapshot = state
+        .store
+        .get_calibration(run.calibration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("calibration snapshot not found"))?;
+    if !state.profile.accepts_profile_id(&snapshot.profile_id) {
+        return Err(ApiError::bad_request(
+            "calibration snapshot does not match the active machine profile",
+        ));
+    }
+    let artifacts_changed =
+        crate::calibration_artifacts::reconcile_snapshot_artifacts(&state, &mut snapshot)
+            .map_err(ApiError::bad_request)?;
+    let nozzle_id = run
+        .placement_transfer_report
+        .as_ref()
+        .map(|report| report.nozzle_id.as_str())
+        .ok_or_else(|| ApiError::bad_request("run has no placement-transfer report"))?;
+    let runtime_artifact = CalibrationArtifactId::runtime_tip_transform(nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("placement-transfer nozzle is unknown"))?;
+    let vacuum_artifact = CalibrationArtifactId::vacuum_characterization(nozzle_id)
+        .ok_or_else(|| ApiError::bad_request("placement-transfer nozzle is unknown"))?;
+    for required in [
+        CalibrationArtifactId::TopCameraPlanarModel,
+        runtime_artifact,
+        vacuum_artifact,
+    ] {
+        if !crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, required) {
+            return Err(ApiError::bad_request(format!(
+                "placement-transfer promotion requires current {required:?} evidence"
+            )));
+        }
+    }
+    let transfer_artifact = CalibrationArtifactId::placement_transfer(nozzle_id).unwrap();
+    if crate::calibration_artifacts::artifact_tree_is_current(&state, &snapshot, transfer_artifact)
+    {
+        return Err(ApiError::bad_request(format!(
+            "current {nozzle_id} placement-transfer evidence already exists"
+        )));
+    }
+    if artifacts_changed {
+        state
+            .store
+            .put_calibration(&snapshot)
+            .map_err(ApiError::internal)?;
+    }
+
+    let mut transfer = prepare_placement_transfer_promotion(&run, &profile, [0.0, 0.0])
+        .map_err(ApiError::bad_request)?;
+    let fingerprint =
+        commit_placement_transfer_report(&state, run.id, run.calibration_id, &transfer)
+            .map_err(ApiError::internal)?;
+    transfer.committed = true;
+    transfer.artifact_fingerprint = Some(fingerprint.clone());
+    transfer
+        .findings
+        .push("committed the reviewed correction without making new placements".into());
+    run.placement_transfer_report = Some(transfer);
+    update_run_check(
+        &mut run,
+        "verify",
+        CalibrationCheckStatus::Passed,
+        "Stored placement evidence meets the resolution-aware limits",
+        Value::Null,
+    );
+    update_run_check(
+        &mut run,
+        "commit",
+        CalibrationCheckStatus::Passed,
+        "Committed the operator-reviewed placement-transfer correction",
+        json!({"artifact_fingerprint": fingerprint}),
+    );
+    run.status = CalibrationRunStatus::Succeeded;
+    run.phase = CalibrationRunPhase::Complete;
+    run.failure = None;
+    persist_calibration_run(&state, &mut run).map_err(ApiError::internal)?;
+    Ok(Json(run))
 }
 
 fn recover_placement_transfer_pending_samples(
@@ -35759,6 +35973,106 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_hardware_run_can_be_promoted_without_new_placements() {
+        let machine: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let profile = machine.placement_transfer_calibration.unwrap();
+        let baseline_offsets = [
+            [0.03853752836000229, -0.22225708073826353],
+            [0.029424759198898965, -0.17367043097961524],
+            [0.013591769964418536, -0.14401064211295173],
+        ];
+        let check_offsets = [
+            [0.0675093396250242, -0.041800834631715925],
+            [-0.0006940559918122246, -0.03831748618202791],
+            [0.03571522538772539, 0.06176621881089158],
+        ];
+        let make_samples = |offsets: [[f64; 2]; 3], prefix: &str| {
+            offsets
+                .into_iter()
+                .enumerate()
+                .map(|(index, offset)| PlacementTransferSample {
+                    execution_id: Uuid::new_v4(),
+                    placement_reference: format!("{prefix}{}", index + 1),
+                    target_machine_mm: [300.0 + index as f64, 250.0],
+                    observed_part_offset_mm: offset,
+                    radial_part_offset_mm: offset[0].hypot(offset[1]),
+                    stored_correction_delta_mm: offset,
+                    rotation_error_deg: 0.0,
+                    held_centering_residual_mm: 0.05,
+                    model_cv_center_delta_mm: Some(0.1),
+                    inspection_artifact_name: BOARD_PLACEMENT_MODEL_INSPECTION_ARTIFACT.into(),
+                    inspection_algorithm_version: PLACEMENT_VERIFICATION_CONTROL_ALGORITHM.into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let baseline_summary = summarize_placement_transfer_round(&baseline_offsets).unwrap();
+        let check_summary = summarize_placement_transfer_round(&check_offsets).unwrap();
+        let candidate = baseline_summary.robust_observed_part_offset_mm;
+        let mut run = test_calibration_run(Uuid::new_v4());
+        run.status = CalibrationRunStatus::Rejected;
+        run.placement_transfer_report = Some(PlacementTransferCalibrationReport {
+            algorithm_version: PLACEMENT_TRANSFER_ALGORITHM.into(),
+            mode: PlacementTransferRunMode::Calibration,
+            profile: profile.clone(),
+            job_id: Uuid::new_v4(),
+            board_instance_id: Uuid::new_v4(),
+            feeder_id: Uuid::new_v4(),
+            feeder_registration_id: Uuid::new_v4(),
+            part_key: "0603-resistor".into(),
+            nozzle_id: "N1".into(),
+            nominal_rotation_deg: 180.0,
+            target_references: vec![
+                "R24".into(),
+                "R22".into(),
+                "R1".into(),
+                "R23".into(),
+                "R21".into(),
+                "R20".into(),
+            ],
+            initial_correction_mm: [0.0, 0.0],
+            final_correction_mm: candidate,
+            rounds: vec![
+                PlacementTransferRoundReport {
+                    round_index: 0,
+                    kind: PlacementTransferRoundKind::Baseline,
+                    applied_correction_mm: [0.0, 0.0],
+                    samples: make_samples(baseline_offsets, "B"),
+                    summary: baseline_summary,
+                    passed: false,
+                    findings: Vec::new(),
+                },
+                PlacementTransferRoundReport {
+                    round_index: 1,
+                    kind: PlacementTransferRoundKind::Check,
+                    applied_correction_mm: candidate,
+                    samples: make_samples(check_offsets, "C"),
+                    summary: check_summary,
+                    passed: false,
+                    findings: Vec::new(),
+                },
+            ],
+            pending_round_samples: Vec::new(),
+            passed: false,
+            committed: false,
+            artifact_fingerprint: None,
+            findings: Vec::new(),
+        });
+
+        let promoted = prepare_placement_transfer_promotion(&run, &profile, [0.0, 0.0])
+            .expect("reviewed hardware evidence should pass the active policy");
+
+        assert!(promoted.passed);
+        assert!(!promoted.committed);
+        assert!(promoted.rounds.last().unwrap().passed);
+        assert_eq!(promoted.final_correction_mm, candidate);
+        assert!(promoted
+            .findings
+            .iter()
+            .any(|finding| finding.contains("no new placements")));
+    }
+
+    #[test]
     fn placement_model_disagreement_cannot_pass_inspection() {
         let result = build_placement_verification_artifacts(
             placement_crop(),
@@ -41066,6 +41380,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn placement_transfer_promotion_requires_review_confirmation() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/calibration-runs/{}/placement-transfer-promotion",
+                        Uuid::new_v4()
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"confirmed_evidence_reviewed": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("image evidence was reviewed"));
     }
 
     #[tokio::test]
