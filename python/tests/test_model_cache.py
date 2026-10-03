@@ -142,13 +142,15 @@ class ModelCacheTests(unittest.TestCase):
 
         return fetch
 
-    def test_repository_lock_is_cache_only_and_valid(self) -> None:
+    def test_repository_lock_selects_the_approved_runtime_set(self) -> None:
         document, _, digest = load_lock(REPOSITORY_ROOT / "models.lock.json")
 
-        self.assertEqual(document["selection_policy"], "cache_only")
+        self.assertEqual(document["selection_policy"], "runtime")
         self.assertEqual(len(document["models"]), 3)
         self.assertEqual(len(digest), 64)
-        self.assertTrue(all(item["status"] == "candidate" for item in document["models"]))
+        self.assertTrue(
+            all(item["status"] == "approved" for item in document["models"])
+        )
 
     def test_sync_is_content_addressed_and_does_not_activate(self) -> None:
         with TemporaryDirectory() as directory:

@@ -1,15 +1,15 @@
 {
   "schema_version": 2,
-  "selection_policy": "cache_only",
+  "selection_policy": "runtime",
   "catalog": {
     "repository": "VelocityPnP/velocitypnp-models",
-    "commit": "1ad64ff44c2ba235e5d1fc063aabc267e0c6782d"
+    "commit": "156e2c98e5b220a613ab13c150a56661088bce53"
   },
   "models": [
     {
       "role": "source_component",
       "id": "source-component-pose/2026-09-27.1",
-      "status": "candidate",
+      "status": "approved",
       "contract_version": "velocitypnp.source-component-pose.v2",
       "package_root": "source-component-pose-2026-09-27.1",
       "release_tag": "models-2026-09-27.1",
@@ -28,7 +28,7 @@
     {
       "role": "held_part",
       "id": "held-part-pose/2026-09-14.1",
-      "status": "candidate",
+      "status": "approved",
       "contract_version": "velocitypnp.held-part-pose.v1",
       "package_root": "held-part-pose-2026-09-14.1",
       "release_tag": "models-2026-09-14.1",
@@ -47,7 +47,7 @@
     {
       "role": "placement_verification",
       "id": "placement-verification/2026-09-14.1",
-      "status": "candidate",
+      "status": "approved",
       "contract_version": "velocitypnp.placement-verification.v1",
       "package_root": "placement-verification-2026-09-14.1",
       "release_tag": "models-2026-09-14.1",

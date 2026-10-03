@@ -128,7 +128,10 @@ The project is organized by measurable gates rather than calendar estimates.
     sub-resolution boundary failures. Reviewed run
     `8cc3a045-a8b1-4b20-90da-bca01fd8380c` committed X+0.029425/Y-0.173670
     mm. A daemon restart retained the correction and current artifact tree.
-- [ ] Pass 100 imperial-0402 placements with the documented accuracy/reliability thresholds
+- [ ] Select or create a reference placement board and acquire compatible parts
+  for a repeatable production qualification
+- [ ] Pass a 100-placement run on that fixture with accuracy and reliability
+  limits defined before motion
 
 ## Gate 5 — Inspection and newer machines
 
@@ -202,13 +205,16 @@ The project is organized by measurable gates rather than calendar estimates.
 - [x] Merge retained placement-execution evidence without target leakage,
   retrain with bounded camera augmentation, and validate the package in the
   Python, ONNX, Rust, and daemon runtimes
-- [ ] Meet labeled-dataset recall and false-flag targets
-- [ ] Reproduce the source-component and held-part release models from clean,
-  commit-identified source trees
+- [x] Record labeled-dataset accuracy and known false flags for the current
+  models, and keep known errors behind deterministic agreement gates
+- [x] Reproduce the source-component, held-part, and placement-verification
+  models from clean, commit-identified source trees
 - [x] Publish versioned Apache-2.0 runtime packages in a separate model-zoo
   repository with model cards, checksums, and evaluation records
 - [x] Publish immutable reviewed-dataset packages beside the model catalog,
   with label records, images, audit data, checksums, and model links
+- [x] Publish a reviewed catalog revision that approves the current three model
+  packages for their existing guarded runtime roles
 - [ ] Add application-managed model download, cache, checksum, and selection
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles
@@ -233,5 +239,5 @@ a failed placement.
   recovery views
 - [ ] Add browser-level tests for the main simulated operator workflows
 
-See `docs/HANDOFF.md` for the measured starting values and session entry
-commands.
+See `docs/HARDWARE_VALIDATION.md` for measured attached-hardware evidence.
+Verify live machine state and get a new safety confirmation before motion.

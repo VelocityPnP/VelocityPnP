@@ -3273,9 +3273,9 @@ tree. The source-component model lacks Git provenance in its manifest, and the
 held-part model records a dirty training worktree. Reproduce these two models
 from clean commits before publishing them in a model-zoo repository.
 
-The next planned work is a measured motion-performance pass and an independent
-web-interface audit. `docs/HANDOFF.md` records the entry state, commands, code
-locations, and safety boundaries for both sessions.
+The next planned work at this closeout was a measured motion-performance pass
+and an independent web-interface audit. Later sections record that work. The
+current remaining work is in `docs/ROADMAP.md`.
 
 ### Calibrated camera-path speed qualification
 

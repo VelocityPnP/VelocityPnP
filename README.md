@@ -84,8 +84,8 @@ python3 -m pip install -e python
 ```
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for prerequisites and commands.
-See [docs/HANDOFF.md](docs/HANDOFF.md) for the current local runtime state and
-the next motion-performance, web-interface, and model-distribution work.
+See [docs/MODEL_DISTRIBUTION.md](docs/MODEL_DISTRIBUTION.md) for model package
+validation, approval, selection, and rollback.
 
 Model weights are not stored in this repository. Local working data and model
 packages are below the ignored `datasets/` tree. Final reviewed datasets and
