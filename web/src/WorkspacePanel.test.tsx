@@ -492,6 +492,10 @@ describe("workspace operational map", () => {
     ).toHaveLength(2));
     expect(container.querySelector(".workspace-camera-footprint")).toBeTruthy();
     expect(container.querySelector(".workspace-top-camera")).toBeTruthy();
+    expect(container.querySelector(".workspace-toolhead-chassis")).toBeTruthy();
+    expect(container.querySelectorAll(".workspace-toolhead-motor"))
+      .toHaveLength(2);
+    expect(container.querySelector(".workspace-toolhead-link")).toBeNull();
     await waitFor(() => expect(
       container.querySelector(".workspace-nozzle.is-active title")?.textContent,
     ).toContain("N1 calibrated axis center · active"));

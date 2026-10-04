@@ -863,6 +863,22 @@ export function WorkspacePanel({
         >
           <title>Live machine workspace map</title>
           <defs>
+            <linearGradient id="workspace-toolhead-shell" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stopColor="#34403c" />
+              <stop offset=".48" stopColor="#18211e" />
+              <stop offset="1" stopColor="#0d1412" />
+            </linearGradient>
+            <linearGradient id="workspace-toolhead-motor" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stopColor="#56635e" />
+              <stop offset=".2" stopColor="#26312d" />
+              <stop offset="1" stopColor="#111816" />
+            </linearGradient>
+            <radialGradient id="workspace-camera-lens">
+              <stop offset="0" stopColor="#dcf7ff" />
+              <stop offset=".22" stopColor="#6ad1ff" />
+              <stop offset=".55" stopColor="#18394a" />
+              <stop offset="1" stopColor="#071117" />
+            </radialGradient>
             {displayPatches.map((patch) => <clipPath
               id={`workspace-patch-${patch.id}`}
               key={patch.id}
@@ -1012,21 +1028,69 @@ export function WorkspacePanel({
             >
               <title>Calibrated top-camera field of view</title>
             </rect>}
-            <g className="workspace-toolhead">
-              {machineGeometry?.nozzles.map((nozzle) => <line
-                className="workspace-toolhead-link"
-                key={`link-${nozzle.nozzle_id}`}
-                x1={status.pose!.x_mm}
-                y1={-status.pose!.y_mm}
-                x2={status.pose!.x_mm + nozzle.offset_machine_mm[0]}
-                y2={-(status.pose!.y_mm + nozzle.offset_machine_mm[1])}
-              />)}
+            <g
+              className="workspace-toolhead"
+              transform={`translate(${status.pose.x_mm} ${-status.pose.y_mm})`}
+            >
+              {machineGeometry && <g className="workspace-toolhead-model">
+                <rect
+                  className="workspace-toolhead-carriage"
+                  x={-46}
+                  y={-22}
+                  width={92}
+                  height={17}
+                  rx={5}
+                />
+                <path
+                  className="workspace-toolhead-shadow"
+                  d="M-27-16 H27 Q35-16 38-7 L44 18 V61 Q44 76 32 85 L15 91 H-15 L-32 85 Q-44 76-44 61 V18 L-38-7 Q-35-16-27-16Z"
+                  transform="translate(1.8 2.6)"
+                />
+                <path
+                  className="workspace-toolhead-chassis"
+                  d="M-27-16 H27 Q35-16 38-7 L44 18 V61 Q44 76 32 85 L15 91 H-15 L-32 85 Q-44 76-44 61 V18 L-38-7 Q-35-16-27-16Z"
+                />
+                <path
+                  className="workspace-toolhead-panel"
+                  d="M-25-7 H25 L33 20 V58 Q33 68 25 75 L11 81 H-11 L-25 75 Q-33 68-33 58 V20Z"
+                />
+                <rect
+                  className="workspace-toolhead-spine"
+                  x={-6.5}
+                  y={15}
+                  width={13}
+                  height={46}
+                  rx={5}
+                />
+                <circle className="workspace-toolhead-pulley" cx={0} cy={29} r={8} />
+                <circle className="workspace-toolhead-pulley-hub" cx={0} cy={29} r={3.2} />
+                {[-30, 30].flatMap((x) => [8, 52].map((y) => <circle
+                  className="workspace-toolhead-fastener"
+                  cx={x}
+                  cy={y}
+                  key={`${x}-${y}`}
+                  r={2.2}
+                />))}
+                {machineGeometry.nozzles.map((nozzle) => <g
+                  className="workspace-toolhead-motor"
+                  key={`motor-${nozzle.nozzle_id}`}
+                  transform={`translate(${nozzle.offset_machine_mm[0]} ${-nozzle.offset_machine_mm[1]})`}
+                >
+                  <rect x={-14} y={-17} width={28} height={34} rx={4} />
+                  <path d="M-9-17 V17 M-3-17 V17 M3-17 V17 M9-17 V17" />
+                  <circle className="motor-collar" r={7.2} />
+                  <circle className="motor-shaft" r={3.2} />
+                </g>)}
+                <title>
+                  Approximate LumenPnP V3 toolhead silhouette; calibrated markers are shown above it
+                </title>
+              </g>}
               <g
                 className="workspace-top-camera"
-                transform={`translate(${status.pose.x_mm} ${-status.pose.y_mm})`}
               >
+                <circle className="camera-shroud" r={machineMarkerSize * 1.85} />
                 <circle className="camera-body" r={machineMarkerSize * .82} />
-                <circle className="camera-lens" r={machineMarkerSize * .36} />
+                <circle className="camera-lens" r={machineMarkerSize * .38} />
                 <line x1={-machineMarkerSize * .22} x2={machineMarkerSize * .22} />
                 <line y1={-machineMarkerSize * .22} y2={machineMarkerSize * .22} />
                 <title>{`Top camera X${status.pose.x_mm.toFixed(3)} Y${status.pose.y_mm.toFixed(3)}`}</title>
@@ -1034,11 +1098,11 @@ export function WorkspacePanel({
               {machineGeometry?.nozzles.map((nozzle) => <g
                 className={`workspace-nozzle ${nozzle.nozzle_id === activeNozzleId ? "is-active" : ""}`}
                 key={nozzle.nozzle_id}
-                transform={`translate(${status.pose!.x_mm + nozzle.offset_machine_mm[0]} ${-(status.pose!.y_mm + nozzle.offset_machine_mm[1])})`}
+                transform={`translate(${nozzle.offset_machine_mm[0]} ${-nozzle.offset_machine_mm[1]})`}
               >
                 <circle className="nozzle-body" r={machineMarkerSize * .64} />
                 <circle className="nozzle-tip" r={machineMarkerSize * .2} />
-                <text x={machineMarkerSize * .82} y={machineMarkerSize * .32}>
+                <text x={0} y={machineMarkerSize * 2.75} textAnchor="middle">
                   {nozzle.nozzle_id}
                 </text>
                 <title>{`${nozzle.nozzle_id} calibrated axis center${nozzle.nozzle_id === activeNozzleId ? " · active" : ""}`}</title>

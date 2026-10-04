@@ -684,11 +684,73 @@ p { line-height: 1.5; }
   stroke-dasharray: 5 4;
   vector-effect: non-scaling-stroke;
 }
-.workspace-toolhead { filter: drop-shadow(0 2px 3px #000c); }
-.workspace-toolhead-link {
-  stroke: #bac9c499;
-  stroke-width: 3.5;
-  stroke-linecap: round;
+.workspace-toolhead { filter: drop-shadow(0 4px 5px #000c); }
+.workspace-toolhead-model { opacity: .84; }
+.workspace-toolhead-carriage {
+  fill: #121a18f2;
+  stroke: #788780;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-shadow { fill: #0009; }
+.workspace-toolhead-chassis {
+  fill: url("#workspace-toolhead-shell");
+  stroke: #9aaba4;
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-panel {
+  fill: #10181599;
+  stroke: #62716b;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-spine {
+  fill: #090e0c;
+  stroke: #6e7b76;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-pulley {
+  fill: #0b100f;
+  stroke: #b7c3be;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-pulley-hub {
+  fill: #73827c;
+  stroke: #dae3df;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-fastener {
+  fill: #b7c3be;
+  stroke: #26312d;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-motor rect {
+  fill: url("#workspace-toolhead-motor");
+  stroke: #b5c1bc;
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-motor path {
+  fill: none;
+  stroke: #8a999366;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-motor .motor-collar {
+  fill: #171f1c;
+  stroke: #c9d3cf;
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead-motor .motor-shaft {
+  fill: #697872;
+  stroke: #e2e9e6;
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
 .workspace-top-camera circle,
@@ -696,13 +758,18 @@ p { line-height: 1.5; }
 .workspace-nozzle circle {
   vector-effect: non-scaling-stroke;
 }
+.workspace-top-camera .camera-shroud {
+  fill: #0b1210e6;
+  stroke: #91a19a;
+  stroke-width: 2.2;
+}
 .workspace-top-camera .camera-body {
   fill: #152827e8;
   stroke: #8ed9ff;
   stroke-width: 2.2;
 }
 .workspace-top-camera .camera-lens {
-  fill: #68cfff80;
+  fill: url("#workspace-camera-lens");
   stroke: #d3f3ff;
   stroke-width: 1.4;
 }
