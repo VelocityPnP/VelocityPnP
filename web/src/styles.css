@@ -670,11 +670,23 @@ p { line-height: 1.5; }
 }
 .workspace-machine-overlay { pointer-events: none; }
 .workspace-machine-overlay.is-untrusted { opacity: .42; }
-.workspace-gantry-guide rect { fill: #67c7ff14; }
-.workspace-gantry-guide line {
-  stroke: #8ed9ff80;
-  stroke-width: 1.4;
-  stroke-dasharray: 8 5;
+.workspace-gantry-guide { opacity: .3; }
+.workspace-gantry-shadow { fill: #000c; }
+.workspace-gantry-extrusion {
+  fill: url("#workspace-gantry-aluminum");
+  stroke: #b7c4be;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-gantry-guide .workspace-gantry-rail {
+  stroke: #d6dfdb;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-gantry-slot {
+  fill: #080d0b;
+  stroke: #9aa8a2;
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
 .workspace-camera-footprint {
@@ -684,8 +696,10 @@ p { line-height: 1.5; }
   stroke-dasharray: 5 4;
   vector-effect: non-scaling-stroke;
 }
-.workspace-toolhead { filter: drop-shadow(0 4px 5px #000c); }
-.workspace-toolhead-model { opacity: .84; }
+.workspace-toolhead-model {
+  opacity: .3;
+  filter: drop-shadow(0 4px 5px #0009);
+}
 .workspace-toolhead-carriage {
   fill: #121a18f2;
   stroke: #788780;
@@ -762,6 +776,7 @@ p { line-height: 1.5; }
   fill: #0b1210e6;
   stroke: #91a19a;
   stroke-width: 2.2;
+  opacity: .35;
 }
 .workspace-top-camera .camera-body {
   fill: #152827e8;

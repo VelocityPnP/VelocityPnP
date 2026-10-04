@@ -873,6 +873,15 @@ export function WorkspacePanel({
               <stop offset=".2" stopColor="#26312d" />
               <stop offset="1" stopColor="#111816" />
             </linearGradient>
+            <linearGradient id="workspace-gantry-aluminum" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stopColor="#b3c0ba" />
+              <stop offset=".08" stopColor="#38433f" />
+              <stop offset=".38" stopColor="#65716c" />
+              <stop offset=".5" stopColor="#111816" />
+              <stop offset=".62" stopColor="#65716c" />
+              <stop offset=".92" stopColor="#38433f" />
+              <stop offset="1" stopColor="#b3c0ba" />
+            </linearGradient>
             <radialGradient id="workspace-camera-lens">
               <stop offset="0" stopColor="#dcf7ff" />
               <stop offset=".22" stopColor="#6ad1ff" />
@@ -1002,18 +1011,43 @@ export function WorkspacePanel({
           >
             <g className="workspace-gantry-guide">
               <rect
+                className="workspace-gantry-shadow"
                 x={region.x_min_mm}
-                y={-status.pose.y_mm - machineMarkerSize * .35}
+                y={-status.pose.y_mm - 8}
                 width={mapWidth}
-                height={machineMarkerSize * .7}
+                height={20}
+                rx={1.5}
+              />
+              <rect
+                className="workspace-gantry-extrusion"
+                x={region.x_min_mm}
+                y={-status.pose.y_mm - 10}
+                width={mapWidth}
+                height={20}
+                rx={1.5}
               />
               <line
+                className="workspace-gantry-rail"
                 x1={region.x_min_mm}
                 x2={region.x_max_mm}
-                y1={-status.pose.y_mm}
-                y2={-status.pose.y_mm}
+                y1={-status.pose.y_mm - 7}
+                y2={-status.pose.y_mm - 7}
               />
-              <title>{`Gantry Y position ${status.pose.y_mm.toFixed(3)} mm`}</title>
+              <line
+                className="workspace-gantry-rail"
+                x1={region.x_min_mm}
+                x2={region.x_max_mm}
+                y1={-status.pose.y_mm + 7}
+                y2={-status.pose.y_mm + 7}
+              />
+              <rect
+                className="workspace-gantry-slot"
+                x={region.x_min_mm}
+                y={-status.pose.y_mm - 2}
+                width={mapWidth}
+                height={4}
+              />
+              <title>{`Approximate 20 mm X-gantry extrusion at Y${status.pose.y_mm.toFixed(3)}`}</title>
             </g>
             {machineGeometry && <rect
               className="workspace-camera-footprint"

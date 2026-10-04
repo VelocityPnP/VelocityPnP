@@ -487,6 +487,10 @@ describe("workspace operational map", () => {
       .toBe("0 -80 100 80");
     expect(container.querySelector(".workspace-machine-overlay")).toBeTruthy();
     expect(container.querySelector(".workspace-gantry-guide")).toBeTruthy();
+    expect(container.querySelector(".workspace-gantry-extrusion")
+      ?.getAttribute("height")).toBe("20");
+    expect(container.querySelectorAll(".workspace-gantry-rail"))
+      .toHaveLength(2);
     await waitFor(() => expect(
       container.querySelectorAll(".workspace-nozzle"),
     ).toHaveLength(2));
