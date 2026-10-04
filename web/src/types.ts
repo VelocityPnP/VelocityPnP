@@ -1502,6 +1502,30 @@ export interface WorkspaceScanTile {
   artifact_name: string;
 }
 
+export interface WorkspaceScanEstimate {
+  mode: "precision" | "survey" | "reconnaissance" | "refinement";
+  artifact_retention: "full_sources" | "transient_sources" | "thumbnails" | "mosaic_only";
+  surface_model: "top_camera_working_plane" | "installed_plate_planes";
+  surface_models: Array<"top_camera_working_plane" | "installed_plate_planes">;
+  region: WorkspaceScanRegion;
+  raster_transform: WorkspaceRasterTransform;
+  overlap_fraction: number;
+  output_mm_per_pixel: number;
+  feed_mm_per_min: number;
+  capture_settle_frames: number;
+  rows: number;
+  columns: number;
+  planned_tiles: number;
+  planned_registrations: number;
+  mosaic_width_px: number;
+  mosaic_height_px: number;
+  estimated_duration_seconds: number;
+  estimated_retained_bytes: number;
+  artifact_quota_bytes: number;
+  persistent_capture: boolean;
+  warnings: string[];
+}
+
 export interface WorkspaceScanReport {
   id: string;
   operation_id: string;

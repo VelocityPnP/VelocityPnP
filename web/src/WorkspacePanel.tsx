@@ -86,6 +86,14 @@ interface WorkspaceSelection {
   objectId: string | null;
 }
 
+interface WorkspaceRescanProgress {
+  capturedTiles: number;
+  plannedTiles: number;
+  estimatedDurationSeconds: number;
+  startedAtMs: number;
+  status: WorkspaceScanReport["status"];
+}
+
 interface WorkspacePanGesture {
   pointerId: number;
   startClientX: number;
@@ -436,7 +444,6 @@ export function latestFeederLanes(
   const selected: StripFeederMapRegistration[] = [];
   const candidates = registrations
     .filter((registration) => registration.profile_id === profileId
-      && registration.updated_at >= base.updated_at
       && registration.pockets.some((pocket) => {
         const [xMm, yMm] = pocket.center_machine_mm;
         return xMm >= base.region.x_min_mm && xMm <= base.region.x_max_mm
@@ -506,6 +513,34 @@ export function workspaceMoveAnimationDuration(
   return Math.min(1200, Math.max(100, durationMs));
 }
 
+export function formatWorkspaceDuration(seconds: number): string {
+  const roundedSeconds = Math.max(1, Math.round(seconds));
+  if (roundedSeconds < 60) return `${roundedSeconds} sec`;
+  const minutes = Math.floor(roundedSeconds / 60);
+  const remainder = roundedSeconds % 60;
+  return remainder === 0
+    ? `${minutes} min`
+    : `${minutes} min ${remainder} sec`;
+}
+
+export function workspaceRescanEtaSeconds(
+  capturedTiles: number,
+  plannedTiles: number,
+  estimatedDurationSeconds: number,
+  elapsedSeconds: number,
+): number {
+  const plannedEstimate = Math.max(estimatedDurationSeconds, 1);
+  const tileProgress = plannedTiles > 0
+    ? Math.min(1, Math.max(0, capturedTiles / plannedTiles))
+    : 0;
+  const observedEstimate = tileProgress > 0
+    ? elapsedSeconds / tileProgress
+    : plannedEstimate;
+  return Math.max(0, Math.ceil(
+    Math.max(plannedEstimate, observedEstimate) - elapsedSeconds,
+  ));
+}
+
 export function WorkspacePanel({
   status, setError, openMachine, openJobs,
 }: WorkspacePanelProps) {
@@ -535,10 +570,11 @@ export function WorkspacePanel({
   const [panning, setPanning] = useState(false);
   const [selection, setSelection] = useState<WorkspaceSelection | null>(null);
   const [selectionAction, setSelectionAction] = useState<
-    "moving" | "scanning" | "capturing" | null
+    "moving" | "estimating" | "scanning" | "capturing" | null
   >(null);
   const [selectionMessage, setSelectionMessage] = useState("");
   const [quickCaptureUrl, setQuickCaptureUrl] = useState("");
+  const [rescanProgress, setRescanProgress] = useState<WorkspaceRescanProgress | null>(null);
   const [layers, setLayers] = useState<Record<WorkspaceLayer, boolean>>({
     image: true,
     objects: true,
@@ -887,13 +923,22 @@ export function WorkspacePanel({
     setSelection(null);
     setSelectionMessage("");
     setQuickCaptureUrl("");
+    setRescanProgress(null);
   }, [selectedSummary?.id]);
+
+  useEffect(() => () => {
+    if (quickCaptureUrl.startsWith("blob:")
+        && typeof URL.revokeObjectURL === "function") {
+      URL.revokeObjectURL(quickCaptureUrl);
+    }
+  }, [quickCaptureUrl]);
 
   const selectTarget = (target: WorkspaceSelection) => {
     if (selectionAction !== null) return;
     setSelection(target);
     setSelectionMessage("");
     setQuickCaptureUrl("");
+    setRescanProgress(null);
   };
 
   const selectBoard = (
@@ -990,7 +1035,7 @@ export function WorkspacePanel({
     });
   };
 
-  const moveTopCamera = async (target: WorkspaceSelection) => {
+  const moveTopCamera = async (target: WorkspaceSelection): Promise<string> => {
     if (!status.pose) throw new Error("The machine pose is not known.");
     const lease = await api.acquireOrRenewLease("VelocityPnP workspace", 3600);
     const targetPose = {
@@ -1007,6 +1052,7 @@ export function WorkspacePanel({
     if (completed.status !== "succeeded") {
       throw new Error(completed.message ?? "The move did not complete.");
     }
+    return lease.id;
   };
 
   const goToSelection = async () => {
@@ -1033,17 +1079,28 @@ export function WorkspacePanel({
       : selection.kind === "pocket"
         ? "the feeder strip around this pocket"
         : selection.kind === "board" ? "this PCB" : "this feeder strip";
-    const confirmed = await requestDialog({
-      title: `Rescan ${selection.label}`,
-      message: `Scan ${rescanScope} and align the result to the current full workspace scan. Confirm that the scan region and travel path are clear, both nozzles are level, and power isolation is reachable.`,
-      confirmLabel: "Start rescan",
-    });
-    if (confirmed === null) return;
-    setSelectionAction("scanning");
-    setSelectionMessage("Preparing rescan…");
+    setSelectionAction("estimating");
+    setSelectionMessage("Estimating rescan…");
     setQuickCaptureUrl("");
+    setRescanProgress(null);
     setError(null);
+    let progressTimer: number | null = null;
     try {
+      const estimate = await api.estimateWorkspaceSurvey(
+        selectedScan.id,
+        selectedScan.calibration_id,
+        selection.scanRegion,
+      );
+      setSelectionAction(null);
+      setSelectionMessage("");
+      const confirmed = await requestDialog({
+        title: `Rescan ${selection.label}`,
+        message: `Scan ${rescanScope} and align the result to the current full workspace scan. Estimated completion time is about ${formatWorkspaceDuration(estimate.estimated_duration_seconds)} for ${estimate.planned_tiles} tiles. Confirm that the scan region and travel path are clear, both nozzles are level, and power isolation is reachable.`,
+        confirmLabel: "Start rescan",
+      });
+      if (confirmed === null) return;
+      setSelectionAction("scanning");
+      setSelectionMessage("Preparing rescan…");
       const lease = await api.acquireOrRenewLease("VelocityPnP workspace", 3600);
       const started = await api.startWorkspaceSurvey(
         selectedScan.id,
@@ -1051,6 +1108,29 @@ export function WorkspacePanel({
         selection.scanRegion,
         lease.id,
       );
+      const startedAtMs = Date.now();
+      setRescanProgress({
+        capturedTiles: started.scan.captured_tiles,
+        plannedTiles: started.scan.planned_tiles,
+        estimatedDurationSeconds: started.scan.estimated_duration_seconds,
+        startedAtMs,
+        status: started.scan.status,
+      });
+      const refreshProgress = async () => {
+        try {
+          const scan = await api.workspaceScan(started.scan.id);
+          setRescanProgress({
+            capturedTiles: scan.captured_tiles,
+            plannedTiles: scan.planned_tiles,
+            estimatedDurationSeconds: scan.estimated_duration_seconds,
+            startedAtMs,
+            status: scan.status,
+          });
+        } catch {
+          // Keep the last known progress while the operation poll remains active.
+        }
+      };
+      progressTimer = window.setInterval(() => void refreshProgress(), 500);
       setSelectionMessage("Scanning selected area…");
       const completed = await waitForOperation(started.operation, (operation) => {
         setSelectionMessage(operation.message ?? "Scanning selected area…");
@@ -1058,6 +1138,12 @@ export function WorkspacePanel({
       if (completed.status !== "succeeded") {
         throw new Error(completed.message ?? "The rescan did not complete.");
       }
+      await refreshProgress();
+      setRescanProgress((current) => current ? {
+        ...current,
+        capturedTiles: current.plannedTiles,
+        status: "succeeded",
+      } : current);
       if (selection.kind === "feeder" || selection.kind === "pocket") {
         setSelectionMessage("Checking feeder alignment…");
         const discoveryReport = await api.discoverWorkspaceObjects(started.scan.id);
@@ -1092,20 +1178,35 @@ export function WorkspacePanel({
       setSelectionMessage("");
       setError(message);
     } finally {
+      if (progressTimer !== null) window.clearInterval(progressTimer);
       setSelectionAction(null);
     }
   };
 
   const quickCapture = async () => {
-    if (!selection || selection.kind !== "point") return;
+    if (!selection || !["placement", "pocket", "point"].includes(selection.kind)) return;
     setSelectionAction("capturing");
     setSelectionMessage("Moving top camera…");
     setQuickCaptureUrl("");
     setError(null);
     try {
-      await moveTopCamera(selection);
+      const leaseId = await moveTopCamera(selection);
       setSelectionMessage("Capturing top-camera image…");
-      setQuickCaptureUrl(`/api/v1/cameras/top_camera/snapshot?t=${Date.now()}`);
+      let lightsRequested = false;
+      try {
+        lightsRequested = true;
+        await waitForOperation(await api.actuate(leaseId, "lights", true));
+        const image = await api.cameraSnapshot("top_camera");
+        if (typeof URL.createObjectURL !== "function") {
+          throw new Error("This browser cannot display the captured image.");
+        }
+        setQuickCaptureUrl(URL.createObjectURL(image));
+      } finally {
+        if (lightsRequested) {
+          await waitForOperation(await api.actuate(leaseId, "lights", false));
+        }
+      }
+      setSelectionMessage("Quick capture complete.");
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
       setSelectionMessage("");
@@ -1114,6 +1215,17 @@ export function WorkspacePanel({
       setSelectionAction(null);
     }
   };
+  const rescanPercent = rescanProgress?.plannedTiles
+    ? Math.round(rescanProgress.capturedTiles / rescanProgress.plannedTiles * 100)
+    : 0;
+  const rescanEtaSeconds = rescanProgress
+    ? workspaceRescanEtaSeconds(
+      rescanProgress.capturedTiles,
+      rescanProgress.plannedTiles,
+      rescanProgress.estimatedDurationSeconds,
+      (Date.now() - rescanProgress.startedAtMs) / 1000,
+    )
+    : 0;
   useEffect(() => {
     const svg = workspaceMapRef.current;
     if (!svg || !displayedViewport || !fullViewport) return;
@@ -1650,17 +1762,35 @@ export function WorkspacePanel({
               onClick={() => void goToSelection()}
               type="button"
             >{selectionAction === "moving" ? "Moving…" : "Go to"}</button>
-            {selection.scanRegion ? <button
+            {selection.scanRegion && <button
               disabled={!selectionActionAllowed}
               onClick={() => void rescanSelection()}
               type="button"
-            >{selectionAction === "scanning" ? "Scanning…" : "Rescan"}</button>
-              : <button
+            >{selectionAction === "estimating"
+                ? "Estimating…"
+                : selectionAction === "scanning" ? "Scanning…" : "Rescan"}</button>}
+            {["placement", "pocket", "point"].includes(selection.kind) && <button
                 disabled={!selectionActionAllowed}
                 onClick={() => void quickCapture()}
                 type="button"
               >{selectionAction === "capturing" ? "Capturing…" : "Quick capture"}</button>}
           </div>
+          {rescanProgress && <div className="workspace-selection-progress" role="status">
+            <div className="workspace-progress-label">
+              <strong>{rescanPercent}%</strong>
+              <span>{rescanProgress.status === "succeeded"
+                ? `${rescanProgress.plannedTiles}/${rescanProgress.plannedTiles} tiles · complete`
+                : rescanProgress.capturedTiles >= rescanProgress.plannedTiles
+                  ? `Finalizing scan${rescanEtaSeconds > 0
+                    ? ` · about ${formatWorkspaceDuration(rescanEtaSeconds)} left`
+                    : ""}`
+                  : `${rescanProgress.capturedTiles}/${rescanProgress.plannedTiles} tiles · about ${formatWorkspaceDuration(rescanEtaSeconds)} left`}</span>
+            </div>
+            <progress
+              value={rescanProgress.capturedTiles}
+              max={Math.max(rescanProgress.plannedTiles, 1)}
+            />
+          </div>}
           {selectionMessage && <p className="workspace-selection-message" role="status">
             {selectionMessage}
           </p>}
@@ -1671,7 +1801,6 @@ export function WorkspacePanel({
             alt={`Top-camera capture at X ${selection.point[0].toFixed(2)}, Y ${selection.point[1].toFixed(2)}`}
             className="workspace-quick-capture"
             onError={() => setSelectionMessage("Quick capture failed.")}
-            onLoad={() => setSelectionMessage("Quick capture complete.")}
             src={quickCaptureUrl}
           />}
         </section>}

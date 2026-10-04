@@ -47,6 +47,38 @@ describe("acquireOrRenewLease", () => {
 });
 
 describe("startWorkspaceSurvey", () => {
+  it("estimates a focused scan with the same survey specification", async () => {
+    const estimate = {
+      mode: "survey",
+      artifact_retention: "transient_sources",
+      planned_tiles: 24,
+      estimated_duration_seconds: 75,
+    };
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(estimate), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const region = {
+      x_min_mm: 10, x_max_mm: 30, y_min_mm: 40, y_max_mm: 80,
+    };
+
+    await expect(api.estimateWorkspaceSurvey(
+      "full-scan", "calibration-id", region,
+    )).resolves.toEqual(estimate);
+
+    const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/workspace-scans/estimate");
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      calibration_id: "calibration-id",
+      mode: "survey",
+      artifact_retention: "transient_sources",
+      region_preset: "installed_plates",
+      parent_scan_id: "full-scan",
+      output_mm_per_pixel: .05,
+      region,
+    });
+  });
+
   it("links a focused scan to its full workspace scan", async () => {
     const response = {
       scan: { id: "local-scan" },

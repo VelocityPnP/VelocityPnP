@@ -11,7 +11,7 @@ import type {
   StripFeederMapRegistration,
   WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceDisplayPatch, WorkspaceInventoryBaseline,
-  WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanSummary,
+  WorkspaceScanEstimate, WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -40,6 +40,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+async function requestBlob(path: string): Promise<Blob> {
+  const response = await fetch(`${BASE}${path}`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new ApiError(
+      response.status,
+      data?.error?.message ?? `Request failed (${response.status})`,
+    );
+  }
+  return response.blob();
+}
+
 function jsonPost<T>(path: string, body?: unknown): Promise<T> {
   return request(path, {
     method: "POST",
@@ -54,6 +66,22 @@ function jsonPut<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function workspaceSurveySpecification(
+  parentScanId: string,
+  calibrationId: string,
+  region: WorkspaceScanRegion,
+) {
+  return {
+    calibration_id: calibrationId,
+    mode: "survey",
+    artifact_retention: "transient_sources",
+    region,
+    region_preset: "installed_plates",
+    parent_scan_id: parentScanId,
+    output_mm_per_pixel: .05,
+  };
 }
 
 async function acquireLease(
@@ -117,6 +145,7 @@ export const api = {
     role: CameraRole, controls: Array<{ id: number; value: number | boolean }>,
   ) => (await jsonPut<{ controls: CameraControl[] }>(`/cameras/${role}/controls`, { controls })).controls,
   cameraProfile: (role: CameraRole) => request<CameraProfile>(`/cameras/${role}/profile`),
+  cameraSnapshot: (role: CameraRole) => requestBlob(`/cameras/${role}/snapshot`),
   setCameraProfile: (role: CameraRole, profile: CameraProfile) =>
     jsonPut<CameraProfile>(`/cameras/${role}/profile`, profile),
   cameraReproducibility: async (role: CameraRole, leaseId: string, sampleCount = 30) =>
@@ -283,6 +312,14 @@ export const api = {
     )).scans,
   workspaceScan: (scanId: string) =>
     request<WorkspaceScanReport>(`/workspace-scans/${scanId}`),
+  estimateWorkspaceSurvey: (
+    parentScanId: string,
+    calibrationId: string,
+    region: WorkspaceScanRegion,
+  ) => jsonPost<WorkspaceScanEstimate>(
+    "/workspace-scans/estimate",
+    workspaceSurveySpecification(parentScanId, calibrationId, region),
+  ),
   startWorkspaceSurvey: (
     parentScanId: string,
     calibrationId: string,
@@ -293,13 +330,7 @@ export const api = {
     {
       lease_id: leaseId,
       confirmed_external_safety_checks: true,
-      calibration_id: calibrationId,
-      mode: "survey",
-      artifact_retention: "transient_sources",
-      region,
-      region_preset: "installed_plates",
-      parent_scan_id: parentScanId,
-      output_mm_per_pixel: .05,
+      ...workspaceSurveySpecification(parentScanId, calibrationId, region),
     },
   ),
   workspaceDisplayPatches: (scanId: string) =>

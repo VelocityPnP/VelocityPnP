@@ -928,6 +928,18 @@ p { line-height: 1.5; }
   margin-top: 11px;
 }
 .workspace-selection-actions button { min-height: 34px; }
+.workspace-selection-progress { margin-top: 10px; }
+.workspace-selection-progress progress {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 8px;
+  background: #26342f;
+}
+.workspace-selection-progress progress::-webkit-progress-bar { background: #26342f; }
+.workspace-selection-progress progress::-webkit-progress-value { background: var(--green); }
+.workspace-selection-progress progress::-moz-progress-bar { background: var(--green); }
 .workspace-selection-close {
   position: absolute;
   top: 8px;
@@ -944,6 +956,7 @@ p { line-height: 1.5; }
   margin-top: 10px;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
+  transform: rotate(180deg);
 }
 .workspace-zoom-controls {
   position: absolute;

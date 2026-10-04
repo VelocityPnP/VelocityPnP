@@ -8,12 +8,13 @@ import { DialogProvider } from "./Dialog";
 import type {
   BoardDesign, Job, JobExecutionRun, MachineStatus, PlacementExecutionRun,
   PlacementOutcomeRecord, StripFeederMapRegistration, WorkspaceDisplayPatch,
-  WorkspaceScanReport, WorkspaceScanSummary,
+  WorkspaceScanEstimate, WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 import {
-  feederScanRegion, jobPlacementMarkers, latestFeederLanes, panWorkspaceViewport,
-  selectActiveJobExecution, selectWorkspaceJob, workspaceArtifactOptions,
-  workspaceComposition, workspaceMoveAnimationDuration, WorkspacePanel,
+  feederScanRegion, formatWorkspaceDuration, jobPlacementMarkers,
+  latestFeederLanes, panWorkspaceViewport, selectActiveJobExecution,
+  selectWorkspaceJob, workspaceArtifactOptions, workspaceComposition,
+  workspaceMoveAnimationDuration, workspaceRescanEtaSeconds, WorkspacePanel,
   zoomWorkspaceViewport,
 } from "./WorkspacePanel";
 
@@ -92,6 +93,30 @@ const scanSummary: WorkspaceScanSummary = {
   strip_feeder_inventory: scan.strip_feeder_inventory,
   change_set: scan.change_set,
   failure: scan.failure,
+};
+
+const surveyEstimate: WorkspaceScanEstimate = {
+  mode: "survey",
+  artifact_retention: "transient_sources",
+  surface_model: "top_camera_working_plane",
+  surface_models: ["top_camera_working_plane", "installed_plate_planes"],
+  region: scan.region,
+  raster_transform: scan.raster_transform!,
+  overlap_fraction: .2,
+  output_mm_per_pixel: .05,
+  feed_mm_per_min: 23_000,
+  capture_settle_frames: 3,
+  rows: 4,
+  columns: 6,
+  planned_tiles: 24,
+  planned_registrations: 38,
+  mosaic_width_px: 2000,
+  mosaic_height_px: 1600,
+  estimated_duration_seconds: 75,
+  estimated_retained_bytes: 1024,
+  artifact_quota_bytes: 1024 * 1024,
+  persistent_capture: true,
+  warnings: [],
 };
 
 const displayPatch: WorkspaceDisplayPatch = {
@@ -254,6 +279,7 @@ const status: MachineStatus = {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("workspace operational map", () => {
@@ -343,6 +369,13 @@ describe("workspace operational map", () => {
     )).toBe(1200);
   });
 
+  it("formats the scan estimate and updates its ETA from tile progress", () => {
+    expect(formatWorkspaceDuration(167)).toBe("2 min 47 sec");
+    expect(workspaceRescanEtaSeconds(0, 20, 100, 10)).toBe(90);
+    expect(workspaceRescanEtaSeconds(5, 20, 100, 50)).toBe(150);
+    expect(workspaceRescanEtaSeconds(20, 20, 100, 90)).toBe(10);
+  });
+
   it("keeps only the newest registration for each physical feeder lane", () => {
     const olderSameLane = {
       ...feederRegistration,
@@ -359,8 +392,14 @@ describe("workspace operational map", () => {
       })),
     };
 
+    const baseUpdatedAfterFeeders = {
+      ...scanSummary,
+      updated_at: "2026-10-04T18:00:00Z",
+    };
     expect(latestFeederLanes(
-      [olderSameLane, adjacentLane, feederRegistration], scan.profile_id, scanSummary,
+      [olderSameLane, adjacentLane, feederRegistration],
+      scan.profile_id,
+      baseUpdatedAfterFeeders,
     ).map((registration) => registration.id)).toEqual([
       feederRegistration.id, adjacentLane.id,
     ]);
@@ -493,6 +532,22 @@ describe("workspace operational map", () => {
       status: "succeeded",
       message: null,
     });
+    const actuate = vi.spyOn(api, "actuate").mockImplementation(
+      async (_leaseId, _actuatorId, enabled) => ({
+        id: `lights-${enabled ? "on" : "off"}`,
+        kind: "machine.actuate",
+        status: "succeeded",
+        message: null,
+      }),
+    );
+    const cameraSnapshot = vi.spyOn(api, "cameraSnapshot")
+      .mockResolvedValue(new Blob(["capture"], { type: "image/png" }));
+    vi.spyOn(api, "estimateWorkspaceSurvey").mockResolvedValue(surveyEstimate);
+    const createObjectURL = vi.fn(() => "blob:quick-capture");
+    vi.stubGlobal("URL", {
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
     vi.spyOn(api, "jobs").mockResolvedValue([job]);
     vi.spyOn(api, "jobExecutions").mockResolvedValue([currentExecution]);
     vi.spyOn(api, "placementExecution").mockResolvedValue({
@@ -566,6 +621,22 @@ describe("workspace operational map", () => {
     expect(screen.getByText(
       "Feeder 1 · pocket 0", { selector: ".workspace-selection-card h3" },
     )).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Quick capture" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Quick capture" }));
+    await waitFor(() => expect(cameraSnapshot).toHaveBeenCalledWith("top_camera"));
+    expect(actuate.mock.calls.map(([, actuatorId, enabled]) => [actuatorId, enabled]))
+      .toEqual([["lights", true], ["lights", false]]);
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(screen.getByRole("img", { name: /Top-camera capture/ })
+      .getAttribute("src")).toBe("blob:quick-capture");
+    await user.click(container.querySelector(".workspace-placement-position")!);
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Quick capture" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Rescan" }));
+    expect(await screen.findByText(
+      /Estimated completion time is about 1 min 15 sec for 24 tiles/,
+    )).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
     await user.click(container.querySelector(".workspace-job-board")!);
     expect(screen.getByText("Main PCB", { selector: ".workspace-selection-card h3" }))
       .toBeTruthy();
