@@ -4,6 +4,18 @@ The client uses only the Python standard library and calls the daemon's
 versioned HTTP API. It intentionally exposes typed machine operations rather
 than raw G-code.
 
+The package also installs `velocitypnp-models`. It downloads, verifies,
+selects, and rolls back immutable model packages:
+
+```bash
+velocitypnp-models activate models.lock.json
+velocitypnp-models current
+velocitypnp-models rollback
+```
+
+Activation is atomic. The daemon verifies the active cache again at startup
+and reports the selected lock and package checksums through `/api/v1/health`.
+
 ```python
 from pathlib import Path
 from velocitypnp import Client

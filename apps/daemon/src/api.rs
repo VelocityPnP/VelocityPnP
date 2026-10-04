@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::{header, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -73,8 +73,9 @@ use velocitypnp_domain::{
 use velocitypnp_driver::{discover_linux_devices, MachineHandle};
 use velocitypnp_kicad::{import_board, merge_bom};
 use velocitypnp_model::{
-    HeldPartModel, HeldPartModelStatus, PlacementVerificationModel,
-    PlacementVerificationModelStatus, SourceComponentModel, SourceComponentModelStatus,
+    HeldPartModel, HeldPartModelStatus, LearnedModelState, ModelSelectionMode,
+    ModelSelectionStatus, PlacementVerificationModel, PlacementVerificationModelStatus,
+    SourceComponentModel, SourceComponentModelStatus,
 };
 use velocitypnp_openpnp::import_openpnp;
 use velocitypnp_planner::{
@@ -530,6 +531,7 @@ pub struct AppState {
     held_part_model_status: Arc<HeldPartModelStatus>,
     placement_verification_model: Option<Arc<PlacementVerificationModel>>,
     placement_verification_model_status: Arc<PlacementVerificationModelStatus>,
+    model_selection_status: Arc<ModelSelectionStatus>,
 }
 
 impl AppState {
@@ -549,6 +551,7 @@ impl AppState {
             placement_verification_model_status: Arc::new(
                 PlacementVerificationModelStatus::disabled(),
             ),
+            model_selection_status: Arc::new(ModelSelectionStatus::disabled()),
         };
         state.recover_interrupted_calibration_runs();
         state.recover_interrupted_workspace_scans();
@@ -561,6 +564,41 @@ impl AppState {
         state.recover_interrupted_job_executions();
         state.refresh_automatic_placement_outcomes();
         state
+    }
+
+    pub fn with_model_selection_status(mut self, status: ModelSelectionStatus) -> Self {
+        self.model_selection_status = Arc::new(status);
+        self
+    }
+
+    pub fn require_managed_models_ready(&self) -> anyhow::Result<()> {
+        if self.model_selection_status.mode != ModelSelectionMode::Managed {
+            return Ok(());
+        }
+        for (role, state, reason) in [
+            (
+                "source_component",
+                &self.source_component_model_status.state,
+                self.source_component_model_status.reason.as_deref(),
+            ),
+            (
+                "held_part",
+                &self.held_part_model_status.state,
+                self.held_part_model_status.reason.as_deref(),
+            ),
+            (
+                "placement_verification",
+                &self.placement_verification_model_status.state,
+                self.placement_verification_model_status.reason.as_deref(),
+            ),
+        ] {
+            ensure!(
+                *state == LearnedModelState::Ready,
+                "selected {role} model did not load: {}",
+                reason.unwrap_or("unknown model load failure")
+            );
+        }
+        Ok(())
     }
 
     pub fn with_source_component_model_package(mut self, package_dir: Option<&FilePath>) -> Self {
@@ -1550,6 +1588,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "simulated": state.machine.status().simulated,
         "models": {
+            "selection": state.model_selection_status.as_ref(),
             "source_component_pose": state.source_component_model_status.as_ref(),
             "held_part_pose": state.held_part_model_status.as_ref(),
             "placement_verification":
@@ -38168,6 +38207,19 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["models"]["source_component_pose"]["state"], "disabled");
         assert_eq!(body["models"]["held_part_pose"]["state"], "disabled");
+        assert_eq!(body["models"]["selection"]["mode"], "disabled");
+    }
+
+    #[tokio::test]
+    async fn managed_selection_requires_all_models_to_load() {
+        let mut selection = ModelSelectionStatus::disabled();
+        selection.mode = ModelSelectionMode::Managed;
+        let state = test_state().with_model_selection_status(selection);
+
+        let error = state.require_managed_models_ready().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("selected source_component model did not load"));
     }
 
     #[tokio::test]

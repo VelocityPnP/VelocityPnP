@@ -2,9 +2,11 @@
 
 mod held_part;
 mod placement_verification;
+mod selection;
 
 pub use held_part::*;
 pub use placement_verification::*;
+pub use selection::*;
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};

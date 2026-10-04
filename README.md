@@ -66,16 +66,17 @@ Clang binding toolchain. See [Development prerequisites](docs/DEVELOPMENT.md)
 for the Debian/Ubuntu installation command.
 
 ```bash
-cargo run -p velocitypnpd -- --simulate --database velocitypnp.db
-cd web && npm install && npm run dev
+cd web && npm install && npm run build
+cd .. && cargo run -p velocitypnpd -- --database velocitypnp.db
 ```
 
-The API listens on all IPv4 interfaces at port `4080` by default. The service
-has no user authentication. Use it only on an isolated, trusted network, and
-use the host firewall to limit access. The development UI proxies `/api` to
-the loopback address and listens on all IPv4 interfaces at port `4081`. To
-serve a built UI from the daemon, run `npm run build` and pass the generated
-`web/dist` directory with `--web-dir`.
+The daemon serves the production UI and API on all IPv4 interfaces at port
+`4080` by default. It finds `web/dist` in a source checkout or the installed
+`/usr/share/velocitypnp/web` directory. The service has no user authentication.
+Use it only on an isolated, trusted network, and use the host firewall to limit
+access. Pass `--web-dir` to select another build, or `--disable-web-ui` to serve
+only the API. The optional Vite development server listens on all IPv4
+interfaces at port `4081` and proxies `/api` to the loopback address.
 
 ```bash
 cargo run -p velocitypnp -- status

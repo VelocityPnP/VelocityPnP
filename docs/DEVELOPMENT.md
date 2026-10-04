@@ -739,7 +739,9 @@ with the ignored dataset and are not source artifacts.
 
 ### Source-component model runtime
 
-The daemon can load one source-component model package:
+The normal daemon startup uses the active approved model-cache selection. See
+`docs/MODEL_DISTRIBUTION.md`. An explicit package is still available for
+diagnostic work and bypasses the managed selection:
 
 ```bash
 cargo run -p velocitypnpd -- \
@@ -986,7 +988,9 @@ a production gate.
 
 ### Held-part model runtime
 
-The daemon can load one held-part model package:
+The normal daemon startup loads this role from the active approved model-cache
+selection. An explicit package can bypass managed selection for diagnostic
+work:
 
 ```bash
 cargo run -p velocitypnpd -- \
@@ -1707,7 +1711,9 @@ The first reviewed run is recorded in
 is recorded in `docs/baselines/placement-verification-v2.json`. These small,
 single-machine evaluation sets are not acceptance thresholds.
 
-Load the exported package in the daemon with:
+The normal daemon startup loads this role from the active approved model-cache
+selection. An explicit package can bypass managed selection for diagnostic
+work:
 
 ```bash
 cargo run -p velocitypnpd -- \
@@ -1954,9 +1960,11 @@ The reproducibility request can set `pixel_format` and
 stored profile. The response reports the tested profile and whether it used a
 temporary capture override.
 
-Build the UI with `npm run build`, then serve it from the daemon using
-`--web-dir web/dist`. The Vite development server listens on all IPv4
-interfaces at port `4081` and proxies API calls to the daemon on loopback.
+Build the UI with `npm run build`. The daemon serves `web/dist` by default from
+a source checkout, or `/usr/share/velocitypnp/web` from an installed package.
+Pass `--web-dir` to select another build, or `--disable-web-ui` to serve only
+the API. The Vite development server listens on all IPv4 interfaces at port
+`4081` and proxies API calls to the daemon on loopback.
 
 ## Physical hardware gate
 

@@ -215,7 +215,8 @@ The project is organized by measurable gates rather than calendar estimates.
   with label records, images, audit data, checksums, and model links
 - [x] Publish a reviewed catalog revision that approves the current three model
   packages for their existing guarded runtime roles
-- [ ] Add application-managed model download, cache, checksum, and selection
+- [x] Add application-managed model download, cache, checksum, selection, and
+  rollback, with strict daemon startup verification and health provenance
 - [ ] Add V3.1/V3.2 and V4.x profiles with hardware-in-loop fixtures
 - [ ] Package signed Debian releases and migration-tested backup/restore bundles
 
