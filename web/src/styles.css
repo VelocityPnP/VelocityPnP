@@ -668,12 +668,72 @@ p { line-height: 1.5; }
   stroke: #fff;
   stroke-width: 2.5;
 }
-.workspace-machine-position circle { fill: #64e3a42e; stroke: #b9ffda; }
-.workspace-machine-position line { stroke: #b9ffda; }
-.workspace-machine-position circle, .workspace-machine-position line {
-  stroke-width: 2.2;
+.workspace-machine-overlay { pointer-events: none; }
+.workspace-machine-overlay.is-untrusted { opacity: .42; }
+.workspace-gantry-guide rect { fill: #67c7ff14; }
+.workspace-gantry-guide line {
+  stroke: #8ed9ff80;
+  stroke-width: 1.4;
+  stroke-dasharray: 8 5;
   vector-effect: non-scaling-stroke;
 }
+.workspace-camera-footprint {
+  fill: #6fd0ff0d;
+  stroke: #77d3ff99;
+  stroke-width: 1.4;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-toolhead { filter: drop-shadow(0 2px 3px #000c); }
+.workspace-toolhead-link {
+  stroke: #bac9c499;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-top-camera circle,
+.workspace-top-camera line,
+.workspace-nozzle circle {
+  vector-effect: non-scaling-stroke;
+}
+.workspace-top-camera .camera-body {
+  fill: #152827e8;
+  stroke: #8ed9ff;
+  stroke-width: 2.2;
+}
+.workspace-top-camera .camera-lens {
+  fill: #68cfff80;
+  stroke: #d3f3ff;
+  stroke-width: 1.4;
+}
+.workspace-top-camera line {
+  stroke: #f0fbff;
+  stroke-width: 1.2;
+}
+.workspace-nozzle .nozzle-body {
+  fill: #202724e8;
+  stroke: #d5e1dc;
+  stroke-width: 2;
+}
+.workspace-nozzle .nozzle-tip {
+  fill: #86a098;
+  stroke: #f2faf6;
+  stroke-width: 1.2;
+}
+.workspace-nozzle text {
+  fill: #e3eeea;
+  paint-order: stroke;
+  stroke: #08100dcc;
+  stroke-width: 2px;
+  font: 600 4px var(--mono);
+}
+.workspace-nozzle.is-active .nozzle-body {
+  fill: #64e3a466;
+  stroke: #a8ffd1;
+  stroke-width: 3;
+}
+.workspace-nozzle.is-active .nozzle-tip { fill: #a8ffd1; }
+.workspace-nozzle.is-active text { fill: #b9ffda; }
 .workspace-map-empty {
   height: 100%;
   display: grid;

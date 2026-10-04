@@ -1436,6 +1436,17 @@ export interface WorkspaceScanRegion {
   y_max_mm: number;
 }
 
+export interface MachineOverlayGeometry {
+  profile_id: string;
+  calibration_id: string;
+  geometry_source: "calibrated";
+  camera_footprint_relative_mm: WorkspaceScanRegion;
+  nozzles: Array<{
+    nozzle_id: string;
+    offset_machine_mm: [number, number];
+  }>;
+}
+
 export interface WorkspaceRasterTransform {
   top_left_x_mm: number;
   top_left_y_mm: number;

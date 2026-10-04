@@ -2,7 +2,7 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Job, JobExecutionRun, Operation, PlacementExecutionRun,
+  Job, JobExecutionRun, MachineOverlayGeometry, Operation, PlacementExecutionRun,
   PlacementOutcomeRecord, SensorReading,
   StripFeederLiveHoldoutRun,
   StripFeederPickupQualificationRun, StripFeederRegistration,
@@ -106,6 +106,8 @@ export async function waitForOperation(
 
 export const api = {
   status: async () => (await request<{ machine: MachineStatus }>("/machine/status")).machine,
+  machineOverlayGeometry: (calibrationId: string) =>
+    request<MachineOverlayGeometry>(`/machine/overlay-geometry/${calibrationId}`),
   devices: async () => (await request<{ devices: Device[] }>("/system/devices")).devices,
   cameraControls: async (role: CameraRole) =>
     (await request<{ controls: CameraControl[] }>(`/cameras/${role}/controls`)).controls,

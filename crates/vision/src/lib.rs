@@ -83,8 +83,8 @@ pub use workspace_inventory::{
     WORKSPACE_CHANGE_SET_ARTIFACT,
 };
 pub use workspace_mosaic::{
-    build_workspace_mosaic, plan_workspace_scan, workspace_camera_reachable_region,
-    WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
+    build_workspace_mosaic, plan_workspace_scan, workspace_camera_footprint,
+    workspace_camera_reachable_region, WorkspaceMosaic, WorkspaceMosaicStream, WorkspaceScanPlan,
 };
 pub use workspace_parallax::{
     measure_known_feature_surface_fraction, measure_workspace_parallax,

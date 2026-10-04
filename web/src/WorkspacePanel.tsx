@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { api } from "./api";
 import type {
-  BoardDesign, BoardInstance, Job, JobExecutionRun, MachineStatus,
-  PlacementOutcomeRecord, StripFeederMapRegistration,
+  BoardDesign, BoardInstance, Job, JobExecutionRun, MachineOverlayGeometry,
+  MachineStatus, PlacementExecutionRun, PlacementOutcomeRecord, StripFeederMapRegistration,
   WorkspaceBoardDiscoveryReport, WorkspaceDisplayPatch, WorkspaceObjectClass,
   WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 
-type WorkspaceLayer = "image" | "objects" | "boards" | "placements" | "feeders";
+type WorkspaceLayer =
+  | "image" | "objects" | "boards" | "placements" | "feeders" | "machine";
 
 const WORKSPACE_LAYERS: Array<{ id: WorkspaceLayer; label: string }> = [
   { id: "image", label: "Scan image" },
@@ -16,6 +17,7 @@ const WORKSPACE_LAYERS: Array<{ id: WorkspaceLayer; label: string }> = [
   { id: "boards", label: "Job boards" },
   { id: "placements", label: "Placement positions" },
   { id: "feeders", label: "Feeder pockets" },
+  { id: "machine", label: "Machine position" },
 ];
 
 interface WorkspacePanelProps {
@@ -437,6 +439,8 @@ export function WorkspacePanel({
   const [feederRegistrations, setFeederRegistrations] = useState<
     StripFeederMapRegistration[]
   >([]);
+  const [machineGeometry, setMachineGeometry] = useState<MachineOverlayGeometry | null>(null);
+  const [placementExecution, setPlacementExecution] = useState<PlacementExecutionRun | null>(null);
   const [selectedScanId, setSelectedScanId] = useState("");
   const [artifactName, setArtifactName] = useState("");
   const [viewport, setViewport] = useState<WorkspaceViewport | null>(null);
@@ -449,6 +453,7 @@ export function WorkspacePanel({
     boards: true,
     placements: true,
     feeders: true,
+    machine: true,
   });
   const workspaceMapRef = useRef<SVGSVGElement>(null);
   const panGestureRef = useRef<WorkspacePanGesture | null>(null);
@@ -533,6 +538,18 @@ export function WorkspacePanel({
   }, [selectedScanId, selectedSummary?.status, setError]);
 
   useEffect(() => {
+    setMachineGeometry(null);
+    if (!selectedScan?.calibration_id) return;
+    let cancelled = false;
+    void api.machineOverlayGeometry(selectedScan.calibration_id).then((geometry) => {
+      if (!cancelled) setMachineGeometry(geometry);
+    }).catch(() => {
+      if (!cancelled) setMachineGeometry(null);
+    });
+    return () => { cancelled = true; };
+  }, [selectedScan?.calibration_id]);
+
+  useEffect(() => {
     setDisplayPatches([]);
     if (!selectedScanId || selectedSummary?.status !== "succeeded") return;
     let cancelled = false;
@@ -598,6 +615,25 @@ export function WorkspacePanel({
   const currentStep = activeExecution?.steps.find(
     (step) => step.step_index === activeExecution.current_step_index,
   ) ?? null;
+  useEffect(() => {
+    setPlacementExecution(null);
+    const executionId = currentStep?.execution_id;
+    if (!executionId) return;
+    let cancelled = false;
+    const load = () => {
+      void api.placementExecution(executionId).then((execution) => {
+        if (!cancelled) setPlacementExecution(execution);
+      }).catch(() => {
+        if (!cancelled) setPlacementExecution(null);
+      });
+    };
+    load();
+    const timer = window.setInterval(load, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [currentStep?.execution_id]);
   const completedSteps = activeExecution?.steps.filter(
     (step) => ["succeeded", "skipped"].includes(step.status),
   ).length ?? 0;
@@ -628,6 +664,7 @@ export function WorkspacePanel({
   const mapWidth = region ? region.x_max_mm - region.x_min_mm : 1;
   const mapHeight = region ? region.y_max_mm - region.y_min_mm : 1;
   const markerSize = Math.max(mapWidth, mapHeight) * 0.009;
+  const machineMarkerSize = Math.max(markerSize, 2.4);
   const placementMarkerRadius = Math.max(
     Math.max(mapWidth, mapHeight) * 0.0024,
     0.65,
@@ -647,6 +684,7 @@ export function WorkspacePanel({
   const machineOnMap = Boolean(status.pose && region
     && status.pose.x_mm >= region.x_min_mm && status.pose.x_mm <= region.x_max_mm
     && status.pose.y_mm >= region.y_min_mm && status.pose.y_mm <= region.y_max_mm);
+  const activeNozzleId = placementExecution?.report?.nozzle_id ?? null;
   const capturedTiles = selectedSummary?.captured_tiles ?? selectedScan?.captured_tiles ?? 0;
   const plannedTiles = selectedSummary?.planned_tiles ?? selectedScan?.planned_tiles ?? 0;
   const selectedStatus = selectedSummary?.status ?? selectedScan?.status ?? null;
@@ -943,14 +981,69 @@ export function WorkspacePanel({
             </circle>)}
           </g>)}
 
-          {status.pose && machineOnMap && <g
-            className="workspace-machine-position"
-            transform={`translate(${status.pose.x_mm} ${-status.pose.y_mm})`}
+          {layers.machine && status.pose && machineOnMap && <g
+            className={`workspace-machine-overlay ${status.homed ? "is-trusted" : "is-untrusted"}`}
           >
-            <circle r={markerSize * 1.2} />
-            <line x1={-markerSize * 2.2} x2={markerSize * 2.2} />
-            <line y1={-markerSize * 2.2} y2={markerSize * 2.2} />
-            <title>{`Head X${status.pose.x_mm.toFixed(3)} Y${status.pose.y_mm.toFixed(3)}`}</title>
+            <g className="workspace-gantry-guide">
+              <rect
+                x={region.x_min_mm}
+                y={-status.pose.y_mm - machineMarkerSize * .35}
+                width={mapWidth}
+                height={machineMarkerSize * .7}
+              />
+              <line
+                x1={region.x_min_mm}
+                x2={region.x_max_mm}
+                y1={-status.pose.y_mm}
+                y2={-status.pose.y_mm}
+              />
+              <title>{`Gantry Y position ${status.pose.y_mm.toFixed(3)} mm`}</title>
+            </g>
+            {machineGeometry && <rect
+              className="workspace-camera-footprint"
+              x={status.pose.x_mm
+                + machineGeometry.camera_footprint_relative_mm.x_min_mm}
+              y={-(status.pose.y_mm
+                + machineGeometry.camera_footprint_relative_mm.y_max_mm)}
+              width={machineGeometry.camera_footprint_relative_mm.x_max_mm
+                - machineGeometry.camera_footprint_relative_mm.x_min_mm}
+              height={machineGeometry.camera_footprint_relative_mm.y_max_mm
+                - machineGeometry.camera_footprint_relative_mm.y_min_mm}
+            >
+              <title>Calibrated top-camera field of view</title>
+            </rect>}
+            <g className="workspace-toolhead">
+              {machineGeometry?.nozzles.map((nozzle) => <line
+                className="workspace-toolhead-link"
+                key={`link-${nozzle.nozzle_id}`}
+                x1={status.pose!.x_mm}
+                y1={-status.pose!.y_mm}
+                x2={status.pose!.x_mm + nozzle.offset_machine_mm[0]}
+                y2={-(status.pose!.y_mm + nozzle.offset_machine_mm[1])}
+              />)}
+              <g
+                className="workspace-top-camera"
+                transform={`translate(${status.pose.x_mm} ${-status.pose.y_mm})`}
+              >
+                <circle className="camera-body" r={machineMarkerSize * .82} />
+                <circle className="camera-lens" r={machineMarkerSize * .36} />
+                <line x1={-machineMarkerSize * .22} x2={machineMarkerSize * .22} />
+                <line y1={-machineMarkerSize * .22} y2={machineMarkerSize * .22} />
+                <title>{`Top camera X${status.pose.x_mm.toFixed(3)} Y${status.pose.y_mm.toFixed(3)}`}</title>
+              </g>
+              {machineGeometry?.nozzles.map((nozzle) => <g
+                className={`workspace-nozzle ${nozzle.nozzle_id === activeNozzleId ? "is-active" : ""}`}
+                key={nozzle.nozzle_id}
+                transform={`translate(${status.pose!.x_mm + nozzle.offset_machine_mm[0]} ${-(status.pose!.y_mm + nozzle.offset_machine_mm[1])})`}
+              >
+                <circle className="nozzle-body" r={machineMarkerSize * .64} />
+                <circle className="nozzle-tip" r={machineMarkerSize * .2} />
+                <text x={machineMarkerSize * .82} y={machineMarkerSize * .32}>
+                  {nozzle.nozzle_id}
+                </text>
+                <title>{`${nozzle.nozzle_id} calibrated axis center${nozzle.nozzle_id === activeNozzleId ? " · active" : ""}`}</title>
+              </g>)}
+            </g>
           </g>}
           <rect
             className="workspace-region-outline"

@@ -633,13 +633,22 @@ pub fn workspace_camera_reachable_region(
     frame_width_px: u32,
     frame_height_px: u32,
 ) -> Result<WorkspaceScanRegion> {
+    let footprint = workspace_camera_footprint(camera_model, frame_width_px, frame_height_px)?;
+    reachable_region_from_footprint(machine_bounds, footprint)
+}
+
+/// Returns the calibrated top-camera footprint relative to its machine pose.
+pub fn workspace_camera_footprint(
+    camera_model: &PlanarCameraModel,
+    frame_width_px: u32,
+    frame_height_px: u32,
+) -> Result<[f64; 4]> {
     ensure!(
         camera_model.role == velocitypnp_domain::CameraRole::TopCamera,
         "workspace scan requires a top-camera planar model"
     );
     let pixel_bounds = supported_pixel_bounds(camera_model, frame_width_px, frame_height_px)?;
-    let footprint = conservative_camera_footprint(camera_model, pixel_bounds)?;
-    reachable_region_from_footprint(machine_bounds, footprint)
+    conservative_camera_footprint(camera_model, pixel_bounds)
 }
 
 fn reachable_region_from_footprint(

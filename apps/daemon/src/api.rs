@@ -109,9 +109,10 @@ use velocitypnp_vision::{
     render_workspace_height_mosaic_with_consistency_parallel, rescale_planar_camera_model,
     resize_gray_frame, source_component_crop_pixel_to_machine, summarize_camera_reproducibility,
     summarize_head_camera_feature, summarize_nozzle_height_feature, summarize_nozzle_tooling,
-    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_reachable_region,
-    BottomCameraCorrection, CameraControlUpdate, CameraControlValue, CameraReproducibilityReport,
-    CaptureFreshnessBoundary, DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
+    summarize_opposed_camera_feature, summarize_residuals, workspace_camera_footprint,
+    workspace_camera_reachable_region, BottomCameraCorrection, CameraControlUpdate,
+    CameraControlValue, CameraReproducibilityReport, CaptureFreshnessBoundary,
+    DeterministicWorkspaceObjectClassifier, FiducialDetection, GrayFrame,
     HeldPartInspectionArtifacts, NozzleToolingReport, PersistentGrayCapture,
     PlacedPartInspectionArtifacts, RgbFrame, RgbaFrame, StripFeederInventoryBuild,
     StripFeederInventorySourceMosaic, StripFeederSourceComponentDraft,
@@ -1310,6 +1311,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/machine/profile", get(machine_profile))
         .route("/api/v1/machine/status", get(machine_status))
+        .route(
+            "/api/v1/machine/overlay-geometry/{calibration_id}",
+            get(machine_overlay_geometry),
+        )
         .route("/api/v1/machine/connect", post(connect))
         .route("/api/v1/machine/disconnect", post(disconnect))
         .route("/api/v1/machine/preflight", post(complete_preflight))
@@ -16109,6 +16114,54 @@ async fn machine_profile(State(state): State<AppState>) -> Json<MachineProfile> 
 
 async fn machine_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"machine": state.machine.status()}))
+}
+
+#[derive(Serialize)]
+struct MachineOverlayNozzle {
+    nozzle_id: String,
+    offset_machine_mm: [f64; 2],
+}
+
+#[derive(Serialize)]
+struct MachineOverlayGeometry {
+    profile_id: String,
+    calibration_id: Uuid,
+    geometry_source: &'static str,
+    camera_footprint_relative_mm: WorkspaceScanRegion,
+    nozzles: Vec<MachineOverlayNozzle>,
+}
+
+async fn machine_overlay_geometry(
+    State(state): State<AppState>,
+    Path(calibration_id): Path<Uuid>,
+) -> ApiResult<Json<MachineOverlayGeometry>> {
+    let (snapshot, camera_model) = load_workspace_camera_model(&state, calibration_id)?;
+    let camera_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
+    let [x_min_mm, x_max_mm, y_min_mm, y_max_mm] =
+        workspace_camera_footprint(&camera_model, camera_profile.width, camera_profile.height)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let nozzles = ["N1", "N2"]
+        .into_iter()
+        .map(|nozzle_id| {
+            let geometry = calibrated_nozzle_geometry(&snapshot, nozzle_id)?;
+            Ok(MachineOverlayNozzle {
+                nozzle_id: nozzle_id.into(),
+                offset_machine_mm: [geometry.head_offset_x_mm, geometry.head_offset_y_mm],
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    Ok(Json(MachineOverlayGeometry {
+        profile_id: state.profile.id.clone(),
+        calibration_id,
+        geometry_source: "calibrated",
+        camera_footprint_relative_mm: WorkspaceScanRegion {
+            x_min_mm,
+            x_max_mm,
+            y_min_mm,
+            y_max_mm,
+        },
+        nozzles,
+    }))
 }
 
 async fn connect(State(state): State<AppState>) -> ApiResult<(StatusCode, Json<Operation>)> {

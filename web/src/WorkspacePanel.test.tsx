@@ -5,9 +5,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import type {
-  BoardDesign, Job, JobExecutionRun, MachineStatus, PlacementOutcomeRecord,
-  StripFeederMapRegistration, WorkspaceDisplayPatch, WorkspaceScanReport,
-  WorkspaceScanSummary,
+  BoardDesign, Job, JobExecutionRun, MachineStatus, PlacementExecutionRun,
+  PlacementOutcomeRecord, StripFeederMapRegistration, WorkspaceDisplayPatch,
+  WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 import {
   jobPlacementMarkers, latestFeederLanes, panWorkspaceViewport,
@@ -412,6 +412,12 @@ describe("workspace operational map", () => {
 
   it("renders machine, scan, board, and current-placement overlays", async () => {
     const user = userEvent.setup();
+    const currentExecution = {
+      ...execution,
+      steps: execution.steps.map((step) => ({
+        ...step, execution_id: "placement-execution",
+      })),
+    };
     const localUpdate: WorkspaceScanSummary = {
       ...scanSummary,
       id: "local-update",
@@ -436,8 +442,23 @@ describe("workspace operational map", () => {
       displayPatch,
       { ...displayPatch, id: "rejected-patch", accepted: false },
     ]);
+    vi.spyOn(api, "machineOverlayGeometry").mockResolvedValue({
+      profile_id: scan.profile_id,
+      calibration_id: scan.calibration_id,
+      geometry_source: "calibrated",
+      camera_footprint_relative_mm: {
+        x_min_mm: -12, x_max_mm: 12, y_min_mm: -8, y_max_mm: 8,
+      },
+      nozzles: [
+        { nozzle_id: "N1", offset_machine_mm: [-24, -68] },
+        { nozzle_id: "N2", offset_machine_mm: [24, -68] },
+      ],
+    });
     vi.spyOn(api, "jobs").mockResolvedValue([job]);
-    vi.spyOn(api, "jobExecutions").mockResolvedValue([execution]);
+    vi.spyOn(api, "jobExecutions").mockResolvedValue([currentExecution]);
+    vi.spyOn(api, "placementExecution").mockResolvedValue({
+      report: { nozzle_id: "N1" },
+    } as unknown as PlacementExecutionRun);
     vi.spyOn(api, "placementOutcomes").mockResolvedValue([placementOutcome]);
     vi.spyOn(api, "boards").mockResolvedValue([design]);
     vi.spyOn(api, "stripFeederPocketMap").mockResolvedValue([feederRegistration]);
@@ -464,7 +485,16 @@ describe("workspace operational map", () => {
     expect(container.querySelectorAll(".workspace-map defs polygon")).toHaveLength(1);
     expect(container.querySelector(".workspace-map")?.getAttribute("viewBox"))
       .toBe("0 -80 100 80");
-    expect(container.querySelector(".workspace-machine-position")).toBeTruthy();
+    expect(container.querySelector(".workspace-machine-overlay")).toBeTruthy();
+    expect(container.querySelector(".workspace-gantry-guide")).toBeTruthy();
+    await waitFor(() => expect(
+      container.querySelectorAll(".workspace-nozzle"),
+    ).toHaveLength(2));
+    expect(container.querySelector(".workspace-camera-footprint")).toBeTruthy();
+    expect(container.querySelector(".workspace-top-camera")).toBeTruthy();
+    await waitFor(() => expect(
+      container.querySelector(".workspace-nozzle.is-active title")?.textContent,
+    ).toContain("N1 calibrated axis center · active"));
     expect(container.querySelector(".workspace-job-board")).toBeTruthy();
     expect(container.querySelector(".workspace-placement-position.current")).toBeTruthy();
     expect(container.querySelector(".workspace-placement-position circle")
@@ -493,7 +523,9 @@ describe("workspace operational map", () => {
     ).not.toBe("0 -80 100 80"));
     await user.click(screen.getByRole("button", { name: "Placement positions" }));
     await user.click(screen.getByRole("button", { name: "Feeder pockets" }));
+    await user.click(screen.getByRole("button", { name: "Machine position" }));
     expect(container.querySelector(".workspace-placement-position")).toBeNull();
     expect(container.querySelector(".workspace-feeder-pockets")).toBeNull();
+    expect(container.querySelector(".workspace-machine-overlay")).toBeNull();
   });
 });
