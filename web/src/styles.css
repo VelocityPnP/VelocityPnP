@@ -813,8 +813,6 @@ p { line-height: 1.5; }
 .workspace-current-step small { grid-column: 1 / -1; color: var(--muted); font: 9px var(--mono); text-transform: uppercase; }
 .workspace-current-step strong { font-size: 12px; }
 .workspace-current-step span { color: var(--green); font: 9px var(--mono); text-transform: uppercase; }
-.workspace-action-note { display: block; margin-top: 7px; color: var(--muted); font-size: 9px; text-align: center; }
-
 .boards-layout {
   display: grid;
   grid-template-columns: minmax(280px, 330px) minmax(0, 1fr);

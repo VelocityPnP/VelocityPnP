@@ -426,7 +426,12 @@ describe("workspace operational map", () => {
     };
     vi.spyOn(api, "workspaceScanSummaries")
       .mockResolvedValue([localUpdate, scanSummary]);
-    vi.spyOn(api, "workspaceScan").mockResolvedValue(scan);
+    vi.spyOn(api, "workspaceScan").mockResolvedValue({
+      ...scan,
+      warnings: [
+        "top-camera coverage reserves 0.057 mm X and 0.055 mm Y for calibrated controller corrections",
+      ],
+    });
     vi.spyOn(api, "workspaceDisplayPatches").mockResolvedValue([
       displayPatch,
       { ...displayPatch, id: "rejected-patch", accepted: false },
@@ -447,6 +452,10 @@ describe("workspace operational map", () => {
     expect(await screen.findByRole("img", { name: "Live machine workspace map" }))
       .toBeTruthy();
     expect(await screen.findByText("Demo assembly")).toBeTruthy();
+    expect(await screen.findByText("Workspace scan")).toBeTruthy();
+    expect(screen.queryByText(/top-camera coverage reserves/)).toBeNull();
+    expect(screen.queryByText("Estimate")).toBeNull();
+    expect(screen.queryByText("Artifacts")).toBeNull();
     await waitFor(() => expect(
       container.querySelectorAll(".workspace-map-update"),
     ).toHaveLength(1));

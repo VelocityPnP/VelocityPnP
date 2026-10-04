@@ -85,19 +85,6 @@ function label(value: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds} s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return remainder === 0 ? `${minutes} min` : `${minutes} min ${remainder} s`;
-}
-
 export function selectActiveJobExecution(
   executions: JobExecutionRun[],
 ): JobExecutionRun | null {
@@ -1058,8 +1045,7 @@ export function WorkspacePanel({
 
       <section className="card workspace-scan-card">
         <div className="card-heading">
-          <div><p className="eyebrow">Workspace evidence</p><h2>Composite map</h2></div>
-          {selectedScan && <span className="count">{displayPatches.length + 1}</span>}
+          <h2>Workspace scan</h2>
         </div>
         {selectedScan ? <>
           <div className="workspace-progress-label">
@@ -1068,23 +1054,16 @@ export function WorkspacePanel({
           </div>
           <progress value={capturedTiles} max={Math.max(plannedTiles, 1)} />
           <dl className="workspace-facts compact">
-            <div><dt>Region</dt><dd>{mapWidth.toFixed(1)} × {mapHeight.toFixed(1)} mm</dd></div>
             <div><dt>Aligned updates</dt><dd>{displayPatches.length}</dd></div>
-            <div><dt>Estimate</dt><dd>{formatDuration(selectedScan.estimated_duration_seconds)}</dd></div>
-            <div><dt>Artifacts</dt><dd>{formatBytes(selectedScan.retained_artifact_bytes)}</dd></div>
             <div><dt>Coverage</dt><dd>{selectedScan.covered_fraction === null ? "Pending" : `${(selectedScan.covered_fraction * 100).toFixed(1)}%`}</dd></div>
           </dl>
           {selectedScan.failure && <div className="notice">{selectedScan.failure}</div>}
-          {selectedScan.warnings.map((warning) =>
-            <p className="warning" key={warning}>⚠ {warning}</p>
-          )}
           <button
             disabled={!analysisAllowed || analyzing}
             onClick={() => void analyzeObjects()}
           >
             {analyzing ? "Analyzing…" : discovery ? "Refresh object analysis" : "Analyze workspace objects"}
           </button>
-          <small className="workspace-action-note">Image analysis causes no machine motion.</small>
         </> : <p>{selectedScanId
           ? "The map is ready. Loading detailed scan evidence…"
           : "No full-workspace evidence is stored."}</p>}
