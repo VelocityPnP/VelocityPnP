@@ -600,6 +600,8 @@ p { line-height: 1.5; }
   touch-action: none;
 }
 .workspace-map.is-panning { cursor: grabbing; }
+.workspace-selectable { cursor: pointer; }
+.workspace-selectable:focus { outline: none; }
 .workspace-map-background { fill: #0a1210; }
 .workspace-map-image { opacity: .9; }
 .workspace-map-update image { opacity: 1; }
@@ -631,6 +633,11 @@ p { line-height: 1.5; }
   stroke-width: 2.2;
   vector-effect: non-scaling-stroke;
 }
+.workspace-selectable.is-selected .workspace-job-board {
+  fill: #64e3a438;
+  stroke: #c5ffe0;
+  stroke-width: 3;
+}
 .workspace-placement-position circle,
 .workspace-placement-position line {
   opacity: .58;
@@ -645,11 +652,27 @@ p { line-height: 1.5; }
 .workspace-placement-position.unpopulated line { stroke: #d2ffe7; }
 .workspace-placement-position.current circle,
 .workspace-placement-position.current line { stroke-width: 2.6; }
+.workspace-placement-position.is-selected circle,
+.workspace-placement-position.is-selected line {
+  stroke: #fff;
+  stroke-width: 3;
+}
 .workspace-feeder-pockets polyline {
   fill: none;
   stroke: #66c4ff80;
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+}
+.workspace-feeder-pockets .workspace-feeder-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-feeder-pockets.is-selected > polyline:not(.workspace-feeder-hit) {
+  stroke: #d7f2ff;
+  stroke-width: 3;
 }
 .workspace-feeder-pockets circle {
   opacity: .58;
@@ -667,6 +690,21 @@ p { line-height: 1.5; }
 .workspace-feeder-pockets circle.selected {
   stroke: #fff;
   stroke-width: 2.5;
+}
+.workspace-selection-marker { pointer-events: none; }
+.workspace-selection-marker rect {
+  fill: #6fd0ff0a;
+  stroke: #8ad9ff;
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-selection-marker circle,
+.workspace-selection-marker line {
+  fill: #091411cc;
+  stroke: #fff;
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
 }
 .workspace-machine-overlay { pointer-events: none; }
 .workspace-machine-overlay.is-untrusted { opacity: .42; }
@@ -851,6 +889,53 @@ p { line-height: 1.5; }
   box-shadow: 0 0 10px var(--green);
 }
 .workspace-map-note { top: auto; bottom: 12px; border-color: #66512c; color: #f5d69f; background: #332818dc; }
+.workspace-selection-card {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: min(310px, calc(100% - 24px));
+  border: 1px solid #477566;
+  border-radius: 10px;
+  padding: 14px;
+  color: #e5efeb;
+  background: #0a1310ee;
+  box-shadow: 0 12px 34px #000b;
+  backdrop-filter: blur(8px);
+}
+.workspace-selection-card h3 {
+  margin: 2px 28px 3px 0;
+  font-size: 15px;
+}
+.workspace-selection-card p { margin: 4px 0; }
+.workspace-selection-coordinate,
+.workspace-selection-message {
+  color: var(--muted);
+  font: 10px var(--mono);
+}
+.workspace-selection-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 11px;
+}
+.workspace-selection-actions button { min-height: 34px; }
+.workspace-selection-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  min-width: 27px;
+  min-height: 27px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+}
+.workspace-quick-capture {
+  width: 100%;
+  display: block;
+  margin-top: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+}
 .workspace-zoom-controls {
   position: absolute;
   right: 12px;

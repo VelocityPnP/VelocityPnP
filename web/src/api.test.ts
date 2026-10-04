@@ -46,6 +46,41 @@ describe("acquireOrRenewLease", () => {
   });
 });
 
+describe("startWorkspaceSurvey", () => {
+  it("links a focused scan to its full workspace scan", async () => {
+    const response = {
+      scan: { id: "local-scan" },
+      operation: {
+        id: "scan-operation", kind: "vision.workspace_scan",
+        status: "pending", message: null,
+      },
+    };
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(response), { status: 202 }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const region = {
+      x_min_mm: 10, x_max_mm: 30, y_min_mm: 40, y_max_mm: 80,
+    };
+
+    await expect(api.startWorkspaceSurvey(
+      "full-scan", "calibration-id", region, lease.id,
+    )).resolves.toEqual(response);
+
+    const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/workspace-scans");
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      lease_id: lease.id,
+      calibration_id: "calibration-id",
+      mode: "survey",
+      artifact_retention: "transient_sources",
+      parent_scan_id: "full-scan",
+      output_mm_per_pixel: .05,
+      region,
+    });
+  });
+});
+
 describe("waitForOperation", () => {
   it("reports each polled operation state", async () => {
     vi.useFakeTimers();

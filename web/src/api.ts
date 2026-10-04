@@ -10,7 +10,7 @@ import type {
   StripFeederMapRegistration,
   WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceDisplayPatch, WorkspaceInventoryBaseline,
-  WorkspaceScanReport, WorkspaceScanSummary,
+  WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -281,6 +281,24 @@ export const api = {
     )).scans,
   workspaceScan: (scanId: string) =>
     request<WorkspaceScanReport>(`/workspace-scans/${scanId}`),
+  startWorkspaceSurvey: (
+    parentScanId: string,
+    calibrationId: string,
+    region: WorkspaceScanRegion,
+    leaseId: string,
+  ) => jsonPost<{ scan: WorkspaceScanReport; operation: Operation }>(
+    "/workspace-scans",
+    {
+      lease_id: leaseId,
+      confirmed_external_safety_checks: true,
+      calibration_id: calibrationId,
+      mode: "survey",
+      artifact_retention: "transient_sources",
+      region,
+      parent_scan_id: parentScanId,
+      output_mm_per_pixel: .05,
+    },
+  ),
   workspaceDisplayPatches: (scanId: string) =>
     jsonPost<{ patches: WorkspaceDisplayPatch[] }>(
       `/workspace-scans/${scanId}/display-patches`,

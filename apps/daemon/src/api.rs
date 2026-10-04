@@ -1928,6 +1928,12 @@ struct WorkspaceRefinementQueueMetadata {
     severity_score: Option<f64>,
 }
 
+enum WorkspaceScanLineage<'a> {
+    Standalone,
+    Survey(&'a WorkspaceScanReport),
+    Refinement(&'a WorkspaceRefinementSource),
+}
+
 #[derive(Debug, Clone)]
 struct WorkspaceRefinementSource {
     parent_scan_id: Uuid,
@@ -2154,10 +2160,9 @@ async fn resolve_workspace_refinement_source(
     specification: &WorkspaceScanSpecification,
 ) -> ApiResult<Option<WorkspaceRefinementSource>> {
     if specification.mode != WorkspaceScanMode::Refinement {
-        if specification.parent_scan_id.is_some() || specification.refinement_target_index.is_some()
-        {
+        if specification.refinement_target_index.is_some() {
             return Err(ApiError::bad_request(
-                "parent_scan_id and refinement_target_index require refinement mode",
+                "refinement_target_index requires refinement mode",
             ));
         }
         return Ok(None);
@@ -2225,6 +2230,61 @@ async fn resolve_workspace_refinement_source(
     }))
 }
 
+async fn resolve_workspace_survey_parent(
+    state: &AppState,
+    specification: &WorkspaceScanSpecification,
+) -> ApiResult<Option<WorkspaceScanReport>> {
+    let Some(parent_scan_id) = specification.parent_scan_id else {
+        return Ok(None);
+    };
+    if specification.mode == WorkspaceScanMode::Refinement {
+        return Ok(None);
+    }
+    if specification.mode != WorkspaceScanMode::Survey {
+        return Err(ApiError::bad_request(
+            "parent_scan_id is supported only for survey and refinement scans",
+        ));
+    }
+    let region = specification
+        .region
+        .ok_or_else(|| ApiError::bad_request("a child survey requires an explicit region"))?;
+    if specification.region_preset.is_some() {
+        return Err(ApiError::bad_request(
+            "a child survey cannot use region_preset",
+        ));
+    }
+    let parent = state
+        .store
+        .get_workspace_scan(parent_scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("parent workspace scan not found"))?;
+    if parent.status != WorkspaceScanStatus::Succeeded
+        || parent.mode == WorkspaceScanMode::Refinement
+        || parent.parent_scan_id.is_some()
+    {
+        return Err(ApiError::bad_request(
+            "a child survey requires a successful full workspace parent",
+        ));
+    }
+    if !state.profile.accepts_profile_id(&parent.profile_id)
+        || parent.calibration_id != specification.calibration_id
+    {
+        return Err(ApiError::bad_request(
+            "a child survey must use its parent's profile and calibration",
+        ));
+    }
+    if region.x_min_mm < parent.region.x_min_mm
+        || region.x_max_mm > parent.region.x_max_mm
+        || region.y_min_mm < parent.region.y_min_mm
+        || region.y_max_mm > parent.region.y_max_mm
+    {
+        return Err(ApiError::bad_request(
+            "a child survey region must stay inside its parent scan",
+        ));
+    }
+    Ok(Some(parent))
+}
+
 async fn reanalyze_retained_workspace_seams(
     state: &AppState,
     scan: &WorkspaceScanReport,
@@ -2279,6 +2339,7 @@ async fn estimate_workspace_scan(
     State(state): State<AppState>,
     Json(body): Json<EstimateWorkspaceScanRequest>,
 ) -> ApiResult<Json<WorkspaceScanEstimate>> {
+    resolve_workspace_survey_parent(&state, &body.specification).await?;
     let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let (snapshot, top_camera_model) =
@@ -2359,6 +2420,7 @@ async fn start_workspace_scan(
     ensure_no_active_board_surface_measurements(&state)?;
     ensure_no_active_strip_feeder_holdouts(&state)?;
     ensure_no_active_strip_feeder_pickup_qualifications(&state)?;
+    let survey_parent = resolve_workspace_survey_parent(&state, &body.specification).await?;
     let refinement = resolve_workspace_refinement_source(&state, &body.specification).await?;
     let top_profile = stored_camera_profile(&state, CameraRole::TopCamera)?;
     let top_path = camera_path_for_role(CameraRole::TopCamera)?;
@@ -2409,11 +2471,20 @@ async fn start_workspace_scan(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
     let operation = Operation::pending("vision.workspace_scan");
+    let lineage = refinement.as_ref().map_or_else(
+        || {
+            survey_parent.as_ref().map_or(
+                WorkspaceScanLineage::Standalone,
+                WorkspaceScanLineage::Survey,
+            )
+        },
+        WorkspaceScanLineage::Refinement,
+    );
     let scan = pending_workspace_scan(
         &state,
         operation.id,
         snapshot.id,
-        refinement.as_ref(),
+        lineage,
         &plan,
         &estimate,
         WorkspaceRefinementQueueMetadata::default(),
@@ -2519,21 +2590,27 @@ fn pending_workspace_scan(
     state: &AppState,
     operation_id: Uuid,
     calibration_id: Uuid,
-    refinement: Option<&WorkspaceRefinementSource>,
+    lineage: WorkspaceScanLineage<'_>,
     plan: &WorkspaceScanPlan,
     estimate: &WorkspaceScanEstimate,
     queue: WorkspaceRefinementQueueMetadata,
 ) -> WorkspaceScanReport {
     let now = Utc::now();
+    let (profile_id, parent_scan_id, refinement) = match lineage {
+        WorkspaceScanLineage::Standalone => (state.profile.id.clone(), None, None),
+        WorkspaceScanLineage::Survey(parent) => (parent.profile_id.clone(), Some(parent.id), None),
+        WorkspaceScanLineage::Refinement(source) => (
+            source.profile_id.clone(),
+            Some(source.parent_scan_id),
+            Some(source),
+        ),
+    };
     WorkspaceScanReport {
         id: Uuid::new_v4(),
         operation_id,
         calibration_id,
-        profile_id: refinement.map_or_else(
-            || state.profile.id.clone(),
-            |source| source.profile_id.clone(),
-        ),
-        parent_scan_id: refinement.map(|source| source.parent_scan_id),
+        profile_id,
+        parent_scan_id,
         refinement_target_index: refinement.map(|source| source.target_index),
         refinement_algorithm_version: refinement.map(|source| source.algorithm_version.clone()),
         refinement_batch_operation_id: queue.batch_operation_id,
@@ -5591,17 +5668,7 @@ fn evaluate_workspace_display_patches(
         .list_workspace_scans()
         .map_err(ApiError::internal)?
         .into_iter()
-        .filter(|scan| {
-            scan.id != base.id
-                && scan.status == WorkspaceScanStatus::Succeeded
-                && scan.profile_id == base.profile_id
-                && scan.calibration_id == base.calibration_id
-                && scan.created_at > base.created_at
-                && scan.output_mm_per_pixel < base.output_mm_per_pixel
-                && scan.raster_transform.is_some()
-                && scan.mosaic_width_px.is_some()
-                && scan.mosaic_height_px.is_some()
-        })
+        .filter(|scan| workspace_display_source_is_eligible(base, scan))
         .collect::<Vec<_>>();
     scans.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     let previous = state
@@ -5620,6 +5687,22 @@ fn evaluate_workspace_display_patches(
     Ok(patches)
 }
 
+fn workspace_display_source_is_eligible(
+    base: &WorkspaceScanReport,
+    scan: &WorkspaceScanReport,
+) -> bool {
+    scan.id != base.id
+        && scan.status == WorkspaceScanStatus::Succeeded
+        && scan.profile_id == base.profile_id
+        && scan.calibration_id == base.calibration_id
+        && scan.parent_scan_id == Some(base.id)
+        && scan.created_at > base.created_at
+        && scan.output_mm_per_pixel <= base.output_mm_per_pixel
+        && scan.raster_transform.is_some()
+        && scan.mosaic_width_px.is_some()
+        && scan.mosaic_height_px.is_some()
+}
+
 fn evaluate_board_display_patches(
     state: &AppState,
     base: &WorkspaceScanReport,
@@ -5634,7 +5717,6 @@ fn evaluate_board_display_patches(
         .into_iter()
         .filter(|registration| {
             registration.passed
-                && registration.source_scan_id == base.id
                 && registration.profile_id == base.profile_id
                 && registration.calibration_id == base.calibration_id
                 && registration.design_to_machine.is_some()
@@ -5779,8 +5861,7 @@ fn evaluate_feeder_display_patches(
         .map_err(ApiError::internal)?
         .into_iter()
         .filter(|registration| {
-            registration.source_scan_id == base.id
-                && registration.profile_id == base.profile_id
+            registration.profile_id == base.profile_id
                 && registration.calibration_id == base.calibration_id
         })
         .collect::<Vec<_>>();
@@ -6259,7 +6340,7 @@ async fn start_workspace_refinement_batch(
             &state,
             operation.id,
             snapshot.id,
-            Some(&refinement),
+            WorkspaceScanLineage::Refinement(&refinement),
             &plan,
             &estimate,
             WorkspaceRefinementQueueMetadata {
@@ -40202,6 +40283,101 @@ mod tests {
                 .unwrap()
                 .is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn child_survey_accepts_a_region_inside_its_reconnaissance_parent() {
+        let state = test_state();
+        let mut parent = test_workspace_scan(Uuid::new_v4());
+        parent.status = WorkspaceScanStatus::Succeeded;
+        parent.mode = WorkspaceScanMode::Reconnaissance;
+        state.store.put_workspace_scan(&parent).unwrap();
+        let specification = WorkspaceScanSpecification {
+            calibration_id: parent.calibration_id,
+            mode: WorkspaceScanMode::Survey,
+            artifact_retention: Some(WorkspaceArtifactRetention::TransientSources),
+            region: Some(WorkspaceScanRegion {
+                x_min_mm: parent.region.x_min_mm + 5.0,
+                x_max_mm: parent.region.x_max_mm - 5.0,
+                y_min_mm: parent.region.y_min_mm + 5.0,
+                y_max_mm: parent.region.y_max_mm - 5.0,
+            }),
+            region_preset: None,
+            parent_scan_id: Some(parent.id),
+            refinement_target_index: None,
+            overlap_fraction: None,
+            output_mm_per_pixel: None,
+            feed_mm_per_min: None,
+            max_tiles: None,
+            artifact_quota_bytes: None,
+        };
+
+        let resolved = resolve_workspace_survey_parent(&state, &specification)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resolved.id, parent.id);
+        assert!(resolve_workspace_refinement_source(&state, &specification)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn child_survey_rejects_a_region_outside_its_parent() {
+        let state = test_state();
+        let mut parent = test_workspace_scan(Uuid::new_v4());
+        parent.status = WorkspaceScanStatus::Succeeded;
+        parent.mode = WorkspaceScanMode::Reconnaissance;
+        state.store.put_workspace_scan(&parent).unwrap();
+        let specification = WorkspaceScanSpecification {
+            calibration_id: parent.calibration_id,
+            mode: WorkspaceScanMode::Survey,
+            artifact_retention: None,
+            region: Some(WorkspaceScanRegion {
+                x_min_mm: parent.region.x_min_mm - 1.0,
+                ..parent.region
+            }),
+            region_preset: None,
+            parent_scan_id: Some(parent.id),
+            refinement_target_index: None,
+            overlap_fraction: None,
+            output_mm_per_pixel: None,
+            feed_mm_per_min: None,
+            max_tiles: None,
+            artifact_quota_bytes: None,
+        };
+
+        let error = resolve_workspace_survey_parent(&state, &specification)
+            .await
+            .unwrap_err();
+
+        assert!(error.message.contains("inside its parent scan"));
+    }
+
+    #[test]
+    fn display_updates_require_a_linked_non_coarser_scan() {
+        let mut base = test_workspace_scan(Uuid::new_v4());
+        base.status = WorkspaceScanStatus::Succeeded;
+        base.mode = WorkspaceScanMode::Reconnaissance;
+        let mut source = test_workspace_scan(Uuid::new_v4());
+        source.status = WorkspaceScanStatus::Succeeded;
+        source.profile_id = base.profile_id.clone();
+        source.calibration_id = base.calibration_id;
+        source.parent_scan_id = Some(base.id);
+        source.created_at = base.created_at + chrono::Duration::seconds(1);
+        source.output_mm_per_pixel = base.output_mm_per_pixel;
+        source.mosaic_width_px = Some(800);
+        source.mosaic_height_px = Some(360);
+
+        assert!(workspace_display_source_is_eligible(&base, &source));
+
+        source.parent_scan_id = None;
+        assert!(!workspace_display_source_is_eligible(&base, &source));
+        source.parent_scan_id = Some(base.id);
+        source.output_mm_per_pixel = base.output_mm_per_pixel * 2.0;
+        assert!(!workspace_display_source_is_eligible(&base, &source));
     }
 
     #[tokio::test]

@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
-import { api } from "./api";
+import type {
+  KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
+import { api, waitForOperation } from "./api";
+import { useDialog } from "./Dialog";
 import type {
   BoardDesign, BoardInstance, Job, JobExecutionRun, MachineOverlayGeometry,
   MachineStatus, PlacementExecutionRun, PlacementOutcomeRecord, StripFeederMapRegistration,
   WorkspaceBoardDiscoveryReport, WorkspaceDisplayPatch, WorkspaceObjectClass,
-  WorkspaceScanReport, WorkspaceScanSummary,
+  WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 
 type WorkspaceLayer =
@@ -61,9 +65,24 @@ interface PlacementMarker {
   id: string;
   reference: string;
   point: [number, number];
+  boardId: string;
+  boardLabel: string;
+  boardPoints: Array<[number, number]>;
   status: "populated" | "unpopulated";
   current: boolean;
   rotationDeg: number;
+}
+
+type WorkspaceSelectionKind =
+  | "feeder" | "board" | "pocket" | "placement" | "point";
+
+interface WorkspaceSelection {
+  kind: WorkspaceSelectionKind;
+  id: string;
+  label: string;
+  point: [number, number];
+  scanRegion: WorkspaceScanRegion | null;
+  objectId: string | null;
 }
 
 interface WorkspacePanGesture {
@@ -73,6 +92,10 @@ interface WorkspacePanGesture {
   pixelsPerMachineUnit: number;
   startViewport: WorkspaceViewport;
 }
+
+type WorkspaceActivateEvent =
+  | ReactMouseEvent<SVGElement>
+  | ReactKeyboardEvent<SVGElement>;
 
 const POPULATED_DISPOSITIONS = new Set([
   "good", "offset", "rotated", "tombstoned", "stacked",
@@ -176,6 +199,40 @@ function applyTransform(
   ];
 }
 
+function polygonCenter(points: Array<[number, number]>): [number, number] {
+  return points.reduce<[number, number]>(
+    (sum, point) => [sum[0] + point[0], sum[1] + point[1]],
+    [0, 0],
+  ).map((value) => value / Math.max(points.length, 1)) as [number, number];
+}
+
+function paddedRegion(
+  points: Array<[number, number]>,
+  parent: WorkspaceScanRegion,
+  paddingMm: number,
+): WorkspaceScanRegion {
+  const xValues = points.map((point) => point[0]);
+  const yValues = points.map((point) => point[1]);
+  return {
+    x_min_mm: Math.max(parent.x_min_mm, Math.min(...xValues) - paddingMm),
+    x_max_mm: Math.min(parent.x_max_mm, Math.max(...xValues) + paddingMm),
+    y_min_mm: Math.max(parent.y_min_mm, Math.min(...yValues) - paddingMm),
+    y_max_mm: Math.min(parent.y_max_mm, Math.max(...yValues) + paddingMm),
+  };
+}
+
+export function feederScanRegion(
+  feeder: StripFeederMapRegistration,
+  parent: WorkspaceScanRegion,
+): WorkspaceScanRegion {
+  const halfWidth = feeder.tape_width_mm / 2;
+  return paddedRegion(
+    feeder.pockets.map((pocket) => pocket.center_machine_mm),
+    parent,
+    halfWidth + 6,
+  );
+}
+
 function jobBoardPolygons(job: Job | null, designs: BoardDesign[]): MapPolygon[] {
   if (!job) return [];
   return job.boards.flatMap((board) => {
@@ -221,6 +278,14 @@ export function jobPlacementMarkers(
     const matrix = board.design_to_machine?.matrix;
     const design = designs.find((candidate) => candidate.id === board.board_id);
     if (!matrix || matrix.length !== 9 || !design) return [];
+    const bounds = design.outline_bounds;
+    if (!bounds) return [];
+    const boardPoints = [
+      [bounds.min_x_mm, bounds.min_y_mm],
+      [bounds.max_x_mm, bounds.min_y_mm],
+      [bounds.max_x_mm, bounds.max_y_mm],
+      [bounds.min_x_mm, bounds.max_y_mm],
+    ].map(([xMm, yMm]) => applyTransform(matrix, xMm, yMm));
     return design.placements
       .filter((placement) => placement.enabled && !placement.fiducial)
       .map((placement) => {
@@ -231,6 +296,9 @@ export function jobPlacementMarkers(
           id: `${board.id}-${placement.reference}`,
           reference: placement.reference,
           point: applyTransform(matrix, placement.pose.x_mm, placement.pose.y_mm),
+          boardId: board.id,
+          boardLabel: board.label,
+          boardPoints,
           status: populatedReferences.has(placement.reference)
             ? "populated" : "unpopulated",
           current: step?.step_index === execution?.current_step_index,
@@ -426,6 +494,7 @@ export function panWorkspaceViewport(
 export function WorkspacePanel({
   status, setError, openMachine, openJobs,
 }: WorkspacePanelProps) {
+  const requestDialog = useDialog();
   const [scanSummaries, setScanSummaries] = useState<WorkspaceScanSummary[]>([]);
   const [scanSummariesLoaded, setScanSummariesLoaded] = useState(false);
   const [selectedScan, setSelectedScan] = useState<WorkspaceScanReport | null>(null);
@@ -447,6 +516,12 @@ export function WorkspacePanel({
   const [discovery, setDiscovery] = useState<WorkspaceBoardDiscoveryReport | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [panning, setPanning] = useState(false);
+  const [selection, setSelection] = useState<WorkspaceSelection | null>(null);
+  const [selectionAction, setSelectionAction] = useState<
+    "moving" | "scanning" | "capturing" | null
+  >(null);
+  const [selectionMessage, setSelectionMessage] = useState("");
+  const [quickCaptureUrl, setQuickCaptureUrl] = useState("");
   const [layers, setLayers] = useState<Record<WorkspaceLayer, boolean>>({
     image: true,
     objects: true,
@@ -549,17 +624,24 @@ export function WorkspacePanel({
     return () => { cancelled = true; };
   }, [selectedScan?.calibration_id]);
 
+  const loadDisplayPatches = useCallback(async () => {
+    if (!selectedScanId || selectedSummary?.status !== "succeeded") {
+      setDisplayPatches([]);
+      return [];
+    }
+    const patches = await api.workspaceDisplayPatches(selectedScanId);
+    const accepted = patches.filter((patch) => patch.accepted);
+    setDisplayPatches(accepted);
+    return accepted;
+  }, [selectedScanId, selectedSummary?.status]);
+
   useEffect(() => {
-    setDisplayPatches([]);
-    if (!selectedScanId || selectedSummary?.status !== "succeeded") return;
     let cancelled = false;
-    void api.workspaceDisplayPatches(selectedScanId).then((patches) => {
-      if (!cancelled) setDisplayPatches(patches.filter((patch) => patch.accepted));
-    }).catch((reason) => {
+    void loadDisplayPatches().catch((reason) => {
       if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
     });
     return () => { cancelled = true; };
-  }, [selectedScanId, selectedSummary?.status, selectedSummary?.updated_at, setError]);
+  }, [loadDisplayPatches, selectedSummary?.updated_at, setError]);
 
   const artifacts = useMemo(
     () => selectedScan ? workspaceArtifactOptions(selectedScan) : [],
@@ -688,6 +770,11 @@ export function WorkspacePanel({
   const capturedTiles = selectedSummary?.captured_tiles ?? selectedScan?.captured_tiles ?? 0;
   const plannedTiles = selectedSummary?.planned_tiles ?? selectedScan?.planned_tiles ?? 0;
   const selectedStatus = selectedSummary?.status ?? selectedScan?.status ?? null;
+  const selectionActionAllowed = status.state === "ready"
+    && status.homed
+    && status.pose !== null
+    && status.calibration_revision === selectedScan?.calibration_id
+    && selectionAction === null;
   const scanProgress = plannedTiles > 0
     ? capturedTiles / plannedTiles
     : 0;
@@ -709,6 +796,245 @@ export function WorkspacePanel({
       displayedViewport.x + displayedViewport.width / 2,
       displayedViewport.y + displayedViewport.height / 2,
     ], scale);
+  };
+  useEffect(() => {
+    setSelection(null);
+    setSelectionMessage("");
+    setQuickCaptureUrl("");
+  }, [selectedSummary?.id]);
+
+  const selectTarget = (target: WorkspaceSelection) => {
+    if (selectionAction !== null) return;
+    setSelection(target);
+    setSelectionMessage("");
+    setQuickCaptureUrl("");
+  };
+
+  const selectBoard = (
+    event: WorkspaceActivateEvent,
+    board: MapPolygon,
+  ) => {
+    event.stopPropagation();
+    if (!region) return;
+    selectTarget({
+      kind: "board",
+      id: board.id,
+      label: board.label,
+      point: polygonCenter(board.points),
+      scanRegion: paddedRegion(board.points, region, 6),
+      objectId: board.id,
+    });
+  };
+
+  const selectPlacement = (
+    event: WorkspaceActivateEvent,
+    placement: PlacementMarker,
+  ) => {
+    event.stopPropagation();
+    if (!region) return;
+    selectTarget({
+      kind: "placement",
+      id: placement.id,
+      label: `${placement.reference} on ${placement.boardLabel}`,
+      point: placement.point,
+      scanRegion: paddedRegion(placement.boardPoints, region, 6),
+      objectId: placement.boardId,
+    });
+  };
+
+  const selectFeeder = (
+    event: WorkspaceActivateEvent,
+    feeder: StripFeederMapRegistration,
+  ) => {
+    event.stopPropagation();
+    if (!region) return;
+    selectTarget({
+      kind: "feeder",
+      id: feeder.id,
+      label: feeder.name,
+      point: polygonCenter(feeder.pockets.map((pocket) => pocket.center_machine_mm)),
+      scanRegion: feederScanRegion(feeder, region),
+      objectId: feeder.id,
+    });
+  };
+
+  const selectPocket = (
+    event: WorkspaceActivateEvent,
+    feeder: StripFeederMapRegistration,
+    pocket: StripFeederMapRegistration["pockets"][number],
+  ) => {
+    event.stopPropagation();
+    if (!region) return;
+    selectTarget({
+      kind: "pocket",
+      id: `${feeder.id}-${pocket.pocket_index}`,
+      label: `${feeder.name} · pocket ${pocket.pocket_index}`,
+      point: pocket.center_machine_mm,
+      scanRegion: feederScanRegion(feeder, region),
+      objectId: feeder.id,
+    });
+  };
+
+  const activateOnKeyboard = (
+    event: ReactKeyboardEvent<SVGElement>,
+    activate: () => void,
+  ) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    activate();
+  };
+
+  const selectArbitraryPoint = (event: ReactMouseEvent<SVGSVGElement>) => {
+    if (event.shiftKey || panning) return;
+    const svg = event.currentTarget;
+    const matrix = svg.getScreenCTM?.() ?? null;
+    if (!matrix || typeof svg.createSVGPoint !== "function") return;
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    const mapPoint = point.matrixTransform(matrix.inverse());
+    selectTarget({
+      kind: "point",
+      id: `point-${mapPoint.x.toFixed(3)}-${mapPoint.y.toFixed(3)}`,
+      label: "Workspace point",
+      point: [mapPoint.x, -mapPoint.y],
+      scanRegion: null,
+      objectId: null,
+    });
+  };
+
+  const moveTopCamera = async (target: WorkspaceSelection) => {
+    if (!status.pose) throw new Error("The machine pose is not known.");
+    const lease = await api.acquireOrRenewLease("VelocityPnP workspace", 3600);
+    const operation = await api.jog(lease.id, {
+      x_mm: target.point[0],
+      y_mm: target.point[1],
+      z_mm: status.pose.z_mm,
+      rotation_deg: status.pose.rotation_deg,
+    });
+    const completed = await waitForOperation(operation);
+    if (completed.status !== "succeeded") {
+      throw new Error(completed.message ?? "The move did not complete.");
+    }
+  };
+
+  const goToSelection = async () => {
+    if (!selection || !status.pose) return;
+    const confirmed = await requestDialog({
+      title: `Go to ${selection.label}`,
+      message: `Move the top camera to X ${selection.point[0].toFixed(2)} mm, Y ${selection.point[1].toFixed(2)} mm at the current Z height. Confirm that the travel path is clear and that both nozzles are level.`,
+      confirmLabel: "Move",
+    });
+    if (confirmed === null) return;
+    setSelectionAction("moving");
+    setSelectionMessage("Moving top camera…");
+    setError(null);
+    try {
+      await moveTopCamera(selection);
+      setSelectionMessage("Top camera is at the selected position.");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setSelectionMessage("");
+      setError(message);
+    } finally {
+      setSelectionAction(null);
+    }
+  };
+
+  const rescanSelection = async () => {
+    if (!selection?.scanRegion || !selectedScan) return;
+    const rescanScope = selection.kind === "placement"
+      ? "the full PCB around this placement"
+      : selection.kind === "pocket"
+        ? "the feeder strip around this pocket"
+        : selection.kind === "board" ? "this PCB" : "this feeder strip";
+    const confirmed = await requestDialog({
+      title: `Rescan ${selection.label}`,
+      message: `Scan ${rescanScope} and align the result to the current full workspace scan. Confirm that the scan region and travel path are clear, both nozzles are level, and power isolation is reachable.`,
+      confirmLabel: "Start rescan",
+    });
+    if (confirmed === null) return;
+    setSelectionAction("scanning");
+    setSelectionMessage("Preparing rescan…");
+    setQuickCaptureUrl("");
+    setError(null);
+    try {
+      const lease = await api.acquireOrRenewLease("VelocityPnP workspace", 3600);
+      const started = await api.startWorkspaceSurvey(
+        selectedScan.id,
+        selectedScan.calibration_id,
+        selection.scanRegion,
+        lease.id,
+      );
+      setSelectionMessage("Scanning selected area…");
+      const completed = await waitForOperation(started.operation, (operation) => {
+        setSelectionMessage(operation.message ?? "Scanning selected area…");
+      });
+      if (completed.status !== "succeeded") {
+        throw new Error(completed.message ?? "The rescan did not complete.");
+      }
+      if (selection.kind === "feeder" || selection.kind === "pocket") {
+        setSelectionMessage("Checking feeder alignment…");
+        const discoveryReport = await api.discoverWorkspaceObjects(started.scan.id);
+        const candidates = discoveryReport.candidates.filter((candidate) => {
+          const classification = candidate.classification;
+          return classification?.class === "feeder"
+            || (classification?.class === "unknown"
+              && classification.evidence.some((evidence) =>
+                evidence.suggested_class === "feeder" && evidence.confidence >= .5));
+        }).sort((left, right) => Math.hypot(
+          left.center_x_mm - selection.point[0],
+          left.center_y_mm - selection.point[1],
+        ) - Math.hypot(
+          right.center_x_mm - selection.point[0],
+          right.center_y_mm - selection.point[1],
+        ));
+        if (candidates[0]) {
+          await api.analyzeStripFeeder(started.scan.id, candidates[0].candidate_index);
+        }
+      }
+      setSelectionMessage("Checking alignment…");
+      const patches = await loadDisplayPatches();
+      const accepted = patches.some((patch) =>
+        patch.source_scan_id === started.scan.id
+          && patch.object_id === selection.objectId);
+      setSelectionMessage(accepted
+        ? "Rescan complete. The aligned image is now shown."
+        : "Rescan complete. Alignment checks did not accept an image update.");
+      await loadScanSummaries();
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setSelectionMessage("");
+      setError(message);
+    } finally {
+      setSelectionAction(null);
+    }
+  };
+
+  const quickCapture = async () => {
+    if (!selection || selection.kind !== "point") return;
+    const confirmed = await requestDialog({
+      title: "Quick capture",
+      message: `Move the top camera to X ${selection.point[0].toFixed(2)} mm, Y ${selection.point[1].toFixed(2)} mm and capture one image. Confirm that the travel path is clear and that both nozzles are level.`,
+      confirmLabel: "Move and capture",
+    });
+    if (confirmed === null) return;
+    setSelectionAction("capturing");
+    setSelectionMessage("Moving top camera…");
+    setQuickCaptureUrl("");
+    setError(null);
+    try {
+      await moveTopCamera(selection);
+      setSelectionMessage("Capturing top-camera image…");
+      setQuickCaptureUrl(`/api/v1/cameras/top_camera/snapshot?t=${Date.now()}`);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setSelectionMessage("");
+      setError(message);
+    } finally {
+      setSelectionAction(null);
+    }
   };
   useEffect(() => {
     const svg = workspaceMapRef.current;
@@ -860,6 +1186,7 @@ export function WorkspacePanel({
           onPointerMove={moveWorkspacePan}
           onPointerUp={stopWorkspacePan}
           onPointerCancel={stopWorkspacePan}
+          onClick={selectArbitraryPoint}
         >
           <title>Live machine workspace map</title>
           <defs>
@@ -962,7 +1289,17 @@ export function WorkspacePanel({
             </polygon>
           )}
 
-          {layers.boards && boardPolygons.map((board) => <g key={board.id}>
+          {layers.boards && boardPolygons.map((board) => <g
+            className={selection?.kind === "board" && selection.id === board.id
+              ? "workspace-selectable is-selected" : "workspace-selectable"}
+            key={board.id}
+            onClick={(event) => selectBoard(event, board)}
+            onKeyDown={(event) => activateOnKeyboard(
+              event, () => selectBoard(event, board),
+            )}
+            role="button"
+            tabIndex={0}
+          >
             <polygon
               className="workspace-job-board"
               points={board.points.map(([xMm, yMm]) => `${xMm},${-yMm}`).join(" ")}
@@ -970,8 +1307,15 @@ export function WorkspacePanel({
             <title>{board.label}</title>
           </g>)}
           {layers.placements && placementMarkers.map((placement) => <g
-            className={`workspace-placement-position ${placement.status} ${placement.current ? "current" : ""}`}
+            className={`workspace-selectable workspace-placement-position ${placement.status} ${placement.current ? "current" : ""} ${selection?.kind === "placement" && selection.id === placement.id ? "is-selected" : ""}`}
             key={placement.id}
+            onClick={(event) => selectPlacement(event, placement)}
+            onKeyDown={(event) => activateOnKeyboard(
+              event,
+              () => selectPlacement(event, placement),
+            )}
+            role="button"
+            tabIndex={0}
             transform={`translate(${placement.point[0]} ${-placement.point[1]}) rotate(${-placement.rotationDeg})`}
           >
             <circle r={placementMarkerRadius} />
@@ -989,9 +1333,22 @@ export function WorkspacePanel({
           </g>)}
 
           {layers.feeders && feederLanes.map((feeder) => <g
-            className="workspace-feeder-pockets"
+            className={`workspace-selectable workspace-feeder-pockets ${selection?.objectId === feeder.id ? "is-selected" : ""}`}
             key={feeder.id}
           >
+            <polyline
+              className="workspace-feeder-hit"
+              points={feeder.pockets.map(
+                (pocket) => `${pocket.center_machine_mm[0]},${-pocket.center_machine_mm[1]}`,
+              ).join(" ")}
+              onClick={(event) => selectFeeder(event, feeder)}
+              onKeyDown={(event) => activateOnKeyboard(
+                event,
+                () => selectFeeder(event, feeder),
+              )}
+              role="button"
+              tabIndex={0}
+            />
             <polyline points={feeder.pockets.map(
               (pocket) => `${pocket.center_machine_mm[0]},${-pocket.center_machine_mm[1]}`,
             ).join(" ")} />
@@ -1000,7 +1357,14 @@ export function WorkspacePanel({
               className={`${pocket.occupancy} status-${pocket.status} ${pocket.selected ? "selected" : ""}`}
               cx={pocket.center_machine_mm[0]}
               cy={-pocket.center_machine_mm[1]}
+              onClick={(event) => selectPocket(event, feeder, pocket)}
+              onKeyDown={(event) => activateOnKeyboard(
+                event,
+                () => selectPocket(event, feeder, pocket),
+              )}
               r={Math.max(markerSize * .38, .8)}
+              role="button"
+              tabIndex={0}
             >
               <title>{`${feeder.name} · pocket ${pocket.pocket_index} · ${pocket.occupancy} · ${label(pocket.status)}`}</title>
             </circle>)}
@@ -1143,6 +1507,31 @@ export function WorkspacePanel({
               </g>)}
             </g>
           </g>}
+          {selection && <g className="workspace-selection-marker">
+            {selection.scanRegion && <rect
+              x={selection.scanRegion.x_min_mm}
+              y={-selection.scanRegion.y_max_mm}
+              width={selection.scanRegion.x_max_mm - selection.scanRegion.x_min_mm}
+              height={selection.scanRegion.y_max_mm - selection.scanRegion.y_min_mm}
+            />}
+            <circle
+              cx={selection.point[0]}
+              cy={-selection.point[1]}
+              r={Math.max(markerSize * .7, 1.5)}
+            />
+            <line
+              x1={selection.point[0] - Math.max(markerSize, 2.2)}
+              x2={selection.point[0] + Math.max(markerSize, 2.2)}
+              y1={-selection.point[1]}
+              y2={-selection.point[1]}
+            />
+            <line
+              x1={selection.point[0]}
+              x2={selection.point[0]}
+              y1={-selection.point[1] - Math.max(markerSize, 2.2)}
+              y2={-selection.point[1] + Math.max(markerSize, 2.2)}
+            />
+          </g>}
           <rect
             className="workspace-region-outline"
             x={region.x_min_mm}
@@ -1156,6 +1545,50 @@ export function WorkspacePanel({
             ? "Loading the full scan and its local updates."
             : "Run a scan that covers the installed workspace."}</span>
         </div>}
+        {selection && <section className="workspace-selection-card">
+          <button
+            aria-label="Clear workspace selection"
+            className="workspace-selection-close"
+            disabled={selectionAction !== null}
+            onClick={() => setSelection(null)}
+            type="button"
+          >×</button>
+          <p className="eyebrow">{label(selection.kind)}</p>
+          <h3>{selection.label}</h3>
+          <p className="workspace-selection-coordinate">
+            X {selection.point[0].toFixed(2)} · Y {selection.point[1].toFixed(2)} mm
+          </p>
+          <div className="workspace-selection-actions">
+            <button
+              disabled={!selectionActionAllowed}
+              onClick={() => void goToSelection()}
+              type="button"
+            >{selectionAction === "moving" ? "Moving…" : "Go to"}</button>
+            {selection.scanRegion ? <button
+              disabled={!selectionActionAllowed}
+              onClick={() => void rescanSelection()}
+              type="button"
+            >{selectionAction === "scanning" ? "Scanning…" : "Rescan"}</button>
+              : <button
+                disabled={!selectionActionAllowed}
+                onClick={() => void quickCapture()}
+                type="button"
+              >{selectionAction === "capturing" ? "Capturing…" : "Quick capture"}</button>}
+          </div>
+          {selectionMessage && <p className="workspace-selection-message" role="status">
+            {selectionMessage}
+          </p>}
+          {!selectionActionAllowed && selectionAction === null && <p
+            className="workspace-selection-message"
+          >Machine must be ready and fine-homed.</p>}
+          {quickCaptureUrl && <img
+            alt={`Top-camera capture at X ${selection.point[0].toFixed(2)}, Y ${selection.point[1].toFixed(2)}`}
+            className="workspace-quick-capture"
+            onError={() => setSelectionMessage("Quick capture failed.")}
+            onLoad={() => setSelectionMessage("Quick capture complete.")}
+            src={quickCaptureUrl}
+          />}
+        </section>}
         {region && displayedViewport && <div className="workspace-zoom-controls">
           <button type="button" aria-label="Zoom out" onClick={() => zoomAtCenter(1.25)}>−</button>
           <span>{zoomPercent}%</span>

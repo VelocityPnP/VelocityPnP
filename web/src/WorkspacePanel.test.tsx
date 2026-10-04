@@ -4,13 +4,14 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
+import { DialogProvider } from "./Dialog";
 import type {
   BoardDesign, Job, JobExecutionRun, MachineStatus, PlacementExecutionRun,
   PlacementOutcomeRecord, StripFeederMapRegistration, WorkspaceDisplayPatch,
   WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 import {
-  jobPlacementMarkers, latestFeederLanes, panWorkspaceViewport,
+  feederScanRegion, jobPlacementMarkers, latestFeederLanes, panWorkspaceViewport,
   selectActiveJobExecution, selectWorkspaceJob, workspaceArtifactOptions,
   workspaceComposition, WorkspacePanel, zoomWorkspaceViewport,
 } from "./WorkspacePanel";
@@ -352,6 +353,15 @@ describe("workspace operational map", () => {
     ]);
   });
 
+  it("uses the full feeder lane for feeder and pocket rescans", () => {
+    expect(feederScanRegion(feederRegistration, scan.region)).toEqual({
+      x_min_mm: 20,
+      x_max_mm: 40,
+      y_min_mm: 20,
+      y_max_mm: 44,
+    });
+  });
+
   it("uses a full scan as the base and layers newer local scans", () => {
     const base = {
       ...scanSummary,
@@ -463,12 +473,12 @@ describe("workspace operational map", () => {
     vi.spyOn(api, "boards").mockResolvedValue([design]);
     vi.spyOn(api, "stripFeederPocketMap").mockResolvedValue([feederRegistration]);
 
-    const { container } = render(<WorkspacePanel
+    const { container } = render(<DialogProvider><WorkspacePanel
       status={status}
       setError={vi.fn()}
       openMachine={vi.fn()}
       openJobs={vi.fn()}
-    />);
+    /></DialogProvider>);
 
     expect(await screen.findByRole("img", { name: "Live machine workspace map" }))
       .toBeTruthy();
@@ -513,6 +523,13 @@ describe("workspace operational map", () => {
       ?.getAttribute("x1")).toBe("-0.65");
     expect(container.querySelectorAll(".workspace-feeder-pockets circle"))
       .toHaveLength(2);
+    await user.click(container.querySelector(".workspace-job-board")!);
+    expect(screen.getByText("Main PCB", { selector: ".workspace-selection-card h3" }))
+      .toBeTruthy();
+    expect(screen.getByRole("button", { name: "Go to" }).hasAttribute("disabled"))
+      .toBe(true);
+    expect(screen.getByRole("button", { name: "Rescan" }).hasAttribute("disabled"))
+      .toBe(true);
     expect(screen.queryByRole("button", { name: "Tiles" })).toBeNull();
     const map = container.querySelector(".workspace-map");
     const plainWheel = new WheelEvent("wheel", {
