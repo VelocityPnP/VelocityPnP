@@ -1523,7 +1523,7 @@ export function WorkspacePanel({
           </g>)}
 
           {layers.feeders && feederLanes.map((feeder) => <g
-            className={`workspace-selectable workspace-feeder-pockets ${selection?.objectId === feeder.id ? "is-selected" : ""}`}
+            className={`workspace-selectable workspace-feeder-pockets ${selection?.kind === "feeder" && selection.id === feeder.id ? "is-selected" : ""}`}
             key={feeder.id}
             onClick={(event) => selectFeeder(event, feeder)}
             onKeyDown={(event) => activateOnKeyboard(
@@ -1552,7 +1552,7 @@ export function WorkspacePanel({
             />)}
             {feeder.pockets.map((pocket) => <circle
               key={pocket.pocket_index}
-              className={`${pocket.occupancy} status-${pocket.status} ${pocket.selected ? "selected" : ""}`}
+              className={`${pocket.occupancy} status-${pocket.status} ${pocket.selected ? "selected" : ""} ${selection?.kind === "pocket" && selection.id === `${feeder.id}-${pocket.pocket_index}` ? "is-user-selected" : ""}`}
               cx={pocket.center_machine_mm[0]}
               cy={-pocket.center_machine_mm[1]}
               onClick={(event) => selectPocket(event, feeder, pocket)}
@@ -1705,7 +1705,9 @@ export function WorkspacePanel({
               </g>)}
             </g>
           </g>}
-          {selection && <g className="workspace-selection-marker">
+          {selection && selection.kind !== "pocket" && <g
+            className="workspace-selection-marker"
+          >
             {selection.scanRegion && <rect
               x={selection.scanRegion.x_min_mm}
               y={-selection.scanRegion.y_max_mm}

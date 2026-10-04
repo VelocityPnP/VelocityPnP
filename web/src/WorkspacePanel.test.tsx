@@ -621,6 +621,12 @@ describe("workspace operational map", () => {
     expect(screen.getByText(
       "Feeder 1 · pocket 0", { selector: ".workspace-selection-card h3" },
     )).toBeTruthy();
+    expect(container.querySelector(
+      ".workspace-feeder-pockets circle.is-user-selected",
+    )).toBeTruthy();
+    expect(container.querySelector(".workspace-feeder-pockets.is-selected"))
+      .toBeNull();
+    expect(container.querySelector(".workspace-selection-marker")).toBeNull();
     expect(screen.getByRole("button", { name: "Quick capture" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Quick capture" }));
     await waitFor(() => expect(cameraSnapshot).toHaveBeenCalledWith("top_camera"));

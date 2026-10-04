@@ -697,8 +697,14 @@ p { line-height: 1.5; }
   stroke-dasharray: 2 2;
 }
 .workspace-feeder-pockets circle.selected {
-  stroke: #fff;
-  stroke-width: 2.5;
+  stroke: #8ad9ff99;
+  stroke-width: 1.8;
+}
+.workspace-feeder-pockets circle.is-user-selected {
+  opacity: .7;
+  stroke: #ffe36ecc;
+  stroke-width: 2.2;
+  stroke-dasharray: none;
 }
 .workspace-selection-marker { pointer-events: none; }
 .workspace-selection-marker rect {
