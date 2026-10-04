@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { api, formatErrorMessage, waitForOperation } from "./api";
 import { DialogProvider, useDialog } from "./Dialog";
+import { selectActiveJobExecution, WorkspacePanel } from "./WorkspacePanel";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
   CalibrationCheck, CalibrationSnapshot, CalibrationStep, Device, Job, JobExecutionRun,
@@ -10,11 +11,11 @@ import type {
   StripFeederRegistration,
   StripFeederVisionReport,
   WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport, WorkspaceChangeSetReport,
-  WorkspaceInventoryBaseline, WorkspaceScanReport,
+  WorkspaceInventoryBaseline, WorkspaceScanSummary,
 } from "./types";
 import "./styles.css";
 
-type Tab = "machine" | "calibration" | "boards" | "jobs";
+type Tab = "workspace" | "machine" | "calibration" | "boards" | "jobs";
 
 interface CalibrationActionState {
   operation: Operation;
@@ -216,6 +217,18 @@ function AppContent() {
       setError(reason instanceof Error ? reason.message : String(reason)));
   }, [tab, setError]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void api.jobExecutions().then((executions) => {
+      if (!cancelled && selectActiveJobExecution(executions)) {
+        setTab((current) => current === "machine" ? "workspace" : current);
+      }
+    }).catch(() => {
+      // Machine status remains the source of startup errors.
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   const run = async (task: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -230,6 +243,7 @@ function AppContent() {
         <div className="brand"><span className="brand-mark">V</span><div>Velocity<span>PnP</span></div></div>
         <nav aria-label="Primary navigation">
           <NavButton active={tab === "machine"} onClick={() => setTab("machine")} icon="⌁">Machine</NavButton>
+          <NavButton active={tab === "workspace"} onClick={() => setTab("workspace")} icon="⌖">Workspace</NavButton>
           <NavButton active={tab === "calibration"} onClick={() => setTab("calibration")} icon="◎">Calibration</NavButton>
           <NavButton active={tab === "boards"} onClick={() => setTab("boards")} icon="▦">Boards</NavButton>
           <NavButton active={tab === "jobs"} onClick={() => setTab("jobs")} icon="▶">Jobs</NavButton>
@@ -239,16 +253,22 @@ function AppContent() {
           <div><strong>{pretty(status?.state ?? "loading")}</strong><small>{status == null ? "Awaiting status" : status.simulated ? "Simulation" : "Physical machine"}</small></div>
         </div>
       </aside>
-      <main>
+      <main className={tab === "workspace" ? "workspace-main" : undefined}>
         <header className="topbar">
-          <div><p className="eyebrow">LumenPnP V3.0.2</p><h1>{tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : tab === "boards" ? "Board library" : "Job execution"}</h1></div>
+          <div><p className="eyebrow">LumenPnP V3.0.2</p><h1>{tab === "workspace" ? "Live workspace" : tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : tab === "boards" ? "Board library" : "Job execution"}</h1></div>
           <div className="topbar-actions">
             <div className="machine-summary"><span className={`state-dot state-${status?.state ?? "disconnected"}`} /><span>{pretty(status?.state ?? "loading")}</span></div>
             <button className="estop" onClick={() => void run(async () => waitForOperation(await api.emergencyStop()))}>EMERGENCY STOP</button>
           </div>
         </header>
         {error && <div className="alert" role="alert"><span>!</span>{error}<button onClick={() => setError(null)}>Dismiss</button></div>}
-        {!status && (tab === "machine" || tab === "calibration" || tab === "jobs") && <section className="card loading-card"><p className="eyebrow">Machine service</p><h2>Loading status…</h2><p>Waiting for the VelocityPnP daemon.</p></section>}
+        {!status && (tab === "workspace" || tab === "machine" || tab === "calibration" || tab === "jobs") && <section className="card loading-card"><p className="eyebrow">Machine service</p><h2>Loading status…</h2><p>Waiting for the VelocityPnP daemon.</p></section>}
+        {tab === "workspace" && status && <WorkspacePanel
+          status={status}
+          setError={setError}
+          openMachine={() => setTab("machine")}
+          openJobs={() => setTab("jobs")}
+        />}
         {tab === "machine" && status && <MachinePanel status={status} devices={devices} calibrations={calibrations} events={events} busy={busy} run={run} openCalibration={() => setTab("calibration")} />}
         {tab === "calibration" && status && <CalibrationPanel
           status={status}
@@ -258,7 +278,11 @@ function AppContent() {
           setActiveAction={setCalibrationAction}
         />}
         {tab === "boards" && <BoardsPanel status={status} setError={setError} />}
-        {tab === "jobs" && status && <JobsPanel status={status} setError={setError} />}
+        {tab === "jobs" && status && <JobsPanel
+          status={status}
+          setError={setError}
+          openWorkspace={() => setTab("workspace")}
+        />}
       </main>
     </div>
   );
@@ -268,9 +292,10 @@ function NavButton({ active, icon, children, onClick }: { active: boolean; icon:
   return <button aria-current={active ? "page" : undefined} className={active ? "nav-active" : ""} onClick={onClick}><span>{icon}</span>{children}</button>;
 }
 
-function JobsPanel({ status, setError }: {
+function JobsPanel({ status, setError, openWorkspace }: {
   status: MachineStatus;
   setError: (value: string | null) => void;
+  openWorkspace: () => void;
 }) {
   const requestDialog = useDialog();
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -314,6 +339,7 @@ function JobsPanel({ status, setError }: {
     }) === null) return;
     const control = await lease("VelocityPnP job execution");
     await api.startJobExecution(job.id, control.id, status.calibration_revision);
+    openWorkspace();
   });
   const resume = (run: JobExecutionRun) => void act(async () => {
     if (await requestDialog({
@@ -323,6 +349,7 @@ function JobsPanel({ status, setError }: {
     }) === null) return;
     const control = await lease("VelocityPnP job resume");
     await api.resumeJobExecution(run.id, control.id);
+    openWorkspace();
   });
   const resolve = (
     run: JobExecutionRun, stepIndex: number, action: "retry" | "skip",
@@ -569,6 +596,9 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
   const requestDialog = useDialog();
   const [steps, setSteps] = useState<CalibrationStep[]>([]);
   const [snapshots, setSnapshots] = useState<CalibrationSnapshot[]>([]);
+  const [snapshotLoadState, setSnapshotLoadState] = useState<
+    "loading" | "loaded" | "error"
+  >("loading");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [placementJobId, setPlacementJobId] = useState("");
   const [placementNozzleId, setPlacementNozzleId] = useState<"N1" | "N2">("N1");
@@ -581,20 +611,38 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
   const observedAction = useRef(false);
 
   const load = useCallback(async () => {
-    try {
-      const [workflow, values] = await Promise.all([api.workflow(), api.calibrations()]);
-      setSteps(workflow); setSnapshots(values);
-      setActive((current) => values.find((v) => v.id === current?.id) ?? values[0] ?? null);
-      void api.jobs().then((jobValues) => {
-        setJobs(jobValues);
-        setPlacementJobId((current) =>
-          jobValues.some((job) => job.id === current) ? current : jobValues[0]?.id ?? ""
-        );
-      }).catch(() => {
-        setJobs([]);
-        setPlacementJobId("");
-      });
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    setSnapshotLoadState("loading");
+    const [workflowResult, snapshotResult] = await Promise.allSettled([
+      api.workflow(), api.calibrations(),
+    ]);
+    if (workflowResult.status === "fulfilled") {
+      setSteps(workflowResult.value);
+    }
+    if (snapshotResult.status === "fulfilled") {
+      const values = snapshotResult.value;
+      setSnapshots(values);
+      setActive((current) =>
+        values.find((value) => value.id === current?.id) ?? values[0] ?? null
+      );
+      setSnapshotLoadState("loaded");
+    } else {
+      setSnapshotLoadState("error");
+    }
+    const failure = workflowResult.status === "rejected"
+      ? workflowResult.reason
+      : snapshotResult.status === "rejected" ? snapshotResult.reason : null;
+    if (failure !== null) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+    void api.jobs().then((jobValues) => {
+      setJobs(jobValues);
+      setPlacementJobId((current) =>
+        jobValues.some((job) => job.id === current) ? current : jobValues[0]?.id ?? ""
+      );
+    }).catch(() => {
+      setJobs([]);
+      setPlacementJobId("");
+    });
   }, [setError]);
   useEffect(() => { void load(); }, [load]);
 
@@ -946,10 +994,19 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
 
   return <div className="calibration-layout">
     <section className="card calibration-summary">
-      <p className="eyebrow">Machine-measured revision</p><h2>{active ? `Snapshot ${active.id.slice(0, 8)}` : "No calibration snapshot"}</h2>
+      <p className="eyebrow">Machine-measured revision</p><h2>{active
+        ? `Snapshot ${active.id.slice(0, 8)}`
+        : snapshotLoadState === "loading" ? "Loading calibration snapshots…"
+          : snapshotLoadState === "error" ? "Calibration snapshots unavailable"
+            : "No calibration snapshot"}</h2>
       <p>The machine executes supported steps, retains raw evidence and residuals, and invalidates downstream measurements when an upstream result changes.</p>
       {status.simulated && <div className="notice">Simulation can exercise the runner but can never mark a machine production-ready.</div>}
-      {!active ? <button onClick={() => void createSnapshot()}>Create calibration</button> : <>
+      {!active ? snapshotLoadState === "loaded"
+        ? <button onClick={() => void createSnapshot()}>Create calibration</button>
+        : <p>{snapshotLoadState === "loading"
+          ? "Reading saved calibration data."
+          : "The saved calibration data could not be read."}</p>
+        : <>
         <div className="button-cluster">
           <button disabled={controlsBusy || !machineReady} onClick={() => void start()}>{runActive ? "Full calibration running" : activeRun ? "Run full calibration again" : "Run full calibration"}</button>
           <button className="secondary" disabled={controlsBusy || !canRecalibrateHeadGeometry} onClick={() => void recalibrateHeadGeometry()}>Recalibrate head geometry</button>
@@ -1093,7 +1150,7 @@ function BoardsPanel({ status, setError }: {
 }) {
   const requestDialog = useDialog();
   const [boards, setBoards] = useState<BoardDesign[]>([]);
-  const [scans, setScans] = useState<WorkspaceScanReport[]>([]);
+  const [scans, setScans] = useState<WorkspaceScanSummary[]>([]);
   const [selectedScan, setSelectedScan] = useState("");
   const [discovery, setDiscovery] = useState<WorkspaceBoardDiscoveryReport | null>(null);
   const [discovering, setDiscovering] = useState(false);
@@ -1118,11 +1175,11 @@ function BoardsPanel({ status, setError }: {
   const load = useCallback(async () => {
     try {
       const [boardValues, scanValues] = await Promise.all([
-        api.boards(), api.workspaceScans(),
+        api.boards(), api.workspaceScanSummaries(),
       ]);
       const eligible = scanValues
         .filter((scan) => scan.status === "succeeded"
-          && (scan.height_map !== null || scan.refinement_composite?.accepted === true))
+          && (scan.height_map_available || scan.refinement_composite?.accepted === true))
         .sort((first, second) => second.updated_at.localeCompare(first.updated_at));
       setBoards(boardValues);
       setScans(eligible);

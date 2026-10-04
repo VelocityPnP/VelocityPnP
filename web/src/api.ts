@@ -2,12 +2,15 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Job, JobExecutionRun, Operation, PlacementExecutionRun, SensorReading,
+  Job, JobExecutionRun, Operation, PlacementExecutionRun,
+  PlacementOutcomeRecord, SensorReading,
   StripFeederLiveHoldoutRun,
   StripFeederPickupQualificationRun, StripFeederRegistration,
   StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
+  StripFeederMapRegistration,
   WorkspaceBoardDiscoveryReport,
-  WorkspaceChangeSetReport, WorkspaceInventoryBaseline, WorkspaceScanReport,
+  WorkspaceChangeSetReport, WorkspaceDisplayPatch, WorkspaceInventoryBaseline,
+  WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -270,6 +273,20 @@ export const api = {
   },
   workspaceScans: async () =>
     (await request<{ scans: WorkspaceScanReport[] }>("/workspace-scans")).scans,
+  workspaceScanSummaries: async () =>
+    (await request<{ scans: WorkspaceScanSummary[] }>(
+      "/workspace-scans/summaries",
+    )).scans,
+  workspaceScan: (scanId: string) =>
+    request<WorkspaceScanReport>(`/workspace-scans/${scanId}`),
+  workspaceDisplayPatches: (scanId: string) =>
+    jsonPost<{ patches: WorkspaceDisplayPatch[] }>(
+      `/workspace-scans/${scanId}/display-patches`,
+    ).then((response) => response.patches),
+  workspaceScanArtifact: <T>(scanId: string, artifactName: string) =>
+    request<T>(
+      `/workspace-scans/${scanId}/artifacts/${encodeURIComponent(artifactName)}`,
+    ),
   discoverWorkspaceBoards: (scanId: string) =>
     jsonPost<WorkspaceBoardDiscoveryReport>(
       `/workspace-scans/${scanId}/board-discovery`,
@@ -356,6 +373,9 @@ export const api = {
   jobs: async () => (await request<{ jobs: Job[] }>("/jobs")).jobs,
   jobExecutions: async () =>
     (await request<{ executions: JobExecutionRun[] }>("/job-executions")).executions,
+  placementOutcomes: async () =>
+    (await request<{ outcomes: PlacementOutcomeRecord[] }>("/placement-outcomes"))
+      .outcomes,
   jobExecution: (executionId: string) =>
     request<JobExecutionRun>(`/job-executions/${executionId}`),
   startJobExecution: (
@@ -391,6 +411,10 @@ export const api = {
     request<StripFeederRegistration>(
       `/strip-feeder-registrations/${registrationId}`,
     ),
+  stripFeederPocketMap: async () =>
+    (await request<{ registrations: StripFeederMapRegistration[] }>(
+      "/strip-feeder-registrations/pocket-map",
+    )).registrations,
   startBoardRegistration: (
     scanId: string, candidateIndex: number, boardId: string, leaseId: string,
     label?: string,

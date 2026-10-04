@@ -347,6 +347,28 @@ describe("machine device display", () => {
 });
 
 describe("calibration progress", () => {
+  it("shows saved snapshots when the workflow request fails", async () => {
+    mockBrowserServices();
+    const user = userEvent.setup();
+    const snapshot = calibrationSnapshot("saved-calibration");
+    vi.spyOn(api, "status").mockResolvedValue(machineStatus({
+      state: "ready", homed: true,
+    }));
+    vi.spyOn(api, "devices").mockResolvedValue([]);
+    vi.spyOn(api, "workflow").mockRejectedValue(new Error("workflow unavailable"));
+    vi.spyOn(api, "calibrations").mockResolvedValue([snapshot]);
+    vi.spyOn(api, "calibrationRuns").mockResolvedValue([]);
+    vi.spyOn(api, "calibrationPlan").mockResolvedValue({
+      targets: [], items: [], requires_motion: false, estimated_duration_seconds: 0,
+    });
+
+    render(<App />);
+    await user.click(screen.getByText("Calibration"));
+
+    expect(await screen.findByText("Snapshot saved-ca")).toBeTruthy();
+    expect(screen.queryByText("No calibration snapshot")).toBeNull();
+  });
+
   it("selects the active check instead of a waiting check", () => {
     const run = calibrationRun("calibration", "running");
     run.checks = [

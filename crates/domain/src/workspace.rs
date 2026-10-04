@@ -1,4 +1,4 @@
-use crate::Pose;
+use crate::{Pose, Residuals, Transform2d};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -25,7 +25,7 @@ impl WorkspaceScanRegion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct WorkspacePixelBounds {
     pub left: u32,
     pub top: u32,
@@ -788,6 +788,45 @@ pub struct WorkspaceScanReport {
     pub change_set: Option<WorkspaceChangeSetSummary>,
     pub warnings: Vec<String>,
     pub failure: Option<String>,
+}
+
+/// One local image that is safe to splice into a full-workspace image.
+///
+/// The record keeps the alignment evidence and the object-scoped clip. A UI
+/// must not display a patch unless `accepted` is true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceDisplayPatchKind {
+    Board,
+    FeederLane,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceDisplayPatch {
+    pub id: Uuid,
+    pub algorithm_version: String,
+    pub base_scan_id: Uuid,
+    pub source_scan_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub kind: WorkspaceDisplayPatchKind,
+    pub object_id: Uuid,
+    pub object_label: String,
+    pub artifact_name: String,
+    pub source_raster_transform: WorkspaceRasterTransform,
+    pub source_width_px: u32,
+    pub source_height_px: u32,
+    pub source_to_base: Transform2d,
+    pub clip_polygon_machine_mm: Vec<[f64; 2]>,
+    pub anchor_count: u32,
+    pub alignment_residuals: Residuals,
+    pub accepted: bool,
+    #[serde(default)]
+    pub rejection_reason: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+    pub source_created_at: DateTime<Utc>,
+    pub evaluated_at: DateTime<Utc>,
 }
 
 #[cfg(test)]

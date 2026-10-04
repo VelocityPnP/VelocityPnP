@@ -676,7 +676,16 @@ export interface BoardDesign {
     min_y_mm: number;
     max_y_mm: number;
   } | null;
-  placements: Array<{ reference: string; side: "top" | "bottom"; enabled: boolean; fiducial: boolean }>;
+  placements: Array<{
+    reference: string;
+    value: string;
+    package: string;
+    side: "top" | "bottom";
+    pose: Pose;
+    enabled: boolean;
+    fiducial: boolean;
+    properties: Record<string, string>;
+  }>;
   warnings: string[];
 }
 
@@ -708,6 +717,28 @@ export interface Job {
 
 export type PlacementOutcomeDisposition = "good" | "offset" | "rotated"
   | "tombstoned" | "stacked" | "missing" | "stuck_on_nozzle" | "uncertain";
+
+export interface PlacementOutcomeRecord {
+  id: string;
+  execution_id: string;
+  job_id: string;
+  placement_reference: string;
+  part_key: string;
+  package: string;
+  nozzle_id: string;
+  placement_surface_offset_mm: number;
+  placement_seating_offset_mm: number;
+  automatic_algorithm_version: string;
+  automatic_disposition: PlacementOutcomeDisposition;
+  automatic_confidence: number;
+  operator_disposition: PlacementOutcomeDisposition | null;
+  operator_note: string | null;
+  measured_offset_x_mm: number | null;
+  measured_offset_y_mm: number | null;
+  measured_rotation_error_deg: number | null;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface JobExecutionStep {
   step_index: number;
@@ -1004,6 +1035,24 @@ export interface StripFeederRegistration {
   vision_confidence: number;
   vision_review_required: boolean;
   findings: string[];
+}
+
+export interface StripFeederMapRegistration {
+  id: string;
+  profile_id: string;
+  updated_at: string;
+  status: StripFeederRegistration["status"];
+  name: string;
+  tape_width_mm: number;
+  tape_rotation_deg: number;
+  pockets: Array<{
+    pocket_index: number;
+    center_machine_mm: [number, number];
+    occupancy: "occupied" | "empty" | "uncertain";
+    occupancy_confidence: number;
+    status: "available" | "empty" | "reserved" | "consumed" | "needs_review";
+    selected: boolean;
+  }>;
 }
 
 export interface StripFeederLiveHoldoutReport {
@@ -1380,17 +1429,124 @@ export interface WorkspaceChangeSetReport {
   warnings: string[];
 }
 
+export interface WorkspaceScanRegion {
+  x_min_mm: number;
+  x_max_mm: number;
+  y_min_mm: number;
+  y_max_mm: number;
+}
+
+export interface WorkspaceRasterTransform {
+  top_left_x_mm: number;
+  top_left_y_mm: number;
+  x_mm_per_pixel: number;
+  y_mm_per_pixel: number;
+}
+
+export interface WorkspaceDisplayPatch {
+  id: string;
+  algorithm_version: string;
+  base_scan_id: string;
+  source_scan_id: string;
+  profile_id: string;
+  calibration_id: string;
+  kind: "board" | "feeder_lane";
+  object_id: string;
+  object_label: string;
+  artifact_name: string;
+  source_raster_transform: WorkspaceRasterTransform;
+  source_width_px: number;
+  source_height_px: number;
+  source_to_base: { matrix: number[] };
+  clip_polygon_machine_mm: Array<[number, number]>;
+  anchor_count: number;
+  alignment_residuals: {
+    sample_count: number;
+    rms_mm: number;
+    p95_mm: number;
+    max_mm: number;
+  };
+  accepted: boolean;
+  rejection_reason: string | null;
+  findings: string[];
+  source_created_at: string;
+  evaluated_at: string;
+}
+
+export interface WorkspaceScanTile {
+  index: number;
+  row: number;
+  column: number;
+  capture_order: number;
+  nominal_pose: Pose;
+  placement_correction_x_mm: number;
+  placement_correction_y_mm: number;
+  artifact_name: string;
+}
+
 export interface WorkspaceScanReport {
   id: string;
+  operation_id: string;
+  calibration_id: string;
+  profile_id: string;
+  parent_scan_id: string | null;
+  created_at: string;
   updated_at: string;
   status: "pending" | "running" | "succeeded" | "failed";
   mode: "precision" | "survey" | "reconnaissance" | "refinement";
-  height_map: object | null;
-  refinement_composite: { accepted: boolean } | null;
+  artifact_retention: "full_sources" | "transient_sources" | "thumbnails" | "mosaic_only";
+  region: WorkspaceScanRegion;
+  raster_transform: WorkspaceRasterTransform | null;
+  rows: number;
+  columns: number;
+  planned_tiles: number;
+  captured_tiles: number;
+  mosaic_width_px: number | null;
+  mosaic_height_px: number | null;
+  covered_fraction: number | null;
+  estimated_duration_seconds: number;
+  estimated_retained_bytes: number;
+  retained_artifact_bytes: number;
+  tiles: WorkspaceScanTile[];
+  mosaic_artifact_name: string | null;
+  mosaic_layers: Array<{
+    surface_model: string;
+    artifact_name: string;
+    covered_fraction: number;
+    accepted_registrations: number;
+    attempted_registrations: number;
+  }>;
+  height_map: {
+    corrected_mosaic_artifact_name: string;
+    preview_artifact_name: string;
+    class_preview_artifact_name: string;
+    measured_cells: number;
+    inferred_cells: number;
+    unknown_cells: number;
+  } | null;
+  seam_health: {
+    preview_artifact_name: string;
+    total_seams: number;
+    healthy_seams: number;
+    elevated_seams: number;
+    unresolved_seams: number;
+    target_regions: number;
+    recommended_action: string;
+  } | null;
+  refinement_composite: {
+    accepted: boolean;
+    mosaic_artifact_name: string;
+    quality_preview_artifact_name: string;
+  } | null;
   board_discovery: {
     algorithm_version: string;
+    source_mosaic_artifact_name: string;
+    report_artifact_name: string;
+    preview_artifact_name: string;
     candidate_count: number;
     matched_candidate_count: number;
+    board_design_count: number;
+    height_source_count: number;
   } | null;
   strip_feeder_inventory: {
     algorithm_version: string;
@@ -1419,6 +1575,31 @@ export interface WorkspaceScanReport {
     reused_baseline_count: number;
     target_region_count: number;
   } | null;
+  warnings: string[];
+  failure: string | null;
+}
+
+export interface WorkspaceScanSummary {
+  id: string;
+  profile_id: string;
+  created_at: string;
+  updated_at: string;
+  status: WorkspaceScanReport["status"];
+  mode: WorkspaceScanReport["mode"];
+  parent_scan_id: string | null;
+  region: WorkspaceScanRegion;
+  raster_transform: WorkspaceRasterTransform | null;
+  planned_tiles: number;
+  captured_tiles: number;
+  mosaic_width_px: number | null;
+  mosaic_height_px: number | null;
+  display_artifact_name: string | null;
+  height_map_available: boolean;
+  refinement_composite: { accepted: boolean } | null;
+  board_discovery: WorkspaceScanReport["board_discovery"];
+  strip_feeder_inventory: WorkspaceScanReport["strip_feeder_inventory"];
+  change_set: WorkspaceScanReport["change_set"];
+  failure: string | null;
 }
 
 export interface MachineEvent {

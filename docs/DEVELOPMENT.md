@@ -360,6 +360,28 @@ If an accepted correction moves an outer tile inward, only the newly exposed
 edge pixels use nominal machine placement. The manifest reports this value as
 `nominal_fallback_fraction`.
 
+### Workspace display patches
+
+The live Workspace view keeps the selected successful full scan as its stable
+base. It does not splice a newer scan because its date or region looks useful.
+It uses only persisted `workspace_display_patch.v1` records with
+`accepted: true`.
+
+`POST /api/v1/workspace-scans/SCAN_UUID/display-patches` evaluates retained
+local scans without machine motion. A board patch must match at least three
+registered board fiducials. A feeder patch must match at least eight pockets
+from one registered tape lane. Both gates require at most 0.15 mm p95 and
+maximum residual. Feeder patches also require height-corrected source images.
+Each feeder lane gets its own transform and tape-width clip, even when two
+lanes use the same source scan. Thus, one rectangular feeder image cannot
+misalign an adjacent lane.
+
+The accepted record keeps the base scan, source scan, object ID, artifact,
+transform, clip polygon, anchor count, residuals, and evaluation time. The UI
+applies these raster patches below the machine-coordinate vector overlays.
+`GET` on the same route returns the stored decisions. Here, acceptance is an
+automatic quality-gate result. It is not an operator click.
+
 Retained full-source scans can be replayed without machine motion. Save the
 calibration snapshot that the scan names, then run:
 

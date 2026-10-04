@@ -12,7 +12,7 @@ use velocitypnp_domain::{
     MachineEvent, Operation, Part, PlacementExecutionRun, PlacementOutcomeRecord,
     StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun, StripFeederPocketOutcome,
     StripFeederPocketStatus, StripFeederRegistration, StripFeederSourceCaptureRun,
-    StripPocketOccupancy, WorkspaceInventoryBaseline, WorkspaceScanReport,
+    StripPocketOccupancy, WorkspaceDisplayPatch, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -413,6 +413,14 @@ impl Store {
         self.get("workspace_scan", id)
     }
 
+    pub fn put_workspace_display_patch(&self, patch: &WorkspaceDisplayPatch) -> Result<()> {
+        self.put("workspace_display_patch", patch.id, patch)
+    }
+
+    pub fn list_workspace_display_patches(&self) -> Result<Vec<WorkspaceDisplayPatch>> {
+        self.list("workspace_display_patch")
+    }
+
     pub fn put_workspace_inventory_baseline(
         &self,
         baseline: &WorkspaceInventoryBaseline,
@@ -469,6 +477,11 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Lists retained workspace artifact names without loading image data.
+    pub fn list_workspace_scan_artifacts(&self, scan_id: Uuid) -> Result<Vec<(String, String)>> {
+        self.list_artifact_metadata("workspace_scan_artifacts", "scan_id", scan_id)
     }
 
     pub fn workspace_scan_artifact_bytes_except(
@@ -1151,6 +1164,10 @@ impl Store {
             ("strip_feeder_pickup_artifacts", "qualification_id") => {
                 "SELECT name, media_type FROM strip_feeder_pickup_artifacts \
                  WHERE qualification_id = ?1 ORDER BY name"
+            }
+            ("workspace_scan_artifacts", "scan_id") => {
+                "SELECT name, media_type FROM workspace_scan_artifacts \
+                 WHERE scan_id = ?1 ORDER BY name"
             }
             _ => unreachable!("artifact table and key are fixed by Store methods"),
         };

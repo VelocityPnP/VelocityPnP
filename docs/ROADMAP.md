@@ -234,10 +234,14 @@ a failed placement.
   limits, controlled stop, and calibration residuals
 - [ ] Audit the complete current web interface in simulation and record the
   normal operator workflow and recovery paths
-- [ ] Split the monolithic React application into feature-focused components
-  and give Workspace and Feeders clear navigation
-- [ ] Add model health, artifact evidence, operation progress, inspection, and
-  recovery views
+- [x] Add a dedicated live Workspace view with georeferenced scan imagery,
+  machine pose, scan progress, object, board, and active-placement overlays
+- [x] Gate board and per-lane feeder display patches against registered
+  fiducials or pocket lattices, with persisted transforms and residuals
+- [ ] Split the remaining monolithic React application into feature-focused
+  components and give Feeders clear navigation
+- [ ] Add artifact evidence, operation progress, inspection, and recovery
+  views
 - [ ] Add browser-level tests for the main simulated operator workflows
 
 See `docs/HARDWARE_VALIDATION.md` for measured attached-hardware evidence.

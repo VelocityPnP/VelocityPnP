@@ -63,9 +63,10 @@ use velocitypnp_domain::{
     VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
     WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
     WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
-    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceHeightMapSummary,
-    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
-    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceDisplayPatch,
+    WorkspaceDisplayPatchKind, WorkspaceHeightMapSummary, WorkspaceInventoryBaseline,
+    WorkspaceMosaicLayerReport, WorkspaceObjectClass, WorkspaceParallaxSummary,
+    WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
     WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
     WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
     WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
@@ -94,14 +95,14 @@ use velocitypnp_vision::{
     detect_camera_target, detect_installed_plate_hole, discover_workspace_objects,
     draft_strip_feeder_source_component, encode_gray_png, encode_rgb_png, encode_rgba_png,
     fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
-    fit_planar_camera_model, fit_top_side_board_registration, inspect_held_part_difference,
-    inspect_held_part_difference_with_orientation, inspect_placed_part_with_orientation,
-    inspect_strip_feeder_pocket_return, inspect_strip_feeder_source_pose,
-    interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
-    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
-    normalize_placement_verification_crop, plan_bottom_camera_correction, plan_pixel_correction,
-    plan_visual_homing, plan_workspace_scan, query_camera_controls,
-    reanalyze_workspace_seam_health, register_two_terminal_placement_target,
+    fit_planar_camera_model, fit_rigid_transform, fit_top_side_board_registration,
+    inspect_held_part_difference, inspect_held_part_difference_with_orientation,
+    inspect_placed_part_with_orientation, inspect_strip_feeder_pocket_return,
+    inspect_strip_feeder_source_pose, interpolate_planar_camera_model, mean_nozzle_detection,
+    measure_known_feature_surface_fraction, measure_workspace_parallax,
+    merge_workspace_height_maps, monotonic_timestamp, normalize_placement_verification_crop,
+    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
+    query_camera_controls, reanalyze_workspace_seam_health, register_two_terminal_placement_target,
     render_board_fiducial_evidence, render_held_part_shadow_preview,
     render_placement_verification_preview, render_source_component_shadow_preview,
     render_workspace_height_mosaic_with_consistency,
@@ -1217,7 +1218,15 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspace-scans/estimate",
             post(estimate_workspace_scan),
         )
+        .route(
+            "/api/v1/workspace-scans/summaries",
+            get(list_workspace_scan_summaries),
+        )
         .route("/api/v1/workspace-scans/{id}", get(get_workspace_scan))
+        .route(
+            "/api/v1/workspace-scans/{id}/display-patches",
+            get(get_workspace_display_patches).post(rebuild_workspace_display_patches),
+        )
         .route(
             "/api/v1/workspace-scans/{id}/refinement-targets",
             get(get_workspace_refinement_targets),
@@ -1416,6 +1425,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/strip-feeder-registrations",
             get(list_strip_feeder_registrations).post(create_strip_feeder_registration),
+        )
+        .route(
+            "/api/v1/strip-feeder-registrations/pocket-map",
+            get(list_strip_feeder_pocket_map),
         )
         .route(
             "/api/v1/strip-feeder-registrations/{id}",
@@ -5442,6 +5455,54 @@ async fn list_workspace_scans(State(state): State<AppState>) -> ApiResult<Json<V
     })))
 }
 
+fn workspace_scan_summary(scan: &WorkspaceScanReport) -> Value {
+    let display_artifact_name = scan
+        .refinement_composite
+        .as_ref()
+        .filter(|summary| summary.accepted)
+        .map(|summary| summary.mosaic_artifact_name.as_str())
+        .or_else(|| {
+            scan.height_map
+                .as_ref()
+                .map(|summary| summary.corrected_mosaic_artifact_name.as_str())
+        })
+        .or(scan.mosaic_artifact_name.as_deref());
+    json!({
+        "id": scan.id,
+        "profile_id": scan.profile_id,
+        "created_at": scan.created_at,
+        "updated_at": scan.updated_at,
+        "status": scan.status,
+        "mode": scan.mode,
+        "parent_scan_id": scan.parent_scan_id,
+        "region": scan.region,
+        "raster_transform": scan.raster_transform,
+        "planned_tiles": scan.planned_tiles,
+        "captured_tiles": scan.captured_tiles,
+        "mosaic_width_px": scan.mosaic_width_px,
+        "mosaic_height_px": scan.mosaic_height_px,
+        "display_artifact_name": display_artifact_name,
+        "height_map_available": scan.height_map.is_some(),
+        "refinement_composite": scan.refinement_composite.as_ref().map(|summary| json!({
+            "accepted": summary.accepted,
+        })),
+        "board_discovery": scan.board_discovery,
+        "strip_feeder_inventory": scan.strip_feeder_inventory,
+        "change_set": scan.change_set,
+        "failure": scan.failure,
+    })
+}
+
+async fn list_workspace_scan_summaries(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let scans = state
+        .store
+        .list_workspace_scans()
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "scans": scans.iter().map(workspace_scan_summary).collect::<Vec<_>>()
+    })))
+}
+
 async fn get_workspace_scan(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -5452,6 +5513,535 @@ async fn get_workspace_scan(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("workspace scan not found"))
+}
+
+const WORKSPACE_DISPLAY_PATCH_ALGORITHM: &str = "workspace_display_patch.v1";
+const DISPLAY_PATCH_MAX_TRANSLATION_MM: f64 = 2.5;
+const DISPLAY_PATCH_MAX_RESIDUAL_MM: f64 = 0.15;
+
+async fn get_workspace_display_patches(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let mut patches = state
+        .store
+        .list_workspace_display_patches()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|patch| patch.base_scan_id == id)
+        .collect::<Vec<_>>();
+    patches.sort_by(|left, right| right.source_created_at.cmp(&left.source_created_at));
+    Ok(Json(json!({ "patches": patches })))
+}
+
+async fn rebuild_workspace_display_patches(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let base = state
+        .store
+        .get_workspace_scan(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if base.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "display patches require a completed base scan",
+        ));
+    }
+    let patches = evaluate_workspace_display_patches(&state, &base)?;
+    let current_ids = patches
+        .iter()
+        .map(|patch| patch.id)
+        .collect::<BTreeSet<_>>();
+    for mut stale in state
+        .store
+        .list_workspace_display_patches()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|patch| patch.base_scan_id == base.id && !current_ids.contains(&patch.id))
+    {
+        stale.accepted = false;
+        stale.rejection_reason = Some("Not selected by the latest display evaluation".into());
+        stale.evaluated_at = Utc::now();
+        state
+            .store
+            .put_workspace_display_patch(&stale)
+            .map_err(ApiError::internal)?;
+    }
+    for patch in &patches {
+        state
+            .store
+            .put_workspace_display_patch(patch)
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(json!({ "patches": patches })))
+}
+
+fn evaluate_workspace_display_patches(
+    state: &AppState,
+    base: &WorkspaceScanReport,
+) -> ApiResult<Vec<WorkspaceDisplayPatch>> {
+    let mut scans = state
+        .store
+        .list_workspace_scans()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|scan| {
+            scan.id != base.id
+                && scan.status == WorkspaceScanStatus::Succeeded
+                && scan.profile_id == base.profile_id
+                && scan.calibration_id == base.calibration_id
+                && scan.created_at > base.created_at
+                && scan.output_mm_per_pixel < base.output_mm_per_pixel
+                && scan.raster_transform.is_some()
+                && scan.mosaic_width_px.is_some()
+                && scan.mosaic_height_px.is_some()
+        })
+        .collect::<Vec<_>>();
+    scans.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let previous = state
+        .store
+        .list_workspace_display_patches()
+        .map_err(ApiError::internal)?;
+    let mut patches = evaluate_board_display_patches(state, base, &scans, &previous)?;
+    patches.extend(evaluate_feeder_display_patches(
+        state, base, &scans, &previous,
+    )?);
+    patches.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.object_label.cmp(&right.object_label))
+    });
+    Ok(patches)
+}
+
+fn evaluate_board_display_patches(
+    state: &AppState,
+    base: &WorkspaceScanReport,
+    scans: &[WorkspaceScanReport],
+    previous: &[WorkspaceDisplayPatch],
+) -> ApiResult<Vec<WorkspaceDisplayPatch>> {
+    let boards = state.store.list_boards().map_err(ApiError::internal)?;
+    let mut registrations = state
+        .store
+        .list_board_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|registration| {
+            registration.passed
+                && registration.source_scan_id == base.id
+                && registration.profile_id == base.profile_id
+                && registration.calibration_id == base.calibration_id
+                && registration.design_to_machine.is_some()
+                && registration.board_instance.is_some()
+        })
+        .collect::<Vec<_>>();
+    registrations.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let mut seen_boards = BTreeSet::new();
+    let mut patches = Vec::new();
+    for registration in registrations {
+        if !seen_boards.insert(registration.board_id) {
+            continue;
+        }
+        let Some(board) = boards
+            .iter()
+            .find(|board| board.id == registration.board_id)
+        else {
+            continue;
+        };
+        let Some(bounds) = board.outline_bounds else {
+            continue;
+        };
+        let transform = registration.design_to_machine.expect("filtered transform");
+        let Some(instance) = registration.board_instance.as_ref() else {
+            continue;
+        };
+        let clip = board_clip_polygon(bounds, transform);
+        let fiducials = board
+            .placements
+            .iter()
+            .filter(|placement| placement.fiducial)
+            .collect::<Vec<_>>();
+        if fiducials.len() < 3 {
+            continue;
+        }
+        for scan in scans {
+            if !polygon_is_inside_region(&clip, scan.region) {
+                continue;
+            }
+            let Some(artifact_name) = workspace_display_artifact_name(scan) else {
+                continue;
+            };
+            let Some((_, encoded)) = state
+                .store
+                .get_workspace_scan_artifact(scan.id, &artifact_name)
+                .map_err(ApiError::internal)?
+            else {
+                continue;
+            };
+            let frame = match decode_gray_png(&encoded) {
+                Ok(frame) => frame,
+                Err(_) => continue,
+            };
+            let raster = scan.raster_transform.expect("filtered raster transform");
+            let scale_mm_per_px = raster.x_mm_per_pixel.abs().max(raster.y_mm_per_pixel.abs());
+            if !scale_mm_per_px.is_finite() || scale_mm_per_px <= 0.0 {
+                continue;
+            }
+            let mut measured_points = Vec::new();
+            let mut target_points = Vec::new();
+            for fiducial in &fiducials {
+                let target = transform.apply(fiducial.pose.x_mm, fiducial.pose.y_mm);
+                let expected_x_px = (target.0 - raster.top_left_x_mm) / raster.x_mm_per_pixel;
+                let expected_y_px = (target.1 - raster.top_left_y_mm) / raster.y_mm_per_pixel;
+                if let Some(detection) = detect_board_fiducial_near(
+                    &frame,
+                    expected_x_px,
+                    expected_y_px,
+                    BOARD_REGISTRATION_SEARCH_RADIUS_MM / scale_mm_per_px,
+                    BOARD_REGISTRATION_FIDUCIAL_DIAMETER_MM / scale_mm_per_px,
+                    BOARD_REGISTRATION_FIDUCIAL_DIAMETER_TOLERANCE_MM / scale_mm_per_px,
+                ) {
+                    let measured_x = raster.top_left_x_mm + detection.x_px * raster.x_mm_per_pixel;
+                    let measured_y = raster.top_left_y_mm + detection.y_px * raster.y_mm_per_pixel;
+                    measured_points.push((measured_x, measured_y));
+                    target_points.push(target);
+                }
+            }
+            let Some(fit) = fit_rigid_transform(&measured_points, &target_points) else {
+                continue;
+            };
+            let maximum_correction_mm = measured_points
+                .iter()
+                .zip(&target_points)
+                .map(|(measured, target)| (target.0 - measured.0).hypot(target.1 - measured.1))
+                .fold(0.0_f64, f64::max);
+            if measured_points.len() < 3
+                || maximum_correction_mm > DISPLAY_PATCH_MAX_TRANSLATION_MM
+                || fit.residuals.p95_mm > DISPLAY_PATCH_MAX_RESIDUAL_MM
+                || fit.residuals.max_mm > DISPLAY_PATCH_MAX_RESIDUAL_MM
+            {
+                continue;
+            }
+            patches.push(WorkspaceDisplayPatch {
+                id: previous_patch_id(
+                    previous,
+                    base.id,
+                    scan.id,
+                    WorkspaceDisplayPatchKind::Board,
+                    instance.id,
+                ),
+                algorithm_version: WORKSPACE_DISPLAY_PATCH_ALGORITHM.into(),
+                base_scan_id: base.id,
+                source_scan_id: scan.id,
+                profile_id: base.profile_id.clone(),
+                calibration_id: base.calibration_id,
+                kind: WorkspaceDisplayPatchKind::Board,
+                object_id: instance.id,
+                object_label: instance.label.clone(),
+                artifact_name,
+                source_raster_transform: raster,
+                source_width_px: scan.mosaic_width_px.expect("filtered width"),
+                source_height_px: scan.mosaic_height_px.expect("filtered height"),
+                source_to_base: fit.transform,
+                clip_polygon_machine_mm: clip,
+                anchor_count: measured_points.len() as u32,
+                alignment_residuals: fit.residuals,
+                accepted: true,
+                rejection_reason: None,
+                findings: vec![format!(
+                    "Matched {} registered board fiducials",
+                    measured_points.len(),
+                )],
+                source_created_at: scan.created_at,
+                evaluated_at: Utc::now(),
+            });
+            break;
+        }
+    }
+    Ok(patches)
+}
+
+fn evaluate_feeder_display_patches(
+    state: &AppState,
+    base: &WorkspaceScanReport,
+    scans: &[WorkspaceScanReport],
+    previous: &[WorkspaceDisplayPatch],
+) -> ApiResult<Vec<WorkspaceDisplayPatch>> {
+    let mut registrations = state
+        .store
+        .list_strip_feeder_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|registration| {
+            registration.source_scan_id == base.id
+                && registration.profile_id == base.profile_id
+                && registration.calibration_id == base.calibration_id
+        })
+        .collect::<Vec<_>>();
+    registrations.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let mut seen_lanes = BTreeSet::new();
+    registrations.retain(|registration| {
+        let center = registration.pick_centerline_machine_mm[0][0]
+            + registration.pick_centerline_machine_mm[1][0];
+        seen_lanes.insert((center * 10.0).round() as i64)
+    });
+    let mut accepted_objects = BTreeSet::new();
+    let mut patches = Vec::new();
+    for scan in scans.iter().filter(|scan| scan.height_map.is_some()) {
+        let raster = scan.raster_transform.expect("filtered raster transform");
+        let Some(artifact_name) = scan
+            .height_map
+            .as_ref()
+            .map(|summary| summary.corrected_mosaic_artifact_name.clone())
+        else {
+            continue;
+        };
+        let artifacts = state
+            .store
+            .list_workspace_scan_artifacts(scan.id)
+            .map_err(ApiError::internal)?;
+        for (report_name, _) in artifacts.into_iter().filter(|(name, media_type)| {
+            name.starts_with("strip-feeder-vision-")
+                && name.ends_with(".json")
+                && media_type == "application/json"
+        }) {
+            let Some((_, data)) = state
+                .store
+                .get_workspace_scan_artifact(scan.id, &report_name)
+                .map_err(ApiError::internal)?
+            else {
+                continue;
+            };
+            let report = match serde_json::from_slice::<StripFeederVisionReport>(&data) {
+                Ok(report) => report,
+                Err(_) => continue,
+            };
+            for proposal in report.proposals.iter().filter(|proposal| {
+                !proposal.review_required
+                    && proposal.confidence >= 0.8
+                    && proposal.sprocket_pitch_residual_p95_mm <= DISPLAY_PATCH_MAX_RESIDUAL_MM
+                    && proposal.pocket_centers_machine_mm.len() >= 8
+            }) {
+                let mut best: Option<(&StripFeederRegistration, [f64; 2], Residuals, usize)> = None;
+                for registration in &registrations {
+                    if accepted_objects.contains(&registration.id)
+                        || (registration.tape_width_mm
+                            - proposal.tape_width_mm.unwrap_or(registration.tape_width_mm))
+                        .abs()
+                            > 1.0
+                        || (registration.tape_pitch_mm
+                            - proposal
+                                .component_pitch_mm
+                                .unwrap_or(registration.tape_pitch_mm))
+                        .abs()
+                            > 0.25
+                        || angle_difference_deg(
+                            registration.tape_rotation_deg,
+                            proposal.tape_rotation_deg,
+                        )
+                        .abs()
+                            > 1.0
+                    {
+                        continue;
+                    }
+                    let offsets = lattice_offsets(
+                        &proposal.pocket_centers_machine_mm,
+                        &registration.pocket_centers_machine_mm,
+                        DISPLAY_PATCH_MAX_TRANSLATION_MM,
+                    );
+                    let Some((translation, residuals)) = fit_display_translation(&offsets) else {
+                        continue;
+                    };
+                    if offsets.len() < 8
+                        || translation[0].hypot(translation[1]) > DISPLAY_PATCH_MAX_TRANSLATION_MM
+                        || residuals.p95_mm > DISPLAY_PATCH_MAX_RESIDUAL_MM
+                        || residuals.max_mm > DISPLAY_PATCH_MAX_RESIDUAL_MM
+                    {
+                        continue;
+                    }
+                    let replace = best.as_ref().is_none_or(|(_, _, current, count)| {
+                        offsets.len() > *count
+                            || (offsets.len() == *count && residuals.p95_mm < current.p95_mm)
+                    });
+                    if replace {
+                        best = Some((registration, translation, residuals, offsets.len()));
+                    }
+                }
+                let Some((registration, translation, residuals, anchor_count)) = best else {
+                    continue;
+                };
+                accepted_objects.insert(registration.id);
+                patches.push(WorkspaceDisplayPatch {
+                    id: previous_patch_id(
+                        previous,
+                        base.id,
+                        scan.id,
+                        WorkspaceDisplayPatchKind::FeederLane,
+                        registration.id,
+                    ),
+                    algorithm_version: WORKSPACE_DISPLAY_PATCH_ALGORITHM.into(),
+                    base_scan_id: base.id,
+                    source_scan_id: scan.id,
+                    profile_id: base.profile_id.clone(),
+                    calibration_id: base.calibration_id,
+                    kind: WorkspaceDisplayPatchKind::FeederLane,
+                    object_id: registration.id,
+                    object_label: registration.name.clone(),
+                    artifact_name: artifact_name.clone(),
+                    source_raster_transform: raster,
+                    source_width_px: scan.mosaic_width_px.expect("filtered width"),
+                    source_height_px: scan.mosaic_height_px.expect("filtered height"),
+                    source_to_base: velocitypnp_domain::Transform2d::rigid(
+                        translation[0],
+                        translation[1],
+                        0.0,
+                    ),
+                    clip_polygon_machine_mm: feeder_lane_clip(registration),
+                    anchor_count: anchor_count as u32,
+                    alignment_residuals: residuals,
+                    accepted: true,
+                    rejection_reason: None,
+                    findings: vec![format!("Matched {anchor_count} registered feeder pockets",)],
+                    source_created_at: scan.created_at,
+                    evaluated_at: Utc::now(),
+                });
+            }
+        }
+    }
+    Ok(patches)
+}
+
+fn workspace_display_artifact_name(scan: &WorkspaceScanReport) -> Option<String> {
+    scan.height_map
+        .as_ref()
+        .map(|summary| summary.corrected_mosaic_artifact_name.clone())
+        .or_else(|| scan.mosaic_artifact_name.clone())
+}
+
+fn previous_patch_id(
+    previous: &[WorkspaceDisplayPatch],
+    base_scan_id: Uuid,
+    source_scan_id: Uuid,
+    kind: WorkspaceDisplayPatchKind,
+    object_id: Uuid,
+) -> Uuid {
+    previous
+        .iter()
+        .find(|patch| {
+            patch.base_scan_id == base_scan_id
+                && patch.source_scan_id == source_scan_id
+                && patch.kind == kind
+                && patch.object_id == object_id
+        })
+        .map(|patch| patch.id)
+        .unwrap_or_else(Uuid::new_v4)
+}
+
+fn board_clip_polygon(
+    bounds: velocitypnp_domain::BoardOutlineBounds,
+    transform: velocitypnp_domain::Transform2d,
+) -> Vec<[f64; 2]> {
+    [
+        [bounds.min_x_mm, bounds.min_y_mm],
+        [bounds.max_x_mm, bounds.min_y_mm],
+        [bounds.max_x_mm, bounds.max_y_mm],
+        [bounds.min_x_mm, bounds.max_y_mm],
+    ]
+    .into_iter()
+    .map(|point| {
+        let transformed = transform.apply(point[0], point[1]);
+        [transformed.0, transformed.1]
+    })
+    .collect()
+}
+
+fn polygon_is_inside_region(points: &[[f64; 2]], region: WorkspaceScanRegion) -> bool {
+    points.iter().all(|point| {
+        (region.x_min_mm..=region.x_max_mm).contains(&point[0])
+            && (region.y_min_mm..=region.y_max_mm).contains(&point[1])
+    })
+}
+
+fn lattice_offsets(
+    source: &[[f64; 2]],
+    target: &[[f64; 2]],
+    maximum_distance_mm: f64,
+) -> Vec<[f64; 2]> {
+    let mut used = BTreeSet::new();
+    source
+        .iter()
+        .filter_map(|source_point| {
+            let (target_index, target_point, distance) = target
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !used.contains(index))
+                .map(|(index, point)| {
+                    (
+                        index,
+                        point,
+                        (point[0] - source_point[0]).hypot(point[1] - source_point[1]),
+                    )
+                })
+                .min_by(|left, right| left.2.total_cmp(&right.2))?;
+            if distance > maximum_distance_mm {
+                return None;
+            }
+            used.insert(target_index);
+            Some([
+                target_point[0] - source_point[0],
+                target_point[1] - source_point[1],
+            ])
+        })
+        .collect()
+}
+
+fn fit_display_translation(offsets: &[[f64; 2]]) -> Option<([f64; 2], Residuals)> {
+    if offsets.is_empty() {
+        return None;
+    }
+    let mut x = offsets.iter().map(|offset| offset[0]).collect::<Vec<_>>();
+    let mut y = offsets.iter().map(|offset| offset[1]).collect::<Vec<_>>();
+    x.sort_by(f64::total_cmp);
+    y.sort_by(f64::total_cmp);
+    let translation = [x[x.len() / 2], y[y.len() / 2]];
+    let residuals = summarize_residuals(
+        offsets
+            .iter()
+            .map(|offset| (offset[0] - translation[0]).hypot(offset[1] - translation[1])),
+    )?;
+    Some((translation, residuals))
+}
+
+fn feeder_lane_clip(registration: &StripFeederRegistration) -> Vec<[f64; 2]> {
+    let [start, end] = registration.pick_centerline_machine_mm;
+    let delta = [end[0] - start[0], end[1] - start[1]];
+    let length = delta[0].hypot(delta[1]);
+    let normal = if length > 0.0 {
+        [-delta[1] / length, delta[0] / length]
+    } else {
+        [1.0, 0.0]
+    };
+    let half_width = registration.tape_width_mm / 2.0;
+    [
+        [
+            start[0] + normal[0] * half_width,
+            start[1] + normal[1] * half_width,
+        ],
+        [
+            end[0] + normal[0] * half_width,
+            end[1] + normal[1] * half_width,
+        ],
+        [
+            end[0] - normal[0] * half_width,
+            end[1] - normal[1] * half_width,
+        ],
+        [
+            start[0] - normal[0] * half_width,
+            start[1] - normal[1] * half_width,
+        ],
+    ]
+    .into()
 }
 
 async fn get_workspace_refinement_targets(
@@ -8564,6 +9154,39 @@ async fn list_strip_feeder_registrations(State(state): State<AppState>) -> ApiRe
             .store
             .list_strip_feeder_registrations()
             .map_err(ApiError::internal)?,
+    })))
+}
+
+fn strip_feeder_pocket_map_entry(registration: &StripFeederRegistration) -> Value {
+    json!({
+        "id": registration.id,
+        "profile_id": registration.profile_id,
+        "updated_at": registration.updated_at,
+        "status": registration.status,
+        "name": registration.name,
+        "tape_width_mm": registration.tape_width_mm,
+        "tape_rotation_deg": registration.tape_rotation_deg,
+        "pockets": registration.pockets.iter().map(|pocket| json!({
+            "pocket_index": pocket.pocket_index,
+            "center_machine_mm": pocket.nominal_center_machine_mm,
+            "occupancy": pocket.occupancy,
+            "occupancy_confidence": pocket.occupancy_confidence,
+            "status": pocket.status,
+            "selected": registration.selected_pocket_index == Some(pocket.pocket_index),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+async fn list_strip_feeder_pocket_map(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let registrations = state
+        .store
+        .list_strip_feeder_registrations()
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "registrations": registrations
+            .iter()
+            .map(strip_feeder_pocket_map_entry)
+            .collect::<Vec<_>>(),
     })))
 }
 
@@ -35475,6 +36098,40 @@ mod tests {
     use velocitypnp_driver::SimulatorDriver;
 
     #[test]
+    fn display_patch_matches_one_feeder_lattice_translation() {
+        let source = (0..18)
+            .map(|index| [163.25, 160.5 - f64::from(index) * 4.0])
+            .collect::<Vec<_>>();
+        let target = source
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let noise = if index % 2 == 0 { 0.02 } else { -0.02 };
+                [point[0] + 0.265 + noise, point[1] - 1.316]
+            })
+            .collect::<Vec<_>>();
+
+        let offsets = lattice_offsets(&source, &target, DISPLAY_PATCH_MAX_TRANSLATION_MM);
+        let (translation, residuals) = fit_display_translation(&offsets).unwrap();
+
+        assert_eq!(offsets.len(), 18);
+        assert!((translation[0] - 0.285).abs() < 1e-9);
+        assert!((translation[1] + 1.316).abs() < 1e-9);
+        assert!(residuals.p95_mm < DISPLAY_PATCH_MAX_RESIDUAL_MM);
+    }
+
+    #[test]
+    fn display_patch_rejects_accumulated_feeder_drift() {
+        let offsets = (0..18)
+            .map(|index| [0.2, -0.5 + f64::from(index) * 0.04])
+            .collect::<Vec<_>>();
+
+        let (_, residuals) = fit_display_translation(&offsets).unwrap();
+
+        assert!(residuals.p95_mm > DISPLAY_PATCH_MAX_RESIDUAL_MM);
+    }
+
+    #[test]
     fn workspace_timing_distribution_reports_bounded_summary() {
         let summary = workspace_timing_distribution(&[4.0, 1.0, 3.0, 2.0]);
 
@@ -36916,6 +37573,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn strip_feeder_pocket_map_keeps_state_and_omits_diagnostics() {
+        let mut registration = test_pickup_registration(Utc::now());
+        registration.ensure_pocket_state();
+        registration.pockets[0].measured_center_machine_mm = Some([10.1, 0.2]);
+        registration.pockets[0].occupancy = StripPocketOccupancy::Occupied;
+        registration.pockets[0].status = StripFeederPocketStatus::Available;
+        registration.selected_pocket_index = Some(0);
+        registration.findings = vec!["large retained diagnostic".into()];
+
+        let entry = strip_feeder_pocket_map_entry(&registration);
+
+        assert_eq!(entry["pockets"][0]["center_machine_mm"], json!([10.0, 0.0]));
+        assert_eq!(entry["pockets"][0]["occupancy"], "occupied");
+        assert_eq!(entry["pockets"][0]["status"], "available");
+        assert_eq!(entry["pockets"][0]["selected"], true);
+        assert!(entry.get("findings").is_none());
+    }
+
     #[tokio::test]
     async fn placement_transfer_pins_its_current_feeder_registration() {
         let state = test_state();
@@ -37729,6 +38405,33 @@ mod tests {
             warnings: vec![],
             failure: None,
         }
+    }
+
+    #[test]
+    fn workspace_scan_summary_omits_large_detail_arrays() {
+        let mut scan = test_workspace_scan(Uuid::new_v4());
+        scan.captured_tiles = 12;
+        scan.mosaic_artifact_name = Some("mosaic.png".into());
+        scan.tiles.push(WorkspaceScanTile {
+            index: 0,
+            row: 0,
+            column: 0,
+            capture_order: 0,
+            nominal_pose: Pose::ORIGIN,
+            placement_correction_x_mm: 0.0,
+            placement_correction_y_mm: 0.0,
+            artifact_name: "tile-000.png".into(),
+        });
+
+        let summary = workspace_scan_summary(&scan);
+
+        assert_eq!(summary["id"], json!(scan.id));
+        assert_eq!(summary["captured_tiles"], 12);
+        assert_eq!(summary["height_map_available"], false);
+        assert_eq!(summary["display_artifact_name"], "mosaic.png");
+        assert_eq!(summary["region"], json!(scan.region));
+        assert!(summary.get("tiles").is_none());
+        assert!(summary.get("registrations").is_none());
     }
 
     fn put_test_workspace_objects(state: &AppState, scan: &mut WorkspaceScanReport) {
