@@ -621,9 +621,11 @@ describe("workspace operational map", () => {
     expect(screen.getByText(
       "Feeder 1 · pocket 0", { selector: ".workspace-selection-card h3" },
     )).toBeTruthy();
-    expect(container.querySelector(
+    const selectedPocket = container.querySelector(
       ".workspace-feeder-pockets circle.is-user-selected",
-    )).toBeTruthy();
+    );
+    expect(selectedPocket).toBeTruthy();
+    expect(selectedPocket?.getAttribute("r")).toBe("0.55");
     expect(container.querySelector(".workspace-feeder-pockets.is-selected"))
       .toBeNull();
     expect(container.querySelector(".workspace-selection-marker")).toBeNull();

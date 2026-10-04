@@ -1560,7 +1560,10 @@ export function WorkspacePanel({
                 event,
                 () => selectPocket(event, feeder, pocket),
               )}
-              r={Math.max(markerSize * .38, .8)}
+              r={selection?.kind === "pocket"
+                  && selection.id === `${feeder.id}-${pocket.pocket_index}`
+                ? Math.max(markerSize * .22, .55)
+                : Math.max(markerSize * .38, .8)}
               role="button"
               tabIndex={0}
             >

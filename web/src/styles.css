@@ -701,9 +701,10 @@ p { line-height: 1.5; }
   stroke-width: 1.8;
 }
 .workspace-feeder-pockets circle.is-user-selected {
-  opacity: .7;
-  stroke: #ffe36ecc;
-  stroke-width: 2.2;
+  fill: #ffe36e40;
+  opacity: .68;
+  stroke: #ffcf40b3;
+  stroke-width: 1.6;
   stroke-dasharray: none;
 }
 .workspace-selection-marker { pointer-events: none; }
