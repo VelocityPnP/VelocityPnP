@@ -634,8 +634,8 @@ p { line-height: 1.5; }
   vector-effect: non-scaling-stroke;
 }
 .workspace-selectable.is-selected .workspace-job-board {
-  fill: #64e3a438;
-  stroke: #c5ffe0;
+  fill: #ffe36e14;
+  stroke: #ffe36e;
   stroke-width: 3;
 }
 .workspace-placement-position circle,
@@ -654,9 +654,10 @@ p { line-height: 1.5; }
 .workspace-placement-position.current line { stroke-width: 2.6; }
 .workspace-placement-position.is-selected circle,
 .workspace-placement-position.is-selected line {
-  stroke: #fff;
+  stroke: #ffe36e;
   stroke-width: 3;
 }
+.workspace-placement-position.is-selected circle { fill: #ffe36e26; }
 .workspace-feeder-pockets polyline {
   fill: none;
   stroke: #66c4ff80;
@@ -671,13 +672,21 @@ p { line-height: 1.5; }
   vector-effect: non-scaling-stroke;
 }
 .workspace-feeder-pockets.is-selected > polyline:not(.workspace-feeder-hit) {
-  stroke: #d7f2ff;
+  stroke: #ffe36e;
   stroke-width: 3;
 }
 .workspace-feeder-pockets circle {
   opacity: .58;
   stroke: #bfe7ff;
   stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-feeder-pockets circle.workspace-pocket-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  opacity: 1;
+  pointer-events: all;
   vector-effect: non-scaling-stroke;
 }
 .workspace-feeder-pockets circle.occupied { fill: #4bb4ffdc; }
@@ -693,16 +702,16 @@ p { line-height: 1.5; }
 }
 .workspace-selection-marker { pointer-events: none; }
 .workspace-selection-marker rect {
-  fill: #6fd0ff0a;
-  stroke: #8ad9ff;
+  fill: #ffe36e0d;
+  stroke: #ffe36e;
   stroke-width: 1.5;
   stroke-dasharray: 6 4;
   vector-effect: non-scaling-stroke;
 }
 .workspace-selection-marker circle,
 .workspace-selection-marker line {
-  fill: #091411cc;
-  stroke: #fff;
+  fill: #ffe36e24;
+  stroke: #fff2a8;
   stroke-width: 1.8;
   vector-effect: non-scaling-stroke;
 }

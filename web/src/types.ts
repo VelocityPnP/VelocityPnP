@@ -52,6 +52,13 @@ export interface MachineStatus {
   controller: ControllerConnection | null;
 }
 
+export interface MachineMotionProfile {
+  id: string;
+  transit_motion: {
+    clear_xy_feed_mm_per_min: number;
+  };
+}
+
 export interface Device {
   kind: "serial_controller" | "camera";
   path: string;

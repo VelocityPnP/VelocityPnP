@@ -7,7 +7,8 @@ import { api, waitForOperation } from "./api";
 import { useDialog } from "./Dialog";
 import type {
   BoardDesign, BoardInstance, Job, JobExecutionRun, MachineOverlayGeometry,
-  MachineStatus, PlacementExecutionRun, PlacementOutcomeRecord, StripFeederMapRegistration,
+  MachineStatus, PlacementExecutionRun, PlacementOutcomeRecord, Pose,
+  StripFeederMapRegistration,
   WorkspaceBoardDiscoveryReport, WorkspaceDisplayPatch, WorkspaceObjectClass,
   WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanSummary,
 } from "./types";
@@ -491,6 +492,20 @@ export function panWorkspaceViewport(
   };
 }
 
+export function workspaceMoveAnimationDuration(
+  from: Pose,
+  to: Pose,
+  feedMmPerMin: number,
+): number {
+  const distanceMm = Math.hypot(
+    to.x_mm - from.x_mm,
+    to.y_mm - from.y_mm,
+    to.z_mm - from.z_mm,
+  );
+  const durationMs = distanceMm / Math.max(feedMmPerMin / 60, 1) * 1000;
+  return Math.min(1200, Math.max(100, durationMs));
+}
+
 export function WorkspacePanel({
   status, setError, openMachine, openJobs,
 }: WorkspacePanelProps) {
@@ -509,6 +524,8 @@ export function WorkspacePanel({
     StripFeederMapRegistration[]
   >([]);
   const [machineGeometry, setMachineGeometry] = useState<MachineOverlayGeometry | null>(null);
+  const [clearXyFeedMmPerMin, setClearXyFeedMmPerMin] = useState(23_000);
+  const [mapPose, setMapPose] = useState<Pose | null>(status.pose);
   const [placementExecution, setPlacementExecution] = useState<PlacementExecutionRun | null>(null);
   const [selectedScanId, setSelectedScanId] = useState("");
   const [artifactName, setArtifactName] = useState("");
@@ -532,6 +549,75 @@ export function WorkspacePanel({
   });
   const workspaceMapRef = useRef<SVGSVGElement>(null);
   const panGestureRef = useRef<WorkspacePanGesture | null>(null);
+  const mapPoseRef = useRef<Pose | null>(status.pose);
+  const mapPoseAnimationRef = useRef<number | null>(null);
+
+  const animateMapPose = useCallback((target: Pose | null) => {
+    if (mapPoseAnimationRef.current !== null
+        && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(mapPoseAnimationRef.current);
+    }
+    mapPoseAnimationRef.current = null;
+    if (!target) {
+      mapPoseRef.current = null;
+      setMapPose(null);
+      return;
+    }
+    const source = mapPoseRef.current ?? target;
+    if (typeof window.requestAnimationFrame !== "function") {
+      mapPoseRef.current = target;
+      setMapPose(target);
+      return;
+    }
+    const durationMs = workspaceMoveAnimationDuration(
+      source, target, clearXyFeedMmPerMin,
+    );
+    let startedAt: number | null = null;
+    const frame = (now: number) => {
+      startedAt ??= now;
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - (1 - progress) ** 3;
+      const next = {
+        x_mm: source.x_mm + (target.x_mm - source.x_mm) * eased,
+        y_mm: source.y_mm + (target.y_mm - source.y_mm) * eased,
+        z_mm: source.z_mm + (target.z_mm - source.z_mm) * eased,
+        rotation_deg: source.rotation_deg
+          + (target.rotation_deg - source.rotation_deg) * eased,
+      };
+      mapPoseRef.current = next;
+      setMapPose(next);
+      if (progress < 1) {
+        mapPoseAnimationRef.current = window.requestAnimationFrame(frame);
+      } else {
+        mapPoseAnimationRef.current = null;
+      }
+    };
+    mapPoseAnimationRef.current = window.requestAnimationFrame(frame);
+  }, [clearXyFeedMmPerMin]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.machineProfile().then((profile) => {
+      if (!cancelled) {
+        setClearXyFeedMmPerMin(profile.transit_motion.clear_xy_feed_mm_per_min);
+      }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [status.profile_id]);
+
+  useEffect(() => {
+    animateMapPose(status.pose);
+  }, [
+    animateMapPose, status.pose?.rotation_deg, status.pose?.x_mm,
+    status.pose?.y_mm, status.pose?.z_mm,
+  ]);
+
+  useEffect(() => () => {
+    if (mapPoseAnimationRef.current !== null
+        && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(mapPoseAnimationRef.current);
+    }
+  }, []);
 
   const loadScanSummaries = useCallback(async () => {
     try {
@@ -763,9 +849,9 @@ export function WorkspacePanel({
   } : null;
   const displayedViewport = viewport ?? fullViewport;
   useEffect(() => setViewport(null), [selectedSummary?.id]);
-  const machineOnMap = Boolean(status.pose && region
-    && status.pose.x_mm >= region.x_min_mm && status.pose.x_mm <= region.x_max_mm
-    && status.pose.y_mm >= region.y_min_mm && status.pose.y_mm <= region.y_max_mm);
+  const machineOnMap = Boolean(mapPose && region
+    && mapPose.x_mm >= region.x_min_mm && mapPose.x_mm <= region.x_max_mm
+    && mapPose.y_mm >= region.y_min_mm && mapPose.y_mm <= region.y_max_mm);
   const activeNozzleId = placementExecution?.report?.nozzle_id ?? null;
   const capturedTiles = selectedSummary?.captured_tiles ?? selectedScan?.captured_tiles ?? 0;
   const plannedTiles = selectedSummary?.planned_tiles ?? selectedScan?.planned_tiles ?? 0;
@@ -907,12 +993,16 @@ export function WorkspacePanel({
   const moveTopCamera = async (target: WorkspaceSelection) => {
     if (!status.pose) throw new Error("The machine pose is not known.");
     const lease = await api.acquireOrRenewLease("VelocityPnP workspace", 3600);
-    const operation = await api.jog(lease.id, {
+    const targetPose = {
       x_mm: target.point[0],
       y_mm: target.point[1],
       z_mm: status.pose.z_mm,
       rotation_deg: status.pose.rotation_deg,
-    });
+    };
+    animateMapPose(targetPose);
+    const operation = await api.jog(
+      lease.id, targetPose, clearXyFeedMmPerMin,
+    );
     const completed = await waitForOperation(operation);
     if (completed.status !== "succeeded") {
       throw new Error(completed.message ?? "The move did not complete.");
@@ -921,12 +1011,6 @@ export function WorkspacePanel({
 
   const goToSelection = async () => {
     if (!selection || !status.pose) return;
-    const confirmed = await requestDialog({
-      title: `Go to ${selection.label}`,
-      message: `Move the top camera to X ${selection.point[0].toFixed(2)} mm, Y ${selection.point[1].toFixed(2)} mm at the current Z height. Confirm that the travel path is clear and that both nozzles are level.`,
-      confirmLabel: "Move",
-    });
-    if (confirmed === null) return;
     setSelectionAction("moving");
     setSelectionMessage("Moving top camera…");
     setError(null);
@@ -1014,12 +1098,6 @@ export function WorkspacePanel({
 
   const quickCapture = async () => {
     if (!selection || selection.kind !== "point") return;
-    const confirmed = await requestDialog({
-      title: "Quick capture",
-      message: `Move the top camera to X ${selection.point[0].toFixed(2)} mm, Y ${selection.point[1].toFixed(2)} mm and capture one image. Confirm that the travel path is clear and that both nozzles are level.`,
-      confirmLabel: "Move and capture",
-    });
-    if (confirmed === null) return;
     setSelectionAction("capturing");
     setSelectionMessage("Moving top camera…");
     setQuickCaptureUrl("");
@@ -1335,23 +1413,31 @@ export function WorkspacePanel({
           {layers.feeders && feederLanes.map((feeder) => <g
             className={`workspace-selectable workspace-feeder-pockets ${selection?.objectId === feeder.id ? "is-selected" : ""}`}
             key={feeder.id}
+            onClick={(event) => selectFeeder(event, feeder)}
+            onKeyDown={(event) => activateOnKeyboard(
+              event,
+              () => selectFeeder(event, feeder),
+            )}
+            role="button"
+            tabIndex={0}
           >
             <polyline
               className="workspace-feeder-hit"
               points={feeder.pockets.map(
                 (pocket) => `${pocket.center_machine_mm[0]},${-pocket.center_machine_mm[1]}`,
               ).join(" ")}
-              onClick={(event) => selectFeeder(event, feeder)}
-              onKeyDown={(event) => activateOnKeyboard(
-                event,
-                () => selectFeeder(event, feeder),
-              )}
-              role="button"
-              tabIndex={0}
             />
             <polyline points={feeder.pockets.map(
               (pocket) => `${pocket.center_machine_mm[0]},${-pocket.center_machine_mm[1]}`,
             ).join(" ")} />
+            {feeder.pockets.map((pocket) => <circle
+              className="workspace-pocket-hit"
+              cx={pocket.center_machine_mm[0]}
+              cy={-pocket.center_machine_mm[1]}
+              key={`hit-${pocket.pocket_index}`}
+              onClick={(event) => selectPocket(event, feeder, pocket)}
+              r={Math.max(markerSize * .38, .8)}
+            />)}
             {feeder.pockets.map((pocket) => <circle
               key={pocket.pocket_index}
               className={`${pocket.occupancy} status-${pocket.status} ${pocket.selected ? "selected" : ""}`}
@@ -1370,14 +1456,14 @@ export function WorkspacePanel({
             </circle>)}
           </g>)}
 
-          {layers.machine && status.pose && machineOnMap && <g
+          {layers.machine && mapPose && machineOnMap && <g
             className={`workspace-machine-overlay ${status.homed ? "is-trusted" : "is-untrusted"}`}
           >
             <g className="workspace-gantry-guide">
               <rect
                 className="workspace-gantry-shadow"
                 x={region.x_min_mm}
-                y={-status.pose.y_mm - 8}
+                y={-mapPose.y_mm - 8}
                 width={mapWidth}
                 height={20}
                 rx={1.5}
@@ -1385,7 +1471,7 @@ export function WorkspacePanel({
               <rect
                 className="workspace-gantry-extrusion"
                 x={region.x_min_mm}
-                y={-status.pose.y_mm - 10}
+                y={-mapPose.y_mm - 10}
                 width={mapWidth}
                 height={20}
                 rx={1.5}
@@ -1394,30 +1480,30 @@ export function WorkspacePanel({
                 className="workspace-gantry-rail"
                 x1={region.x_min_mm}
                 x2={region.x_max_mm}
-                y1={-status.pose.y_mm - 7}
-                y2={-status.pose.y_mm - 7}
+                y1={-mapPose.y_mm - 7}
+                y2={-mapPose.y_mm - 7}
               />
               <line
                 className="workspace-gantry-rail"
                 x1={region.x_min_mm}
                 x2={region.x_max_mm}
-                y1={-status.pose.y_mm + 7}
-                y2={-status.pose.y_mm + 7}
+                y1={-mapPose.y_mm + 7}
+                y2={-mapPose.y_mm + 7}
               />
               <rect
                 className="workspace-gantry-slot"
                 x={region.x_min_mm}
-                y={-status.pose.y_mm - 2}
+                y={-mapPose.y_mm - 2}
                 width={mapWidth}
                 height={4}
               />
-              <title>{`Approximate 20 mm X-gantry extrusion at Y${status.pose.y_mm.toFixed(3)}`}</title>
+              <title>{`Approximate 20 mm X-gantry extrusion at Y${mapPose.y_mm.toFixed(3)}`}</title>
             </g>
             {machineGeometry && <rect
               className="workspace-camera-footprint"
-              x={status.pose.x_mm
+              x={mapPose.x_mm
                 + machineGeometry.camera_footprint_relative_mm.x_min_mm}
-              y={-(status.pose.y_mm
+              y={-(mapPose.y_mm
                 + machineGeometry.camera_footprint_relative_mm.y_max_mm)}
               width={machineGeometry.camera_footprint_relative_mm.x_max_mm
                 - machineGeometry.camera_footprint_relative_mm.x_min_mm}
@@ -1428,7 +1514,7 @@ export function WorkspacePanel({
             </rect>}
             <g
               className="workspace-toolhead"
-              transform={`translate(${status.pose.x_mm} ${-status.pose.y_mm})`}
+              transform={`translate(${mapPose.x_mm} ${-mapPose.y_mm})`}
             >
               {machineGeometry && <g className="workspace-toolhead-model">
                 <rect
@@ -1491,7 +1577,7 @@ export function WorkspacePanel({
                 <circle className="camera-lens" r={machineMarkerSize * .38} />
                 <line x1={-machineMarkerSize * .22} x2={machineMarkerSize * .22} />
                 <line y1={-machineMarkerSize * .22} y2={machineMarkerSize * .22} />
-                <title>{`Top camera X${status.pose.x_mm.toFixed(3)} Y${status.pose.y_mm.toFixed(3)}`}</title>
+                <title>{`Top camera X${mapPose.x_mm.toFixed(3)} Y${mapPose.y_mm.toFixed(3)}`}</title>
               </g>
               {machineGeometry?.nozzles.map((nozzle) => <g
                 className={`workspace-nozzle ${nozzle.nozzle_id === activeNozzleId ? "is-active" : ""}`}
@@ -1599,7 +1685,7 @@ export function WorkspacePanel({
         {selectedStatus === "running" && <div className="workspace-live-label">
           <span /> Live scan · {capturedTiles}/{plannedTiles} tiles
         </div>}
-        {status.pose && region && !machineOnMap && <div className="workspace-map-note">
+        {mapPose && region && !machineOnMap && <div className="workspace-map-note">
           Head position is outside this scan region.
         </div>}
       </div>

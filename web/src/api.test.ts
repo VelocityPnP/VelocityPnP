@@ -74,6 +74,7 @@ describe("startWorkspaceSurvey", () => {
       calibration_id: "calibration-id",
       mode: "survey",
       artifact_retention: "transient_sources",
+      region_preset: "installed_plates",
       parent_scan_id: "full-scan",
       output_mm_per_pixel: .05,
       region,

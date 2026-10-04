@@ -3,8 +3,8 @@ mod calibration_artifacts;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::{net::SocketAddr, time::Duration};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -142,12 +142,21 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await;
     if shutdown_machine.status().state != velocitypnp_domain::MachineState::Disconnected {
-        if let Err(error) = shutdown_machine.disconnect().await {
-            warn!(%error, "machine disconnect reported errors during shutdown");
+        match tokio::time::timeout(Duration::from_secs(5), shutdown_machine.disconnect()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "machine disconnect reported errors during shutdown");
+            }
+            Err(_) => {
+                warn!("machine disconnect timed out during shutdown");
+            }
         }
     }
     serve_result?;
-    Ok(())
+    // Tokio can wait for long-lived blocking driver workers while it drops the
+    // runtime. The controller is already disconnected or timed out above, so
+    // exit now and let the OS close any remaining process resources.
+    std::process::exit(0)
 }
 
 struct StartupModelPackages {

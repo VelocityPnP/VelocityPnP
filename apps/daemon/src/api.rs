@@ -2248,11 +2248,6 @@ async fn resolve_workspace_survey_parent(
     let region = specification
         .region
         .ok_or_else(|| ApiError::bad_request("a child survey requires an explicit region"))?;
-    if specification.region_preset.is_some() {
-        return Err(ApiError::bad_request(
-            "a child survey cannot use region_preset",
-        ));
-    }
     let parent = state
         .store
         .get_workspace_scan(parent_scan_id)
@@ -40302,7 +40297,7 @@ mod tests {
                 y_min_mm: parent.region.y_min_mm + 5.0,
                 y_max_mm: parent.region.y_max_mm - 5.0,
             }),
-            region_preset: None,
+            region_preset: Some(WorkspaceRegionPreset::InstalledPlates),
             parent_scan_id: Some(parent.id),
             refinement_target_index: None,
             overlap_fraction: None,

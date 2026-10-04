@@ -2,7 +2,8 @@ import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
-  Job, JobExecutionRun, MachineOverlayGeometry, Operation, PlacementExecutionRun,
+  Job, JobExecutionRun, MachineMotionProfile, MachineOverlayGeometry, Operation,
+  PlacementExecutionRun,
   PlacementOutcomeRecord, SensorReading,
   StripFeederLiveHoldoutRun,
   StripFeederPickupQualificationRun, StripFeederRegistration,
@@ -106,6 +107,7 @@ export async function waitForOperation(
 
 export const api = {
   status: async () => (await request<{ machine: MachineStatus }>("/machine/status")).machine,
+  machineProfile: () => request<MachineMotionProfile>("/machine/profile"),
   machineOverlayGeometry: (calibrationId: string) =>
     request<MachineOverlayGeometry>(`/machine/overlay-geometry/${calibrationId}`),
   devices: async () => (await request<{ devices: Device[] }>("/system/devices")).devices,
@@ -295,6 +297,7 @@ export const api = {
       mode: "survey",
       artifact_retention: "transient_sources",
       region,
+      region_preset: "installed_plates",
       parent_scan_id: parentScanId,
       output_mm_per_pixel: .05,
     },

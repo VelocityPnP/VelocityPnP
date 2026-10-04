@@ -13,7 +13,8 @@ import type {
 import {
   feederScanRegion, jobPlacementMarkers, latestFeederLanes, panWorkspaceViewport,
   selectActiveJobExecution, selectWorkspaceJob, workspaceArtifactOptions,
-  workspaceComposition, WorkspacePanel, zoomWorkspaceViewport,
+  workspaceComposition, workspaceMoveAnimationDuration, WorkspacePanel,
+  zoomWorkspaceViewport,
 } from "./WorkspacePanel";
 
 const scan: WorkspaceScanReport = {
@@ -330,6 +331,18 @@ describe("workspace operational map", () => {
     )).toEqual({ x: 0, y: -40, width: 50, height: 40 });
   });
 
+  it("animates clear travel at the configured machine feed", () => {
+    const from = { x_mm: 0, y_mm: 0, z_mm: 31.5, rotation_deg: 0 };
+
+    expect(workspaceMoveAnimationDuration(
+      from, { ...from, x_mm: 191.667 }, 23_000,
+    )).toBeCloseTo(500, 0);
+    expect(workspaceMoveAnimationDuration(from, from, 23_000)).toBe(100);
+    expect(workspaceMoveAnimationDuration(
+      from, { ...from, x_mm: 1000 }, 300,
+    )).toBe(1200);
+  });
+
   it("keeps only the newest registration for each physical feeder lane", () => {
     const olderSameLane = {
       ...feederRegistration,
@@ -464,6 +477,22 @@ describe("workspace operational map", () => {
         { nozzle_id: "N2", offset_machine_mm: [24, -68] },
       ],
     });
+    vi.spyOn(api, "machineProfile").mockResolvedValue({
+      id: scan.profile_id,
+      transit_motion: { clear_xy_feed_mm_per_min: 23_000 },
+    });
+    vi.spyOn(api, "acquireOrRenewLease").mockResolvedValue({
+      id: "workspace-lease",
+      client_name: "test",
+      acquired_at: "2026-10-03T18:00:00Z",
+      expires_at: "2026-10-03T19:00:00Z",
+    });
+    const jog = vi.spyOn(api, "jog").mockResolvedValue({
+      id: "jog-operation",
+      kind: "machine.jog",
+      status: "succeeded",
+      message: null,
+    });
     vi.spyOn(api, "jobs").mockResolvedValue([job]);
     vi.spyOn(api, "jobExecutions").mockResolvedValue([currentExecution]);
     vi.spyOn(api, "placementExecution").mockResolvedValue({
@@ -474,7 +503,7 @@ describe("workspace operational map", () => {
     vi.spyOn(api, "stripFeederPocketMap").mockResolvedValue([feederRegistration]);
 
     const { container } = render(<DialogProvider><WorkspacePanel
-      status={status}
+      status={{ ...status, state: "ready" }}
       setError={vi.fn()}
       openMachine={vi.fn()}
       openJobs={vi.fn()}
@@ -521,15 +550,36 @@ describe("workspace operational map", () => {
       ?.getAttribute("transform")).toContain("rotate(0)");
     expect(container.querySelector(".workspace-placement-position.current line")
       ?.getAttribute("x1")).toBe("-0.65");
-    expect(container.querySelectorAll(".workspace-feeder-pockets circle"))
+    expect(container.querySelectorAll(
+      ".workspace-feeder-pockets circle:not(.workspace-pocket-hit)",
+    ))
       .toHaveLength(2);
+    expect(container.querySelectorAll(".workspace-pocket-hit")).toHaveLength(2);
+    await user.click(container.querySelector(
+      ".workspace-feeder-pockets > polyline:not(.workspace-feeder-hit)",
+    )!);
+    expect(screen.getByText("Feeder 1", { selector: ".workspace-selection-card h3" }))
+      .toBeTruthy();
+    await user.click(container.querySelector(
+      ".workspace-feeder-pockets circle.occupied",
+    )!);
+    expect(screen.getByText(
+      "Feeder 1 · pocket 0", { selector: ".workspace-selection-card h3" },
+    )).toBeTruthy();
     await user.click(container.querySelector(".workspace-job-board")!);
     expect(screen.getByText("Main PCB", { selector: ".workspace-selection-card h3" }))
       .toBeTruthy();
     expect(screen.getByRole("button", { name: "Go to" }).hasAttribute("disabled"))
-      .toBe(true);
+      .toBe(false);
     expect(screen.getByRole("button", { name: "Rescan" }).hasAttribute("disabled"))
-      .toBe(true);
+      .toBe(false);
+    await user.click(screen.getByRole("button", { name: "Go to" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(jog).toHaveBeenCalledWith(
+      "workspace-lease",
+      { x_mm: 40, y_mm: 30, z_mm: 30, rotation_deg: 0 },
+      23_000,
+    ));
     expect(screen.queryByRole("button", { name: "Tiles" })).toBeNull();
     const map = container.querySelector(".workspace-map");
     const plainWheel = new WheelEvent("wheel", {
