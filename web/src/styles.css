@@ -677,9 +677,16 @@ p { line-height: 1.5; }
 }
 .workspace-feeder-pockets circle {
   opacity: .58;
+  outline: none;
   stroke: #bfe7ff;
   stroke-width: 1.4;
   vector-effect: non-scaling-stroke;
+}
+.workspace-feeder-pockets circle:focus { outline: none; }
+.workspace-feeder-pockets circle:focus-visible {
+  outline: none;
+  stroke: #ffcf40b3;
+  stroke-width: 1.6;
 }
 .workspace-feeder-pockets circle.workspace-pocket-hit {
   fill: none;
@@ -701,10 +708,10 @@ p { line-height: 1.5; }
   stroke-width: 1.8;
 }
 .workspace-feeder-pockets circle.is-user-selected {
-  fill: #ffe36e40;
-  opacity: .68;
-  stroke: #ffcf40b3;
-  stroke-width: 1.6;
+  fill: #ffe36e26;
+  opacity: .58;
+  stroke: #ffe36e;
+  stroke-width: 3;
   stroke-dasharray: none;
 }
 .workspace-selection-marker { pointer-events: none; }

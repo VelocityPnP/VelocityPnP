@@ -1562,7 +1562,7 @@ export function WorkspacePanel({
               )}
               r={selection?.kind === "pocket"
                   && selection.id === `${feeder.id}-${pocket.pocket_index}`
-                ? Math.max(markerSize * .22, .55)
+                ? placementMarkerRadius
                 : Math.max(markerSize * .38, .8)}
               role="button"
               tabIndex={0}
@@ -1708,10 +1708,8 @@ export function WorkspacePanel({
               </g>)}
             </g>
           </g>}
-          {selection && selection.kind !== "pocket" && <g
-            className="workspace-selection-marker"
-          >
-            {selection.scanRegion && <rect
+          {selection && <g className="workspace-selection-marker">
+            {selection.scanRegion && selection.kind !== "pocket" && <rect
               x={selection.scanRegion.x_min_mm}
               y={-selection.scanRegion.y_max_mm}
               width={selection.scanRegion.x_max_mm - selection.scanRegion.x_min_mm}

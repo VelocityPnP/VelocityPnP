@@ -625,10 +625,15 @@ describe("workspace operational map", () => {
       ".workspace-feeder-pockets circle.is-user-selected",
     );
     expect(selectedPocket).toBeTruthy();
-    expect(selectedPocket?.getAttribute("r")).toBe("0.55");
+    expect(selectedPocket?.getAttribute("r")).toBe("0.65");
     expect(container.querySelector(".workspace-feeder-pockets.is-selected"))
       .toBeNull();
-    expect(container.querySelector(".workspace-selection-marker")).toBeNull();
+    expect(container.querySelector(".workspace-selection-marker circle"))
+      .toBeTruthy();
+    expect(container.querySelectorAll(".workspace-selection-marker line"))
+      .toHaveLength(2);
+    expect(container.querySelector(".workspace-selection-marker rect"))
+      .toBeNull();
     expect(screen.getByRole("button", { name: "Quick capture" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Quick capture" }));
     await waitFor(() => expect(cameraSnapshot).toHaveBeenCalledWith("top_camera"));
