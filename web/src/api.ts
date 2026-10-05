@@ -1,11 +1,13 @@
 import type {
-  AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactId,
+  AutomatedCalibrationRun, BoardDesign, BoardPopulationRefreshReport, BoardRegistrationRun,
+  CalibrationArtifactId,
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
   Job, JobExecutionRun, MachineMotionProfile, MachineOverlayGeometry, Operation,
   PlacementExecutionRun,
   PlacementOutcomeRecord, SensorReading,
   StripFeederLiveHoldoutRun,
+  StripFeederOccupancyRefreshReport,
   StripFeederPickupQualificationRun, StripFeederRegistration,
   StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
   StripFeederMapRegistration,
@@ -354,6 +356,23 @@ export const api = {
       `/workspace-scans/${scanId}/strip-feeder-vision`,
       { candidate_index: candidateIndex },
     ),
+  refreshStripFeederOccupancy: (
+    scanId: string, candidateIndex: number, registrationId: string,
+  ) => jsonPost<StripFeederOccupancyRefreshReport>(
+    `/workspace-scans/${scanId}/strip-feeder-occupancy`,
+    { candidate_index: candidateIndex, registration_id: registrationId },
+  ),
+  refreshBoardPopulation: (
+    scanId: string, jobId: string, boardInstanceId: string,
+  ) => jsonPost<BoardPopulationRefreshReport>(
+    `/workspace-scans/${scanId}/board-population`,
+    { job_id: jobId, board_instance_id: boardInstanceId },
+  ),
+  boardPopulationRefreshes: async () => (
+    await request<{ refreshes: BoardPopulationRefreshReport[] }>(
+      "/board-population-refreshes",
+    )
+  ).refreshes,
   buildStripFeederInventory: (
     scanId: string,
     evidenceSources: Array<{ scan_id: string; candidate_index: number }>,
@@ -363,13 +382,14 @@ export const api = {
   ),
   createStripFeederDraft: (
     scanId: string, candidateIndex: number, proposalIndex: number,
-    partKey?: string, partRotationDeg?: number,
+    partKey?: string, partRotationDeg?: number, name?: string,
   ) => jsonPost<StripFeederRegistration>(
     "/strip-feeder-registrations",
     {
       scan_id: scanId,
       candidate_index: candidateIndex,
       proposal_index: proposalIndex,
+      name: name || null,
       part_key: partKey || null,
       part_rotation_deg: partRotationDeg ?? null,
     },

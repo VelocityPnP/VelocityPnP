@@ -888,7 +888,19 @@ export interface WorkspaceBoardCandidate {
   classification: WorkspaceObjectClassification | null;
   known_fixture_id: string | null;
   evidence_artifact_name: string | null;
+  feeder_lane_slots?: WorkspaceFeederLaneSlot[];
   design_matches: WorkspaceBoardDesignMatch[];
+}
+
+export interface WorkspaceFeederLaneSlot {
+  slot_index: number;
+  centerline_machine_mm: [[number, number], [number, number]];
+  outline_machine_mm: Array<[number, number]>;
+  width_mm: number;
+  length_mm: number;
+  rotation_deg: number;
+  confidence: number;
+  review_required: boolean;
 }
 
 export interface StripFeederLaneProposal {
@@ -933,6 +945,102 @@ export interface StripFeederVisionReport {
   created_at: string;
   proposals: StripFeederLaneProposal[];
   rejected_lattices: StripFeederRejectedLattice[];
+  warnings: string[];
+}
+
+export interface SourceComponentModelPrediction {
+  contract_version: string;
+  model_artifact_sha256: string;
+  runtime: string;
+  class: "empty" | "component_flat" | "component_on_edge";
+  probabilities: {
+    empty: number;
+    component_flat: number;
+    component_on_edge: number;
+  };
+  class_confidence: number;
+  class_margin: number;
+  confidence_gate_passed: boolean;
+  pose: {
+    center_px: [number, number];
+    size_px: [number, number];
+    rotation_deg_mod_180: number;
+    outline_px: Array<[number, number]>;
+    valid: boolean;
+  };
+  findings: string[];
+}
+
+export interface StripFeederOccupancyRefreshReport {
+  algorithm_version: string;
+  source_scan_id: string;
+  source_candidate_index: number;
+  source_proposal_index: number;
+  registration_id: string;
+  report_artifact_name: string;
+  created_at: string;
+  model_available: boolean;
+  observations: Array<{
+    pocket_index: number;
+    center_machine_mm: [number, number];
+    deterministic_occupancy: StripPocketOccupancy;
+    deterministic_confidence: number;
+    model_prediction: SourceComponentModelPrediction | null;
+    occupancy: StripPocketOccupancy;
+    confidence: number;
+    review_required: boolean;
+    findings: string[];
+  }>;
+  warnings: string[];
+}
+
+export type BoardPlacementOccupancy = "populated" | "empty" | "uncertain";
+
+export interface PlacementVerificationModelPrediction {
+  contract_version: string;
+  model_artifact_sha256: string;
+  runtime: string;
+  class: "empty" | "component_flat" | "component_on_edge"
+    | "multiple_components";
+  probabilities: {
+    empty: number;
+    component_flat: number;
+    component_on_edge: number;
+    multiple_components: number;
+  };
+  class_confidence: number;
+  class_margin: number;
+  confidence_gate_passed: boolean;
+  pose: {
+    center_px: [number, number];
+    size_px: [number, number];
+    rotation_deg_mod_180: number;
+    outline_px: Array<[number, number]>;
+    valid: boolean;
+  };
+  findings: string[];
+}
+
+export interface BoardPopulationRefreshReport {
+  algorithm_version: string;
+  source_scan_id: string;
+  profile_id: string;
+  calibration_id: string;
+  job_id: string;
+  board_instance_id: string;
+  board_design_id: string;
+  design_to_machine: { matrix: number[] };
+  report_artifact_name: string;
+  created_at: string;
+  observations: Array<{
+    placement_reference: string;
+    center_machine_mm: [number, number];
+    prediction: PlacementVerificationModelPrediction;
+    occupancy: BoardPlacementOccupancy;
+    confidence: number;
+    review_required: boolean;
+    findings: string[];
+  }>;
   warnings: string[];
 }
 
@@ -1057,6 +1165,8 @@ export interface StripFeederMapRegistration {
     center_machine_mm: [number, number];
     occupancy: "occupied" | "empty" | "uncertain";
     occupancy_confidence: number;
+    occupancy_source?: "operational" | "workspace_rescan";
+    occupancy_review_required?: boolean;
     status: "available" | "empty" | "reserved" | "consumed" | "needs_review";
     selected: boolean;
   }>;

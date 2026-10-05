@@ -25,15 +25,16 @@ use velocitypnp_domain::{
     assess_placement_transfer_round, calculate_vacuum_classification_thresholds,
     classify_placement_outcome, estimate_placement_process, lumen_calibration_artifacts,
     lumen_calibration_workflow, summarize_placement_transfer_round,
-    summarize_visual_homing_validation, ApproachSide, AutomatedCalibrationConfig,
-    AutomatedCalibrationRun, BoardDesign, BoardInstance, BoardRegistrationFiducialObservation,
-    BoardRegistrationHypothesis, BoardRegistrationRun, BoardSide, BoardSurfaceFiducialView,
-    BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun, BoardSurfaceParallaxObservation,
-    BottomCameraMappingReport, CalibrationArtifactId, CalibrationArtifactPlan, CalibrationCheck,
-    CalibrationCheckSource, CalibrationCheckStatus, CalibrationRunPhase, CalibrationRunStatus,
-    CalibrationSnapshot, CalibrationStepId, CameraPixelFormat, CameraProfile,
-    CameraProfileControlValue, CameraRayTransferReport, CameraRole, Feeder,
-    HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
+    summarize_visual_homing_validation, top_side_placement_rotation_deg, ApproachSide,
+    AutomatedCalibrationConfig, AutomatedCalibrationRun, BoardDesign, BoardInstance,
+    BoardPlacementOccupancy, BoardPlacementScanObservation, BoardPopulationRefreshReport,
+    BoardRegistrationFiducialObservation, BoardRegistrationHypothesis, BoardRegistrationRun,
+    BoardSide, BoardSurfaceFiducialView, BoardSurfaceMeasurementReport, BoardSurfaceMeasurementRun,
+    BoardSurfaceParallaxObservation, BottomCameraMappingReport, CalibrationArtifactId,
+    CalibrationArtifactPlan, CalibrationCheck, CalibrationCheckSource, CalibrationCheckStatus,
+    CalibrationRunPhase, CalibrationRunStatus, CalibrationSnapshot, CalibrationStepId,
+    CameraPixelFormat, CameraProfile, CameraProfileControlValue, CameraRayTransferReport,
+    CameraRole, Feeder, HeadFeatureCenterReport, HeadGeometryReport, HeldPartAlignmentObservation,
     HeldPartAlignmentReport, HeldPartClass, HeldPartInspectionReport, HeldPartModelPrediction,
     HeldPartRotationCapture, HeldPartShadowReport, InspectionReport, InspectionStatus,
     InstalledGeometryCalibrationReport, InstalledPlateGeometryReport, InstalledPlateHoleSample,
@@ -52,21 +53,22 @@ use velocitypnp_domain::{
     PlanarCameraCalibrationSample, PlanarCameraModel, PlanarXyDirectionResponseSurface, Pose,
     Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
     SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
-    StripFeederInventorySummary, StripFeederLiveHoldoutRun, StripFeederPickupBenchmarkCycle,
+    StripFeederInventorySummary, StripFeederLaneProposal, StripFeederLiveHoldoutRun,
+    StripFeederOccupancyRefreshReport, StripFeederPickupBenchmarkCycle,
     StripFeederPickupDisposition, StripFeederPickupQualificationReport,
     StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
-    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
-    StripFeederRegistrationStatus, StripFeederSourceCaptureRun, StripFeederSourceCaptureSample,
-    StripFeederVisionReport, StripPocketOccupancy, VacuumKnownPartValidationReport,
-    VacuumKnownPartValidationSample, VacuumProbeReport, VacuumProbeSample,
-    VacuumSensorCharacterizationReport, VacuumSignalPolarity, VacuumStateStatistics,
-    VisualHomingProfile, VisualHomingValidationReport, VisualHomingValidationSample,
-    WorkspaceArtifactRetention, WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport,
-    WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource, WorkspaceCameraApertureSummary,
-    WorkspaceChangeSetReport, WorkspaceChangeSetSummary, WorkspaceDisplayPatch,
-    WorkspaceDisplayPatchKind, WorkspaceHeightMapSummary, WorkspaceInventoryBaseline,
-    WorkspaceMosaicLayerReport, WorkspaceObjectClass, WorkspaceParallaxSummary,
-    WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
+    StripFeederPocketScanObservation, StripFeederPocketState, StripFeederPocketStatus,
+    StripFeederRegistration, StripFeederRegistrationStatus, StripFeederSourceCaptureRun,
+    StripFeederSourceCaptureSample, StripFeederVisionReport, StripPocketOccupancy,
+    VacuumKnownPartValidationReport, VacuumKnownPartValidationSample, VacuumProbeReport,
+    VacuumProbeSample, VacuumSensorCharacterizationReport, VacuumSignalPolarity,
+    VacuumStateStatistics, VisualHomingProfile, VisualHomingValidationReport,
+    VisualHomingValidationSample, WorkspaceArtifactRetention, WorkspaceBoardDesignMatch,
+    WorkspaceBoardDiscoveryReport, WorkspaceBoardDiscoverySummary, WorkspaceBoardHeightSource,
+    WorkspaceCameraApertureSummary, WorkspaceChangeSetReport, WorkspaceChangeSetSummary,
+    WorkspaceDisplayPatch, WorkspaceDisplayPatchKind, WorkspaceHeightMapSummary,
+    WorkspaceInventoryBaseline, WorkspaceMosaicLayerReport, WorkspaceObjectClass,
+    WorkspaceParallaxSummary, WorkspaceRasterTransform, WorkspaceRefinementCompositeSummary,
     WorkspaceRefinementQualityThresholds, WorkspaceScanEstimate, WorkspaceScanMode,
     WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanStatus, WorkspaceScanTile,
     WorkspaceSeamHealthAction, WorkspaceSeamHealthSummary, WorkspaceSurfaceModel,
@@ -90,19 +92,20 @@ use velocitypnp_vision::{
     build_workspace_mosaic, calibrate_bottom_camera_mapping, calibrate_camera_ray_transfer,
     camera_sample_metrics, capture_gray_frame, capture_gray_frames, compare_workspace_observation,
     compare_workspace_reconnaissance, compose_workspace_refinements,
-    composite_workspace_camera_aperture, decode_gray_png, decode_rgb_png,
-    detect_board_fiducial_near, detect_bright_fiducial_near, detect_bright_reference_pad,
-    detect_camera_target, detect_installed_plate_hole, discover_workspace_objects,
-    draft_strip_feeder_source_component, encode_gray_png, encode_rgb_png, encode_rgba_png,
-    fit_installed_plate_geometry, fit_nozzle_height_model, fit_nozzle_runout,
-    fit_planar_camera_model, fit_rigid_transform, fit_top_side_board_registration,
-    inspect_held_part_difference, inspect_held_part_difference_with_orientation,
-    inspect_placed_part_with_orientation, inspect_strip_feeder_pocket_return,
-    inspect_strip_feeder_source_pose, interpolate_planar_camera_model, mean_nozzle_detection,
-    measure_known_feature_surface_fraction, measure_workspace_parallax,
-    merge_workspace_height_maps, monotonic_timestamp, normalize_placement_verification_crop,
-    plan_bottom_camera_correction, plan_pixel_correction, plan_visual_homing, plan_workspace_scan,
-    query_camera_controls, reanalyze_workspace_seam_health, register_two_terminal_placement_target,
+    composite_workspace_camera_aperture, crop_workspace_source_component, decode_gray_png,
+    decode_rgb_png, detect_board_fiducial_near, detect_bright_fiducial_near,
+    detect_bright_reference_pad, detect_camera_target, detect_installed_plate_hole,
+    discover_workspace_objects, draft_strip_feeder_source_component, encode_gray_png,
+    encode_rgb_png, encode_rgba_png, fit_installed_plate_geometry, fit_nozzle_height_model,
+    fit_nozzle_runout, fit_planar_camera_model, fit_rigid_transform,
+    fit_top_side_board_registration, inspect_held_part_difference,
+    inspect_held_part_difference_with_orientation, inspect_placed_part_with_orientation,
+    inspect_strip_feeder_pocket_return, inspect_strip_feeder_source_pose,
+    interpolate_planar_camera_model, mean_nozzle_detection, measure_known_feature_surface_fraction,
+    measure_workspace_parallax, merge_workspace_height_maps, monotonic_timestamp,
+    normalize_placement_verification_crop, plan_bottom_camera_correction, plan_pixel_correction,
+    plan_visual_homing, plan_workspace_scan, query_camera_controls,
+    reanalyze_workspace_seam_health, register_two_terminal_placement_target,
     render_board_fiducial_evidence, render_held_part_shadow_preview,
     render_placement_verification_preview, render_source_component_shadow_preview,
     render_workspace_height_mosaic_with_consistency,
@@ -1253,6 +1256,14 @@ pub fn router(state: AppState) -> Router {
             post(build_strip_feeder_vision),
         )
         .route(
+            "/api/v1/workspace-scans/{id}/strip-feeder-occupancy",
+            post(refresh_strip_feeder_occupancy),
+        )
+        .route(
+            "/api/v1/workspace-scans/{id}/board-population",
+            post(refresh_board_population),
+        )
+        .route(
             "/api/v1/workspace-scans/{id}/strip-feeder-inventory",
             post(build_strip_feeder_inventory_report),
         )
@@ -1434,6 +1445,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/strip-feeder-registrations/pocket-map",
             get(list_strip_feeder_pocket_map),
+        )
+        .route(
+            "/api/v1/board-population-refreshes",
+            get(list_board_population_refreshes),
         )
         .route(
             "/api/v1/strip-feeder-registrations/{id}",
@@ -7008,6 +7023,568 @@ async fn build_strip_feeder_vision(
     Ok(Json(report))
 }
 
+const STRIP_FEEDER_OCCUPANCY_ALGORITHM: &str = "strip_feeder_occupancy_refresh.v1";
+const STRIP_FEEDER_OCCUPANCY_ARTIFACT_PREFIX: &str = "strip-feeder-occupancy-";
+
+#[derive(Debug, Deserialize)]
+struct RefreshStripFeederOccupancyRequest {
+    candidate_index: u32,
+    registration_id: Uuid,
+}
+
+async fn refresh_strip_feeder_occupancy(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+    Json(body): Json<RefreshStripFeederOccupancyRequest>,
+) -> ApiResult<Json<StripFeederOccupancyRefreshReport>> {
+    let mut scan = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "feeder occupancy refresh requires a successful workspace scan",
+        ));
+    }
+    let registration = state
+        .store
+        .get_strip_feeder_registration(body.registration_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
+    if registration.profile_id != scan.profile_id
+        || registration.calibration_id != scan.calibration_id
+    {
+        return Err(ApiError::bad_request(
+            "strip feeder registration uses different machine geometry",
+        ));
+    }
+    let vision_artifact_name = format!("strip-feeder-vision-{:03}.json", body.candidate_index);
+    let (media_type, vision_data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &vision_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder vision report not found"))?;
+    if media_type != "application/json" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "strip feeder vision report is not JSON"
+        )));
+    }
+    let vision: StripFeederVisionReport =
+        serde_json::from_slice(&vision_data).map_err(ApiError::internal)?;
+    if vision.algorithm_version != STRIP_FEEDER_VISION_ALGORITHM
+        || vision.source_scan_id != scan.id
+        || vision.source_candidate_index != body.candidate_index
+    {
+        return Err(ApiError::bad_request(
+            "strip feeder vision report is stale or incompatible",
+        ));
+    }
+    let (proposal, translation) = select_rescan_feeder_proposal(&vision.proposals, &registration)
+        .ok_or_else(|| {
+        ApiError::bad_request("rescan did not find the registered feeder lane")
+    })?;
+    let raster = scan.raster_transform.ok_or_else(|| {
+        ApiError::bad_request("feeder occupancy refresh requires a workspace raster transform")
+    })?;
+    let mosaic_artifact_name = workspace_display_artifact_name(&scan)
+        .ok_or_else(|| ApiError::bad_request("workspace scan has no mosaic"))?;
+    let (media_type, mosaic_data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &mosaic_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace rescan mosaic not found"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "workspace rescan mosaic is not a PNG"
+        )));
+    }
+    let mosaic = decode_gray_png(&mosaic_data).map_err(ApiError::internal)?;
+    let report_artifact_name = format!(
+        "{STRIP_FEEDER_OCCUPANCY_ARTIFACT_PREFIX}{:03}-{}.json",
+        body.candidate_index, registration.id,
+    );
+    let model = state.source_component_model.clone();
+    let model_available = model.is_some();
+    let registration_for_task = registration.clone();
+    let proposal_for_task = proposal.clone();
+    let analysis = tokio::task::spawn_blocking(move || {
+        build_rescan_occupancy_observations(
+            &mosaic,
+            raster,
+            &registration_for_task,
+            &proposal_for_task,
+            translation,
+            model.as_deref(),
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    let mut warnings = analysis.warnings;
+    if !model_available {
+        warnings.push(
+            "the source-component model is unavailable; deterministic occupancy was retained"
+                .into(),
+        );
+    }
+    let report = StripFeederOccupancyRefreshReport {
+        algorithm_version: STRIP_FEEDER_OCCUPANCY_ALGORITHM.into(),
+        source_scan_id: scan.id,
+        source_candidate_index: body.candidate_index,
+        source_proposal_index: proposal.proposal_index,
+        registration_id: registration.id,
+        report_artifact_name: report_artifact_name.clone(),
+        created_at: Utc::now(),
+        model_available,
+        observations: analysis.observations,
+        warnings,
+    };
+    let report_json = serde_json::to_vec_pretty(&report).map_err(ApiError::internal)?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        &report_artifact_name,
+        "application/json",
+        &report_json,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    scan.updated_at = Utc::now();
+    persist_workspace_manifest(&state, &mut scan)
+        .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    state
+        .store
+        .apply_strip_feeder_occupancy_refresh(
+            report.registration_id,
+            &report.observations,
+            report.created_at,
+        )
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .store
+        .put_strip_feeder_occupancy_refresh(&report)
+        .map_err(ApiError::internal)?;
+    Ok(Json(report))
+}
+
+const BOARD_POPULATION_REFRESH_ALGORITHM: &str = "board_population_refresh.v1";
+const BOARD_POPULATION_ARTIFACT_PREFIX: &str = "board-population-";
+
+#[derive(Debug, Deserialize)]
+struct RefreshBoardPopulationRequest {
+    job_id: Uuid,
+    board_instance_id: Uuid,
+}
+
+async fn refresh_board_population(
+    State(state): State<AppState>,
+    Path(scan_id): Path<Uuid>,
+    Json(body): Json<RefreshBoardPopulationRequest>,
+) -> ApiResult<Json<BoardPopulationRefreshReport>> {
+    let mut scan = state
+        .store
+        .get_workspace_scan(scan_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace scan not found"))?;
+    if scan.status != WorkspaceScanStatus::Succeeded {
+        return Err(ApiError::bad_request(
+            "board population refresh requires a successful workspace scan",
+        ));
+    }
+    let raster = scan.raster_transform.ok_or_else(|| {
+        ApiError::bad_request("board population refresh requires a workspace raster transform")
+    })?;
+    if raster.x_mm_per_pixel.abs().max(raster.y_mm_per_pixel.abs()) > 0.08 {
+        return Err(ApiError::bad_request(
+            "board population refresh requires a scan at 0.08 mm per pixel or finer",
+        ));
+    }
+    let model = state.placement_verification_model.clone().ok_or_else(|| {
+        ApiError::bad_request("board population refresh requires the approved placement model")
+    })?;
+    let job = state
+        .store
+        .get_job(body.job_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("job not found"))?;
+    let board_instance = job
+        .boards
+        .iter()
+        .find(|instance| instance.id == body.board_instance_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("job board instance not found"))?;
+    let board = state
+        .store
+        .get_board(board_instance.board_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("board design not found"))?;
+    if board_instance.design_to_machine.is_none() {
+        return Err(ApiError::bad_request(
+            "board population refresh requires a registered board transform",
+        ));
+    }
+    let board_design_id = board_instance.board_id;
+    let design_to_machine = board_instance
+        .design_to_machine
+        .expect("validated board transform");
+    let mosaic_artifact_name = workspace_display_artifact_name(&scan)
+        .ok_or_else(|| ApiError::bad_request("workspace scan has no mosaic"))?;
+    let (media_type, mosaic_data) = state
+        .store
+        .get_workspace_scan_artifact(scan.id, &mosaic_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("workspace rescan mosaic not found"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "workspace rescan mosaic is not a PNG"
+        )));
+    }
+    let mosaic = decode_gray_png(&mosaic_data).map_err(ApiError::internal)?;
+    let (observations, warnings) = tokio::task::spawn_blocking(move || {
+        build_board_population_observations(
+            model.as_ref(),
+            &mosaic,
+            raster,
+            &board_instance,
+            &board,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    if observations.is_empty() {
+        return Err(ApiError::bad_request(
+            "board rescan did not produce usable placement observations",
+        ));
+    }
+    let report_artifact_name = format!(
+        "{BOARD_POPULATION_ARTIFACT_PREFIX}{}.json",
+        body.board_instance_id,
+    );
+    let report = BoardPopulationRefreshReport {
+        algorithm_version: BOARD_POPULATION_REFRESH_ALGORITHM.into(),
+        source_scan_id: scan.id,
+        profile_id: scan.profile_id.clone(),
+        calibration_id: scan.calibration_id,
+        job_id: body.job_id,
+        board_instance_id: body.board_instance_id,
+        board_design_id,
+        design_to_machine,
+        report_artifact_name: report_artifact_name.clone(),
+        created_at: Utc::now(),
+        observations,
+        warnings,
+    };
+    let report_json = serde_json::to_vec_pretty(&report).map_err(ApiError::internal)?;
+    persist_workspace_artifact(
+        &state,
+        &mut scan,
+        &report_artifact_name,
+        "application/json",
+        &report_json,
+    )
+    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    scan.updated_at = Utc::now();
+    persist_workspace_manifest(&state, &mut scan)
+        .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+    state
+        .store
+        .put_board_population_refresh(&report)
+        .map_err(ApiError::internal)?;
+    Ok(Json(report))
+}
+
+fn build_board_population_observations(
+    model: &PlacementVerificationModel,
+    mosaic: &GrayFrame,
+    raster: WorkspaceRasterTransform,
+    instance: &BoardInstance,
+    board: &BoardDesign,
+) -> (Vec<BoardPlacementScanObservation>, Vec<String>) {
+    let Some(transform) = instance.design_to_machine else {
+        return (
+            Vec::new(),
+            vec!["the board has no machine transform".into()],
+        );
+    };
+    let mut observations = Vec::new();
+    let mut warnings = Vec::new();
+    let mapping = [[raster.x_mm_per_pixel, 0.0], [0.0, raster.y_mm_per_pixel]];
+    for placement in board.placements.iter().filter(|placement| {
+        placement.enabled && !placement.fiducial && placement.side == instance.side
+    }) {
+        let (x_mm, y_mm) = transform.apply(placement.pose.x_mm, placement.pose.y_mm);
+        let target_px = [
+            (x_mm - raster.top_left_x_mm) / raster.x_mm_per_pixel,
+            (y_mm - raster.top_left_y_mm) / raster.y_mm_per_pixel,
+        ];
+        let margin_x = 0.5 * velocitypnp_vision::PLACEMENT_VERIFICATION_CROP_SPAN_MM
+            / raster.x_mm_per_pixel.abs();
+        let margin_y = 0.5 * velocitypnp_vision::PLACEMENT_VERIFICATION_CROP_SPAN_MM
+            / raster.y_mm_per_pixel.abs();
+        if target_px[0] < margin_x
+            || target_px[1] < margin_y
+            || target_px[0] + margin_x >= f64::from(mosaic.width)
+            || target_px[1] + margin_y >= f64::from(mosaic.height)
+        {
+            warnings.push(format!(
+                "{} is outside the usable board-rescan raster",
+                placement.reference,
+            ));
+            continue;
+        }
+        let target_rotation_deg = if instance.side == BoardSide::Top {
+            top_side_placement_rotation_deg(transform, placement.pose.rotation_deg)
+        } else {
+            let angle = placement.pose.rotation_deg.to_radians();
+            let x_axis = transform.matrix[0] * angle.cos() + transform.matrix[1] * angle.sin();
+            let y_axis = transform.matrix[3] * angle.cos() + transform.matrix[4] * angle.sin();
+            y_axis.atan2(x_axis).to_degrees()
+        };
+        let crop = match normalize_placement_verification_crop(
+            mosaic,
+            target_px,
+            mapping,
+            target_rotation_deg,
+        ) {
+            Ok(crop) => crop,
+            Err(error) => {
+                warnings.push(format!("{}: {error}", placement.reference));
+                continue;
+            }
+        };
+        let prediction =
+            match model.predict_gray(crop.frame.width, crop.frame.height, &crop.frame.pixels) {
+                Ok(prediction) => prediction,
+                Err(error) => {
+                    warnings.push(format!(
+                        "{} placement inference failed: {error}",
+                        placement.reference,
+                    ));
+                    continue;
+                }
+            };
+        let (occupancy, review_required, findings) =
+            resolve_board_population_prediction(&prediction);
+        observations.push(BoardPlacementScanObservation {
+            placement_reference: placement.reference.clone(),
+            center_machine_mm: [x_mm, y_mm],
+            confidence: prediction.class_confidence,
+            prediction,
+            occupancy,
+            review_required,
+            findings,
+        });
+    }
+    (observations, warnings)
+}
+
+fn resolve_board_population_prediction(
+    prediction: &velocitypnp_domain::PlacementVerificationModelPrediction,
+) -> (BoardPlacementOccupancy, bool, Vec<String>) {
+    let mut findings = prediction.findings.clone();
+    let (occupancy, review_required) = if !prediction.confidence_gate_passed {
+        findings.push("the placement model did not pass its confidence gate".into());
+        (BoardPlacementOccupancy::Uncertain, true)
+    } else {
+        match prediction.class {
+            PlacementVerificationClass::Empty => (BoardPlacementOccupancy::Empty, false),
+            PlacementVerificationClass::ComponentFlat => {
+                (BoardPlacementOccupancy::Populated, false)
+            }
+            PlacementVerificationClass::ComponentOnEdge
+            | PlacementVerificationClass::MultipleComponents => {
+                findings.push("the observed placement condition requires operator review".into());
+                (BoardPlacementOccupancy::Uncertain, true)
+            }
+        }
+    };
+    (occupancy, review_required, findings)
+}
+
+async fn list_board_population_refreshes(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "refreshes": state
+            .store
+            .list_board_population_refreshes()
+            .map_err(ApiError::internal)?,
+    })))
+}
+
+fn select_rescan_feeder_proposal<'a>(
+    proposals: &'a [StripFeederLaneProposal],
+    registration: &StripFeederRegistration,
+) -> Option<(&'a StripFeederLaneProposal, [f64; 2])> {
+    proposals
+        .iter()
+        .filter(|proposal| {
+            proposal
+                .tape_width_mm
+                .is_some_and(|width| (width - registration.tape_width_mm).abs() <= 1.0)
+                && proposal
+                    .component_pitch_mm
+                    .is_some_and(|pitch| (pitch - registration.tape_pitch_mm).abs() <= 0.25)
+                && angle_difference_deg(proposal.tape_rotation_deg, registration.tape_rotation_deg)
+                    .abs()
+                    <= 2.0
+        })
+        .filter_map(|proposal| {
+            let offsets = lattice_offsets(
+                &proposal.pocket_centers_machine_mm,
+                &registration.pocket_centers_machine_mm,
+                3.0,
+            );
+            let (translation, residuals) = fit_display_translation(&offsets)?;
+            (offsets.len() >= 3 && residuals.p95_mm <= 0.35).then_some((
+                proposal,
+                translation,
+                offsets.len(),
+                residuals.p95_mm,
+            ))
+        })
+        .max_by(|first, second| {
+            first
+                .2
+                .cmp(&second.2)
+                .then_with(|| second.3.total_cmp(&first.3))
+        })
+        .map(|(proposal, translation, _, _)| (proposal, translation))
+}
+
+struct RescanOccupancyAnalysis {
+    observations: Vec<StripFeederPocketScanObservation>,
+    warnings: Vec<String>,
+}
+
+fn build_rescan_occupancy_observations(
+    mosaic: &GrayFrame,
+    raster: WorkspaceRasterTransform,
+    registration: &StripFeederRegistration,
+    proposal: &StripFeederLaneProposal,
+    translation: [f64; 2],
+    model: Option<&SourceComponentModel>,
+) -> RescanOccupancyAnalysis {
+    let mut observations = Vec::new();
+    let mut warnings = Vec::new();
+    for pocket in &registration.pockets {
+        let matched = proposal
+            .pocket_observations
+            .iter()
+            .filter_map(|observation| {
+                let corrected = [
+                    observation.center_machine_mm[0] + translation[0],
+                    observation.center_machine_mm[1] + translation[1],
+                ];
+                let distance = (corrected[0] - pocket.nominal_center_machine_mm[0])
+                    .hypot(corrected[1] - pocket.nominal_center_machine_mm[1]);
+                (distance <= registration.tape_pitch_mm * 0.35).then_some((observation, distance))
+            })
+            .min_by(|first, second| first.1.total_cmp(&second.1));
+        let Some((deterministic, _)) = matched else {
+            continue;
+        };
+        let mut findings = Vec::new();
+        let model_prediction = model.and_then(|model| {
+            let crop = match crop_workspace_source_component(
+                mosaic,
+                raster,
+                deterministic.center_machine_mm,
+                proposal.tape_rotation_deg,
+                proposal.tape_width_mm.unwrap_or(registration.tape_width_mm),
+                proposal
+                    .component_pitch_mm
+                    .unwrap_or(registration.tape_pitch_mm),
+            ) {
+                Ok(crop) => crop,
+                Err(error) => {
+                    findings.push(error.to_string());
+                    return None;
+                }
+            };
+            match model.predict_gray(crop.width, crop.height, &crop.pixels) {
+                Ok(prediction) => Some(prediction),
+                Err(error) => {
+                    findings.push(format!("source-component inference failed: {error}"));
+                    None
+                }
+            }
+        });
+        let model_analysis_failed = model.is_some() && model_prediction.is_none();
+        let (occupancy, confidence, mut review_required) = resolve_rescan_occupancy(
+            deterministic.occupancy,
+            deterministic.confidence,
+            model_prediction.as_ref(),
+            &mut findings,
+        );
+        review_required |= model_analysis_failed;
+        observations.push(StripFeederPocketScanObservation {
+            pocket_index: pocket.pocket_index,
+            center_machine_mm: deterministic.center_machine_mm,
+            deterministic_occupancy: deterministic.occupancy,
+            deterministic_confidence: deterministic.confidence,
+            model_prediction,
+            occupancy,
+            confidence,
+            review_required,
+            findings,
+        });
+    }
+    if observations.len() < registration.pockets.len() {
+        warnings.push(format!(
+            "{} of {} registered pockets had usable rescan evidence",
+            observations.len(),
+            registration.pockets.len(),
+        ));
+    }
+    RescanOccupancyAnalysis {
+        observations,
+        warnings,
+    }
+}
+
+fn resolve_rescan_occupancy(
+    deterministic: StripPocketOccupancy,
+    deterministic_confidence: f64,
+    prediction: Option<&SourceComponentModelPrediction>,
+    findings: &mut Vec<String>,
+) -> (StripPocketOccupancy, f64, bool) {
+    let Some(prediction) = prediction else {
+        return (
+            deterministic,
+            deterministic_confidence,
+            deterministic == StripPocketOccupancy::Uncertain,
+        );
+    };
+    if !prediction.confidence_gate_passed {
+        findings.push("the source-component model did not pass its confidence gate".into());
+        return (deterministic, deterministic_confidence, true);
+    }
+    let learned = if prediction.class.occupied() {
+        StripPocketOccupancy::Occupied
+    } else {
+        StripPocketOccupancy::Empty
+    };
+    if deterministic == StripPocketOccupancy::Uncertain {
+        findings.push("the gated model resolved uncertain deterministic occupancy".into());
+        return (
+            learned,
+            prediction.class_confidence,
+            prediction.class == SourceComponentClass::ComponentOnEdge,
+        );
+    }
+    if deterministic == learned {
+        return (
+            deterministic,
+            deterministic_confidence.min(prediction.class_confidence),
+            prediction.class == SourceComponentClass::ComponentOnEdge,
+        );
+    }
+    findings.push("learned and deterministic occupancy disagree".into());
+    (
+        StripPocketOccupancy::Uncertain,
+        deterministic_confidence.min(prediction.class_confidence),
+        true,
+    )
+}
+
 const STRIP_FEEDER_INVENTORY_REPORT_ARTIFACT: &str = "strip-feeder-inventory.json";
 const STRIP_FEEDER_INVENTORY_PREVIEW_ARTIFACT: &str = "mosaic-strip-feeder-inventory.png";
 
@@ -9238,7 +9815,38 @@ async fn list_strip_feeder_registrations(State(state): State<AppState>) -> ApiRe
     })))
 }
 
-fn strip_feeder_pocket_map_entry(registration: &StripFeederRegistration) -> Value {
+fn latest_strip_feeder_scan_observations(
+    state: &AppState,
+) -> ApiResult<HashMap<(Uuid, u32), (chrono::DateTime<Utc>, StripFeederPocketScanObservation)>> {
+    let mut latest = HashMap::new();
+    for report in state
+        .store
+        .list_strip_feeder_occupancy_refreshes()
+        .map_err(ApiError::internal)?
+    {
+        if report.algorithm_version != STRIP_FEEDER_OCCUPANCY_ALGORITHM {
+            continue;
+        }
+        for observation in report.observations {
+            let key = (report.registration_id, observation.pocket_index);
+            let replace = latest
+                .get(&key)
+                .is_none_or(|(created_at, _)| report.created_at > *created_at);
+            if replace {
+                latest.insert(key, (report.created_at, observation));
+            }
+        }
+    }
+    Ok(latest)
+}
+
+fn strip_feeder_pocket_map_entry(
+    registration: &StripFeederRegistration,
+    scan_observations: &HashMap<
+        (Uuid, u32),
+        (chrono::DateTime<Utc>, StripFeederPocketScanObservation),
+    >,
+) -> Value {
     json!({
         "id": registration.id,
         "profile_id": registration.profile_id,
@@ -9247,14 +9855,32 @@ fn strip_feeder_pocket_map_entry(registration: &StripFeederRegistration) -> Valu
         "name": registration.name,
         "tape_width_mm": registration.tape_width_mm,
         "tape_rotation_deg": registration.tape_rotation_deg,
-        "pockets": registration.pockets.iter().map(|pocket| json!({
-            "pocket_index": pocket.pocket_index,
-            "center_machine_mm": pocket.nominal_center_machine_mm,
-            "occupancy": pocket.occupancy,
-            "occupancy_confidence": pocket.occupancy_confidence,
-            "status": pocket.status,
-            "selected": registration.selected_pocket_index == Some(pocket.pocket_index),
-        })).collect::<Vec<_>>(),
+        "pockets": registration.pockets.iter().map(|pocket| {
+            let scan_observation = scan_observations
+                .get(&(registration.id, pocket.pocket_index))
+                .filter(|(created_at, _)| *created_at >= pocket.updated_at);
+            let occupancy = scan_observation
+                .map(|(_, observation)| observation.occupancy)
+                .unwrap_or(pocket.occupancy);
+            let occupancy_confidence = scan_observation
+                .map(|(_, observation)| observation.confidence)
+                .unwrap_or(pocket.occupancy_confidence);
+            json!({
+                "pocket_index": pocket.pocket_index,
+                "center_machine_mm": pocket.nominal_center_machine_mm,
+                "occupancy": occupancy,
+                "occupancy_confidence": occupancy_confidence,
+                "occupancy_source": if scan_observation.is_some() {
+                    "workspace_rescan"
+                } else {
+                    "operational"
+                },
+                "occupancy_review_required": scan_observation
+                    .is_some_and(|(_, observation)| observation.review_required),
+                "status": pocket.status,
+                "selected": registration.selected_pocket_index == Some(pocket.pocket_index),
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -9263,10 +9889,13 @@ async fn list_strip_feeder_pocket_map(State(state): State<AppState>) -> ApiResul
         .store
         .list_strip_feeder_registrations()
         .map_err(ApiError::internal)?;
+    let scan_observations = latest_strip_feeder_scan_observations(&state)?;
     Ok(Json(json!({
         "registrations": registrations
             .iter()
-            .map(strip_feeder_pocket_map_entry)
+            .map(|registration| {
+                strip_feeder_pocket_map_entry(registration, &scan_observations)
+            })
             .collect::<Vec<_>>(),
     })))
 }
@@ -30524,6 +31153,67 @@ fn validate_job_execution_machine(
     Ok(status.simulated)
 }
 
+fn latest_board_population_state(
+    state: &AppState,
+    job: &Job,
+    calibration_id: Uuid,
+) -> ApiResult<HashMap<(Uuid, String), (chrono::DateTime<Utc>, BoardPlacementScanObservation)>> {
+    let mut latest =
+        HashMap::<(Uuid, String), (chrono::DateTime<Utc>, BoardPlacementScanObservation)>::new();
+    for report in state
+        .store
+        .list_board_population_refreshes()
+        .map_err(ApiError::internal)?
+    {
+        if report.algorithm_version != BOARD_POPULATION_REFRESH_ALGORITHM
+            || report.job_id != job.id
+            || report.calibration_id != calibration_id
+            || !state.profile.accepts_profile_id(&report.profile_id)
+        {
+            continue;
+        }
+        let current = job.boards.iter().find(|instance| {
+            instance.id == report.board_instance_id
+                && instance.board_id == report.board_design_id
+                && instance.design_to_machine == Some(report.design_to_machine)
+        });
+        if current.is_none() {
+            continue;
+        }
+        for observation in report.observations {
+            let key = (
+                report.board_instance_id,
+                observation.placement_reference.clone(),
+            );
+            if latest
+                .get(&key)
+                .is_none_or(|(created_at, _)| report.created_at > *created_at)
+            {
+                latest.insert(key, (report.created_at, observation));
+            }
+        }
+    }
+    for run in state
+        .store
+        .list_placement_executions()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|run| run.job_id == job.id)
+    {
+        let Some(report) = run.report.as_ref().filter(|report| !report.simulated) else {
+            continue;
+        };
+        latest.retain(|(board_instance_id, reference), (created_at, _)| {
+            let same_target = reference == &report.placement_reference
+                && report
+                    .board_instance_id
+                    .is_none_or(|id| id == *board_instance_id);
+            !same_target || run.updated_at <= *created_at
+        });
+    }
+    Ok(latest)
+}
+
 async fn start_job_execution(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
@@ -30573,6 +31263,38 @@ async fn start_job_execution(
     if plan.steps.is_empty() {
         return Err(ApiError::bad_request("job plan has no placement steps"));
     }
+    let population = latest_board_population_state(&state, &job, body.calibration_id)?;
+    let review_references = plan
+        .steps
+        .iter()
+        .filter_map(|step| {
+            population
+                .get(&(step.board_instance_id, step.placement_reference.clone()))
+                .filter(|(_, observation)| {
+                    observation.review_required
+                        || observation.occupancy == BoardPlacementOccupancy::Uncertain
+                })
+                .map(|_| step.placement_reference.clone())
+        })
+        .collect::<Vec<_>>();
+    if !review_references.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "job execution requires board-population review for {}",
+            review_references.join(", "),
+        )));
+    }
+    let populated = plan
+        .steps
+        .iter()
+        .filter(|step| {
+            population
+                .get(&(step.board_instance_id, step.placement_reference.clone()))
+                .is_some_and(|(_, observation)| {
+                    observation.occupancy == BoardPlacementOccupancy::Populated
+                        && !observation.review_required
+                })
+        })
+        .count();
     let operation = Operation::pending(if simulated {
         "job.execution.simulate"
     } else {
@@ -30592,21 +31314,37 @@ async fn start_job_execution(
             .steps
             .iter()
             .enumerate()
-            .map(|(step_index, step)| JobExecutionStep {
-                step_index: step_index as u32,
-                placement_reference: step.placement_reference.clone(),
-                status: JobExecutionStepStatus::Pending,
-                execution_id: None,
-                attempt_execution_ids: Vec::new(),
-                outcome_disposition: None,
-                board_contacted: false,
-                message: None,
+            .map(|(step_index, step)| {
+                let already_populated = population
+                    .get(&(step.board_instance_id, step.placement_reference.clone()))
+                    .is_some_and(|(_, observation)| {
+                        observation.occupancy == BoardPlacementOccupancy::Populated
+                            && !observation.review_required
+                    });
+                JobExecutionStep {
+                    step_index: step_index as u32,
+                    placement_reference: step.placement_reference.clone(),
+                    status: if already_populated {
+                        JobExecutionStepStatus::Skipped
+                    } else {
+                        JobExecutionStepStatus::Pending
+                    },
+                    execution_id: None,
+                    attempt_execution_ids: Vec::new(),
+                    outcome_disposition: None,
+                    board_contacted: false,
+                    message: already_populated
+                        .then(|| "board rescan found this placement populated".into()),
+                }
             })
             .collect(),
         current_step_index: None,
         pause_requested: false,
         cancel_requested: false,
-        message: Some(format!("{} placement steps are ready", plan.steps.len())),
+        message: Some(format!(
+            "{} placement steps are ready; {populated} already populated",
+            plan.steps.len() - populated,
+        )),
     };
     state
         .machine
@@ -31754,6 +32492,23 @@ async fn prepare_guarded_placement_execution(
             "job plan order changed after execution started; operator review is required",
         ));
     }
+    let board_population = latest_board_population_state(state, &job, body.calibration_id)?;
+    let board_observation =
+        board_population.get(&(step.board_instance_id, step.placement_reference.clone()));
+    if board_observation.is_some_and(|(_, observation)| {
+        observation.review_required || observation.occupancy == BoardPlacementOccupancy::Uncertain
+    }) {
+        return Err(ApiError::bad_request(
+            "placement target has uncertain board-rescan population",
+        ));
+    }
+    if board_observation
+        .is_some_and(|(_, observation)| observation.occupancy == BoardPlacementOccupancy::Populated)
+    {
+        return Err(ApiError::bad_request(
+            "placement target is populated in the latest board rescan",
+        ));
+    }
     let feeder_registration = validate_production_strip_feeder_with_preference(
         state,
         &step,
@@ -31767,7 +32522,11 @@ async fn prepare_guarded_placement_execution(
             ));
         }
         validate_guarded_board_surface(state, &step, body.calibration_id)?;
-        validate_guarded_board_target_unused(state, &step)?;
+        if board_observation
+            .is_none_or(|(_, observation)| observation.occupancy != BoardPlacementOccupancy::Empty)
+        {
+            validate_guarded_board_target_unused(state, &step)?;
+        }
     }
     let motion_calibration = load_job_motion_calibration(state, body.calibration_id)?;
     let motion_planner = MotionPlanner::new(state.profile.bounds, Some(motion_calibration));
@@ -36260,6 +37019,76 @@ mod tests {
         assert!(residuals.p95_mm > DISPLAY_PATCH_MAX_RESIDUAL_MM);
     }
 
+    fn source_prediction(class: SourceComponentClass) -> SourceComponentModelPrediction {
+        SourceComponentModelPrediction {
+            contract_version: "source_component_pose.v1".into(),
+            model_artifact_sha256: "test".into(),
+            runtime: "test".into(),
+            class,
+            probabilities: velocitypnp_domain::SourceComponentClassProbabilities {
+                empty: if class == SourceComponentClass::Empty {
+                    0.95
+                } else {
+                    0.03
+                },
+                component_flat: if class == SourceComponentClass::ComponentFlat {
+                    0.95
+                } else {
+                    0.03
+                },
+                component_on_edge: if class == SourceComponentClass::ComponentOnEdge {
+                    0.95
+                } else {
+                    0.02
+                },
+            },
+            class_confidence: 0.95,
+            class_margin: 0.90,
+            confidence_gate_passed: true,
+            pose: velocitypnp_domain::SourceComponentPosePrediction {
+                center_px: [128.0, 128.0],
+                size_px: [40.0, 20.0],
+                rotation_deg_mod_180: 0.0,
+                outline_px: [
+                    [108.0, 118.0],
+                    [148.0, 118.0],
+                    [148.0, 138.0],
+                    [108.0, 138.0],
+                ],
+                valid: true,
+            },
+            findings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn gated_model_resolves_uncertain_rescan_occupancy() {
+        let mut findings = Vec::new();
+        let resolved = resolve_rescan_occupancy(
+            StripPocketOccupancy::Uncertain,
+            0.4,
+            Some(&source_prediction(SourceComponentClass::ComponentFlat)),
+            &mut findings,
+        );
+
+        assert_eq!(resolved, (StripPocketOccupancy::Occupied, 0.95, false));
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn conflicting_rescan_detectors_remain_uncertain() {
+        let mut findings = Vec::new();
+        let resolved = resolve_rescan_occupancy(
+            StripPocketOccupancy::Occupied,
+            0.9,
+            Some(&source_prediction(SourceComponentClass::Empty)),
+            &mut findings,
+        );
+
+        assert_eq!(resolved, (StripPocketOccupancy::Uncertain, 0.9, true));
+        assert_eq!(findings, ["learned and deterministic occupancy disagree"]);
+    }
+
     #[test]
     fn workspace_timing_distribution_reports_bounded_summary() {
         let summary = workspace_timing_distribution(&[4.0, 1.0, 3.0, 2.0]);
@@ -36574,6 +37403,31 @@ mod tests {
             },
             findings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn board_population_uses_only_gated_normal_conditions() {
+        let populated = resolve_board_population_prediction(&placement_prediction(
+            PlacementVerificationClass::ComponentFlat,
+        ));
+        let empty = resolve_board_population_prediction(&placement_prediction(
+            PlacementVerificationClass::Empty,
+        ));
+        let damaged = resolve_board_population_prediction(&placement_prediction(
+            PlacementVerificationClass::ComponentOnEdge,
+        ));
+        let mut low_confidence = placement_prediction(PlacementVerificationClass::ComponentFlat);
+        low_confidence.confidence_gate_passed = false;
+        let low_confidence = resolve_board_population_prediction(&low_confidence);
+
+        assert_eq!(populated.0, BoardPlacementOccupancy::Populated);
+        assert!(!populated.1);
+        assert_eq!(empty.0, BoardPlacementOccupancy::Empty);
+        assert!(!empty.1);
+        assert_eq!(damaged.0, BoardPlacementOccupancy::Uncertain);
+        assert!(damaged.1);
+        assert_eq!(low_confidence.0, BoardPlacementOccupancy::Uncertain);
+        assert!(low_confidence.1);
     }
 
     fn placement_crop() -> velocitypnp_vision::PlacementVerificationCrop {
@@ -37712,13 +38566,44 @@ mod tests {
         registration.selected_pocket_index = Some(0);
         registration.findings = vec!["large retained diagnostic".into()];
 
-        let entry = strip_feeder_pocket_map_entry(&registration);
+        let entry = strip_feeder_pocket_map_entry(&registration, &HashMap::new());
 
         assert_eq!(entry["pockets"][0]["center_machine_mm"], json!([10.0, 0.0]));
         assert_eq!(entry["pockets"][0]["occupancy"], "occupied");
         assert_eq!(entry["pockets"][0]["status"], "available");
         assert_eq!(entry["pockets"][0]["selected"], true);
         assert!(entry.get("findings").is_none());
+    }
+
+    #[test]
+    fn pocket_map_reports_authoritative_rescan_state() {
+        let now = Utc::now();
+        let mut registration = test_pickup_registration(now);
+        registration.ensure_pocket_state();
+        registration.pockets[0].occupancy = StripPocketOccupancy::Occupied;
+        registration.pockets[0].status = StripFeederPocketStatus::Available;
+        registration.pockets[0].updated_at = now + chrono::Duration::seconds(1);
+        let observation = StripFeederPocketScanObservation {
+            pocket_index: 0,
+            center_machine_mm: [10.1, 0.1],
+            deterministic_occupancy: StripPocketOccupancy::Occupied,
+            deterministic_confidence: 0.9,
+            model_prediction: None,
+            occupancy: StripPocketOccupancy::Occupied,
+            confidence: 0.9,
+            review_required: false,
+            findings: Vec::new(),
+        };
+        let scan_observations = HashMap::from([(
+            (registration.id, 0),
+            (now + chrono::Duration::seconds(1), observation),
+        )]);
+
+        let entry = strip_feeder_pocket_map_entry(&registration, &scan_observations);
+
+        assert_eq!(entry["pockets"][0]["occupancy"], "occupied");
+        assert_eq!(entry["pockets"][0]["occupancy_source"], "workspace_rescan");
+        assert_eq!(entry["pockets"][0]["status"], "available");
     }
 
     #[tokio::test]
@@ -38609,6 +39494,7 @@ mod tests {
                 }),
                 known_fixture_id: None,
                 evidence_artifact_name: Some(evidence_name.into()),
+                feeder_lane_slots: Vec::new(),
                 design_matches: Vec::new(),
             }],
             warnings: Vec::new(),
@@ -40917,6 +41803,7 @@ mod tests {
             }),
             known_fixture_id: None,
             evidence_artifact_name: Some("object-evidence-000.png".into()),
+            feeder_lane_slots: Vec::new(),
             design_matches: Vec::new(),
         };
         let object_report = WorkspaceBoardDiscoveryReport {

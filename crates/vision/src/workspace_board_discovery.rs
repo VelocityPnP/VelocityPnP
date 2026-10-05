@@ -9,11 +9,12 @@ use velocitypnp_domain::{
     InstalledPlateGeometryReport, InstalledPlateRole, MachineProfile, WorkspaceBoardCandidate,
     WorkspaceBoardDesignMatch, WorkspaceBoardDiscoveryReport, WorkspaceBoardHeightSource,
     WorkspaceBoardRegistrationMethod, WorkspaceCameraApertureSummary,
-    WorkspaceClassificationEvidence, WorkspaceFixtureAnchor, WorkspaceObjectClass,
-    WorkspaceObjectClassification, WorkspaceRasterTransform, WorkspaceScanRegion,
+    WorkspaceClassificationEvidence, WorkspaceFeederLaneSlot, WorkspaceFixtureAnchor,
+    WorkspaceObjectClass, WorkspaceObjectClassification, WorkspaceRasterTransform,
+    WorkspaceScanRegion,
 };
 
-pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v6";
+pub const WORKSPACE_BOARD_DISCOVERY_ALGORITHM: &str = "workspace_object_proposals.v7";
 pub const WORKSPACE_BOARD_DISCOVERY_REPORT_ARTIFACT: &str = "board-discovery.json";
 pub const WORKSPACE_BOARD_DISCOVERY_PREVIEW_ARTIFACT: &str = "mosaic-board-candidates.png";
 
@@ -876,6 +877,7 @@ fn candidate_from_component(
         classification: None,
         known_fixture_id: known_fixture.map(|(fixture, _)| fixture.id.clone()),
         evidence_artifact_name: None,
+        feeder_lane_slots: Vec::new(),
         design_matches,
     };
     candidate.classification = Some(classifier.classify(WorkspaceObjectEvidence {
@@ -885,6 +887,47 @@ fn candidate_from_component(
         component_cell_indices: component,
         known_fixture,
     }));
+    if candidate
+        .classification
+        .as_ref()
+        .is_some_and(|classification| classification.class == WorkspaceObjectClass::Feeder)
+    {
+        candidate.feeder_lane_slots = line_features
+            .as_ref()
+            .map(|features| {
+                features.feeder_lane_slots(
+                    width_mm / f64::from(crop.width),
+                    height_mm / f64::from(crop.height),
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let centerline_machine_mm = slot.centerline_px.map(|point| {
+                    crop_pixel_to_machine(point, &crop, &candidate.outline_machine_mm)
+                });
+                let outline_machine_mm = slot
+                    .corners_px
+                    .iter()
+                    .map(|point| {
+                        crop_pixel_to_machine(*point, &crop, &candidate.outline_machine_mm)
+                    })
+                    .collect::<Vec<_>>();
+                let direction = subtract(centerline_machine_mm[1], centerline_machine_mm[0]);
+                WorkspaceFeederLaneSlot {
+                    slot_index: index as u32,
+                    centerline_machine_mm,
+                    outline_machine_mm,
+                    width_mm: slot.width_mm,
+                    length_mm: slot.length_mm,
+                    rotation_deg: normalize_angle(direction[1].atan2(direction[0]).to_degrees()),
+                    confidence: slot.confidence,
+                    review_required: slot.confidence < 0.72,
+                }
+            })
+            .collect();
+    }
     Some(CandidateDraft { candidate, crop })
 }
 

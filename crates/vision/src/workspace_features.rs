@@ -8,6 +8,9 @@ use std::f64::consts::{FRAC_PI_2, PI};
 const LINE_ANGLE_TOLERANCE_RAD: f64 = 4.0 * PI / 180.0;
 const LINE_POSITION_CLUSTER_PX: f64 = 3.0;
 const OUTLINE_DIMENSION_TOLERANCE_FRACTION: f64 = 0.16;
+const MINIMUM_FEEDER_SLOT_WIDTH_MM: f64 = 6.0;
+const MAXIMUM_FEEDER_SLOT_WIDTH_MM: f64 = 32.0;
+const MINIMUM_FEEDER_SLOT_SUPPORT_FRACTION: f64 = 0.55;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct LineSegment {
@@ -41,6 +44,15 @@ pub(crate) struct ParallelTrackEvidence {
     pub track_count: u32,
     pub mean_length_fraction: f64,
     pub transverse_span_fraction: f64,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FeederLaneSlotFit {
+    pub centerline_px: [[f64; 2]; 2],
+    pub corners_px: Vec<[f64; 2]>,
+    pub width_mm: f64,
+    pub length_mm: f64,
     pub confidence: f64,
 }
 
@@ -294,6 +306,147 @@ impl WorkspaceLineFeatures {
         })
     }
 
+    pub(crate) fn feeder_lane_slots(
+        &self,
+        x_mm_per_pixel: f64,
+        y_mm_per_pixel: f64,
+    ) -> Vec<FeederLaneSlotFit> {
+        if x_mm_per_pixel <= 0.0
+            || y_mm_per_pixel <= 0.0
+            || !x_mm_per_pixel.is_finite()
+            || !y_mm_per_pixel.is_finite()
+        {
+            return Vec::new();
+        }
+        let vertical = self.height >= self.width;
+        let long_axis: [f64; 2] = if vertical { [0.0, 1.0] } else { [1.0, 0.0] };
+        let transverse_axis: [f64; 2] = if vertical { [1.0, 0.0] } else { [0.0, 1.0] };
+        let long_length_px = f64::from(self.height.max(self.width));
+        let transverse_mm_per_pixel = if vertical {
+            x_mm_per_pixel
+        } else {
+            y_mm_per_pixel
+        };
+        let long_mm_per_pixel = if vertical {
+            y_mm_per_pixel
+        } else {
+            x_mm_per_pixel
+        };
+        let mut tracks = self
+            .positioned_lines(long_axis, transverse_axis)
+            .into_iter()
+            .filter(|track| {
+                track.length_px() / long_length_px >= MINIMUM_FEEDER_SLOT_SUPPORT_FRACTION
+            })
+            .collect::<Vec<_>>();
+        tracks.sort_by(|first, second| first.position_px.total_cmp(&second.position_px));
+        if tracks.len() < 2 {
+            return Vec::new();
+        }
+
+        let candidates = tracks
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, pair)| {
+                let first = pair[0];
+                let second = pair[1];
+                let width_px = second.position_px - first.position_px;
+                let width_mm = width_px * transverse_mm_per_pixel;
+                if !(MINIMUM_FEEDER_SLOT_WIDTH_MM..=MAXIMUM_FEEDER_SLOT_WIDTH_MM)
+                    .contains(&width_mm)
+                {
+                    return None;
+                }
+                let along_min_px = first.along_min_px.max(second.along_min_px);
+                let along_max_px = first.along_max_px.min(second.along_max_px);
+                let length_px = along_max_px - along_min_px;
+                let support_fraction = length_px / long_length_px;
+                if support_fraction < MINIMUM_FEEDER_SLOT_SUPPORT_FRACTION {
+                    return None;
+                }
+                let previous_gap = index.checked_sub(1).map(|previous| {
+                    tracks[previous + 1].position_px - tracks[previous].position_px
+                });
+                let next_gap = tracks
+                    .get(index + 2)
+                    .map(|next| next.position_px - tracks[index + 1].position_px);
+                let adjacent_max = previous_gap
+                    .into_iter()
+                    .chain(next_gap)
+                    .fold(0.0_f64, f64::max);
+                let separation_score = if adjacent_max <= 1e-9 {
+                    1.0
+                } else {
+                    ((width_px / adjacent_max - 1.0) / 1.5 + 0.5).clamp(0.0, 1.0)
+                };
+                let support_score = ((support_fraction - MINIMUM_FEEDER_SLOT_SUPPORT_FRACTION)
+                    / (1.0 - MINIMUM_FEEDER_SLOT_SUPPORT_FRACTION))
+                    .clamp(0.0, 1.0);
+                Some((
+                    index,
+                    0.58 * support_score + 0.42 * separation_score,
+                    first,
+                    second,
+                    along_min_px,
+                    along_max_px,
+                    width_mm,
+                    length_px * long_mm_per_pixel,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let mut selected = Vec::new();
+        let mut index = 0;
+        while index < tracks.len().saturating_sub(1) {
+            let current = candidates.iter().find(|candidate| candidate.0 == index);
+            let next = candidates.iter().find(|candidate| candidate.0 == index + 1);
+            let chosen = match (current, next) {
+                (Some(current), Some(next)) if next.1 > current.1 => Some(next),
+                (Some(current), _) => Some(current),
+                (None, Some(next)) => Some(next),
+                (None, None) => None,
+            };
+            let Some(chosen) = chosen else {
+                index += 1;
+                continue;
+            };
+            selected.push(*chosen);
+            index = chosen.0 + 2;
+        }
+
+        selected
+            .into_iter()
+            .map(
+                |(_, confidence, first, second, along_min, along_max, width_mm, length_mm)| {
+                    let cross_min = first.position_px.min(second.position_px);
+                    let cross_max = first.position_px.max(second.position_px);
+                    let center_cross = 0.5 * (cross_min + cross_max);
+                    let from_basis = |along: f64, cross: f64| {
+                        [
+                            along * long_axis[0] + cross * transverse_axis[0],
+                            along * long_axis[1] + cross * transverse_axis[1],
+                        ]
+                    };
+                    FeederLaneSlotFit {
+                        centerline_px: [
+                            from_basis(along_min, center_cross),
+                            from_basis(along_max, center_cross),
+                        ],
+                        corners_px: vec![
+                            from_basis(along_min, cross_min),
+                            from_basis(along_max, cross_min),
+                            from_basis(along_max, cross_max),
+                            from_basis(along_min, cross_max),
+                        ],
+                        width_mm,
+                        length_mm,
+                        confidence,
+                    }
+                },
+            )
+            .collect()
+    }
+
     fn positioned_lines(
         &self,
         along_axis: [f64; 2],
@@ -457,5 +610,30 @@ mod tests {
         assert!(evidence.track_count >= 6);
         assert!(evidence.mean_length_fraction >= 0.80);
         assert!(evidence.confidence >= 0.75);
+    }
+
+    #[test]
+    fn paired_long_rails_produce_empty_feeder_slots() {
+        let width = 280;
+        let height = 640;
+        let mut pixels = vec![82; width * height];
+        for x in [18, 82, 98, 162, 178, 242] {
+            for y in 10..630 {
+                pixels[y * width + x] = 220;
+                pixels[y * width + x + 1] = 220;
+            }
+        }
+        let features = detect_workspace_line_features(&GrayFrame {
+            width: width as u32,
+            height: height as u32,
+            pixels,
+        })
+        .unwrap();
+        let slots = features.feeder_lane_slots(0.20, 0.20);
+
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|slot| (slot.width_mm - 12.8).abs() < 1.0));
+        assert!(slots.iter().all(|slot| slot.length_mm > 120.0));
+        assert!(slots.iter().all(|slot| slot.confidence >= 0.75));
     }
 }

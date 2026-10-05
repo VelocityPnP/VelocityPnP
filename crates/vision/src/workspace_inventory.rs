@@ -790,6 +790,7 @@ mod tests {
                 }),
                 known_fixture_id: fixture.map(str::to_string),
                 evidence_artifact_name: Some(format!("object-evidence-{index:03}.png")),
+                feeder_lane_slots: Vec::new(),
                 design_matches: Vec::new(),
             },
             evidence: Some(GrayFrame {

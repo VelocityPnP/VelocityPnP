@@ -650,6 +650,9 @@ p { line-height: 1.5; }
 .workspace-placement-position.unpopulated circle { fill: #0b1511e6; }
 .workspace-placement-position.unpopulated circle,
 .workspace-placement-position.unpopulated line { stroke: #d2ffe7; }
+.workspace-placement-position.uncertain circle { fill: #f0ba5842; }
+.workspace-placement-position.uncertain circle,
+.workspace-placement-position.uncertain line { stroke: var(--amber); }
 .workspace-placement-position.current circle,
 .workspace-placement-position.current line { stroke-width: 2.6; }
 .workspace-placement-position.is-selected circle,
@@ -658,6 +661,41 @@ p { line-height: 1.5; }
   stroke-width: 3;
 }
 .workspace-placement-position.is-selected circle { fill: #ffe36e26; }
+.workspace-feeder-slot-boundary {
+  fill: #66c4ff12;
+  pointer-events: none;
+  stroke: #8fd6ffb8;
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-feeder-slot-hit {
+  fill: transparent;
+  pointer-events: all;
+  stroke: transparent;
+}
+.workspace-feeder-slot.is-selected > .workspace-feeder-slot-boundary {
+  fill: #ffe36e1f;
+  stroke: #ffe36e;
+  stroke-width: 2.4;
+}
+.workspace-feeder-lane-boundary {
+  fill: #66c4ff0d;
+  pointer-events: none;
+  stroke: #66c4ff8c;
+  stroke-width: 1.4;
+  stroke-dasharray: 5 3;
+  vector-effect: non-scaling-stroke;
+}
+.workspace-feeder-lane-hit {
+  fill: transparent;
+  pointer-events: all;
+  stroke: transparent;
+}
+.workspace-feeder-pockets.is-selected > .workspace-feeder-lane-boundary {
+  fill: #ffe36e14;
+  stroke: #ffe36e;
+  stroke-width: 2;
+}
 .workspace-feeder-pockets polyline {
   fill: none;
   stroke: #66c4ff80;

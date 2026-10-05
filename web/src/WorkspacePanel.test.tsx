@@ -6,14 +6,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { DialogProvider } from "./Dialog";
 import type {
-  BoardDesign, Job, JobExecutionRun, MachineStatus, PlacementExecutionRun,
-  PlacementOutcomeRecord, StripFeederMapRegistration, WorkspaceDisplayPatch,
-  WorkspaceScanEstimate, WorkspaceScanReport, WorkspaceScanSummary,
+  BoardDesign, BoardPopulationRefreshReport, Job, JobExecutionRun, MachineStatus,
+  PlacementExecutionRun, PlacementOutcomeRecord, StripFeederMapRegistration,
+  WorkspaceDisplayPatch,
+  WorkspaceBoardDiscoveryReport, WorkspaceScanEstimate, WorkspaceScanReport,
+  WorkspaceScanSummary,
 } from "./types";
 import {
-  feederScanRegion, formatWorkspaceDuration, jobPlacementMarkers,
-  latestFeederLanes, panWorkspaceViewport, selectActiveJobExecution,
+  feederLaneOutline, feederScanRegion, formatWorkspaceDuration, jobPlacementMarkers,
+  latestFeederLanes, nearestFeederProposal, normalizeFeederSlotToBank,
+  panWorkspaceViewport,
+  selectActiveJobExecution,
   selectWorkspaceJob, workspaceArtifactOptions, workspaceComposition,
+  workspaceFeederBanks, workspaceFeederLaneTargets,
   workspaceMoveAnimationDuration, workspaceRescanEtaSeconds, WorkspacePanel,
   zoomWorkspaceViewport,
 } from "./WorkspacePanel";
@@ -300,6 +305,24 @@ describe("workspace operational map", () => {
     )[0].status).toBe("populated");
   });
 
+  it("uses a newer board rescan as the placement population state", () => {
+    const refresh = {
+      job_id: job.id,
+      board_instance_id: job.boards[0].id,
+      board_design_id: job.boards[0].board_id,
+      design_to_machine: job.boards[0].design_to_machine,
+      created_at: "2026-10-03T18:04:00Z",
+      observations: [{
+        placement_reference: "R1",
+        occupancy: "empty",
+      }],
+    } as unknown as BoardPopulationRefreshReport;
+
+    expect(jobPlacementMarkers(
+      job, null, [design], [job], [placementOutcome], [refresh],
+    )[0].status).toBe("unpopulated");
+  });
+
   it("maps intended placement rotation into machine coordinates", () => {
     const rotatedDesign = {
       ...design,
@@ -376,6 +399,35 @@ describe("workspace operational map", () => {
     expect(workspaceRescanEtaSeconds(20, 20, 100, 90)).toBe(10);
   });
 
+  it("selects the feeder proposal nearest a physical slot", () => {
+    const proposal = (proposalIndex: number, xMm: number) => ({
+      proposal_index: proposalIndex,
+      tape_rotation_deg: 90,
+      sprocket_pitch_mm: 4,
+      sprocket_pitch_residual_p95_mm: .05,
+      sprocket_center_count: 10,
+      sprocket_centers_machine_mm: [],
+      tape_width_mm: 8,
+      component_pitch_mm: 4,
+      pick_centerline_machine_mm: [[xMm, 10], [xMm, 70]] as [
+        [number, number], [number, number],
+      ],
+      pocket_centers_machine_mm: [],
+      component_size_mm: null,
+      pocket_observations: [],
+      present_count: 0,
+      absent_count: 0,
+      uncertain_count: 0,
+      confidence: .9,
+      review_required: false,
+      findings: [],
+    });
+
+    expect(nearestFeederProposal(
+      [proposal(0, 20), proposal(1, 40)], [38, 30],
+    )?.proposal_index).toBe(1);
+  });
+
   it("keeps only the newest registration for each physical feeder lane", () => {
     const olderSameLane = {
       ...feederRegistration,
@@ -412,6 +464,104 @@ describe("workspace operational map", () => {
       y_min_mm: 20,
       y_max_mm: 44,
     });
+    expect(feederLaneOutline(feederRegistration).map(([xMm, yMm]) => [
+      Math.round(xMm), Math.round(yMm),
+    ])).toEqual([
+      [34, 28], [34, 36], [26, 36], [26, 28],
+    ]);
+  });
+
+  it("uses physical bank positions for lane names and common extents", () => {
+    const candidate = {
+      candidate_index: 4,
+      region: { x_min_mm: 20, x_max_mm: 55, y_min_mm: 10, y_max_mm: 70 },
+      outline_machine_mm: [[20, 10], [55, 10], [55, 70], [20, 70]],
+      center_x_mm: 37.5,
+      center_y_mm: 40,
+      classification: { class: "feeder" },
+      feeder_lane_slots: [],
+    } as unknown as WorkspaceBoardDiscoveryReport["candidates"][number];
+    const discovery = {
+      candidates: [candidate],
+    } as unknown as WorkspaceBoardDiscoveryReport;
+    const left = feederRegistration;
+    const right = {
+      ...feederRegistration,
+      id: "right-lane",
+      name: "Inventory feeder 7",
+      pockets: feederRegistration.pockets.map((pocket) => ({
+        ...pocket,
+        center_machine_mm: [42, pocket.center_machine_mm[1]] as [number, number],
+      })),
+    };
+    const banks = workspaceFeederBanks(discovery);
+    const lanes = workspaceFeederLaneTargets([right, left], banks);
+
+    expect(banks.map((bank) => bank.label)).toEqual(["Feeder Bank 1"]);
+    expect(lanes.map((lane) => lane.label).sort()).toEqual([
+      "Feeder Bank 1 - lane 1", "Feeder Bank 1 - lane 2",
+    ]);
+    for (const lane of lanes) {
+      const yValues = feederLaneOutline(lane.feeder, lane.bankOutline)
+        .map((point) => Math.round(point[1]));
+      expect(Math.min(...yValues)).toBe(10);
+      expect(Math.max(...yValues)).toBe(70);
+    }
+  });
+
+  it("keeps a registered lane number from the detected physical slots", () => {
+    const candidate = {
+      candidate_index: 2,
+      region: { x_min_mm: 20, x_max_mm: 55, y_min_mm: 10, y_max_mm: 70 },
+      outline_machine_mm: [[20, 10], [55, 10], [55, 70], [20, 70]],
+      center_x_mm: 37.5,
+      center_y_mm: 40,
+      classification: { class: "feeder" },
+      feeder_lane_slots: [30, 40, 50].map((xMm, slotIndex) => ({
+        slot_index: slotIndex,
+        centerline_machine_mm: [[xMm, 10], [xMm, 70]],
+        outline_machine_mm: [
+          [xMm - 4, 10], [xMm + 4, 10],
+          [xMm + 4, 70], [xMm - 4, 70],
+        ],
+        width_mm: 8,
+        length_mm: 60,
+        rotation_deg: 90,
+        confidence: .9,
+        review_required: false,
+      })),
+    } as unknown as WorkspaceBoardDiscoveryReport["candidates"][number];
+    const laneThree = {
+      ...feederRegistration,
+      pockets: feederRegistration.pockets.map((pocket) => ({
+        ...pocket,
+        center_machine_mm: [50.5, pocket.center_machine_mm[1]] as [number, number],
+      })),
+    };
+    const banks = workspaceFeederBanks({
+      candidates: [candidate],
+    } as unknown as WorkspaceBoardDiscoveryReport);
+
+    expect(workspaceFeederLaneTargets([laneThree], banks)[0].label)
+      .toBe("Feeder Bank 1 - lane 3");
+  });
+
+  it("extends each recognized empty slot to the common bank ends", () => {
+    const normalized = normalizeFeederSlotToBank({
+      slot_index: 0,
+      centerline_machine_mm: [[30, 20], [30, 60]],
+      outline_machine_mm: [[26, 20], [26, 60], [34, 60], [34, 20]],
+      width_mm: 8,
+      length_mm: 40,
+      rotation_deg: 90,
+      confidence: .9,
+      review_required: false,
+    }, [[20, 10], [55, 10], [55, 70], [20, 70]]);
+
+    const yValues = normalized.outline_machine_mm.map((point) => point[1]);
+    expect(Math.min(...yValues)).toBeCloseTo(10);
+    expect(Math.max(...yValues)).toBeCloseTo(70);
+    expect(normalized.length_mm).toBeCloseTo(60);
   });
 
   it("uses a full scan as the base and layers newer local scans", () => {
@@ -470,6 +620,100 @@ describe("workspace operational map", () => {
     expect(composition.overlays.map((value) => value.id)).toEqual([
       feeder.id, board.id,
     ]);
+  });
+
+  it("shows and selects physical feeder slots without tape registrations", async () => {
+    const user = userEvent.setup();
+    const boardDiscovery = {
+      algorithm_version: "workspace_object_proposals.v7",
+      source_mosaic_artifact_name: "mosaic.png",
+      report_artifact_name: "board-discovery.json",
+      preview_artifact_name: "mosaic-board-candidates.png",
+      candidate_count: 1,
+      matched_candidate_count: 0,
+      board_design_count: 0,
+      height_source_count: 1,
+    };
+    const scanWithSlots = { ...scan, board_discovery: boardDiscovery };
+    const summaryWithSlots = { ...scanSummary, board_discovery: boardDiscovery };
+    const report: WorkspaceBoardDiscoveryReport = {
+      algorithm_version: "workspace_object_proposals.v7",
+      source_mosaic_artifact_name: "mosaic.png",
+      height_sources: [],
+      installed_plate_fraction: 1,
+      raised_surface_max_fraction: .875,
+      board_design_count: 0,
+      candidates: [{
+        candidate_index: 2,
+        region: { x_min_mm: 10, x_max_mm: 70, y_min_mm: 5, y_max_mm: 75 },
+        outline_machine_mm: [[10, 5], [70, 5], [70, 75], [10, 75]],
+        plate_id: "staging",
+        plate_role: "staging",
+        center_x_mm: 40,
+        center_y_mm: 40,
+        width_mm: 60,
+        height_mm: 70,
+        rotation_deg: 0,
+        evidence_cell_count: 20,
+        measured_cell_fraction: 1,
+        mean_surface_fraction: .5,
+        mean_height_confidence: .9,
+        fill_fraction: .8,
+        texture_energy_luma: 20,
+        board_likelihood: .2,
+        classification: {
+          class: "feeder",
+          confidence: .9,
+          classifier_id: "test",
+          review_required: false,
+          evidence: [],
+        },
+        known_fixture_id: null,
+        evidence_artifact_name: "object-evidence-002.png",
+        feeder_lane_slots: [{
+          slot_index: 0,
+          centerline_machine_mm: [[30, 10], [30, 70]],
+          outline_machine_mm: [[24, 10], [24, 70], [36, 70], [36, 10]],
+          width_mm: 12,
+          length_mm: 60,
+          rotation_deg: 90,
+          confidence: .95,
+          review_required: false,
+        }],
+        design_matches: [],
+      }],
+      warnings: [],
+    };
+    vi.spyOn(api, "workspaceScanSummaries").mockResolvedValue([summaryWithSlots]);
+    vi.spyOn(api, "workspaceScan").mockResolvedValue(scanWithSlots);
+    vi.spyOn(api, "workspaceScanArtifact").mockResolvedValue(report);
+    vi.spyOn(api, "workspaceDisplayPatches").mockResolvedValue([]);
+    vi.spyOn(api, "machineProfile").mockResolvedValue({
+      id: scan.profile_id,
+      transit_motion: { clear_xy_feed_mm_per_min: 23_000 },
+    });
+    vi.spyOn(api, "jobs").mockResolvedValue([]);
+    vi.spyOn(api, "jobExecutions").mockResolvedValue([]);
+    vi.spyOn(api, "placementOutcomes").mockResolvedValue([]);
+    vi.spyOn(api, "boardPopulationRefreshes").mockResolvedValue([]);
+    vi.spyOn(api, "boards").mockResolvedValue([]);
+    vi.spyOn(api, "stripFeederPocketMap").mockResolvedValue([]);
+
+    const { container } = render(<DialogProvider><WorkspacePanel
+      status={{ ...status, state: "ready" }}
+      setError={vi.fn()}
+      openMachine={vi.fn()}
+      openJobs={vi.fn()}
+    /></DialogProvider>);
+
+    await waitFor(() => expect(
+      container.querySelectorAll(".workspace-feeder-slot-boundary"),
+    ).toHaveLength(1));
+    await user.click(container.querySelector(".workspace-feeder-slot-hit")!);
+    expect(screen.getByText(
+      "Feeder Bank 1 - lane 1", { selector: ".workspace-selection-card h3" },
+    )).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeTruthy();
   });
 
   it("renders machine, scan, board, and current-placement overlays", async () => {
@@ -554,6 +798,7 @@ describe("workspace operational map", () => {
       report: { nozzle_id: "N1" },
     } as unknown as PlacementExecutionRun);
     vi.spyOn(api, "placementOutcomes").mockResolvedValue([placementOutcome]);
+    vi.spyOn(api, "boardPopulationRefreshes").mockResolvedValue([]);
     vi.spyOn(api, "boards").mockResolvedValue([design]);
     vi.spyOn(api, "stripFeederPocketMap").mockResolvedValue([feederRegistration]);
 
@@ -610,11 +855,14 @@ describe("workspace operational map", () => {
     ))
       .toHaveLength(2);
     expect(container.querySelectorAll(".workspace-pocket-hit")).toHaveLength(2);
+    expect(container.querySelectorAll(".workspace-feeder-lane-boundary"))
+      .toHaveLength(1);
     await user.click(container.querySelector(
-      ".workspace-feeder-pockets > polyline:not(.workspace-feeder-hit)",
+      ".workspace-feeder-lane-hit",
     )!);
     expect(screen.getByText("Feeder 1", { selector: ".workspace-selection-card h3" }))
       .toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeTruthy();
     await user.click(container.querySelector(
       ".workspace-feeder-pockets circle.occupied",
     )!);
@@ -681,7 +929,9 @@ describe("workspace operational map", () => {
       container.querySelector(".workspace-map")?.getAttribute("viewBox"),
     ).not.toBe("0 -80 100 80"));
     await user.click(screen.getByRole("button", { name: "Placement positions" }));
-    await user.click(screen.getByRole("button", { name: "Feeder pockets" }));
+    await user.click(screen.getByRole(
+      "button", { name: "Feeder lanes / pockets" },
+    ));
     await user.click(screen.getByRole("button", { name: "Machine position" }));
     expect(container.querySelector(".workspace-placement-position")).toBeNull();
     expect(container.querySelector(".workspace-feeder-pockets")).toBeNull();

@@ -7,10 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use velocitypnp_domain::{
-    AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, BoardSurfaceMeasurementRun,
-    CalibrationSnapshot, CameraProfile, CameraRole, Feeder, InspectionReport, Job, JobExecutionRun,
-    MachineEvent, Operation, Part, PlacementExecutionRun, PlacementOutcomeRecord,
-    StripFeederLiveHoldoutRun, StripFeederPickupQualificationRun, StripFeederPocketOutcome,
+    AutomatedCalibrationRun, BoardDesign, BoardPopulationRefreshReport, BoardRegistrationRun,
+    BoardSurfaceMeasurementRun, CalibrationSnapshot, CameraProfile, CameraRole, Feeder,
+    InspectionReport, Job, JobExecutionRun, MachineEvent, Operation, Part, PlacementExecutionRun,
+    PlacementOutcomeRecord, StripFeederLiveHoldoutRun, StripFeederOccupancyRefreshReport,
+    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketScanObservation,
     StripFeederPocketStatus, StripFeederRegistration, StripFeederSourceCaptureRun,
     StripPocketOccupancy, WorkspaceDisplayPatch, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
@@ -421,6 +422,41 @@ impl Store {
         self.list("workspace_display_patch")
     }
 
+    pub fn put_strip_feeder_occupancy_refresh(
+        &self,
+        report: &StripFeederOccupancyRefreshReport,
+    ) -> Result<()> {
+        self.put_named(
+            "strip_feeder_occupancy_refresh",
+            &format!("{}:{}", report.source_scan_id, report.registration_id),
+            report,
+        )
+    }
+
+    pub fn list_strip_feeder_occupancy_refreshes(
+        &self,
+    ) -> Result<Vec<StripFeederOccupancyRefreshReport>> {
+        self.list("strip_feeder_occupancy_refresh")
+    }
+
+    pub fn put_board_population_refresh(
+        &self,
+        report: &BoardPopulationRefreshReport,
+    ) -> Result<()> {
+        self.put_named(
+            "board_population_refresh",
+            &format!(
+                "{}:{}:{}",
+                report.source_scan_id, report.job_id, report.board_instance_id,
+            ),
+            report,
+        )
+    }
+
+    pub fn list_board_population_refreshes(&self) -> Result<Vec<BoardPopulationRefreshReport>> {
+        self.list("board_population_refresh")
+    }
+
     pub fn put_workspace_inventory_baseline(
         &self,
         baseline: &WorkspaceInventoryBaseline,
@@ -566,6 +602,99 @@ impl Store {
         if let Some(registration) = &mut registration {
             registration.ensure_pocket_state();
         }
+        Ok(registration)
+    }
+
+    /// Atomically applies a completed lane rescan to operational pocket state.
+    ///
+    /// An active reservation blocks the refresh so that a scan cannot change
+    /// state while a pickup owns a pocket.
+    pub fn apply_strip_feeder_occupancy_refresh(
+        &self,
+        registration_id: Uuid,
+        observations: &[StripFeederPocketScanObservation],
+        observed_at: chrono::DateTime<Utc>,
+    ) -> Result<StripFeederRegistration> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let document: String = transaction
+            .query_row(
+                "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
+                params!["strip_feeder_registration", registration_id.to_string()],
+                |row| row.get(0),
+            )
+            .context("strip feeder registration not found")?;
+        let mut registration: StripFeederRegistration =
+            serde_json::from_str(&document).context("decoding strip feeder registration")?;
+        registration.ensure_pocket_state();
+        anyhow::ensure!(
+            registration.pockets.iter().all(|pocket| {
+                pocket.status != StripFeederPocketStatus::Reserved
+                    && pocket.reservation_id.is_none()
+            }),
+            "strip feeder occupancy cannot refresh while a pocket is reserved"
+        );
+        for observation in observations {
+            let Some(pocket) = registration
+                .pockets
+                .iter_mut()
+                .find(|pocket| pocket.pocket_index == observation.pocket_index)
+            else {
+                continue;
+            };
+            pocket.measured_center_machine_mm = Some(observation.center_machine_mm);
+            pocket.occupancy = observation.occupancy;
+            pocket.occupancy_confidence = observation.confidence;
+            pocket.status = if observation.review_required {
+                StripFeederPocketStatus::NeedsReview
+            } else {
+                match observation.occupancy {
+                    StripPocketOccupancy::Occupied => StripFeederPocketStatus::Available,
+                    StripPocketOccupancy::Empty => StripFeederPocketStatus::Empty,
+                    StripPocketOccupancy::Uncertain => StripFeederPocketStatus::NeedsReview,
+                }
+            };
+            pocket.updated_at = observed_at;
+        }
+        if let Some(selected_index) = registration.selected_pocket_index {
+            let selected = registration
+                .pockets
+                .iter()
+                .find(|pocket| pocket.pocket_index == selected_index)
+                .filter(|pocket| pocket.status == StripFeederPocketStatus::Available)
+                .map(|pocket| {
+                    (
+                        pocket.pocket_index,
+                        pocket
+                            .measured_center_machine_mm
+                            .unwrap_or(pocket.nominal_center_machine_mm),
+                    )
+                })
+                .or_else(|| {
+                    registration.next_available_pocket(None).map(|pocket| {
+                        (
+                            pocket.pocket_index,
+                            pocket
+                                .measured_center_machine_mm
+                                .unwrap_or(pocket.nominal_center_machine_mm),
+                        )
+                    })
+                });
+            registration.selected_pocket_index = selected.map(|item| item.0);
+            registration.selected_pocket_machine_mm = selected.map(|item| item.1);
+        }
+        registration.updated_at = observed_at;
+        transaction.execute(
+            r#"UPDATE entities
+               SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), document = ?3
+               WHERE kind = ?1 AND id = ?2"#,
+            params![
+                "strip_feeder_registration",
+                registration_id.to_string(),
+                serde_json::to_string(&registration)?,
+            ],
+        )?;
+        transaction.commit()?;
         Ok(registration)
     }
 
@@ -1269,6 +1398,155 @@ mod tests {
         };
         store.put_board(&board).unwrap();
         assert_eq!(store.get_board(board.id).unwrap().unwrap().name, "fixture");
+    }
+
+    #[test]
+    fn strip_feeder_occupancy_refresh_round_trip() {
+        let store = Store::memory().unwrap();
+        let report = StripFeederOccupancyRefreshReport {
+            algorithm_version: "strip_feeder_occupancy_refresh.v1".into(),
+            source_scan_id: Uuid::new_v4(),
+            source_candidate_index: 2,
+            source_proposal_index: 1,
+            registration_id: Uuid::new_v4(),
+            report_artifact_name: "occupancy.json".into(),
+            created_at: Utc::now(),
+            model_available: true,
+            observations: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        store.put_strip_feeder_occupancy_refresh(&report).unwrap();
+
+        assert_eq!(
+            store.list_strip_feeder_occupancy_refreshes().unwrap(),
+            [report],
+        );
+    }
+
+    #[test]
+    fn board_population_refresh_round_trip() {
+        let store = Store::memory().unwrap();
+        let report = BoardPopulationRefreshReport {
+            algorithm_version: "board_population_refresh.v1".into(),
+            source_scan_id: Uuid::new_v4(),
+            profile_id: "test".into(),
+            calibration_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            board_instance_id: Uuid::new_v4(),
+            board_design_id: Uuid::new_v4(),
+            design_to_machine: velocitypnp_domain::Transform2d::identity(),
+            report_artifact_name: "board-population.json".into(),
+            created_at: Utc::now(),
+            observations: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        store.put_board_population_refresh(&report).unwrap();
+
+        assert_eq!(store.list_board_population_refreshes().unwrap(), [report]);
+    }
+
+    #[test]
+    fn feeder_rescan_updates_operational_pocket_state() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let registration_id = Uuid::new_v4();
+        let pocket = |pocket_index, occupancy, status| velocitypnp_domain::StripFeederPocketState {
+            pocket_index,
+            nominal_center_machine_mm: [10.0, f64::from(pocket_index) * 4.0],
+            measured_center_machine_mm: None,
+            occupancy,
+            occupancy_confidence: 0.5,
+            status,
+            attempt_count: 1,
+            consecutive_failure_count: 0,
+            reservation_id: None,
+            last_qualification_id: None,
+            last_outcome: Some(StripFeederPocketOutcome::Consumed),
+            updated_at: now,
+        };
+        let registration = StripFeederRegistration {
+            id: registration_id,
+            profile_id: "test".into(),
+            calibration_id: Uuid::new_v4(),
+            source_scan_id: Uuid::new_v4(),
+            source_candidate_index: 0,
+            source_proposal_index: 0,
+            created_at: now,
+            updated_at: now,
+            status: velocitypnp_domain::StripFeederRegistrationStatus::Ready,
+            name: "test strip".into(),
+            part_key: None,
+            part_rotation_deg: None,
+            tape_width_mm: 8.0,
+            tape_pitch_mm: 4.0,
+            tape_rotation_deg: 90.0,
+            pick_centerline_machine_mm: [[10.0, 0.0], [10.0, 4.0]],
+            pocket_centers_machine_mm: vec![[10.0, 0.0], [10.0, 4.0]],
+            pockets: vec![
+                pocket(
+                    0,
+                    StripPocketOccupancy::Empty,
+                    StripFeederPocketStatus::Consumed,
+                ),
+                pocket(
+                    1,
+                    StripPocketOccupancy::Occupied,
+                    StripFeederPocketStatus::Available,
+                ),
+            ],
+            selected_pocket_machine_mm: Some([10.0, 4.0]),
+            selected_pocket_index: Some(1),
+            pickup_z_mm: None,
+            surveyed_part_size_mm: None,
+            measured_part_size_mm: None,
+            measured_part_rotation_deg: None,
+            measured_part_confidence: None,
+            active_feeder_id: None,
+            latest_live_holdout_id: None,
+            latest_pickup_qualification_id: None,
+            pickup_sequence_passed: false,
+            latest_pickup_sequence_qualification_ids: Vec::new(),
+            latest_placement_validation_id: None,
+            vision_confidence: 0.9,
+            vision_review_required: false,
+            findings: Vec::new(),
+        };
+        store.put_strip_feeder_registration(&registration).unwrap();
+        let observed_at = now + chrono::Duration::seconds(1);
+        let observation =
+            |pocket_index, center, occupancy, review_required| StripFeederPocketScanObservation {
+                pocket_index,
+                center_machine_mm: center,
+                deterministic_occupancy: occupancy,
+                deterministic_confidence: 0.95,
+                model_prediction: None,
+                occupancy,
+                confidence: 0.95,
+                review_required,
+                findings: Vec::new(),
+            };
+
+        let refreshed = store
+            .apply_strip_feeder_occupancy_refresh(
+                registration_id,
+                &[
+                    observation(0, [10.1, 0.1], StripPocketOccupancy::Occupied, false),
+                    observation(1, [10.1, 4.1], StripPocketOccupancy::Empty, false),
+                ],
+                observed_at,
+            )
+            .unwrap();
+
+        assert_eq!(
+            refreshed.pockets[0].status,
+            StripFeederPocketStatus::Available
+        );
+        assert_eq!(refreshed.pockets[1].status, StripFeederPocketStatus::Empty);
+        assert_eq!(refreshed.pockets[0].attempt_count, 1);
+        assert_eq!(refreshed.selected_pocket_index, Some(0));
+        assert_eq!(refreshed.selected_pocket_machine_mm, Some([10.1, 0.1]));
     }
 
     #[test]

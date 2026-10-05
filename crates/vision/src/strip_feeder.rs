@@ -8,7 +8,7 @@ use velocitypnp_domain::{
     PlanarCameraModel, Pose, SourceComponentModelPrediction, StripFeederLaneProposal,
     StripFeederLiveHoldoutReport, StripFeederPocketObservation, StripFeederPocketReturnReport,
     StripFeederRegistration, StripFeederRejectedLattice, StripFeederSourcePoseReport,
-    StripPocketOccupancy, WorkspaceBoardCandidate,
+    StripPocketOccupancy, WorkspaceBoardCandidate, WorkspaceRasterTransform,
 };
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
@@ -102,6 +102,101 @@ pub struct StripFeederSourceComponentDraft {
 pub struct StripFeederSourceComponentDraftArtifacts {
     pub report: StripFeederSourceComponentDraft,
     pub crop: GrayFrame,
+}
+
+/// Rectifies one feeder pocket from a machine-coordinate workspace mosaic.
+///
+/// This supports review-only batch inference after a targeted lane rescan.
+pub fn crop_workspace_source_component(
+    mosaic: &GrayFrame,
+    raster: WorkspaceRasterTransform,
+    pocket_machine_mm: [f64; 2],
+    tape_rotation_deg: f64,
+    tape_width_mm: f64,
+    tape_pitch_mm: f64,
+) -> Result<GrayFrame> {
+    ensure!(
+        mosaic.width >= 2
+            && mosaic.height >= 2
+            && mosaic.pixels.len() == mosaic.width as usize * mosaic.height as usize,
+        "workspace source mosaic is invalid"
+    );
+    ensure!(
+        raster.x_mm_per_pixel.is_finite()
+            && raster.y_mm_per_pixel.is_finite()
+            && raster.x_mm_per_pixel > 0.0
+            && raster.y_mm_per_pixel < 0.0,
+        "workspace source raster transform is invalid"
+    );
+    ensure!(
+        pocket_machine_mm.iter().all(|value| value.is_finite())
+            && tape_rotation_deg.is_finite()
+            && tape_width_mm.is_finite()
+            && tape_width_mm >= 8.0
+            && tape_pitch_mm.is_finite()
+            && tape_pitch_mm >= 2.0,
+        "workspace source pocket geometry is invalid"
+    );
+    let radians = tape_rotation_deg.to_radians();
+    let along = [radians.cos(), radians.sin()];
+    let cross = [-along[1], along[0]];
+    let cross_span_mm = tape_width_mm + 2.0 * LIVE_HOLDOUT_CROSS_MARGIN_MM;
+    let along_span_mm = (tape_pitch_mm * 3.0).max(12.0);
+    let output_mm_per_pixel = raster.x_mm_per_pixel.abs().max(raster.y_mm_per_pixel.abs());
+    ensure!(
+        output_mm_per_pixel <= 0.08,
+        "workspace source mosaic resolution is too low for component inference"
+    );
+    let width = (cross_span_mm / output_mm_per_pixel).round().max(64.0) as u32;
+    let height = (along_span_mm / output_mm_per_pixel).round().max(64.0) as u32;
+    let machine_to_pixel = |machine: [f64; 2]| {
+        [
+            (machine[0] - raster.top_left_x_mm) / raster.x_mm_per_pixel,
+            (machine[1] - raster.top_left_y_mm) / raster.y_mm_per_pixel,
+        ]
+    };
+    let corner_pixels = [
+        [-0.5 * cross_span_mm, -0.5 * along_span_mm],
+        [0.5 * cross_span_mm, -0.5 * along_span_mm],
+        [0.5 * cross_span_mm, 0.5 * along_span_mm],
+        [-0.5 * cross_span_mm, 0.5 * along_span_mm],
+    ]
+    .map(|offset| {
+        machine_to_pixel(add(
+            pocket_machine_mm,
+            add(scale(cross, offset[0]), scale(along, offset[1])),
+        ))
+    });
+    ensure!(
+        corner_pixels.iter().all(|pixel| {
+            pixel[0] >= 0.0
+                && pixel[1] >= 0.0
+                && pixel[0] < f64::from(mosaic.width - 1)
+                && pixel[1] < f64::from(mosaic.height - 1)
+        }),
+        "workspace source pocket crop is outside the rescan mosaic"
+    );
+
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        let along_mm =
+            (f64::from(y) + 0.5) / f64::from(height) * along_span_mm - 0.5 * along_span_mm;
+        for x in 0..width {
+            let cross_mm =
+                (f64::from(x) + 0.5) / f64::from(width) * cross_span_mm - 0.5 * cross_span_mm;
+            let machine = add(
+                pocket_machine_mm,
+                add(scale(cross, cross_mm), scale(along, along_mm)),
+            );
+            let pixel = machine_to_pixel(machine);
+            pixels.push(bilinear_luma(mosaic, pixel[0], pixel[1]));
+        }
+    }
+    Ok(GrayFrame {
+        width,
+        height,
+        pixels,
+    })
 }
 
 /// Rectifies one source pocket and produces a draft component label.
@@ -4317,8 +4412,37 @@ mod tests {
             }),
             known_fixture_id: None,
             evidence_artifact_name: Some("object-evidence-002.png".into()),
+            feeder_lane_slots: Vec::new(),
             design_matches: Vec::new(),
         }
+    }
+
+    #[test]
+    fn workspace_source_crop_keeps_the_selected_pocket_centered() {
+        let width = 500_u32;
+        let height = 500_u32;
+        let pixels = (0..height)
+            .flat_map(|row| (0..width).map(move |column| ((row + column) % 256) as u8))
+            .collect::<Vec<_>>();
+        let mosaic = GrayFrame {
+            width,
+            height,
+            pixels,
+        };
+        let raster = WorkspaceRasterTransform {
+            top_left_x_mm: 0.0,
+            top_left_y_mm: 25.0,
+            x_mm_per_pixel: 0.05,
+            y_mm_per_pixel: -0.05,
+        };
+
+        let crop =
+            crop_workspace_source_component(&mosaic, raster, [12.5, 12.5], 90.0, 8.0, 4.0).unwrap();
+
+        assert_eq!(crop.width, 280);
+        assert_eq!(crop.height, 240);
+        let center = crop.pixels[((crop.height / 2) * crop.width + crop.width / 2) as usize];
+        assert!(center.abs_diff(mosaic.pixels[(250 * width + 250) as usize]) <= 2);
     }
 
     fn synthetic_tape_bank() -> GrayFrame {

@@ -6,11 +6,14 @@ import type {
 import { api, waitForOperation } from "./api";
 import { useDialog } from "./Dialog";
 import type {
-  BoardDesign, BoardInstance, Job, JobExecutionRun, MachineOverlayGeometry,
-  MachineStatus, PlacementExecutionRun, PlacementOutcomeRecord, Pose,
-  StripFeederMapRegistration,
-  WorkspaceBoardDiscoveryReport, WorkspaceDisplayPatch, WorkspaceObjectClass,
-  WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanSummary,
+  BoardDesign, BoardInstance, BoardPopulationRefreshReport, Job, JobExecutionRun,
+  MachineOverlayGeometry, MachineStatus, PlacementExecutionRun,
+  PlacementOutcomeRecord, Pose,
+  StripFeederLaneProposal, StripFeederMapRegistration,
+  WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport, WorkspaceDisplayPatch,
+  WorkspaceObjectClass,
+  WorkspaceFeederLaneSlot, WorkspaceScanRegion, WorkspaceScanReport,
+  WorkspaceScanSummary,
 } from "./types";
 
 type WorkspaceLayer =
@@ -21,7 +24,7 @@ const WORKSPACE_LAYERS: Array<{ id: WorkspaceLayer; label: string }> = [
   { id: "objects", label: "Detected objects" },
   { id: "boards", label: "Job boards" },
   { id: "placements", label: "Placement positions" },
-  { id: "feeders", label: "Feeder pockets" },
+  { id: "feeders", label: "Feeder lanes / pockets" },
   { id: "machine", label: "Machine position" },
 ];
 
@@ -69,13 +72,13 @@ interface PlacementMarker {
   boardId: string;
   boardLabel: string;
   boardPoints: Array<[number, number]>;
-  status: "populated" | "unpopulated";
+  status: "populated" | "unpopulated" | "uncertain";
   current: boolean;
   rotationDeg: number;
 }
 
 type WorkspaceSelectionKind =
-  | "feeder" | "board" | "pocket" | "placement" | "point";
+  | "feeder" | "feeder_slot" | "board" | "pocket" | "placement" | "point";
 
 interface WorkspaceSelection {
   kind: WorkspaceSelectionKind;
@@ -84,6 +87,24 @@ interface WorkspaceSelection {
   point: [number, number];
   scanRegion: WorkspaceScanRegion | null;
   objectId: string | null;
+}
+
+interface WorkspaceFeederSlotTarget {
+  id: string;
+  label: string;
+  slot: WorkspaceFeederLaneSlot;
+}
+
+interface WorkspaceFeederBank {
+  bankIndex: number;
+  label: string;
+  candidate: WorkspaceBoardCandidate;
+}
+
+interface WorkspaceFeederLaneTarget {
+  feeder: StripFeederMapRegistration;
+  label: string;
+  bankOutline: Array<[number, number]> | null;
 }
 
 interface WorkspaceRescanProgress {
@@ -242,6 +263,75 @@ export function feederScanRegion(
   );
 }
 
+export function feederLaneOutline(
+  feeder: StripFeederMapRegistration,
+  bankOutline: Array<[number, number]> | null = null,
+): Array<[number, number]> {
+  if (feeder.pockets.length === 0) return [];
+  const radians = feeder.tape_rotation_deg * Math.PI / 180;
+  const axis: [number, number] = [Math.cos(radians), Math.sin(radians)];
+  const normal: [number, number] = [-axis[1], axis[0]];
+  const along = feeder.pockets.map((pocket) =>
+    pocket.center_machine_mm[0] * axis[0]
+      + pocket.center_machine_mm[1] * axis[1]
+  );
+  const across = feeder.pockets.map((pocket) =>
+    pocket.center_machine_mm[0] * normal[0]
+      + pocket.center_machine_mm[1] * normal[1]
+  );
+  const centerAcross = across.reduce((sum, value) => sum + value, 0)
+    / across.length;
+  const bankAlong = bankOutline?.map((point) =>
+    point[0] * axis[0] + point[1] * axis[1]
+  ) ?? [];
+  const start = bankAlong.length > 0 ? Math.min(...bankAlong) : Math.min(...along) - 2;
+  const end = bankAlong.length > 0 ? Math.max(...bankAlong) : Math.max(...along) + 2;
+  const halfWidth = feeder.tape_width_mm / 2;
+  return [
+    [start, centerAcross - halfWidth],
+    [end, centerAcross - halfWidth],
+    [end, centerAcross + halfWidth],
+    [start, centerAcross + halfWidth],
+  ].map(([alongValue, acrossValue]) => [
+    axis[0] * alongValue + normal[0] * acrossValue,
+    axis[1] * alongValue + normal[1] * acrossValue,
+  ]);
+}
+
+function pointToSegmentDistance(
+  point: [number, number],
+  segment: [[number, number], [number, number]],
+): number {
+  const delta = [
+    segment[1][0] - segment[0][0],
+    segment[1][1] - segment[0][1],
+  ];
+  const lengthSquared = delta[0] ** 2 + delta[1] ** 2;
+  const fraction = lengthSquared > 0
+    ? Math.min(1, Math.max(0, (
+      (point[0] - segment[0][0]) * delta[0]
+        + (point[1] - segment[0][1]) * delta[1]
+    ) / lengthSquared))
+    : 0;
+  return Math.hypot(
+    point[0] - (segment[0][0] + fraction * delta[0]),
+    point[1] - (segment[0][1] + fraction * delta[1]),
+  );
+}
+
+export function nearestFeederProposal(
+  proposals: StripFeederLaneProposal[],
+  point: [number, number],
+): StripFeederLaneProposal | null {
+  return proposals
+    .filter((proposal) => proposal.pick_centerline_machine_mm !== null)
+    .sort((left, right) => pointToSegmentDistance(
+      point, left.pick_centerline_machine_mm!,
+    ) - pointToSegmentDistance(
+      point, right.pick_centerline_machine_mm!,
+    ))[0] ?? null;
+}
+
 function jobBoardPolygons(job: Job | null, designs: BoardDesign[]): MapPolygon[] {
   if (!job) return [];
   return job.boards.flatMap((board) => {
@@ -265,6 +355,7 @@ export function jobPlacementMarkers(
   designs: BoardDesign[],
   jobs: Job[] = [],
   outcomes: PlacementOutcomeRecord[] = [],
+  boardPopulation: BoardPopulationRefreshReport[] = [],
 ): PlacementMarker[] {
   if (!job) return [];
   const compatibleJobIds = new Set(
@@ -278,9 +369,45 @@ export function jobPlacementMarkers(
         outcome.operator_disposition ?? outcome.automatic_disposition,
       ))
     .map((outcome) => outcome.placement_reference));
+  const latestPhysicalEvidence = new Map<string, string>();
+  for (const outcome of outcomes.filter((outcome) =>
+    compatibleJobIds.has(outcome.job_id)
+  )) {
+    const current = latestPhysicalEvidence.get(outcome.placement_reference);
+    if (!current || outcome.updated_at > current) {
+      latestPhysicalEvidence.set(outcome.placement_reference, outcome.updated_at);
+    }
+  }
   for (const step of execution?.steps ?? []) {
     if (step.status === "succeeded") {
       populatedReferences.add(step.placement_reference);
+      const current = latestPhysicalEvidence.get(step.placement_reference);
+      if (execution && (!current || execution.updated_at > current)) {
+        latestPhysicalEvidence.set(step.placement_reference, execution.updated_at);
+      }
+    }
+  }
+  const latestPopulation = new Map<string, {
+    createdAt: string;
+    occupancy: "populated" | "empty" | "uncertain";
+  }>();
+  for (const report of boardPopulation.filter((report) => report.job_id === job.id)) {
+    const instance = job.boards.find((board) =>
+      board.id === report.board_instance_id
+        && board.board_id === report.board_design_id
+        && board.design_to_machine?.matrix.every(
+          (value, index) => value === report.design_to_machine.matrix[index],
+        ));
+    if (!instance) continue;
+    for (const observation of report.observations) {
+      const key = `${instance.id}:${observation.placement_reference}`;
+      const current = latestPopulation.get(key);
+      if (!current || report.created_at > current.createdAt) {
+        latestPopulation.set(key, {
+          createdAt: report.created_at,
+          occupancy: observation.occupancy,
+        });
+      }
     }
   }
   return job.boards.flatMap((board) => {
@@ -301,6 +428,14 @@ export function jobPlacementMarkers(
         const step = execution?.steps.find(
           (candidate) => candidate.placement_reference === placement.reference,
         );
+        const scanEvidence = latestPopulation.get(
+          `${board.id}:${placement.reference}`,
+        );
+        const scanned = scanEvidence
+          && scanEvidence.createdAt
+            >= (latestPhysicalEvidence.get(placement.reference) ?? "")
+          ? scanEvidence
+          : undefined;
         return {
           id: `${board.id}-${placement.reference}`,
           reference: placement.reference,
@@ -308,8 +443,10 @@ export function jobPlacementMarkers(
           boardId: board.id,
           boardLabel: board.label,
           boardPoints,
-          status: populatedReferences.has(placement.reference)
-            ? "populated" : "unpopulated",
+          status: scanned?.occupancy === "populated"
+              || (!scanned && populatedReferences.has(placement.reference))
+            ? "populated"
+            : scanned?.occupancy === "uncertain" ? "uncertain" : "unpopulated",
           current: step?.step_index === execution?.current_step_index,
           rotationDeg: Math.atan2(matrix[3], matrix[0]) * 180 / Math.PI
             + placement.pose.rotation_deg,
@@ -461,6 +598,153 @@ export function latestFeederLanes(
   return selected;
 }
 
+export function workspaceFeederBanks(
+  discovery: WorkspaceBoardDiscoveryReport | null,
+): WorkspaceFeederBank[] {
+  return (discovery?.candidates ?? [])
+    .filter((candidate) => candidateClass(candidate) === "feeder")
+    .sort((left, right) => left.center_x_mm - right.center_x_mm
+      || left.center_y_mm - right.center_y_mm)
+    .map((candidate, bankIndex) => ({
+      bankIndex,
+      label: `Feeder Bank ${bankIndex + 1}`,
+      candidate,
+    }));
+}
+
+function feederCenter(feeder: StripFeederMapRegistration): [number, number] {
+  return feeder.pockets.reduce<[number, number]>(
+    (sum, pocket) => [
+      sum[0] + pocket.center_machine_mm[0],
+      sum[1] + pocket.center_machine_mm[1],
+    ],
+    [0, 0],
+  ).map((value) => value / Math.max(feeder.pockets.length, 1)) as [number, number];
+}
+
+function feederIsInBank(
+  feeder: StripFeederMapRegistration,
+  bank: WorkspaceFeederBank,
+): boolean {
+  const [xMm, yMm] = feederCenter(feeder);
+  return xMm >= bank.candidate.region.x_min_mm
+    && xMm <= bank.candidate.region.x_max_mm
+    && yMm >= bank.candidate.region.y_min_mm
+    && yMm <= bank.candidate.region.y_max_mm;
+}
+
+function feederBankIsVertical(bank: WorkspaceFeederBank): boolean {
+  return bank.candidate.region.y_max_mm - bank.candidate.region.y_min_mm
+    >= bank.candidate.region.x_max_mm - bank.candidate.region.x_min_mm;
+}
+
+function feederBankLaneAnchors(
+  bank: WorkspaceFeederBank,
+  feeders: StripFeederMapRegistration[],
+): number[] {
+  const coordinateIndex = feederBankIsVertical(bank) ? 0 : 1;
+  const coordinates = [
+    ...(bank.candidate.feeder_lane_slots ?? []).map(
+      (slot) => polygonCenter(slot.outline_machine_mm)[coordinateIndex],
+    ),
+    ...feeders.filter((feeder) => feederIsInBank(feeder, bank)).map(
+      (feeder) => feederCenter(feeder)[coordinateIndex],
+    ),
+  ].sort((left, right) => left - right);
+  const anchors: number[] = [];
+  const clustered: number[][] = [];
+  for (const coordinate of coordinates) {
+    const current = clustered.at(-1);
+    const center = current
+      ? current.reduce((sum, value) => sum + value, 0) / current.length
+      : null;
+    if (current && center !== null && Math.abs(coordinate - center) <= 4) {
+      current.push(coordinate);
+    } else {
+      clustered.push([coordinate]);
+    }
+  }
+  for (const cluster of clustered) {
+    anchors.push(cluster.reduce((sum, value) => sum + value, 0) / cluster.length);
+  }
+  return anchors;
+}
+
+function nearestFeederLaneIndex(coordinate: number, anchors: number[]): number {
+  let nearestIndex = 0;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  anchors.forEach((anchor, index) => {
+    const distance = Math.abs(anchor - coordinate);
+    if (distance < nearestDistance) {
+      nearestIndex = index;
+      nearestDistance = distance;
+    }
+  });
+  return nearestIndex;
+}
+
+export function workspaceFeederLaneTargets(
+  feeders: StripFeederMapRegistration[],
+  banks: WorkspaceFeederBank[],
+): WorkspaceFeederLaneTarget[] {
+  const targets = new Map<string, WorkspaceFeederLaneTarget>();
+  for (const bank of banks) {
+    const coordinateIndex = feederBankIsVertical(bank) ? 0 : 1;
+    const anchors = feederBankLaneAnchors(bank, feeders);
+    feeders.filter((feeder) => feederIsInBank(feeder, bank)).forEach((feeder) => {
+      const laneIndex = nearestFeederLaneIndex(
+        feederCenter(feeder)[coordinateIndex], anchors,
+      );
+      targets.set(feeder.id, {
+        feeder,
+        label: `${bank.label} - lane ${laneIndex + 1}`,
+        bankOutline: bank.candidate.outline_machine_mm,
+      });
+    });
+  }
+  return feeders.map((feeder) => targets.get(feeder.id) ?? {
+    feeder,
+    label: feeder.name,
+    bankOutline: null,
+  });
+}
+
+export function normalizeFeederSlotToBank(
+  slot: WorkspaceFeederLaneSlot,
+  bankOutline: Array<[number, number]>,
+): WorkspaceFeederLaneSlot {
+  const delta = [
+    slot.centerline_machine_mm[1][0] - slot.centerline_machine_mm[0][0],
+    slot.centerline_machine_mm[1][1] - slot.centerline_machine_mm[0][1],
+  ];
+  const length = Math.hypot(delta[0], delta[1]);
+  if (length <= 0 || bankOutline.length === 0) return slot;
+  const axis: [number, number] = [delta[0] / length, delta[1] / length];
+  const normal: [number, number] = [-axis[1], axis[0]];
+  const along = bankOutline.map((point) => point[0] * axis[0] + point[1] * axis[1]);
+  const across = slot.outline_machine_mm.map(
+    (point) => point[0] * normal[0] + point[1] * normal[1],
+  );
+  const start = Math.min(...along);
+  const end = Math.max(...along);
+  const crossMin = Math.min(...across);
+  const crossMax = Math.max(...across);
+  const centerAcross = (crossMin + crossMax) / 2;
+  const point = (alongValue: number, acrossValue: number): [number, number] => [
+    axis[0] * alongValue + normal[0] * acrossValue,
+    axis[1] * alongValue + normal[1] * acrossValue,
+  ];
+  return {
+    ...slot,
+    centerline_machine_mm: [point(start, centerAcross), point(end, centerAcross)],
+    outline_machine_mm: [
+      point(start, crossMin), point(end, crossMin),
+      point(end, crossMax), point(start, crossMax),
+    ],
+    length_mm: end - start,
+  };
+}
+
 export function zoomWorkspaceViewport(
   current: WorkspaceViewport,
   full: WorkspaceViewport,
@@ -553,6 +837,9 @@ export function WorkspacePanel({
   const [executions, setExecutions] = useState<JobExecutionRun[]>([]);
   const [placementOutcomes, setPlacementOutcomes] = useState<
     PlacementOutcomeRecord[]
+  >([]);
+  const [boardPopulation, setBoardPopulation] = useState<
+    BoardPopulationRefreshReport[]
   >([]);
   const [designs, setDesigns] = useState<BoardDesign[]>([]);
   const [feederRegistrations, setFeederRegistrations] = useState<
@@ -682,14 +969,19 @@ export function WorkspacePanel({
 
   const loadOperationalData = useCallback(async () => {
     try {
-      const [jobValues, executionValues, designValues, outcomeValues]
+      const [
+        jobValues, executionValues, designValues, outcomeValues,
+        populationValues,
+      ]
         = await Promise.all([
           api.jobs(), api.jobExecutions(), api.boards(), api.placementOutcomes(),
+          api.boardPopulationRefreshes(),
       ]);
       setJobs(jobValues);
       setExecutions(executionValues);
       setDesigns(designValues);
       setPlacementOutcomes(outcomeValues);
+      setBoardPopulation(populationValues);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -732,7 +1024,7 @@ export function WorkspacePanel({
       if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
     });
     return () => { cancelled = true; };
-  }, [selectedScanId, selectedSummary?.status, setError]);
+  }, [selectedScanId, selectedSummary?.status, selectedSummary?.updated_at, setError]);
 
   useEffect(() => {
     setMachineGeometry(null);
@@ -789,7 +1081,10 @@ export function WorkspacePanel({
       if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
     });
     return () => { cancelled = true; };
-  }, [selectedScan?.id, selectedScan?.board_discovery?.report_artifact_name, setError]);
+  }, [
+    selectedScan?.id, selectedScan?.updated_at,
+    selectedScan?.board_discovery?.report_artifact_name, setError,
+  ]);
 
   const activeExecution = useMemo(
     () => selectActiveJobExecution(executions),
@@ -807,8 +1102,12 @@ export function WorkspacePanel({
   const placementMarkers = useMemo(
     () => jobPlacementMarkers(
       workspaceJob, activeExecution, designs, jobs, placementOutcomes,
+      boardPopulation,
     ),
-    [activeExecution, designs, jobs, placementOutcomes, workspaceJob],
+    [
+      activeExecution, boardPopulation, designs, jobs, placementOutcomes,
+      workspaceJob,
+    ],
   );
   const feederLanes = useMemo(
     () => latestFeederLanes(
@@ -816,6 +1115,33 @@ export function WorkspacePanel({
     ),
     [feederRegistrations, selectedSummary, status.profile_id],
   );
+  const feederBanks = useMemo(() => workspaceFeederBanks(discovery), [discovery]);
+  const feederLaneTargets = useMemo(
+    () => workspaceFeederLaneTargets(feederLanes, feederBanks),
+    [feederBanks, feederLanes],
+  );
+  const feederSlots = useMemo(() => feederBanks.flatMap((bank) => {
+    const vertical = feederBankIsVertical(bank);
+    const coordinateIndex = vertical ? 0 : 1;
+    const anchors = feederBankLaneAnchors(bank, feederLanes);
+    return [...(bank.candidate.feeder_lane_slots ?? [])]
+      .sort((left, right) => {
+        const leftCenter = polygonCenter(left.outline_machine_mm);
+        const rightCenter = polygonCenter(right.outline_machine_mm);
+        return leftCenter[vertical ? 0 : 1] - rightCenter[vertical ? 0 : 1];
+      })
+      .map((slot) => ({
+        id: `candidate-${bank.candidate.candidate_index}-slot-${slot.slot_index}`,
+        label: `${bank.label} - lane ${
+          nearestFeederLaneIndex(
+            polygonCenter(slot.outline_machine_mm)[coordinateIndex], anchors,
+          ) + 1
+        }`,
+        slot: normalizeFeederSlotToBank(
+          slot, bank.candidate.outline_machine_mm,
+        ),
+      }));
+  }), [feederBanks]);
   const currentStep = activeExecution?.steps.find(
     (step) => step.step_index === activeExecution.current_step_index,
   ) ?? null;
@@ -976,22 +1302,40 @@ export function WorkspacePanel({
   const selectFeeder = (
     event: WorkspaceActivateEvent,
     feeder: StripFeederMapRegistration,
+    feederLabel: string,
   ) => {
     event.stopPropagation();
     if (!region) return;
     selectTarget({
       kind: "feeder",
       id: feeder.id,
-      label: feeder.name,
+      label: feederLabel,
       point: polygonCenter(feeder.pockets.map((pocket) => pocket.center_machine_mm)),
       scanRegion: feederScanRegion(feeder, region),
       objectId: feeder.id,
     });
   };
 
+  const selectFeederSlot = (
+    event: WorkspaceActivateEvent,
+    target: WorkspaceFeederSlotTarget,
+  ) => {
+    event.stopPropagation();
+    if (!region) return;
+    selectTarget({
+      kind: "feeder_slot",
+      id: target.id,
+      label: target.label,
+      point: polygonCenter(target.slot.outline_machine_mm),
+      scanRegion: paddedRegion(target.slot.outline_machine_mm, region, 6),
+      objectId: null,
+    });
+  };
+
   const selectPocket = (
     event: WorkspaceActivateEvent,
     feeder: StripFeederMapRegistration,
+    feederLabel: string,
     pocket: StripFeederMapRegistration["pockets"][number],
   ) => {
     event.stopPropagation();
@@ -999,7 +1343,7 @@ export function WorkspacePanel({
     selectTarget({
       kind: "pocket",
       id: `${feeder.id}-${pocket.pocket_index}`,
-      label: `${feeder.name} · pocket ${pocket.pocket_index}`,
+      label: `${feederLabel} · pocket ${pocket.pocket_index}`,
       point: pocket.center_machine_mm,
       scanRegion: feederScanRegion(feeder, region),
       objectId: feeder.id,
@@ -1078,7 +1422,7 @@ export function WorkspacePanel({
       ? "the full PCB around this placement"
       : selection.kind === "pocket"
         ? "the feeder strip around this pocket"
-        : selection.kind === "board" ? "this PCB" : "this feeder strip";
+        : selection.kind === "board" ? "this PCB" : "this feeder lane";
     setSelectionAction("estimating");
     setSelectionMessage("Estimating rescan…");
     setQuickCaptureUrl("");
@@ -1144,8 +1488,11 @@ export function WorkspacePanel({
         capturedTiles: current.plannedTiles,
         status: "succeeded",
       } : current);
-      if (selection.kind === "feeder" || selection.kind === "pocket") {
-        setSelectionMessage("Checking feeder alignment…");
+      let rescanObjectId = selection.objectId;
+      let feederResultMessage = "";
+      let boardResultMessage = "";
+      if (["feeder", "feeder_slot", "pocket"].includes(selection.kind)) {
+        setSelectionMessage("Detecting feeder tape and pocket occupancy…");
         const discoveryReport = await api.discoverWorkspaceObjects(started.scan.id);
         const candidates = discoveryReport.candidates.filter((candidate) => {
           const classification = candidate.classification;
@@ -1161,17 +1508,102 @@ export function WorkspacePanel({
           right.center_y_mm - selection.point[1],
         ));
         if (candidates[0]) {
-          await api.analyzeStripFeeder(started.scan.id, candidates[0].candidate_index);
+          const vision = await api.analyzeStripFeeder(
+            started.scan.id, candidates[0].candidate_index,
+          );
+          const proposal = nearestFeederProposal(vision.proposals, selection.point);
+          if (proposal) {
+            if (!rescanObjectId) {
+              const existing = feederLanes.find((feeder) => {
+                if (feeder.pockets.length < 2) return false;
+                const segment: [[number, number], [number, number]] = [
+                  feeder.pockets[0].center_machine_mm,
+                  feeder.pockets[feeder.pockets.length - 1].center_machine_mm,
+                ];
+                return pointToSegmentDistance(selection.point, segment)
+                  <= feeder.tape_width_mm * .6;
+              });
+              if (existing) {
+                rescanObjectId = existing.id;
+              } else {
+                const registration = await api.createStripFeederDraft(
+                  started.scan.id,
+                  candidates[0].candidate_index,
+                  proposal.proposal_index,
+                  undefined,
+                  undefined,
+                  selection.label,
+                );
+                rescanObjectId = registration.id;
+                feederResultMessage = "Tape was detected and a feeder draft was created.";
+              }
+            }
+            const occupancy = await api.refreshStripFeederOccupancy(
+              started.scan.id,
+              candidates[0].candidate_index,
+              rescanObjectId,
+            );
+            const modelObservationCount = occupancy.observations.filter(
+              (observation) => observation.model_prediction !== null,
+            ).length;
+            feederResultMessage = [
+              feederResultMessage,
+              `${occupancy.observations.length} operational pocket states were refreshed.`,
+              modelObservationCount > 0
+                ? `Model evidence was available for ${modelObservationCount}.`
+                : occupancy.model_available
+                  ? "The model did not produce usable evidence."
+                  : "The model was not available.",
+            ].filter(Boolean).join(" ");
+            await loadFeederData();
+          } else {
+            feederResultMessage = "No carrier tape was detected in the selected lane.";
+          }
+        } else {
+          feederResultMessage = "No feeder lane was detected in the rescan.";
         }
+      } else if (["board", "placement"].includes(selection.kind)) {
+        const board = workspaceJob?.boards.find(
+          (candidate) => candidate.id === selection.objectId,
+        );
+        if (!workspaceJob || !board) {
+          throw new Error("The selected PCB is not part of the current workspace job.");
+        }
+        setSelectionMessage("Detecting board population…");
+        const population = await api.refreshBoardPopulation(
+          started.scan.id,
+          workspaceJob.id,
+          board.id,
+        );
+        const populated = population.observations.filter(
+          (observation) => observation.occupancy === "populated",
+        ).length;
+        const empty = population.observations.filter(
+          (observation) => observation.occupancy === "empty",
+        ).length;
+        const review = population.observations.filter(
+          (observation) => observation.review_required,
+        ).length;
+        boardResultMessage = [
+          `${population.observations.length} placement states were refreshed.`,
+          `${populated} populated, ${empty} empty.`,
+          review > 0 ? `${review} require review.` : "",
+        ].filter(Boolean).join(" ");
+        await loadOperationalData();
       }
       setSelectionMessage("Checking alignment…");
       const patches = await loadDisplayPatches();
       const accepted = patches.some((patch) =>
         patch.source_scan_id === started.scan.id
-          && patch.object_id === selection.objectId);
-      setSelectionMessage(accepted
-        ? "Rescan complete. The aligned image is now shown."
-        : "Rescan complete. Alignment checks did not accept an image update.");
+          && patch.object_id === rescanObjectId);
+      setSelectionMessage([
+        "Rescan complete.",
+        feederResultMessage,
+        boardResultMessage,
+        accepted
+          ? "The aligned image is now shown."
+          : "Alignment checks did not accept an image update.",
+      ].filter(Boolean).join(" "));
       await loadScanSummaries();
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
@@ -1475,9 +1907,37 @@ export function WorkspacePanel({
                 ([xMm, yMm]) => `${xMm},${-yMm}`,
               ).join(" ")}
             >
-              <title>{`${label(candidateClass(candidate))} ${candidate.candidate_index + 1}`}</title>
+              <title>{feederBanks.find(
+                (bank) => bank.candidate.candidate_index === candidate.candidate_index,
+              )?.label ?? `${label(candidateClass(candidate))} ${candidate.candidate_index + 1}`}</title>
             </polygon>
           )}
+
+          {layers.feeders && feederSlots.map((target) => <g
+            aria-label={`${target.label} recognized feeder slot`}
+            className={`workspace-selectable workspace-feeder-slot ${selection?.kind === "feeder_slot" && selection.id === target.id ? "is-selected" : ""}`}
+            key={target.id}
+            onClick={(event) => selectFeederSlot(event, target)}
+            onKeyDown={(event) => activateOnKeyboard(
+              event, () => selectFeederSlot(event, target),
+            )}
+            role="button"
+            tabIndex={0}
+          >
+            <title>{`${target.label} · ${target.slot.width_mm.toFixed(1)} mm physical slot${target.slot.review_required ? " · review" : ""}`}</title>
+            <polygon
+              className="workspace-feeder-slot-hit"
+              points={target.slot.outline_machine_mm.map(
+                ([xMm, yMm]) => `${xMm},${-yMm}`,
+              ).join(" ")}
+            />
+            <polygon
+              className="workspace-feeder-slot-boundary"
+              points={target.slot.outline_machine_mm.map(
+                ([xMm, yMm]) => `${xMm},${-yMm}`,
+              ).join(" ")}
+            />
+          </g>)}
 
           {layers.boards && boardPolygons.map((board) => <g
             className={selection?.kind === "board" && selection.id === board.id
@@ -1522,52 +1982,70 @@ export function WorkspacePanel({
             <title>{`${placement.reference}: ${placement.status}`}</title>
           </g>)}
 
-          {layers.feeders && feederLanes.map((feeder) => <g
-            className={`workspace-selectable workspace-feeder-pockets ${selection?.kind === "feeder" && selection.id === feeder.id ? "is-selected" : ""}`}
-            key={feeder.id}
-            onClick={(event) => selectFeeder(event, feeder)}
+          {layers.feeders && feederLaneTargets.map((target) => <g
+            aria-label={`${target.label} feeder lane`}
+            className={`workspace-selectable workspace-feeder-pockets ${selection?.kind === "feeder" && selection.id === target.feeder.id ? "is-selected" : ""}`}
+            key={target.feeder.id}
+            onClick={(event) => selectFeeder(event, target.feeder, target.label)}
             onKeyDown={(event) => activateOnKeyboard(
               event,
-              () => selectFeeder(event, feeder),
+              () => selectFeeder(event, target.feeder, target.label),
             )}
             role="button"
             tabIndex={0}
           >
+            <title>{`${target.label} recognized feeder lane`}</title>
+            <polygon
+              className="workspace-feeder-lane-hit"
+              points={feederLaneOutline(target.feeder, target.bankOutline).map(
+                ([xMm, yMm]) => `${xMm},${-yMm}`,
+              ).join(" ")}
+            />
+            <polygon
+              className="workspace-feeder-lane-boundary"
+              points={feederLaneOutline(target.feeder, target.bankOutline).map(
+                ([xMm, yMm]) => `${xMm},${-yMm}`,
+              ).join(" ")}
+            />
             <polyline
               className="workspace-feeder-hit"
-              points={feeder.pockets.map(
+              points={target.feeder.pockets.map(
                 (pocket) => `${pocket.center_machine_mm[0]},${-pocket.center_machine_mm[1]}`,
               ).join(" ")}
             />
-            <polyline points={feeder.pockets.map(
+            <polyline points={target.feeder.pockets.map(
               (pocket) => `${pocket.center_machine_mm[0]},${-pocket.center_machine_mm[1]}`,
             ).join(" ")} />
-            {feeder.pockets.map((pocket) => <circle
+            {target.feeder.pockets.map((pocket) => <circle
               className="workspace-pocket-hit"
               cx={pocket.center_machine_mm[0]}
               cy={-pocket.center_machine_mm[1]}
               key={`hit-${pocket.pocket_index}`}
-              onClick={(event) => selectPocket(event, feeder, pocket)}
+              onClick={(event) => selectPocket(
+                event, target.feeder, target.label, pocket,
+              )}
               r={Math.max(markerSize * .38, .8)}
             />)}
-            {feeder.pockets.map((pocket) => <circle
+            {target.feeder.pockets.map((pocket) => <circle
               key={pocket.pocket_index}
-              className={`${pocket.occupancy} status-${pocket.status} ${pocket.selected ? "selected" : ""} ${selection?.kind === "pocket" && selection.id === `${feeder.id}-${pocket.pocket_index}` ? "is-user-selected" : ""}`}
+              className={`${pocket.occupancy} status-${pocket.status} ${pocket.selected ? "selected" : ""} ${selection?.kind === "pocket" && selection.id === `${target.feeder.id}-${pocket.pocket_index}` ? "is-user-selected" : ""}`}
               cx={pocket.center_machine_mm[0]}
               cy={-pocket.center_machine_mm[1]}
-              onClick={(event) => selectPocket(event, feeder, pocket)}
+              onClick={(event) => selectPocket(
+                event, target.feeder, target.label, pocket,
+              )}
               onKeyDown={(event) => activateOnKeyboard(
                 event,
-                () => selectPocket(event, feeder, pocket),
+                () => selectPocket(event, target.feeder, target.label, pocket),
               )}
               r={selection?.kind === "pocket"
-                  && selection.id === `${feeder.id}-${pocket.pocket_index}`
+                  && selection.id === `${target.feeder.id}-${pocket.pocket_index}`
                 ? placementMarkerRadius
                 : Math.max(markerSize * .38, .8)}
               role="button"
               tabIndex={0}
             >
-              <title>{`${feeder.name} · pocket ${pocket.pocket_index} · ${pocket.occupancy} · ${label(pocket.status)}`}</title>
+              <title>{`${target.label} · pocket ${pocket.pocket_index} · ${pocket.occupancy}${pocket.occupancy_source === "workspace_rescan" ? " from workspace rescan" : ""}${pocket.occupancy_review_required ? " · review" : ""} · ${label(pocket.status)}`}</title>
             </circle>)}
           </g>)}
 
@@ -1754,7 +2232,10 @@ export function WorkspacePanel({
             onClick={() => setSelection(null)}
             type="button"
           >×</button>
-          <p className="eyebrow">{label(selection.kind)}</p>
+          <p className="eyebrow">
+            {["feeder", "feeder_slot"].includes(selection.kind)
+              ? "Feeder lane" : label(selection.kind)}
+          </p>
           <h3>{selection.label}</h3>
           <p className="workspace-selection-coordinate">
             X {selection.point[0].toFixed(2)} · Y {selection.point[1].toFixed(2)} mm
@@ -1825,7 +2306,7 @@ export function WorkspacePanel({
       <div className="workspace-legend">
         <div className="workspace-legend-group">
           <strong>Objects</strong>
-          <span className="legend-feeder">Feeder</span>
+          <span className="legend-feeder">Feeder lane</span>
           <span className="legend-board">Board</span>
           <span className="legend-fiducial">Machine fiducial</span>
           <span className="legend-unknown">Unknown</span>

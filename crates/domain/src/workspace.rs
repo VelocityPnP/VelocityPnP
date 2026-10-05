@@ -323,6 +323,22 @@ pub struct WorkspaceObjectClassification {
     pub evidence: Vec<WorkspaceClassificationEvidence>,
 }
 
+/// One physical feeder slot measured from its two long guide rails.
+///
+/// A slot can be empty. Carrier-tape and pocket recognition are separate and
+/// occur after tape is present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceFeederLaneSlot {
+    pub slot_index: u32,
+    pub centerline_machine_mm: [[f64; 2]; 2],
+    pub outline_machine_mm: Vec<[f64; 2]>,
+    pub width_mm: f64,
+    pub length_mm: f64,
+    pub rotation_deg: f64,
+    pub confidence: f64,
+    pub review_required: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceBoardCandidate {
     pub candidate_index: u32,
@@ -352,6 +368,8 @@ pub struct WorkspaceBoardCandidate {
     pub known_fixture_id: Option<String>,
     #[serde(default)]
     pub evidence_artifact_name: Option<String>,
+    #[serde(default)]
+    pub feeder_lane_slots: Vec<WorkspaceFeederLaneSlot>,
     #[serde(default)]
     pub design_matches: Vec<WorkspaceBoardDesignMatch>,
 }
@@ -461,6 +479,81 @@ pub struct StripFeederVisionReport {
     pub proposals: Vec<StripFeederLaneProposal>,
     #[serde(default)]
     pub rejected_lattices: Vec<StripFeederRejectedLattice>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// One pocket observation made from a targeted workspace rescan.
+///
+/// The daemon applies this evidence to the persistent operational pocket
+/// state after the deterministic and learned vision policy resolves it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederPocketScanObservation {
+    pub pocket_index: u32,
+    pub center_machine_mm: [f64; 2],
+    pub deterministic_occupancy: crate::StripPocketOccupancy,
+    pub deterministic_confidence: f64,
+    #[serde(default)]
+    pub model_prediction: Option<crate::SourceComponentModelPrediction>,
+    pub occupancy: crate::StripPocketOccupancy,
+    pub confidence: f64,
+    pub review_required: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Persisted occupancy evidence from one targeted feeder-lane rescan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederOccupancyRefreshReport {
+    pub algorithm_version: String,
+    pub source_scan_id: Uuid,
+    pub source_candidate_index: u32,
+    pub source_proposal_index: u32,
+    pub registration_id: Uuid,
+    pub report_artifact_name: String,
+    pub created_at: DateTime<Utc>,
+    pub model_available: bool,
+    pub observations: Vec<StripFeederPocketScanObservation>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Authoritative population state for one planned board placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardPlacementOccupancy {
+    Populated,
+    Empty,
+    Uncertain,
+}
+
+/// One placement observation from a targeted board rescan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardPlacementScanObservation {
+    pub placement_reference: String,
+    pub center_machine_mm: [f64; 2],
+    pub prediction: crate::PlacementVerificationModelPrediction,
+    pub occupancy: BoardPlacementOccupancy,
+    pub confidence: f64,
+    pub review_required: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// Persisted population evidence from one targeted board rescan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardPopulationRefreshReport {
+    pub algorithm_version: String,
+    pub source_scan_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub job_id: Uuid,
+    pub board_instance_id: Uuid,
+    pub board_design_id: Uuid,
+    pub design_to_machine: crate::Transform2d,
+    pub report_artifact_name: String,
+    pub created_at: DateTime<Utc>,
+    pub observations: Vec<BoardPlacementScanObservation>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
