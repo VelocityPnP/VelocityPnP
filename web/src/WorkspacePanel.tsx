@@ -87,6 +87,7 @@ interface WorkspaceSelection {
   point: [number, number];
   scanRegion: WorkspaceScanRegion | null;
   objectId: string | null;
+  pocketIndex?: number;
 }
 
 interface WorkspaceFeederSlotTarget {
@@ -1120,6 +1121,25 @@ export function WorkspacePanel({
     () => workspaceFeederLaneTargets(feederLanes, feederBanks),
     [feederBanks, feederLanes],
   );
+  useEffect(() => {
+    if (selection?.kind !== "pocket"
+        || selection.objectId === null
+        || selection.pocketIndex === undefined) return;
+    const pocket = feederLaneTargets
+      .find((target) => target.feeder.id === selection.objectId)
+      ?.feeder.pockets.find(
+        (candidate) => candidate.pocket_index === selection.pocketIndex,
+      );
+    if (!pocket) return;
+    setSelection((current) => {
+      if (current?.kind !== "pocket"
+          || current.objectId !== selection.objectId
+          || current.pocketIndex !== selection.pocketIndex
+          || current.point[0] === pocket.center_machine_mm[0]
+            && current.point[1] === pocket.center_machine_mm[1]) return current;
+      return { ...current, point: pocket.center_machine_mm };
+    });
+  }, [feederLaneTargets, selection]);
   const feederSlots = useMemo(() => feederBanks.flatMap((bank) => {
     const vertical = feederBankIsVertical(bank);
     const coordinateIndex = vertical ? 0 : 1;
@@ -1347,6 +1367,7 @@ export function WorkspacePanel({
       point: pocket.center_machine_mm,
       scanRegion: feederScanRegion(feeder, region),
       objectId: feeder.id,
+      pocketIndex: pocket.pocket_index,
     });
   };
 
@@ -1548,7 +1569,7 @@ export function WorkspacePanel({
             ).length;
             feederResultMessage = [
               feederResultMessage,
-              `${occupancy.observations.length} operational pocket states were refreshed.`,
+              `${occupancy.observations.length} pockets were promoted as one lane revision.`,
               modelObservationCount > 0
                 ? `Model evidence was available for ${modelObservationCount}.`
                 : occupancy.model_available

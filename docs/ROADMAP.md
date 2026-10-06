@@ -238,6 +238,9 @@ a failed placement.
   machine pose, scan progress, object, board, and active-placement overlays
 - [x] Gate board and per-lane feeder display patches against registered
   fiducials or pocket lattices, with persisted transforms and residuals
+- [x] Promote each feeder rescan as one atomic lane revision containing the
+  image registration, tape geometry, pocket positions, occupancy, and active
+  feeder plan
 - [ ] Split the remaining monolithic React application into feature-focused
   components and give Feeders clear navigation
 - [ ] Add artifact evidence, operation progress, inspection, and recovery

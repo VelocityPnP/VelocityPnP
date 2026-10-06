@@ -53,8 +53,8 @@ use velocitypnp_domain::{
     PlanarCameraCalibrationSample, PlanarCameraModel, PlanarXyDirectionResponseSurface, Pose,
     Residuals, SensorReading, SourceComponentClass, SourceComponentModelPrediction,
     SourceComponentShadowReport, StripFeederInventoryLane, StripFeederInventoryReport,
-    StripFeederInventorySummary, StripFeederLaneProposal, StripFeederLiveHoldoutRun,
-    StripFeederOccupancyRefreshReport, StripFeederPickupBenchmarkCycle,
+    StripFeederInventorySummary, StripFeederLaneProposal, StripFeederLaneRevision,
+    StripFeederLiveHoldoutRun, StripFeederOccupancyRefreshReport, StripFeederPickupBenchmarkCycle,
     StripFeederPickupDisposition, StripFeederPickupQualificationReport,
     StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
     StripFeederPocketScanObservation, StripFeederPocketState, StripFeederPocketStatus,
@@ -5686,8 +5686,15 @@ fn evaluate_workspace_display_patches(
         .list_workspace_display_patches()
         .map_err(ApiError::internal)?;
     let mut patches = evaluate_board_display_patches(state, base, &scans, &previous)?;
+    let (active_feeder_patches, active_feeders) =
+        evaluate_active_feeder_revision_patches(state, base, &scans, &previous)?;
+    patches.extend(active_feeder_patches);
     patches.extend(evaluate_feeder_display_patches(
-        state, base, &scans, &previous,
+        state,
+        base,
+        &scans,
+        &previous,
+        &active_feeders,
     )?);
     patches.sort_by(|left, right| {
         left.kind
@@ -5859,11 +5866,205 @@ fn evaluate_board_display_patches(
     Ok(patches)
 }
 
+fn evaluate_active_feeder_revision_patches(
+    state: &AppState,
+    base: &WorkspaceScanReport,
+    scans: &[WorkspaceScanReport],
+    previous: &[WorkspaceDisplayPatch],
+) -> ApiResult<(Vec<WorkspaceDisplayPatch>, BTreeSet<Uuid>)> {
+    let registrations = state
+        .store
+        .list_strip_feeder_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|registration| (registration.id, registration))
+        .collect::<HashMap<_, _>>();
+    let scan_by_id = scans
+        .iter()
+        .map(|scan| (scan.id, scan))
+        .collect::<HashMap<_, _>>();
+    let mut reports = state
+        .store
+        .list_strip_feeder_occupancy_refreshes()
+        .map_err(ApiError::internal)?;
+    reports.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let mut seen = BTreeSet::new();
+    let mut active_feeders = BTreeSet::new();
+    let mut patches = Vec::new();
+    for report in reports {
+        if (report.algorithm_version != STRIP_FEEDER_OCCUPANCY_ALGORITHM
+            && report.algorithm_version != "strip_feeder_occupancy_refresh.v1")
+            || !seen.insert(report.registration_id)
+        {
+            continue;
+        }
+        let Some(registration) = registrations.get(&report.registration_id) else {
+            continue;
+        };
+        if registration.profile_id != base.profile_id
+            || registration.calibration_id != base.calibration_id
+            || report.observations.len() < 3
+            || (report.lane_revision.is_none()
+                && report.observations.len() * 5 < registration.pockets.len() * 4)
+        {
+            continue;
+        }
+        active_feeders.insert(report.registration_id);
+        let Some(scan) = scan_by_id.get(&report.source_scan_id) else {
+            continue;
+        };
+        if let Some(revision) = report.lane_revision.as_ref() {
+            if revision.base_scan_id != base.id
+                || revision.profile_id != base.profile_id
+                || revision.calibration_id != base.calibration_id
+            {
+                continue;
+            }
+            patches.push(WorkspaceDisplayPatch {
+                id: revision.display_patch_id,
+                algorithm_version: WORKSPACE_DISPLAY_PATCH_ALGORITHM.into(),
+                base_scan_id: base.id,
+                source_scan_id: report.source_scan_id,
+                profile_id: revision.profile_id.clone(),
+                calibration_id: revision.calibration_id,
+                kind: WorkspaceDisplayPatchKind::FeederLane,
+                object_id: report.registration_id,
+                object_label: registration.name.clone(),
+                artifact_name: revision.mosaic_artifact_name.clone(),
+                source_raster_transform: revision.raster_transform,
+                source_width_px: revision.mosaic_width_px,
+                source_height_px: revision.mosaic_height_px,
+                source_to_base: velocitypnp_domain::Transform2d::identity(),
+                clip_polygon_machine_mm: feeder_geometry_clip(
+                    revision.pick_centerline_machine_mm,
+                    revision.tape_width_mm,
+                ),
+                anchor_count: report.observations.len() as u32,
+                alignment_residuals: revision.geometry_residuals,
+                accepted: true,
+                rejection_reason: None,
+                findings: vec![
+                    "Active feeder lane revision supplies image and operational state".into(),
+                ],
+                source_created_at: scan.created_at,
+                evaluated_at: Utc::now(),
+            });
+            continue;
+        }
+
+        let Some(raster) = scan.raster_transform else {
+            continue;
+        };
+        let Some(width) = scan.mosaic_width_px else {
+            continue;
+        };
+        let Some(height) = scan.mosaic_height_px else {
+            continue;
+        };
+        let Some(artifact_name) = workspace_display_artifact_name(scan) else {
+            continue;
+        };
+        let centerline = feeder_revision_centerline(
+            &report.observations,
+            registration.tape_pitch_mm,
+            registration.pick_centerline_machine_mm,
+        );
+        let offsets = report
+            .observations
+            .iter()
+            .filter_map(|observation| {
+                let pocket = registration
+                    .pockets
+                    .iter()
+                    .find(|pocket| pocket.pocket_index == observation.pocket_index)?;
+                Some([
+                    pocket.nominal_center_machine_mm[0] - observation.center_machine_mm[0],
+                    pocket.nominal_center_machine_mm[1] - observation.center_machine_mm[1],
+                ])
+            })
+            .collect::<Vec<_>>();
+        let residuals = fit_display_translation(&offsets)
+            .map(|(_, residuals)| residuals)
+            .unwrap_or(Residuals {
+                sample_count: 0,
+                rms_mm: 0.0,
+                p95_mm: 0.0,
+                max_mm: 0.0,
+            });
+        patches.push(WorkspaceDisplayPatch {
+            id: previous_patch_id(
+                previous,
+                base.id,
+                scan.id,
+                WorkspaceDisplayPatchKind::FeederLane,
+                registration.id,
+            ),
+            algorithm_version: WORKSPACE_DISPLAY_PATCH_ALGORITHM.into(),
+            base_scan_id: base.id,
+            source_scan_id: scan.id,
+            profile_id: base.profile_id.clone(),
+            calibration_id: base.calibration_id,
+            kind: WorkspaceDisplayPatchKind::FeederLane,
+            object_id: registration.id,
+            object_label: registration.name.clone(),
+            artifact_name,
+            source_raster_transform: raster,
+            source_width_px: width,
+            source_height_px: height,
+            source_to_base: velocitypnp_domain::Transform2d::identity(),
+            clip_polygon_machine_mm: feeder_geometry_clip(centerline, registration.tape_width_mm),
+            anchor_count: report.observations.len() as u32,
+            alignment_residuals: residuals,
+            accepted: true,
+            rejection_reason: None,
+            findings: vec![
+                "Legacy feeder refresh was recovered as the active lane revision".into(),
+            ],
+            source_created_at: scan.created_at,
+            evaluated_at: Utc::now(),
+        });
+    }
+    Ok((patches, active_feeders))
+}
+
+fn feeder_revision_centerline(
+    observations: &[StripFeederPocketScanObservation],
+    tape_pitch_mm: f64,
+    fallback: [[f64; 2]; 2],
+) -> [[f64; 2]; 2] {
+    let Some(first) = observations
+        .iter()
+        .min_by_key(|observation| observation.pocket_index)
+        .map(|observation| observation.center_machine_mm)
+    else {
+        return fallback;
+    };
+    let Some(last) = observations
+        .iter()
+        .max_by_key(|observation| observation.pocket_index)
+        .map(|observation| observation.center_machine_mm)
+    else {
+        return fallback;
+    };
+    let delta = [last[0] - first[0], last[1] - first[1]];
+    let length = delta[0].hypot(delta[1]);
+    if length <= 0.0 {
+        return fallback;
+    }
+    let padding = tape_pitch_mm * 0.5;
+    let axis = [delta[0] / length, delta[1] / length];
+    [
+        [first[0] - axis[0] * padding, first[1] - axis[1] * padding],
+        [last[0] + axis[0] * padding, last[1] + axis[1] * padding],
+    ]
+}
+
 fn evaluate_feeder_display_patches(
     state: &AppState,
     base: &WorkspaceScanReport,
     scans: &[WorkspaceScanReport],
     previous: &[WorkspaceDisplayPatch],
+    excluded_objects: &BTreeSet<Uuid>,
 ) -> ApiResult<Vec<WorkspaceDisplayPatch>> {
     let mut registrations = state
         .store
@@ -5921,7 +6122,8 @@ fn evaluate_feeder_display_patches(
             }) {
                 let mut best: Option<(&StripFeederRegistration, [f64; 2], Residuals, usize)> = None;
                 for registration in &registrations {
-                    if accepted_objects.contains(&registration.id)
+                    if excluded_objects.contains(&registration.id)
+                        || accepted_objects.contains(&registration.id)
                         || (registration.tape_width_mm
                             - proposal.tape_width_mm.unwrap_or(registration.tape_width_mm))
                         .abs()
@@ -6110,7 +6312,14 @@ fn fit_display_translation(offsets: &[[f64; 2]]) -> Option<([f64; 2], Residuals)
 }
 
 fn feeder_lane_clip(registration: &StripFeederRegistration) -> Vec<[f64; 2]> {
-    let [start, end] = registration.pick_centerline_machine_mm;
+    feeder_geometry_clip(
+        registration.pick_centerline_machine_mm,
+        registration.tape_width_mm,
+    )
+}
+
+fn feeder_geometry_clip(centerline_machine_mm: [[f64; 2]; 2], tape_width_mm: f64) -> Vec<[f64; 2]> {
+    let [start, end] = centerline_machine_mm;
     let delta = [end[0] - start[0], end[1] - start[1]];
     let length = delta[0].hypot(delta[1]);
     let normal = if length > 0.0 {
@@ -6118,7 +6327,7 @@ fn feeder_lane_clip(registration: &StripFeederRegistration) -> Vec<[f64; 2]> {
     } else {
         [1.0, 0.0]
     };
-    let half_width = registration.tape_width_mm / 2.0;
+    let half_width = tape_width_mm / 2.0;
     [
         [
             start[0] + normal[0] * half_width,
@@ -7023,7 +7232,7 @@ async fn build_strip_feeder_vision(
     Ok(Json(report))
 }
 
-const STRIP_FEEDER_OCCUPANCY_ALGORITHM: &str = "strip_feeder_occupancy_refresh.v1";
+const STRIP_FEEDER_OCCUPANCY_ALGORITHM: &str = "strip_feeder_lane_revision.v2";
 const STRIP_FEEDER_OCCUPANCY_ARTIFACT_PREFIX: &str = "strip-feeder-occupancy-";
 
 #[derive(Debug, Deserialize)]
@@ -7080,10 +7289,10 @@ async fn refresh_strip_feeder_occupancy(
             "strip feeder vision report is stale or incompatible",
         ));
     }
-    let (proposal, translation) = select_rescan_feeder_proposal(&vision.proposals, &registration)
-        .ok_or_else(|| {
-        ApiError::bad_request("rescan did not find the registered feeder lane")
-    })?;
+    let (proposal, _registration_translation, geometry_residuals) =
+        select_rescan_feeder_proposal(&vision.proposals, &registration).ok_or_else(|| {
+            ApiError::bad_request("rescan did not find the registered feeder lane")
+        })?;
     let raster = scan.raster_transform.ok_or_else(|| {
         ApiError::bad_request("feeder occupancy refresh requires a workspace raster transform")
     })?;
@@ -7112,9 +7321,9 @@ async fn refresh_strip_feeder_occupancy(
         build_rescan_occupancy_observations(
             &mosaic,
             raster,
-            &registration_for_task,
             &proposal_for_task,
-            translation,
+            registration_for_task.tape_width_mm,
+            registration_for_task.tape_pitch_mm,
             model.as_deref(),
         )
     })
@@ -7127,6 +7336,47 @@ async fn refresh_strip_feeder_occupancy(
                 .into(),
         );
     }
+    if analysis.observations.len() < 3 {
+        return Err(ApiError::bad_request(
+            "feeder lane revision requires at least three observed pockets",
+        ));
+    }
+    let base_scan_id = scan.parent_scan_id.ok_or_else(|| {
+        ApiError::bad_request("feeder lane revision requires a full-workspace parent scan")
+    })?;
+    let mosaic_width_px = scan
+        .mosaic_width_px
+        .ok_or_else(|| ApiError::bad_request("feeder lane revision requires a mosaic width"))?;
+    let mosaic_height_px = scan
+        .mosaic_height_px
+        .ok_or_else(|| ApiError::bad_request("feeder lane revision requires a mosaic height"))?;
+    let tape_width_mm = proposal.tape_width_mm.ok_or_else(|| {
+        ApiError::bad_request("feeder lane revision requires a resolved tape width")
+    })?;
+    let tape_pitch_mm = proposal.component_pitch_mm.ok_or_else(|| {
+        ApiError::bad_request("feeder lane revision requires a resolved pocket pitch")
+    })?;
+    let pick_centerline_machine_mm = proposal.pick_centerline_machine_mm.ok_or_else(|| {
+        ApiError::bad_request("feeder lane revision requires a resolved pocket centerline")
+    })?;
+    let created_at = Utc::now();
+    let lane_revision = StripFeederLaneRevision {
+        id: Uuid::new_v4(),
+        display_patch_id: Uuid::new_v4(),
+        base_scan_id,
+        profile_id: scan.profile_id.clone(),
+        calibration_id: scan.calibration_id,
+        mosaic_artifact_name: mosaic_artifact_name.clone(),
+        raster_transform: raster,
+        mosaic_width_px,
+        mosaic_height_px,
+        tape_width_mm,
+        tape_pitch_mm,
+        tape_rotation_deg: proposal.tape_rotation_deg,
+        pick_centerline_machine_mm,
+        geometry_residuals,
+        vision_confidence: proposal.confidence,
+    };
     let report = StripFeederOccupancyRefreshReport {
         algorithm_version: STRIP_FEEDER_OCCUPANCY_ALGORITHM.into(),
         source_scan_id: scan.id,
@@ -7134,10 +7384,37 @@ async fn refresh_strip_feeder_occupancy(
         source_proposal_index: proposal.proposal_index,
         registration_id: registration.id,
         report_artifact_name: report_artifact_name.clone(),
-        created_at: Utc::now(),
+        created_at,
         model_available,
+        lane_revision: Some(lane_revision.clone()),
         observations: analysis.observations,
         warnings,
+    };
+    let patch = WorkspaceDisplayPatch {
+        id: lane_revision.display_patch_id,
+        algorithm_version: WORKSPACE_DISPLAY_PATCH_ALGORITHM.into(),
+        base_scan_id,
+        source_scan_id: scan.id,
+        profile_id: scan.profile_id.clone(),
+        calibration_id: scan.calibration_id,
+        kind: WorkspaceDisplayPatchKind::FeederLane,
+        object_id: registration.id,
+        object_label: registration.name.clone(),
+        artifact_name: mosaic_artifact_name,
+        source_raster_transform: raster,
+        source_width_px: mosaic_width_px,
+        source_height_px: mosaic_height_px,
+        source_to_base: velocitypnp_domain::Transform2d::identity(),
+        clip_polygon_machine_mm: feeder_geometry_clip(pick_centerline_machine_mm, tape_width_mm),
+        anchor_count: report.observations.len() as u32,
+        alignment_residuals: geometry_residuals,
+        accepted: true,
+        rejection_reason: None,
+        findings: vec![
+            "Image, tape geometry, pocket positions, and occupancy were promoted together".into(),
+        ],
+        source_created_at: scan.created_at,
+        evaluated_at: created_at,
     };
     let report_json = serde_json::to_vec_pretty(&report).map_err(ApiError::internal)?;
     persist_workspace_artifact(
@@ -7153,16 +7430,8 @@ async fn refresh_strip_feeder_occupancy(
         .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
     state
         .store
-        .apply_strip_feeder_occupancy_refresh(
-            report.registration_id,
-            &report.observations,
-            report.created_at,
-        )
+        .promote_strip_feeder_lane_revision(&report, &patch)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    state
-        .store
-        .put_strip_feeder_occupancy_refresh(&report)
-        .map_err(ApiError::internal)?;
     Ok(Json(report))
 }
 
@@ -7412,13 +7681,16 @@ async fn list_board_population_refreshes(State(state): State<AppState>) -> ApiRe
 fn select_rescan_feeder_proposal<'a>(
     proposals: &'a [StripFeederLaneProposal],
     registration: &StripFeederRegistration,
-) -> Option<(&'a StripFeederLaneProposal, [f64; 2])> {
+) -> Option<(&'a StripFeederLaneProposal, [f64; 2], Residuals)> {
     proposals
         .iter()
         .filter(|proposal| {
-            proposal
-                .tape_width_mm
-                .is_some_and(|width| (width - registration.tape_width_mm).abs() <= 1.0)
+            !proposal.review_required
+                && proposal.confidence >= 0.8
+                && proposal.sprocket_pitch_residual_p95_mm <= 0.35
+                && proposal
+                    .tape_width_mm
+                    .is_some_and(|width| (width - registration.tape_width_mm).abs() <= 1.0)
                 && proposal
                     .component_pitch_mm
                     .is_some_and(|pitch| (pitch - registration.tape_pitch_mm).abs() <= 0.25)
@@ -7437,16 +7709,16 @@ fn select_rescan_feeder_proposal<'a>(
                 proposal,
                 translation,
                 offsets.len(),
-                residuals.p95_mm,
+                residuals,
             ))
         })
         .max_by(|first, second| {
             first
                 .2
                 .cmp(&second.2)
-                .then_with(|| second.3.total_cmp(&first.3))
+                .then_with(|| second.3.p95_mm.total_cmp(&first.3.p95_mm))
         })
-        .map(|(proposal, translation, _, _)| (proposal, translation))
+        .map(|(proposal, translation, _, residuals)| (proposal, translation, residuals))
 }
 
 struct RescanOccupancyAnalysis {
@@ -7457,29 +7729,17 @@ struct RescanOccupancyAnalysis {
 fn build_rescan_occupancy_observations(
     mosaic: &GrayFrame,
     raster: WorkspaceRasterTransform,
-    registration: &StripFeederRegistration,
     proposal: &StripFeederLaneProposal,
-    translation: [f64; 2],
+    fallback_tape_width_mm: f64,
+    fallback_tape_pitch_mm: f64,
     model: Option<&SourceComponentModel>,
 ) -> RescanOccupancyAnalysis {
     let mut observations = Vec::new();
     let mut warnings = Vec::new();
-    for pocket in &registration.pockets {
-        let matched = proposal
-            .pocket_observations
-            .iter()
-            .filter_map(|observation| {
-                let corrected = [
-                    observation.center_machine_mm[0] + translation[0],
-                    observation.center_machine_mm[1] + translation[1],
-                ];
-                let distance = (corrected[0] - pocket.nominal_center_machine_mm[0])
-                    .hypot(corrected[1] - pocket.nominal_center_machine_mm[1]);
-                (distance <= registration.tape_pitch_mm * 0.35).then_some((observation, distance))
-            })
-            .min_by(|first, second| first.1.total_cmp(&second.1));
-        let Some((deterministic, _)) = matched else {
-            continue;
+    for (index, deterministic) in proposal.pocket_observations.iter().enumerate() {
+        let Ok(pocket_index) = u32::try_from(index) else {
+            warnings.push("the feeder lane contains too many pockets to index".into());
+            break;
         };
         let mut findings = Vec::new();
         let model_prediction = model.and_then(|model| {
@@ -7488,10 +7748,10 @@ fn build_rescan_occupancy_observations(
                 raster,
                 deterministic.center_machine_mm,
                 proposal.tape_rotation_deg,
-                proposal.tape_width_mm.unwrap_or(registration.tape_width_mm),
+                proposal.tape_width_mm.unwrap_or(fallback_tape_width_mm),
                 proposal
                     .component_pitch_mm
-                    .unwrap_or(registration.tape_pitch_mm),
+                    .unwrap_or(fallback_tape_pitch_mm),
             ) {
                 Ok(crop) => crop,
                 Err(error) => {
@@ -7516,7 +7776,7 @@ fn build_rescan_occupancy_observations(
         );
         review_required |= model_analysis_failed;
         observations.push(StripFeederPocketScanObservation {
-            pocket_index: pocket.pocket_index,
+            pocket_index,
             center_machine_mm: deterministic.center_machine_mm,
             deterministic_occupancy: deterministic.occupancy,
             deterministic_confidence: deterministic.confidence,
@@ -7527,11 +7787,11 @@ fn build_rescan_occupancy_observations(
             findings,
         });
     }
-    if observations.len() < registration.pockets.len() {
+    if observations.len() < proposal.pocket_observations.len() {
         warnings.push(format!(
-            "{} of {} registered pockets had usable rescan evidence",
+            "{} of {} detected pockets had usable rescan evidence",
             observations.len(),
-            registration.pockets.len(),
+            proposal.pocket_observations.len(),
         ));
     }
     RescanOccupancyAnalysis {
@@ -9815,37 +10075,66 @@ async fn list_strip_feeder_registrations(State(state): State<AppState>) -> ApiRe
     })))
 }
 
-fn latest_strip_feeder_scan_observations(
+#[derive(Default)]
+struct StripFeederPocketMapEvidence {
+    observations: HashMap<(Uuid, u32), (chrono::DateTime<Utc>, StripFeederPocketScanObservation)>,
+    active_pocket_indices: HashMap<Uuid, BTreeSet<u32>>,
+}
+
+fn active_strip_feeder_pocket_map_evidence(
     state: &AppState,
-) -> ApiResult<HashMap<(Uuid, u32), (chrono::DateTime<Utc>, StripFeederPocketScanObservation)>> {
-    let mut latest = HashMap::new();
-    for report in state
+) -> ApiResult<StripFeederPocketMapEvidence> {
+    let registrations = state
+        .store
+        .list_strip_feeder_registrations()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|registration| (registration.id, registration))
+        .collect::<HashMap<_, _>>();
+    let mut reports = state
         .store
         .list_strip_feeder_occupancy_refreshes()
-        .map_err(ApiError::internal)?
-    {
-        if report.algorithm_version != STRIP_FEEDER_OCCUPANCY_ALGORITHM {
+        .map_err(ApiError::internal)?;
+    reports.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let mut seen = BTreeSet::new();
+    let mut evidence = StripFeederPocketMapEvidence::default();
+    for report in reports {
+        if (report.algorithm_version != STRIP_FEEDER_OCCUPANCY_ALGORITHM
+            && report.algorithm_version != "strip_feeder_occupancy_refresh.v1")
+            || !seen.insert(report.registration_id)
+        {
             continue;
         }
+        let Some(registration) = registrations.get(&report.registration_id) else {
+            continue;
+        };
+        let complete_revision = report.lane_revision.is_some()
+            || (report.observations.len() >= 3
+                && report.observations.len() * 5 >= registration.pockets.len() * 4);
+        if !complete_revision {
+            continue;
+        }
+        evidence.active_pocket_indices.insert(
+            report.registration_id,
+            report
+                .observations
+                .iter()
+                .map(|observation| observation.pocket_index)
+                .collect(),
+        );
         for observation in report.observations {
             let key = (report.registration_id, observation.pocket_index);
-            let replace = latest
-                .get(&key)
-                .is_none_or(|(created_at, _)| report.created_at > *created_at);
-            if replace {
-                latest.insert(key, (report.created_at, observation));
-            }
+            evidence
+                .observations
+                .insert(key, (report.created_at, observation));
         }
     }
-    Ok(latest)
+    Ok(evidence)
 }
 
 fn strip_feeder_pocket_map_entry(
     registration: &StripFeederRegistration,
-    scan_observations: &HashMap<
-        (Uuid, u32),
-        (chrono::DateTime<Utc>, StripFeederPocketScanObservation),
-    >,
+    evidence: &StripFeederPocketMapEvidence,
 ) -> Value {
     json!({
         "id": registration.id,
@@ -9855,8 +10144,14 @@ fn strip_feeder_pocket_map_entry(
         "name": registration.name,
         "tape_width_mm": registration.tape_width_mm,
         "tape_rotation_deg": registration.tape_rotation_deg,
-        "pockets": registration.pockets.iter().map(|pocket| {
-            let scan_observation = scan_observations
+        "pockets": registration.pockets.iter().filter(|pocket| {
+            evidence
+                .active_pocket_indices
+                .get(&registration.id)
+                .is_none_or(|indices| indices.contains(&pocket.pocket_index))
+        }).map(|pocket| {
+            let scan_observation = evidence
+                .observations
                 .get(&(registration.id, pocket.pocket_index))
                 .filter(|(created_at, _)| *created_at >= pocket.updated_at);
             let occupancy = scan_observation
@@ -9867,7 +10162,9 @@ fn strip_feeder_pocket_map_entry(
                 .unwrap_or(pocket.occupancy_confidence);
             json!({
                 "pocket_index": pocket.pocket_index,
-                "center_machine_mm": pocket.nominal_center_machine_mm,
+                "center_machine_mm": pocket
+                    .measured_center_machine_mm
+                    .unwrap_or(pocket.nominal_center_machine_mm),
                 "occupancy": occupancy,
                 "occupancy_confidence": occupancy_confidence,
                 "occupancy_source": if scan_observation.is_some() {
@@ -9889,12 +10186,12 @@ async fn list_strip_feeder_pocket_map(State(state): State<AppState>) -> ApiResul
         .store
         .list_strip_feeder_registrations()
         .map_err(ApiError::internal)?;
-    let scan_observations = latest_strip_feeder_scan_observations(&state)?;
+    let evidence = active_strip_feeder_pocket_map_evidence(&state)?;
     Ok(Json(json!({
         "registrations": registrations
             .iter()
             .map(|registration| {
-                strip_feeder_pocket_map_entry(registration, &scan_observations)
+                strip_feeder_pocket_map_entry(registration, &evidence)
             })
             .collect::<Vec<_>>(),
     })))
@@ -37019,6 +37316,30 @@ mod tests {
         assert!(residuals.p95_mm > DISPLAY_PATCH_MAX_RESIDUAL_MM);
     }
 
+    #[test]
+    fn active_lane_clip_uses_revised_pocket_extent() {
+        let observation = |pocket_index, center_machine_mm| StripFeederPocketScanObservation {
+            pocket_index,
+            center_machine_mm,
+            deterministic_occupancy: StripPocketOccupancy::Occupied,
+            deterministic_confidence: 0.9,
+            model_prediction: None,
+            occupancy: StripPocketOccupancy::Occupied,
+            confidence: 0.9,
+            review_required: false,
+            findings: Vec::new(),
+        };
+        let observations = vec![
+            observation(2, [20.0, 18.0]),
+            observation(0, [20.0, 2.0]),
+            observation(1, [20.0, 10.0]),
+        ];
+
+        let centerline = feeder_revision_centerline(&observations, 8.0, [[10.0, 0.0], [10.0, 8.0]]);
+
+        assert_eq!(centerline, [[20.0, -2.0], [20.0, 22.0]]);
+    }
+
     fn source_prediction(class: SourceComponentClass) -> SourceComponentModelPrediction {
         SourceComponentModelPrediction {
             contract_version: "source_component_pose.v1".into(),
@@ -38557,7 +38878,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_feeder_pocket_map_keeps_state_and_omits_diagnostics() {
+    fn strip_feeder_pocket_map_uses_the_active_revision_center() {
         let mut registration = test_pickup_registration(Utc::now());
         registration.ensure_pocket_state();
         registration.pockets[0].measured_center_machine_mm = Some([10.1, 0.2]);
@@ -38566,9 +38887,10 @@ mod tests {
         registration.selected_pocket_index = Some(0);
         registration.findings = vec!["large retained diagnostic".into()];
 
-        let entry = strip_feeder_pocket_map_entry(&registration, &HashMap::new());
+        let entry =
+            strip_feeder_pocket_map_entry(&registration, &StripFeederPocketMapEvidence::default());
 
-        assert_eq!(entry["pockets"][0]["center_machine_mm"], json!([10.0, 0.0]));
+        assert_eq!(entry["pockets"][0]["center_machine_mm"], json!([10.1, 0.2]));
         assert_eq!(entry["pockets"][0]["occupancy"], "occupied");
         assert_eq!(entry["pockets"][0]["status"], "available");
         assert_eq!(entry["pockets"][0]["selected"], true);
@@ -38594,16 +38916,34 @@ mod tests {
             review_required: false,
             findings: Vec::new(),
         };
-        let scan_observations = HashMap::from([(
-            (registration.id, 0),
-            (now + chrono::Duration::seconds(1), observation),
-        )]);
+        let evidence = StripFeederPocketMapEvidence {
+            observations: HashMap::from([(
+                (registration.id, 0),
+                (now + chrono::Duration::seconds(1), observation),
+            )]),
+            active_pocket_indices: HashMap::new(),
+        };
 
-        let entry = strip_feeder_pocket_map_entry(&registration, &scan_observations);
+        let entry = strip_feeder_pocket_map_entry(&registration, &evidence);
 
         assert_eq!(entry["pockets"][0]["occupancy"], "occupied");
         assert_eq!(entry["pockets"][0]["occupancy_source"], "workspace_rescan");
         assert_eq!(entry["pockets"][0]["status"], "available");
+    }
+
+    #[test]
+    fn pocket_map_hides_pockets_outside_the_active_lane_revision() {
+        let mut registration = test_pickup_registration(Utc::now());
+        registration.ensure_pocket_state();
+        let evidence = StripFeederPocketMapEvidence {
+            observations: HashMap::new(),
+            active_pocket_indices: HashMap::from([(registration.id, BTreeSet::from([0, 1, 2]))]),
+        };
+
+        let entry = strip_feeder_pocket_map_entry(&registration, &evidence);
+
+        assert_eq!(entry["pockets"].as_array().unwrap().len(), 3);
+        assert_eq!(entry["pockets"][2]["pocket_index"], 2);
     }
 
     #[tokio::test]

@@ -166,6 +166,13 @@ review. Consumption requires both vacuum and bottom-camera evidence. A returned
 part also requires a top-camera occupied-pocket check. Restart recovery does
 not guess: it quarantines any interrupted reservation.
 
+A feeder-lane rescan creates one complete lane revision. The revision contains
+the mosaic registration, tape geometry, pocket positions, and occupancy. The
+store promotes these fields with the active feeder plan and display patch in
+one SQLite transaction. A failed geometry or occupancy gate keeps the prior
+revision active. Earlier reports and image artifacts remain as evidence, but
+they do not supply positions to the active lane.
+
 Large survey scans keep one V4L2 stream open across the motion path. The
 streaming mosaic builder keeps only the current and prior full-resolution tile
 rows. It samples them directly into lower-resolution corrected and nominal

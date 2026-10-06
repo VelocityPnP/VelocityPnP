@@ -502,6 +502,29 @@ pub struct StripFeederPocketScanObservation {
     pub findings: Vec<String>,
 }
 
+/// One complete, promoted view of a physical feeder lane.
+///
+/// The image registration, tape geometry, pocket positions, and occupancy
+/// observations become operational together through the containing report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederLaneRevision {
+    pub id: Uuid,
+    pub display_patch_id: Uuid,
+    pub base_scan_id: Uuid,
+    pub profile_id: String,
+    pub calibration_id: Uuid,
+    pub mosaic_artifact_name: String,
+    pub raster_transform: WorkspaceRasterTransform,
+    pub mosaic_width_px: u32,
+    pub mosaic_height_px: u32,
+    pub tape_width_mm: f64,
+    pub tape_pitch_mm: f64,
+    pub tape_rotation_deg: f64,
+    pub pick_centerline_machine_mm: [[f64; 2]; 2],
+    pub geometry_residuals: crate::Residuals,
+    pub vision_confidence: f64,
+}
+
 /// Persisted occupancy evidence from one targeted feeder-lane rescan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StripFeederOccupancyRefreshReport {
@@ -513,6 +536,8 @@ pub struct StripFeederOccupancyRefreshReport {
     pub report_artifact_name: String,
     pub created_at: DateTime<Utc>,
     pub model_available: bool,
+    #[serde(default)]
+    pub lane_revision: Option<StripFeederLaneRevision>,
     pub observations: Vec<StripFeederPocketScanObservation>,
     #[serde(default)]
     pub warnings: Vec<String>,

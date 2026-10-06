@@ -12,8 +12,9 @@ use velocitypnp_domain::{
     InspectionReport, Job, JobExecutionRun, MachineEvent, Operation, Part, PlacementExecutionRun,
     PlacementOutcomeRecord, StripFeederLiveHoldoutRun, StripFeederOccupancyRefreshReport,
     StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketScanObservation,
-    StripFeederPocketStatus, StripFeederRegistration, StripFeederSourceCaptureRun,
-    StripPocketOccupancy, WorkspaceDisplayPatch, WorkspaceInventoryBaseline, WorkspaceScanReport,
+    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
+    StripFeederSourceCaptureRun, StripPocketOccupancy, WorkspaceDisplayPatch,
+    WorkspaceDisplayPatchKind, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
 
 #[derive(Clone)]
@@ -694,6 +695,280 @@ impl Store {
                 serde_json::to_string(&registration)?,
             ],
         )?;
+        transaction.commit()?;
+        Ok(registration)
+    }
+
+    /// Atomically promotes one complete feeder-lane revision.
+    ///
+    /// The active registration, occupancy report, and displayed mosaic patch
+    /// change in one transaction. Existing pocket history remains in prior
+    /// reports, while the new physical tape load receives new pocket state.
+    pub fn promote_strip_feeder_lane_revision(
+        &self,
+        report: &StripFeederOccupancyRefreshReport,
+        patch: &WorkspaceDisplayPatch,
+    ) -> Result<StripFeederRegistration> {
+        let revision = report
+            .lane_revision
+            .as_ref()
+            .context("feeder lane promotion has no revision")?;
+        anyhow::ensure!(
+            !report.observations.is_empty(),
+            "feeder lane revision has no pocket observations"
+        );
+        anyhow::ensure!(
+            patch.id == revision.display_patch_id
+                && patch.base_scan_id == revision.base_scan_id
+                && patch.source_scan_id == report.source_scan_id
+                && patch.profile_id == revision.profile_id
+                && patch.calibration_id == revision.calibration_id
+                && patch.object_id == report.registration_id
+                && patch.kind == WorkspaceDisplayPatchKind::FeederLane
+                && patch.artifact_name == revision.mosaic_artifact_name
+                && patch.source_raster_transform == revision.raster_transform
+                && patch.source_width_px == revision.mosaic_width_px
+                && patch.source_height_px == revision.mosaic_height_px
+                && patch.source_to_base == velocitypnp_domain::Transform2d::identity()
+                && patch.anchor_count == report.observations.len() as u32
+                && patch.alignment_residuals == revision.geometry_residuals
+                && patch.accepted,
+            "feeder lane revision and display patch do not match"
+        );
+        anyhow::ensure!(
+            report
+                .observations
+                .iter()
+                .enumerate()
+                .all(|(index, observation)| u32::try_from(index)
+                    .is_ok_and(|index| observation.pocket_index == index)),
+            "feeder lane revision pocket indices are not contiguous"
+        );
+        anyhow::ensure!(
+            revision.tape_width_mm.is_finite()
+                && revision.tape_width_mm > 0.0
+                && revision.tape_pitch_mm.is_finite()
+                && revision.tape_pitch_mm > 0.0
+                && revision.tape_rotation_deg.is_finite()
+                && revision
+                    .pick_centerline_machine_mm
+                    .iter()
+                    .flatten()
+                    .all(|value| value.is_finite())
+                && report.observations.iter().all(|observation| {
+                    observation
+                        .center_machine_mm
+                        .iter()
+                        .all(|value| value.is_finite())
+                        && observation.confidence.is_finite()
+                        && (0.0..=1.0).contains(&observation.confidence)
+                }),
+            "feeder lane revision contains invalid geometry or confidence"
+        );
+
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let document: String = transaction
+            .query_row(
+                "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
+                params![
+                    "strip_feeder_registration",
+                    report.registration_id.to_string()
+                ],
+                |row| row.get(0),
+            )
+            .context("strip feeder registration not found")?;
+        let mut registration: StripFeederRegistration =
+            serde_json::from_str(&document).context("decoding strip feeder registration")?;
+        registration.ensure_pocket_state();
+        anyhow::ensure!(
+            registration.profile_id == revision.profile_id
+                && registration.calibration_id == revision.calibration_id,
+            "feeder lane revision uses different machine geometry"
+        );
+        anyhow::ensure!(
+            registration.pockets.iter().all(|pocket| {
+                pocket.status != StripFeederPocketStatus::Reserved
+                    && pocket.reservation_id.is_none()
+            }),
+            "strip feeder lane cannot change while a pocket is reserved"
+        );
+
+        registration.source_scan_id = report.source_scan_id;
+        registration.source_candidate_index = report.source_candidate_index;
+        registration.source_proposal_index = report.source_proposal_index;
+        registration.updated_at = report.created_at;
+        registration.tape_width_mm = revision.tape_width_mm;
+        registration.tape_pitch_mm = revision.tape_pitch_mm;
+        registration.tape_rotation_deg = revision.tape_rotation_deg;
+        registration.pick_centerline_machine_mm = revision.pick_centerline_machine_mm;
+        registration.pocket_centers_machine_mm = report
+            .observations
+            .iter()
+            .map(|observation| observation.center_machine_mm)
+            .collect();
+        registration.pockets = report
+            .observations
+            .iter()
+            .map(|observation| StripFeederPocketState {
+                pocket_index: observation.pocket_index,
+                nominal_center_machine_mm: observation.center_machine_mm,
+                measured_center_machine_mm: None,
+                occupancy: observation.occupancy,
+                occupancy_confidence: observation.confidence,
+                status: if observation.review_required {
+                    StripFeederPocketStatus::NeedsReview
+                } else {
+                    match observation.occupancy {
+                        StripPocketOccupancy::Occupied => StripFeederPocketStatus::Available,
+                        StripPocketOccupancy::Empty => StripFeederPocketStatus::Empty,
+                        StripPocketOccupancy::Uncertain => StripFeederPocketStatus::NeedsReview,
+                    }
+                },
+                attempt_count: 0,
+                consecutive_failure_count: 0,
+                reservation_id: None,
+                last_qualification_id: None,
+                last_outcome: None,
+                updated_at: report.created_at,
+            })
+            .collect();
+        let selected = registration.next_available_pocket(None).map(|pocket| {
+            (
+                pocket.pocket_index,
+                pocket
+                    .measured_center_machine_mm
+                    .unwrap_or(pocket.nominal_center_machine_mm),
+            )
+        });
+        registration.selected_pocket_index = selected.map(|item| item.0);
+        registration.selected_pocket_machine_mm = selected.map(|item| item.1);
+        registration.vision_confidence = revision.vision_confidence;
+        registration.vision_review_required = report
+            .observations
+            .iter()
+            .any(|observation| observation.review_required);
+
+        let active_feeder = registration
+            .active_feeder_id
+            .map(|feeder_id| -> Result<Feeder> {
+                let document: String = transaction
+                    .query_row(
+                        "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
+                        params!["feeder", feeder_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .context("active strip feeder not found")?;
+                let mut feeder: Feeder =
+                    serde_json::from_str(&document).context("decoding active strip feeder")?;
+                let Feeder::Strip {
+                    first_pick,
+                    tape_pitch_mm,
+                    tape_width_mm,
+                    tape_rotation_deg,
+                    remaining,
+                    ..
+                } = &mut feeder
+                else {
+                    anyhow::bail!("active feeder is not a strip feeder");
+                };
+                if let Some(center) = registration.selected_pocket_machine_mm {
+                    first_pick.x_mm = center[0];
+                    first_pick.y_mm = center[1];
+                }
+                if let Some(pickup_z_mm) = registration.pickup_z_mm {
+                    first_pick.z_mm = pickup_z_mm;
+                }
+                if let Some(part_rotation_deg) = registration.part_rotation_deg {
+                    first_pick.rotation_deg = part_rotation_deg;
+                }
+                *tape_pitch_mm = registration.tape_pitch_mm;
+                *tape_width_mm = registration.tape_width_mm;
+                *tape_rotation_deg = registration.tape_rotation_deg;
+                *remaining = registration
+                    .pockets
+                    .iter()
+                    .filter(|pocket| {
+                        pocket.status == StripFeederPocketStatus::Available
+                            && pocket.occupancy == StripPocketOccupancy::Occupied
+                    })
+                    .count()
+                    .try_into()
+                    .ok();
+                Ok(feeder)
+            })
+            .transpose()?;
+
+        let stale_documents = {
+            let mut statement = transaction
+                .prepare("SELECT id, document FROM entities WHERE kind = ?1 AND id != ?2")?;
+            let rows = statement.query_map(
+                params!["workspace_display_patch", patch.id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, document) in stale_documents {
+            let Ok(mut stale) = serde_json::from_str::<WorkspaceDisplayPatch>(&document) else {
+                continue;
+            };
+            if stale.kind != WorkspaceDisplayPatchKind::FeederLane
+                || stale.object_id != patch.object_id
+                || !stale.accepted
+            {
+                continue;
+            }
+            stale.accepted = false;
+            stale.rejection_reason = Some("Superseded by a newer feeder lane revision".into());
+            stale.evaluated_at = report.created_at;
+            transaction.execute(
+                "UPDATE entities SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                 document = ?3 WHERE kind = ?1 AND id = ?2",
+                params![
+                    "workspace_display_patch",
+                    id,
+                    serde_json::to_string(&stale)?
+                ],
+            )?;
+        }
+        for (kind, id, document) in [
+            (
+                "strip_feeder_registration",
+                registration.id.to_string(),
+                serde_json::to_string(&registration)?,
+            ),
+            (
+                "strip_feeder_occupancy_refresh",
+                format!("{}:{}", report.source_scan_id, report.registration_id),
+                serde_json::to_string(report)?,
+            ),
+            (
+                "workspace_display_patch",
+                patch.id.to_string(),
+                serde_json::to_string(patch)?,
+            ),
+        ] {
+            transaction.execute(
+                r#"INSERT INTO entities(kind, id, updated_at, document)
+                   VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3)
+                   ON CONFLICT(kind, id) DO UPDATE SET
+                     updated_at = excluded.updated_at,
+                     document = excluded.document"#,
+                params![kind, id, document],
+            )?;
+        }
+        if let Some(feeder) = active_feeder {
+            transaction.execute(
+                r#"UPDATE entities
+                   SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), document = ?3
+                   WHERE kind = ?1 AND id = ?2"#,
+                params![
+                    "feeder",
+                    feeder_id(&feeder).to_string(),
+                    serde_json::to_string(&feeder)?,
+                ],
+            )?;
+        }
         transaction.commit()?;
         Ok(registration)
     }
@@ -1412,6 +1687,7 @@ mod tests {
             report_artifact_name: "occupancy.json".into(),
             created_at: Utc::now(),
             model_available: true,
+            lane_revision: None,
             observations: Vec::new(),
             warnings: Vec::new(),
         };
@@ -1547,6 +1823,256 @@ mod tests {
         assert_eq!(refreshed.pockets[0].attempt_count, 1);
         assert_eq!(refreshed.selected_pocket_index, Some(0));
         assert_eq!(refreshed.selected_pocket_machine_mm, Some([10.1, 0.1]));
+    }
+
+    #[test]
+    fn feeder_lane_revision_promotes_all_active_state_atomically() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let registration_id = Uuid::new_v4();
+        let feeder_id = Uuid::new_v4();
+        let base_scan_id = Uuid::new_v4();
+        let source_scan_id = Uuid::new_v4();
+        let old_patch_id = Uuid::new_v4();
+        let new_patch_id = Uuid::new_v4();
+        let calibration_id = Uuid::new_v4();
+        let raster_transform = WorkspaceRasterTransform {
+            top_left_x_mm: 0.0,
+            top_left_y_mm: 20.0,
+            x_mm_per_pixel: 0.1,
+            y_mm_per_pixel: 0.1,
+        };
+        let residuals = velocitypnp_domain::Residuals {
+            sample_count: 8,
+            rms_mm: 0.08,
+            p95_mm: 0.12,
+            max_mm: 0.14,
+        };
+        let pocket = velocitypnp_domain::StripFeederPocketState {
+            pocket_index: 7,
+            nominal_center_machine_mm: [10.0, 4.0],
+            measured_center_machine_mm: Some([10.1, 4.1]),
+            occupancy: StripPocketOccupancy::Occupied,
+            occupancy_confidence: 0.9,
+            status: StripFeederPocketStatus::Consumed,
+            attempt_count: 3,
+            consecutive_failure_count: 1,
+            reservation_id: None,
+            last_qualification_id: Some(Uuid::new_v4()),
+            last_outcome: Some(StripFeederPocketOutcome::Consumed),
+            updated_at: now,
+        };
+        let registration = StripFeederRegistration {
+            id: registration_id,
+            profile_id: "test".into(),
+            calibration_id,
+            source_scan_id: Uuid::new_v4(),
+            source_candidate_index: 3,
+            source_proposal_index: 2,
+            created_at: now,
+            updated_at: now,
+            status: velocitypnp_domain::StripFeederRegistrationStatus::Ready,
+            name: "Feeder Bank 1 - lane 8".into(),
+            part_key: Some("R_0603".into()),
+            part_rotation_deg: Some(90.0),
+            tape_width_mm: 8.0,
+            tape_pitch_mm: 4.0,
+            tape_rotation_deg: 89.0,
+            pick_centerline_machine_mm: [[10.0, 0.0], [10.0, 8.0]],
+            pocket_centers_machine_mm: vec![[10.0, 4.0]],
+            pockets: vec![pocket],
+            selected_pocket_machine_mm: None,
+            selected_pocket_index: None,
+            pickup_z_mm: Some(12.5),
+            surveyed_part_size_mm: Some([1.6, 0.8]),
+            measured_part_size_mm: Some([1.58, 0.79]),
+            measured_part_rotation_deg: Some(90.0),
+            measured_part_confidence: Some(0.95),
+            active_feeder_id: Some(feeder_id),
+            latest_live_holdout_id: Some(Uuid::new_v4()),
+            latest_pickup_qualification_id: Some(Uuid::new_v4()),
+            pickup_sequence_passed: true,
+            latest_pickup_sequence_qualification_ids: vec![Uuid::new_v4()],
+            latest_placement_validation_id: Some(Uuid::new_v4()),
+            vision_confidence: 0.9,
+            vision_review_required: false,
+            findings: Vec::new(),
+        };
+        store.put_strip_feeder_registration(&registration).unwrap();
+        store
+            .put_feeder(&Feeder::Strip {
+                id: feeder_id,
+                name: registration.name.clone(),
+                part_key: "R_0603".into(),
+                first_pick: velocitypnp_domain::Pose {
+                    x_mm: 10.1,
+                    y_mm: 4.1,
+                    z_mm: 12.5,
+                    rotation_deg: 90.0,
+                },
+                tape_pitch_mm: 4.0,
+                tape_width_mm: 8.0,
+                tape_rotation_deg: 89.0,
+                remaining: Some(0),
+            })
+            .unwrap();
+        let old_patch = WorkspaceDisplayPatch {
+            id: old_patch_id,
+            algorithm_version: "workspace_display_patch.v1".into(),
+            base_scan_id,
+            source_scan_id: Uuid::new_v4(),
+            profile_id: "test".into(),
+            calibration_id,
+            kind: WorkspaceDisplayPatchKind::FeederLane,
+            object_id: registration_id,
+            object_label: registration.name.clone(),
+            artifact_name: "old.png".into(),
+            source_raster_transform: raster_transform,
+            source_width_px: 100,
+            source_height_px: 200,
+            source_to_base: velocitypnp_domain::Transform2d::identity(),
+            clip_polygon_machine_mm: vec![[9.0, 0.0], [11.0, 0.0], [11.0, 8.0]],
+            anchor_count: 8,
+            alignment_residuals: residuals,
+            accepted: true,
+            rejection_reason: None,
+            findings: Vec::new(),
+            source_created_at: now,
+            evaluated_at: now,
+        };
+        store.put_workspace_display_patch(&old_patch).unwrap();
+        let observed_at = now + chrono::Duration::seconds(1);
+        let observation =
+            |pocket_index, center, occupancy, review_required| StripFeederPocketScanObservation {
+                pocket_index,
+                center_machine_mm: center,
+                deterministic_occupancy: occupancy,
+                deterministic_confidence: 0.96,
+                model_prediction: None,
+                occupancy,
+                confidence: 0.96,
+                review_required,
+                findings: Vec::new(),
+            };
+        let report = StripFeederOccupancyRefreshReport {
+            algorithm_version: "strip_feeder_lane_revision.v2".into(),
+            source_scan_id,
+            source_candidate_index: 1,
+            source_proposal_index: 0,
+            registration_id,
+            report_artifact_name: "lane-revision.json".into(),
+            created_at: observed_at,
+            model_available: true,
+            lane_revision: Some(velocitypnp_domain::StripFeederLaneRevision {
+                id: Uuid::new_v4(),
+                display_patch_id: new_patch_id,
+                base_scan_id,
+                profile_id: "test".into(),
+                calibration_id,
+                mosaic_artifact_name: "mosaic.png".into(),
+                raster_transform,
+                mosaic_width_px: 120,
+                mosaic_height_px: 320,
+                tape_width_mm: 12.0,
+                tape_pitch_mm: 8.0,
+                tape_rotation_deg: 90.0,
+                pick_centerline_machine_mm: [[20.0, 2.0], [20.0, 18.0]],
+                geometry_residuals: residuals,
+                vision_confidence: 0.97,
+            }),
+            observations: vec![
+                observation(0, [20.0, 2.0], StripPocketOccupancy::Empty, false),
+                observation(1, [20.0, 10.0], StripPocketOccupancy::Occupied, false),
+                observation(2, [20.0, 18.0], StripPocketOccupancy::Uncertain, true),
+            ],
+            warnings: Vec::new(),
+        };
+        let new_patch = WorkspaceDisplayPatch {
+            id: new_patch_id,
+            algorithm_version: "workspace_display_patch.feeder_lane_revision.v2".into(),
+            base_scan_id,
+            source_scan_id,
+            profile_id: "test".into(),
+            calibration_id,
+            kind: WorkspaceDisplayPatchKind::FeederLane,
+            object_id: registration_id,
+            object_label: registration.name.clone(),
+            artifact_name: "mosaic.png".into(),
+            source_raster_transform: raster_transform,
+            source_width_px: 120,
+            source_height_px: 320,
+            source_to_base: velocitypnp_domain::Transform2d::identity(),
+            clip_polygon_machine_mm: vec![[18.0, 0.0], [22.0, 0.0], [22.0, 20.0]],
+            anchor_count: 3,
+            alignment_residuals: residuals,
+            accepted: true,
+            rejection_reason: None,
+            findings: Vec::new(),
+            source_created_at: observed_at,
+            evaluated_at: observed_at,
+        };
+
+        let promoted = store
+            .promote_strip_feeder_lane_revision(&report, &new_patch)
+            .unwrap();
+
+        assert_eq!(promoted.source_scan_id, source_scan_id);
+        assert_eq!(promoted.tape_width_mm, 12.0);
+        assert_eq!(promoted.tape_pitch_mm, 8.0);
+        assert_eq!(promoted.pockets.len(), 3);
+        assert_eq!(promoted.pockets[0].status, StripFeederPocketStatus::Empty);
+        assert_eq!(
+            promoted.pockets[1].status,
+            StripFeederPocketStatus::Available
+        );
+        assert_eq!(promoted.pockets[1].attempt_count, 0);
+        assert_eq!(promoted.pockets[1].last_outcome, None);
+        assert_eq!(
+            promoted.pockets[2].status,
+            StripFeederPocketStatus::NeedsReview
+        );
+        assert_eq!(promoted.selected_pocket_index, Some(1));
+        assert_eq!(promoted.selected_pocket_machine_mm, Some([20.0, 10.0]));
+        assert_eq!(
+            store.list_strip_feeder_occupancy_refreshes().unwrap(),
+            [report]
+        );
+
+        let patches = store.list_workspace_display_patches().unwrap();
+        let active_patch = patches
+            .iter()
+            .find(|patch| patch.id == new_patch_id)
+            .unwrap();
+        let stale_patch = patches
+            .iter()
+            .find(|patch| patch.id == old_patch_id)
+            .unwrap();
+        assert!(active_patch.accepted);
+        assert!(!stale_patch.accepted);
+        assert_eq!(
+            stale_patch.rejection_reason.as_deref(),
+            Some("Superseded by a newer feeder lane revision")
+        );
+
+        let feeders = store.list_feeders().unwrap();
+        let Feeder::Strip {
+            first_pick,
+            tape_pitch_mm,
+            tape_width_mm,
+            tape_rotation_deg,
+            remaining,
+            ..
+        } = &feeders[0]
+        else {
+            panic!("active feeder changed type");
+        };
+        assert_eq!([first_pick.x_mm, first_pick.y_mm], [20.0, 10.0]);
+        assert_eq!(first_pick.z_mm, 12.5);
+        assert_eq!(first_pick.rotation_deg, 90.0);
+        assert_eq!(*tape_pitch_mm, 8.0);
+        assert_eq!(*tape_width_mm, 12.0);
+        assert_eq!(*tape_rotation_deg, 90.0);
+        assert_eq!(*remaining, Some(1));
     }
 
     #[test]
