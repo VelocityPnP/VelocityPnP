@@ -339,6 +339,10 @@ impl Store {
         self.get("operation", id)
     }
 
+    pub fn list_operations(&self) -> Result<Vec<Operation>> {
+        self.list("operation")
+    }
+
     pub fn put_calibration(&self, calibration: &CalibrationSnapshot) -> Result<()> {
         self.put("calibration", calibration.id, calibration)
     }

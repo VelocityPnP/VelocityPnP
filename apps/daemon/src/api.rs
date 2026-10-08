@@ -5,7 +5,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::Future;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -567,8 +567,29 @@ impl AppState {
         state.recover_interrupted_strip_feeder_pickups();
         state.recover_interrupted_placement_executions();
         state.recover_interrupted_job_executions();
+        state.recover_interrupted_operations();
         state.refresh_automatic_placement_outcomes();
         state
+    }
+
+    fn recover_interrupted_operations(&self) {
+        let Ok(operations) = self.store.list_operations() else {
+            tracing::error!("failed to inspect operations during startup");
+            return;
+        };
+        for mut operation in operations.into_iter().filter(|operation| {
+            matches!(
+                operation.status,
+                OperationStatus::Pending | OperationStatus::Running
+            )
+        }) {
+            operation.status = OperationStatus::Failed;
+            operation.message = Some("daemon restarted before the operation completed".into());
+            operation.updated_at = Utc::now();
+            if let Err(error) = self.store.put_operation(&operation) {
+                tracing::error!(%error, operation_id = %operation.id, "failed to recover operation");
+            }
+        }
     }
 
     pub fn with_model_selection_status(mut self, status: ModelSelectionStatus) -> Self {
@@ -1226,6 +1247,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspace-scans/summaries",
             get(list_workspace_scan_summaries),
         )
+        .route("/api/v1/workspace/activity", get(get_workspace_activity))
         .route("/api/v1/workspace-scans/{id}", get(get_workspace_scan))
         .route(
             "/api/v1/workspace-scans/{id}/display-patches",
@@ -1453,6 +1475,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/strip-feeder-registrations/{id}",
             get(get_strip_feeder_registration),
+        )
+        .route(
+            "/api/v1/strip-feeder-registrations/{id}/assignment",
+            axum::routing::put(update_strip_feeder_assignment),
+        )
+        .route(
+            "/api/v1/strip-feeder-registrations/{id}/revisions",
+            get(list_strip_feeder_revisions),
         )
         .route(
             "/api/v1/strip-feeder-registrations/{id}/live-holdouts",
@@ -5593,6 +5623,305 @@ async fn list_workspace_scan_summaries(State(state): State<AppState>) -> ApiResu
     Ok(Json(json!({
         "scans": scans.iter().map(workspace_scan_summary).collect::<Vec<_>>()
     })))
+}
+
+struct WorkspaceActivityItem {
+    updated_at: DateTime<Utc>,
+    active: bool,
+    priority: u8,
+    value: Value,
+}
+
+async fn get_workspace_activity(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let jobs = state.store.list_jobs().map_err(ApiError::internal)?;
+    let executions = state
+        .store
+        .list_job_executions()
+        .map_err(ApiError::internal)?;
+    let scans = state
+        .store
+        .list_workspace_scans()
+        .map_err(ApiError::internal)?;
+    let operations = state.store.list_operations().map_err(ApiError::internal)?;
+    let represented_operations = executions
+        .iter()
+        .map(|run| run.operation_id)
+        .chain(scans.iter().map(|scan| scan.operation_id))
+        .collect::<BTreeSet<_>>();
+    let latest_completed_job_id = executions
+        .iter()
+        .filter(|run| {
+            matches!(
+                run.status,
+                JobExecutionStatus::Succeeded
+                    | JobExecutionStatus::CompletedWithSkips
+                    | JobExecutionStatus::Cancelled
+            )
+        })
+        .max_by_key(|run| run.updated_at)
+        .map(|run| run.id);
+    let mut items = Vec::new();
+
+    for run in executions {
+        let current_step = run
+            .current_step_index
+            .and_then(|step_index| run.steps.iter().find(|step| step.step_index == step_index));
+        let completed = run
+            .steps
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step.status,
+                    JobExecutionStepStatus::Succeeded | JobExecutionStepStatus::Skipped
+                )
+            })
+            .count();
+        let mut actions = Vec::new();
+        if matches!(
+            run.status,
+            JobExecutionStatus::Pending | JobExecutionStatus::Running
+        ) {
+            actions.push(json!({
+                "id": "pause_job",
+                "label": "Pause",
+                "requires_note": false,
+            }));
+        }
+        if matches!(run.status, JobExecutionStatus::Paused) {
+            actions.push(json!({
+                "id": "resume_job",
+                "label": "Resume",
+                "requires_note": false,
+            }));
+        }
+        if run.status == JobExecutionStatus::NeedsAttention {
+            if current_step.is_some_and(|step| !step.board_contacted) {
+                actions.push(json!({
+                    "id": "retry_step",
+                    "label": "Retry placement",
+                    "requires_note": false,
+                }));
+            }
+            actions.push(json!({
+                "id": "skip_step",
+                "label": "Skip placement",
+                "requires_note": true,
+            }));
+        }
+        if matches!(
+            run.status,
+            JobExecutionStatus::Pending
+                | JobExecutionStatus::Running
+                | JobExecutionStatus::Paused
+                | JobExecutionStatus::NeedsAttention
+        ) {
+            actions.push(json!({
+                "id": "cancel_job",
+                "label": "Cancel job",
+                "requires_note": false,
+                "destructive": true,
+            }));
+        }
+        let active = matches!(
+            run.status,
+            JobExecutionStatus::Pending
+                | JobExecutionStatus::Running
+                | JobExecutionStatus::Paused
+                | JobExecutionStatus::NeedsAttention
+        );
+        let mut evidence = Vec::new();
+        let evidence_execution_id = current_step
+            .and_then(|step| step.execution_id)
+            .or_else(|| run.steps.iter().rev().find_map(|step| step.execution_id));
+        if active || latest_completed_job_id == Some(run.id) {
+            if let Some(execution_id) = evidence_execution_id {
+                for (name, media_type) in state
+                    .store
+                    .list_placement_execution_artifacts(execution_id)
+                    .map_err(ApiError::internal)?
+                {
+                    evidence.push(json!({
+                        "label": name,
+                        "media_type": media_type,
+                        "url": format!(
+                            "/api/v1/placement-executions/{execution_id}/artifacts/{name}"
+                        ),
+                    }));
+                }
+            }
+        }
+        let job_name = jobs
+            .iter()
+            .find(|job| job.id == run.job_id)
+            .map(|job| job.name.as_str())
+            .unwrap_or("Production job");
+        let phase = current_step.map_or_else(
+            || match run.status {
+                JobExecutionStatus::Pending => "pending",
+                JobExecutionStatus::Running => "running",
+                JobExecutionStatus::Paused => "paused",
+                JobExecutionStatus::NeedsAttention => "needs_attention",
+                JobExecutionStatus::Succeeded => "succeeded",
+                JobExecutionStatus::CompletedWithSkips => "completed_with_skips",
+                JobExecutionStatus::Cancelled => "cancelled",
+            },
+            |step| match step.status {
+                JobExecutionStepStatus::Pending => "pending",
+                JobExecutionStepStatus::Running => "running",
+                JobExecutionStepStatus::Succeeded => "succeeded",
+                JobExecutionStepStatus::NeedsAttention => "needs_attention",
+                JobExecutionStepStatus::Skipped => "skipped",
+            },
+        );
+        items.push(WorkspaceActivityItem {
+            updated_at: run.updated_at,
+            active,
+            priority: match run.status {
+                JobExecutionStatus::Pending | JobExecutionStatus::Running => 3,
+                JobExecutionStatus::NeedsAttention => 2,
+                JobExecutionStatus::Paused => 1,
+                _ => 0,
+            },
+            value: json!({
+                "id": run.id,
+                "kind": "job",
+                "title": job_name,
+                "target": current_step.map(|step| json!({
+                    "kind": "placement",
+                    "id": step.placement_reference,
+                    "label": step.placement_reference,
+                })),
+                "phase": phase,
+                "status": run.status,
+                "message": run.message,
+                "started_at": run.created_at,
+                "updated_at": run.updated_at,
+                "progress": {
+                    "completed": completed,
+                    "total": run.steps.len(),
+                    "unit": "placements",
+                    "eta_seconds": Value::Null,
+                },
+                "execution_id": run.id,
+                "step_index": current_step.map(|step| step.step_index),
+                "allowed_actions": actions,
+                "evidence": evidence,
+            }),
+        });
+    }
+
+    for scan in scans {
+        let active = matches!(
+            scan.status,
+            WorkspaceScanStatus::Pending | WorkspaceScanStatus::Running
+        );
+        let elapsed = (Utc::now() - scan.created_at).num_seconds().max(0) as f64;
+        let progress = if scan.planned_tiles == 0 {
+            0.0
+        } else {
+            f64::from(scan.captured_tiles) / f64::from(scan.planned_tiles)
+        };
+        let observed_total = if progress > 0.0 {
+            elapsed / progress
+        } else {
+            scan.estimated_duration_seconds as f64
+        };
+        let eta_seconds = active.then(|| {
+            (observed_total.max(scan.estimated_duration_seconds as f64) - elapsed)
+                .max(0.0)
+                .ceil() as u64
+        });
+        let evidence = scan
+            .mosaic_artifact_name
+            .as_ref()
+            .map(|name| {
+                vec![json!({
+                    "label": "Workspace mosaic",
+                    "media_type": "image/png",
+                    "url": format!("/api/v1/workspace-scans/{}/artifacts/{name}", scan.id),
+                })]
+            })
+            .unwrap_or_default();
+        items.push(WorkspaceActivityItem {
+            updated_at: scan.updated_at,
+            active,
+            priority: if active { 4 } else { 0 },
+            value: json!({
+                "id": scan.id,
+                "kind": "scan",
+                "title": "Workspace scan",
+                "target": {
+                    "kind": "region",
+                    "id": scan.id,
+                    "label": format!("{:?} scan", scan.mode).to_lowercase(),
+                    "region": scan.region,
+                },
+                "phase": if scan.captured_tiles < scan.planned_tiles {
+                    "capturing"
+                } else {
+                    "building mosaic"
+                },
+                "status": scan.status,
+                "message": scan.failure,
+                "started_at": scan.created_at,
+                "updated_at": scan.updated_at,
+                "progress": {
+                    "completed": scan.captured_tiles,
+                    "total": scan.planned_tiles,
+                    "unit": "tiles",
+                    "eta_seconds": eta_seconds,
+                },
+                "allowed_actions": [],
+                "evidence": evidence,
+            }),
+        });
+    }
+
+    for operation in operations
+        .into_iter()
+        .filter(|operation| !represented_operations.contains(&operation.id))
+    {
+        let active = matches!(
+            operation.status,
+            OperationStatus::Pending | OperationStatus::Running
+        );
+        items.push(WorkspaceActivityItem {
+            updated_at: operation.updated_at,
+            active,
+            priority: if active { 4 } else { 0 },
+            value: json!({
+                "id": operation.id,
+                "kind": "operation",
+                "title": operation.kind,
+                "target": Value::Null,
+                "phase": operation.status,
+                "status": operation.status,
+                "message": operation.message,
+                "started_at": operation.created_at,
+                "updated_at": operation.updated_at,
+                "progress": Value::Null,
+                "allowed_actions": [],
+                "evidence": [],
+            }),
+        });
+    }
+    items.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let active = items
+        .iter()
+        .filter(|item| item.active)
+        .max_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+        })
+        .map(|item| item.value.clone());
+    let recent = items
+        .into_iter()
+        .filter(|item| !item.active)
+        .take(5)
+        .map(|item| item.value)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "active": active, "recent": recent })))
 }
 
 async fn get_workspace_scan(
@@ -10079,6 +10408,8 @@ async fn list_strip_feeder_registrations(State(state): State<AppState>) -> ApiRe
 struct StripFeederPocketMapEvidence {
     observations: HashMap<(Uuid, u32), (chrono::DateTime<Utc>, StripFeederPocketScanObservation)>,
     active_pocket_indices: HashMap<Uuid, BTreeSet<u32>>,
+    active_revisions: HashMap<Uuid, (DateTime<Utc>, Uuid, StripFeederLaneRevision)>,
+    revision_counts: HashMap<Uuid, usize>,
 }
 
 fn active_strip_feeder_pocket_map_evidence(
@@ -10099,6 +10430,10 @@ fn active_strip_feeder_pocket_map_evidence(
     let mut seen = BTreeSet::new();
     let mut evidence = StripFeederPocketMapEvidence::default();
     for report in reports {
+        *evidence
+            .revision_counts
+            .entry(report.registration_id)
+            .or_default() += 1;
         if (report.algorithm_version != STRIP_FEEDER_OCCUPANCY_ALGORITHM
             && report.algorithm_version != "strip_feeder_occupancy_refresh.v1")
             || !seen.insert(report.registration_id)
@@ -10113,6 +10448,12 @@ fn active_strip_feeder_pocket_map_evidence(
                 && report.observations.len() * 5 >= registration.pockets.len() * 4);
         if !complete_revision {
             continue;
+        }
+        if let Some(revision) = report.lane_revision.clone() {
+            evidence.active_revisions.insert(
+                report.registration_id,
+                (report.created_at, report.source_scan_id, revision),
+            );
         }
         evidence.active_pocket_indices.insert(
             report.registration_id,
@@ -10142,8 +10483,27 @@ fn strip_feeder_pocket_map_entry(
         "updated_at": registration.updated_at,
         "status": registration.status,
         "name": registration.name,
+        "part_key": registration.part_key,
+        "part_rotation_deg": registration.part_rotation_deg,
         "tape_width_mm": registration.tape_width_mm,
+        "tape_pitch_mm": registration.tape_pitch_mm,
         "tape_rotation_deg": registration.tape_rotation_deg,
+        "pickup_z_mm": registration.pickup_z_mm,
+        "pickup_sequence_passed": registration.pickup_sequence_passed,
+        "latest_live_holdout_id": registration.latest_live_holdout_id,
+        "latest_pickup_qualification_id": registration.latest_pickup_qualification_id,
+        "latest_placement_validation_id": registration.latest_placement_validation_id,
+        "vision_review_required": registration.vision_review_required,
+        "active_revision": evidence.active_revisions.get(&registration.id).map(
+            |(created_at, source_scan_id, revision)| json!({
+                "id": revision.id,
+                "source_scan_id": source_scan_id,
+                "created_at": created_at,
+                "mosaic_artifact_name": revision.mosaic_artifact_name,
+                "vision_confidence": revision.vision_confidence,
+            }),
+        ),
+        "revision_count": evidence.revision_counts.get(&registration.id).copied().unwrap_or(0),
         "pockets": registration.pockets.iter().filter(|pocket| {
             evidence
                 .active_pocket_indices
@@ -10207,6 +10567,154 @@ async fn get_strip_feeder_registration(
         .map_err(ApiError::internal)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateStripFeederAssignmentRequest {
+    part_key: Option<String>,
+    part_rotation_deg: Option<f64>,
+}
+
+async fn update_strip_feeder_assignment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateStripFeederAssignmentRequest>,
+) -> ApiResult<Json<StripFeederRegistration>> {
+    if body
+        .part_rotation_deg
+        .is_some_and(|rotation| !rotation.is_finite())
+    {
+        return Err(ApiError::bad_request("part rotation must be finite"));
+    }
+    let part_key = body
+        .part_key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if part_key.is_some() != body.part_rotation_deg.is_some() {
+        return Err(ApiError::bad_request(
+            "part identity and rotation must be assigned together",
+        ));
+    }
+    if let Some(part_key) = part_key.as_deref() {
+        let known = state
+            .store
+            .list_parts()
+            .map_err(ApiError::internal)?
+            .iter()
+            .any(|part| part.key == part_key);
+        if !known {
+            return Err(ApiError::bad_request(
+                "assigned part is not in the part library",
+            ));
+        }
+    }
+    let mut registration = state
+        .store
+        .get_strip_feeder_registration(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
+    if registration.part_key == part_key && registration.part_rotation_deg == body.part_rotation_deg
+    {
+        return Ok(Json(registration));
+    }
+    ensure_no_active_job_executions(&state)?;
+    if registration
+        .pockets
+        .iter()
+        .any(|pocket| pocket.status == StripFeederPocketStatus::Reserved)
+    {
+        return Err(ApiError::bad_request(
+            "part assignment cannot change while a pocket is reserved",
+        ));
+    }
+    deactivate_strip_feeder(&state, &mut registration).map_err(ApiError::bad_request)?;
+    registration.part_key = part_key;
+    registration.part_rotation_deg = body.part_rotation_deg;
+    registration.latest_live_holdout_id = None;
+    registration.latest_pickup_qualification_id = None;
+    registration.pickup_sequence_passed = false;
+    registration
+        .latest_pickup_sequence_qualification_ids
+        .clear();
+    registration.latest_placement_validation_id = None;
+    registration.pickup_z_mm = None;
+    registration.measured_part_size_mm = None;
+    registration.measured_part_rotation_deg = None;
+    registration.measured_part_confidence = None;
+    registration.status = if registration.part_key.is_some() && !registration.vision_review_required
+    {
+        StripFeederRegistrationStatus::LiveValidationRequired
+    } else {
+        StripFeederRegistrationStatus::VisionDraft
+    };
+    registration.updated_at = Utc::now();
+    registration.findings.retain(|finding| {
+        !finding.contains("part identity")
+            && !finding.contains("part orientation")
+            && !finding.contains("qualification")
+            && !finding.contains("guarded board placement")
+            && !finding.contains("pickup Z")
+    });
+    if registration.part_key.is_some() {
+        registration
+            .findings
+            .push("part assignment changed; feeder qualification is required".into());
+    } else {
+        registration
+            .findings
+            .push("part identity and orientation are not assigned".into());
+    }
+    state
+        .store
+        .put_strip_feeder_registration(&registration)
+        .map_err(ApiError::internal)?;
+    Ok(Json(registration))
+}
+
+async fn list_strip_feeder_revisions(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    if state
+        .store
+        .get_strip_feeder_registration(id)
+        .map_err(ApiError::internal)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("strip feeder registration not found"));
+    }
+    let mut reports = state
+        .store
+        .list_strip_feeder_occupancy_refreshes()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|report| report.registration_id == id)
+        .collect::<Vec<_>>();
+    reports.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(Json(json!({
+        "revisions": reports.into_iter().map(|report| json!({
+            "source_scan_id": report.source_scan_id,
+            "created_at": report.created_at,
+            "model_available": report.model_available,
+            "pocket_count": report.observations.len(),
+            "occupied_count": report.observations.iter().filter(|observation| {
+                observation.occupancy == StripPocketOccupancy::Occupied
+            }).count(),
+            "empty_count": report.observations.iter().filter(|observation| {
+                observation.occupancy == StripPocketOccupancy::Empty
+            }).count(),
+            "review_count": report.observations.iter().filter(|observation| {
+                observation.review_required
+            }).count(),
+            "lane_revision": report.lane_revision.as_ref().map(|revision| json!({
+                "id": revision.id,
+                "mosaic_artifact_name": revision.mosaic_artifact_name,
+                "vision_confidence": revision.vision_confidence,
+            })),
+            "warnings": report.warnings,
+        })).collect::<Vec<_>>(),
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -38877,6 +39385,94 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn feeder_assignment_change_requires_fresh_qualification() {
+        let state = test_state();
+        let now = Utc::now();
+        let feeder_id = Uuid::new_v4();
+        let mut registration = test_pickup_registration(now);
+        registration.status = StripFeederRegistrationStatus::Ready;
+        registration.active_feeder_id = Some(feeder_id);
+        registration.latest_live_holdout_id = Some(Uuid::new_v4());
+        registration.latest_pickup_qualification_id = Some(Uuid::new_v4());
+        registration.pickup_sequence_passed = true;
+        registration.latest_pickup_sequence_qualification_ids = vec![Uuid::new_v4()];
+        registration.latest_placement_validation_id = Some(Uuid::new_v4());
+        registration.pickup_z_mm = Some(4.2);
+        state
+            .store
+            .put_strip_feeder_registration(&registration)
+            .unwrap();
+        state
+            .store
+            .put_feeder(&Feeder::Strip {
+                id: feeder_id,
+                name: registration.name.clone(),
+                part_key: registration.part_key.clone().unwrap(),
+                first_pick: Pose::ORIGIN,
+                tape_pitch_mm: registration.tape_pitch_mm,
+                tape_width_mm: registration.tape_width_mm,
+                tape_rotation_deg: registration.tape_rotation_deg,
+                remaining: Some(4),
+            })
+            .unwrap();
+        state
+            .store
+            .put_part(&Part {
+                id: Uuid::new_v4(),
+                key: "C_0603:100n".into(),
+                manufacturer_part_number: None,
+                package: "C_0603".into(),
+                height_mm: Some(0.45),
+                body_width_mm: Some(0.8),
+                body_length_mm: Some(1.6),
+                placement_seating_offset_mm: None,
+                placement_release: None,
+                compatible_tips: vec!["N045".into()],
+                vision_profile: None,
+                orientation: Some(PartOrientation::AxisSymmetric),
+            })
+            .unwrap();
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::put(format!(
+                    "/api/v1/strip-feeder-registrations/{}/assignment",
+                    registration.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "part_key": "C_0603:100n",
+                        "part_rotation_deg": 90.0,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let changed = state
+            .store
+            .get_strip_feeder_registration(registration.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.part_key.as_deref(), Some("C_0603:100n"));
+        assert_eq!(changed.part_rotation_deg, Some(90.0));
+        assert_eq!(
+            changed.status,
+            StripFeederRegistrationStatus::LiveValidationRequired
+        );
+        assert!(changed.active_feeder_id.is_none());
+        assert!(changed.latest_live_holdout_id.is_none());
+        assert!(changed.latest_pickup_qualification_id.is_none());
+        assert!(changed.latest_placement_validation_id.is_none());
+        assert!(changed.pickup_z_mm.is_none());
+        assert!(state.store.list_feeders().unwrap().is_empty());
+    }
+
     #[test]
     fn strip_feeder_pocket_map_uses_the_active_revision_center() {
         let mut registration = test_pickup_registration(Utc::now());
@@ -38922,6 +39518,7 @@ mod tests {
                 (now + chrono::Duration::seconds(1), observation),
             )]),
             active_pocket_indices: HashMap::new(),
+            ..StripFeederPocketMapEvidence::default()
         };
 
         let entry = strip_feeder_pocket_map_entry(&registration, &evidence);
@@ -38938,6 +39535,7 @@ mod tests {
         let evidence = StripFeederPocketMapEvidence {
             observations: HashMap::new(),
             active_pocket_indices: HashMap::from([(registration.id, BTreeSet::from([0, 1, 2]))]),
+            ..StripFeederPocketMapEvidence::default()
         };
 
         let entry = strip_feeder_pocket_map_entry(&registration, &evidence);
@@ -39615,6 +40213,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn workspace_activity_only_offers_safe_job_recovery_actions() {
+        let state = test_state();
+        let now = Utc::now();
+        let run = JobExecutionRun {
+            id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            calibration_id: Uuid::new_v4(),
+            simulated: false,
+            status: JobExecutionStatus::NeedsAttention,
+            created_at: now,
+            updated_at: now,
+            steps: vec![JobExecutionStep {
+                step_index: 0,
+                placement_reference: "R15".into(),
+                status: JobExecutionStepStatus::NeedsAttention,
+                execution_id: None,
+                attempt_execution_ids: Vec::new(),
+                outcome_disposition: Some(PlacementOutcomeDisposition::StuckOnNozzle),
+                board_contacted: true,
+                message: Some("part stayed on N1".into()),
+            }],
+            current_step_index: Some(0),
+            pause_requested: false,
+            cancel_requested: false,
+            message: Some("placement needs attention".into()),
+        };
+        state.store.put_job_execution(&run).unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::get("/api/v1/workspace/activity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let actions = body["active"]["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|action| action["id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(actions, ["skip_step", "cancel_job"]);
     }
 
     #[test]
@@ -41027,6 +41676,29 @@ mod tests {
                 .unwrap()
                 .status,
             OperationStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_marks_unlinked_interrupted_operation_failed() {
+        let profile: MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let store = Store::memory().unwrap();
+        let mut operation = Operation::pending("calibration.local_xy_direction_response");
+        operation.status = OperationStatus::Running;
+        store.put_operation(&operation).unwrap();
+        let machine = MachineHandle::spawn(
+            Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm)),
+            profile.clone(),
+        );
+
+        let state = AppState::new(machine, profile, store);
+
+        let recovered = state.store.get_operation(operation.id).unwrap().unwrap();
+        assert_eq!(recovered.status, OperationStatus::Failed);
+        assert_eq!(
+            recovered.message.as_deref(),
+            Some("daemon restarted before the operation completed")
         );
     }
 

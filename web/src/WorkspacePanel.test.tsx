@@ -162,8 +162,19 @@ const feederRegistration: StripFeederMapRegistration = {
   updated_at: "2026-10-03T18:02:00Z",
   status: "ready",
   name: "Feeder 1",
+  part_key: "resistor-10k",
+  part_rotation_deg: 0,
   tape_width_mm: 8,
+  tape_pitch_mm: 4,
   tape_rotation_deg: 90,
+  pickup_z_mm: 12.4,
+  pickup_sequence_passed: true,
+  latest_live_holdout_id: "holdout-id",
+  latest_pickup_qualification_id: "qualification-id",
+  latest_placement_validation_id: null,
+  vision_review_required: false,
+  active_revision: null,
+  revision_count: 0,
   pockets: [
     {
       pocket_index: 0,
@@ -794,6 +805,25 @@ describe("workspace operational map", () => {
     });
     vi.spyOn(api, "jobs").mockResolvedValue([job]);
     vi.spyOn(api, "jobExecutions").mockResolvedValue([currentExecution]);
+    vi.spyOn(api, "workspaceActivity").mockResolvedValue({
+      active: {
+        id: currentExecution.id,
+        kind: "job",
+        title: job.name,
+        target: { kind: "placement", id: "R1", label: "R1" },
+        phase: "running",
+        status: "running",
+        message: null,
+        started_at: currentExecution.created_at,
+        updated_at: currentExecution.updated_at,
+        progress: { completed: 0, total: 1, unit: "placements", eta_seconds: null },
+        execution_id: currentExecution.id,
+        step_index: 0,
+        allowed_actions: [],
+        evidence: [],
+      },
+      recent: [],
+    });
     vi.spyOn(api, "placementExecution").mockResolvedValue({
       report: { nozzle_id: "N1" },
     } as unknown as PlacementExecutionRun);

@@ -4,13 +4,14 @@ import type {
   CalibrationArtifactPlan, CalibrationSnapshot, CalibrationStep, CameraControl, CameraProfile,
   CameraReproducibilityReport, CameraRole, ControlLease, Device, JogTarget, MachineStatus,
   Job, JobExecutionRun, MachineMotionProfile, MachineOverlayGeometry, Operation,
-  PlacementExecutionRun,
+  Part, PlacementExecutionRun,
   PlacementOutcomeRecord, SensorReading,
   StripFeederLiveHoldoutRun,
   StripFeederOccupancyRefreshReport,
   StripFeederPickupQualificationRun, StripFeederRegistration,
   StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
-  StripFeederMapRegistration,
+  StripFeederMapRegistration, StripFeederRevisionSummary,
+  WorkspaceActivityFeed,
   WorkspaceBoardDiscoveryReport,
   WorkspaceChangeSetReport, WorkspaceDisplayPatch, WorkspaceInventoryBaseline,
   WorkspaceScanEstimate, WorkspaceScanRegion, WorkspaceScanReport, WorkspaceScanSummary,
@@ -339,6 +340,7 @@ export const api = {
     jsonPost<{ patches: WorkspaceDisplayPatch[] }>(
       `/workspace-scans/${scanId}/display-patches`,
     ).then((response) => response.patches),
+  workspaceActivity: () => request<WorkspaceActivityFeed>("/workspace/activity"),
   workspaceScanArtifact: <T>(scanId: string, artifactName: string) =>
     request<T>(
       `/workspace-scans/${scanId}/artifacts/${encodeURIComponent(artifactName)}`,
@@ -485,10 +487,25 @@ export const api = {
     request<StripFeederRegistration>(
       `/strip-feeder-registrations/${registrationId}`,
     ),
+  stripFeederRegistrations: async () =>
+    (await request<{ registrations: StripFeederRegistration[] }>(
+      "/strip-feeder-registrations",
+    )).registrations,
   stripFeederPocketMap: async () =>
     (await request<{ registrations: StripFeederMapRegistration[] }>(
       "/strip-feeder-registrations/pocket-map",
     )).registrations,
+  stripFeederRevisions: async (registrationId: string) =>
+    (await request<{ revisions: StripFeederRevisionSummary[] }>(
+      `/strip-feeder-registrations/${registrationId}/revisions`,
+    )).revisions,
+  updateStripFeederAssignment: (
+    registrationId: string, partKey: string | null, partRotationDeg: number | null,
+  ) => jsonPut<StripFeederRegistration>(
+    `/strip-feeder-registrations/${registrationId}/assignment`,
+    { part_key: partKey, part_rotation_deg: partRotationDeg },
+  ),
+  parts: async () => (await request<{ parts: Part[] }>("/parts")).parts,
   startBoardRegistration: (
     scanId: string, candidateIndex: number, boardId: string, leaseId: string,
     label?: string,

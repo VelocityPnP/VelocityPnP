@@ -151,6 +151,8 @@ export interface Operation {
   id: string;
   kind: string;
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  created_at?: string;
+  updated_at?: string;
   message: string | null;
 }
 
@@ -722,6 +724,13 @@ export interface Job {
   status: string;
 }
 
+export interface Part {
+  id: string;
+  key: string;
+  manufacturer_part_number: string | null;
+  package: string;
+}
+
 export type PlacementOutcomeDisposition = "good" | "offset" | "rotated"
   | "tombstoned" | "stacked" | "missing" | "stuck_on_nozzle" | "uncertain";
 
@@ -1158,8 +1167,25 @@ export interface StripFeederMapRegistration {
   updated_at: string;
   status: StripFeederRegistration["status"];
   name: string;
+  part_key: string | null;
+  part_rotation_deg: number | null;
   tape_width_mm: number;
+  tape_pitch_mm: number;
   tape_rotation_deg: number;
+  pickup_z_mm: number | null;
+  pickup_sequence_passed: boolean;
+  latest_live_holdout_id: string | null;
+  latest_pickup_qualification_id: string | null;
+  latest_placement_validation_id: string | null;
+  vision_review_required: boolean;
+  active_revision: {
+    id: string;
+    source_scan_id: string;
+    created_at: string;
+    mosaic_artifact_name: string;
+    vision_confidence: number;
+  } | null;
+  revision_count: number;
   pockets: Array<{
     pocket_index: number;
     center_machine_mm: [number, number];
@@ -1170,6 +1196,62 @@ export interface StripFeederMapRegistration {
     status: "available" | "empty" | "reserved" | "consumed" | "needs_review";
     selected: boolean;
   }>;
+}
+
+export interface StripFeederRevisionSummary {
+  source_scan_id: string;
+  created_at: string;
+  model_available: boolean;
+  pocket_count: number;
+  occupied_count: number;
+  empty_count: number;
+  review_count: number;
+  lane_revision: {
+    id: string;
+    mosaic_artifact_name: string;
+    vision_confidence: number;
+  } | null;
+  warnings: string[];
+}
+
+export type WorkspaceActivityActionId =
+  | "pause_job" | "resume_job" | "retry_step" | "skip_step" | "cancel_job";
+
+export interface WorkspaceActivity {
+  id: string;
+  kind: "job" | "scan" | "operation";
+  title: string;
+  target: {
+    kind: string;
+    id: string;
+    label: string;
+    region?: WorkspaceScanRegion;
+  } | null;
+  phase: string;
+  status: string;
+  message: string | null;
+  started_at: string;
+  updated_at: string;
+  progress: {
+    completed: number;
+    total: number;
+    unit: string;
+    eta_seconds: number | null;
+  } | null;
+  execution_id?: string;
+  step_index?: number | null;
+  allowed_actions: Array<{
+    id: WorkspaceActivityActionId;
+    label: string;
+    requires_note: boolean;
+    destructive?: boolean;
+  }>;
+  evidence: Array<{ label: string; media_type: string; url: string }>;
+}
+
+export interface WorkspaceActivityFeed {
+  active: WorkspaceActivity | null;
+  recent: WorkspaceActivity[];
 }
 
 export interface StripFeederLiveHoldoutReport {

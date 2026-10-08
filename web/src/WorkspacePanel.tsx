@@ -13,7 +13,7 @@ import type {
   WorkspaceBoardCandidate, WorkspaceBoardDiscoveryReport, WorkspaceDisplayPatch,
   WorkspaceObjectClass,
   WorkspaceFeederLaneSlot, WorkspaceScanRegion, WorkspaceScanReport,
-  WorkspaceScanSummary,
+  WorkspaceScanSummary, WorkspaceActivityFeed, WorkspaceActivityActionId,
 } from "./types";
 
 type WorkspaceLayer =
@@ -33,6 +33,8 @@ interface WorkspacePanelProps {
   setError: (value: string | null) => void;
   openMachine: () => void;
   openJobs: () => void;
+  focusFeederId?: string | null;
+  onFocusConsumed?: () => void;
 }
 
 interface ArtifactOption {
@@ -90,19 +92,19 @@ interface WorkspaceSelection {
   pocketIndex?: number;
 }
 
-interface WorkspaceFeederSlotTarget {
+export interface WorkspaceFeederSlotTarget {
   id: string;
   label: string;
   slot: WorkspaceFeederLaneSlot;
 }
 
-interface WorkspaceFeederBank {
+export interface WorkspaceFeederBank {
   bankIndex: number;
   label: string;
   candidate: WorkspaceBoardCandidate;
 }
 
-interface WorkspaceFeederLaneTarget {
+export interface WorkspaceFeederLaneTarget {
   feeder: StripFeederMapRegistration;
   label: string;
   bankOutline: Array<[number, number]> | null;
@@ -710,6 +712,34 @@ export function workspaceFeederLaneTargets(
   });
 }
 
+export function workspaceFeederSlotTargets(
+  banks: WorkspaceFeederBank[],
+  feeders: StripFeederMapRegistration[],
+): WorkspaceFeederSlotTarget[] {
+  return banks.flatMap((bank) => {
+    const vertical = feederBankIsVertical(bank);
+    const coordinateIndex = vertical ? 0 : 1;
+    const anchors = feederBankLaneAnchors(bank, feeders);
+    return [...(bank.candidate.feeder_lane_slots ?? [])]
+      .sort((left, right) => {
+        const leftCenter = polygonCenter(left.outline_machine_mm);
+        const rightCenter = polygonCenter(right.outline_machine_mm);
+        return leftCenter[coordinateIndex] - rightCenter[coordinateIndex];
+      })
+      .map((slot) => ({
+        id: `candidate-${bank.candidate.candidate_index}-slot-${slot.slot_index}`,
+        label: `${bank.label} - lane ${
+          nearestFeederLaneIndex(
+            polygonCenter(slot.outline_machine_mm)[coordinateIndex], anchors,
+          ) + 1
+        }`,
+        slot: normalizeFeederSlotToBank(
+          slot, bank.candidate.outline_machine_mm,
+        ),
+      }));
+  });
+}
+
 export function normalizeFeederSlotToBank(
   slot: WorkspaceFeederLaneSlot,
   bankOutline: Array<[number, number]>,
@@ -827,7 +857,7 @@ export function workspaceRescanEtaSeconds(
 }
 
 export function WorkspacePanel({
-  status, setError, openMachine, openJobs,
+  status, setError, openMachine, openJobs, focusFeederId, onFocusConsumed,
 }: WorkspacePanelProps) {
   const requestDialog = useDialog();
   const [scanSummaries, setScanSummaries] = useState<WorkspaceScanSummary[]>([]);
@@ -850,6 +880,11 @@ export function WorkspacePanel({
   const [clearXyFeedMmPerMin, setClearXyFeedMmPerMin] = useState(23_000);
   const [mapPose, setMapPose] = useState<Pose | null>(status.pose);
   const [placementExecution, setPlacementExecution] = useState<PlacementExecutionRun | null>(null);
+  const [activity, setActivity] = useState<WorkspaceActivityFeed>({
+    active: null,
+    recent: [],
+  });
+  const [activityAction, setActivityAction] = useState<WorkspaceActivityActionId | null>(null);
   const [selectedScanId, setSelectedScanId] = useState("");
   const [artifactName, setArtifactName] = useState("");
   const [viewport, setViewport] = useState<WorkspaceViewport | null>(null);
@@ -994,6 +1029,20 @@ export function WorkspacePanel({
     return () => window.clearInterval(timer);
   }, [loadOperationalData]);
 
+  const loadActivity = useCallback(async () => {
+    try {
+      setActivity(await api.workspaceActivity());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [setError]);
+
+  useEffect(() => {
+    void loadActivity();
+    const timer = window.setInterval(() => void loadActivity(), 750);
+    return () => window.clearInterval(timer);
+  }, [loadActivity]);
+
   const loadFeederData = useCallback(async () => {
     try {
       setFeederRegistrations(await api.stripFeederPocketMap());
@@ -1091,7 +1140,6 @@ export function WorkspacePanel({
     () => selectActiveJobExecution(executions),
     [executions],
   );
-  const activeJob = jobs.find((job) => job.id === activeExecution?.job_id) ?? null;
   const workspaceJob = useMemo(
     () => selectWorkspaceJob(jobs, executions, placementOutcomes),
     [executions, jobs, placementOutcomes],
@@ -1140,28 +1188,10 @@ export function WorkspacePanel({
       return { ...current, point: pocket.center_machine_mm };
     });
   }, [feederLaneTargets, selection]);
-  const feederSlots = useMemo(() => feederBanks.flatMap((bank) => {
-    const vertical = feederBankIsVertical(bank);
-    const coordinateIndex = vertical ? 0 : 1;
-    const anchors = feederBankLaneAnchors(bank, feederLanes);
-    return [...(bank.candidate.feeder_lane_slots ?? [])]
-      .sort((left, right) => {
-        const leftCenter = polygonCenter(left.outline_machine_mm);
-        const rightCenter = polygonCenter(right.outline_machine_mm);
-        return leftCenter[vertical ? 0 : 1] - rightCenter[vertical ? 0 : 1];
-      })
-      .map((slot) => ({
-        id: `candidate-${bank.candidate.candidate_index}-slot-${slot.slot_index}`,
-        label: `${bank.label} - lane ${
-          nearestFeederLaneIndex(
-            polygonCenter(slot.outline_machine_mm)[coordinateIndex], anchors,
-          ) + 1
-        }`,
-        slot: normalizeFeederSlotToBank(
-          slot, bank.candidate.outline_machine_mm,
-        ),
-      }));
-  }), [feederBanks]);
+  const feederSlots = useMemo(
+    () => workspaceFeederSlotTargets(feederBanks, feederLanes),
+    [feederBanks, feederLanes],
+  );
   const currentStep = activeExecution?.steps.find(
     (step) => step.step_index === activeExecution.current_step_index,
   ) ?? null;
@@ -1184,9 +1214,6 @@ export function WorkspacePanel({
       window.clearInterval(timer);
     };
   }, [currentStep?.execution_id]);
-  const completedSteps = activeExecution?.steps.filter(
-    (step) => ["succeeded", "skipped"].includes(step.status),
-  ).length ?? 0;
 
   const analyzeObjects = async () => {
     if (!selectedScan) return;
@@ -1286,6 +1313,41 @@ export function WorkspacePanel({
     setQuickCaptureUrl("");
     setRescanProgress(null);
   };
+
+  useEffect(() => {
+    if (!focusFeederId || !region || selectionAction !== null) return;
+    const lane = feederLaneTargets.find(
+      (target) => target.feeder.id === focusFeederId,
+    );
+    if (lane) {
+      setSelection({
+        kind: "feeder",
+        id: lane.feeder.id,
+        label: lane.label,
+        point: polygonCenter(
+          lane.feeder.pockets.map((pocket) => pocket.center_machine_mm),
+        ),
+        scanRegion: feederScanRegion(lane.feeder, region),
+        objectId: lane.feeder.id,
+      });
+      onFocusConsumed?.();
+      return;
+    }
+    const slot = feederSlots.find((target) => target.id === focusFeederId);
+    if (!slot) return;
+    setSelection({
+      kind: "feeder_slot",
+      id: slot.id,
+      label: slot.label,
+      point: polygonCenter(slot.slot.outline_machine_mm),
+      scanRegion: paddedRegion(slot.slot.outline_machine_mm, region, 6),
+      objectId: null,
+    });
+    onFocusConsumed?.();
+  }, [
+    feederLaneTargets, feederSlots, focusFeederId, onFocusConsumed, region,
+    selectionAction,
+  ]);
 
   const selectBoard = (
     event: WorkspaceActivateEvent,
@@ -1637,7 +1699,9 @@ export function WorkspacePanel({
   };
 
   const quickCapture = async () => {
-    if (!selection || !["placement", "pocket", "point"].includes(selection.kind)) return;
+    if (!selection || ![
+      "feeder", "feeder_slot", "placement", "pocket", "point",
+    ].includes(selection.kind)) return;
     setSelectionAction("capturing");
     setSelectionMessage("Moving top camera…");
     setQuickCaptureUrl("");
@@ -1757,6 +1821,71 @@ export function WorkspacePanel({
     }
     setPanning(false);
   };
+
+  const runActivityAction = async (actionId: WorkspaceActivityActionId) => {
+    const current = activity.active;
+    if (!current?.execution_id) return;
+    setActivityAction(actionId);
+    setError(null);
+    try {
+      if (actionId === "pause_job") {
+        await api.pauseJobExecution(current.execution_id);
+      } else if (actionId === "resume_job") {
+        if (await requestDialog({
+          title: "Resume job?",
+          message: "Confirm that the PCB and feeders are fixed, the travel path is clear, and power isolation is reachable.",
+          confirmLabel: "Resume job",
+        }) === null) return;
+        const lease = await api.acquireOrRenewLease(
+          "VelocityPnP workspace job resume", 900,
+        );
+        await api.resumeJobExecution(current.execution_id, lease.id);
+      } else if (actionId === "retry_step" || actionId === "skip_step") {
+        if (current.step_index === null || current.step_index === undefined) return;
+        const skip = actionId === "skip_step";
+        const note = await requestDialog({
+          title: skip ? "Skip this placement?" : "Retry this placement?",
+          message: skip
+            ? "Record why it is safe to continue without this placement."
+            : "Add an optional execution note before the retry.",
+          confirmLabel: skip ? "Skip placement" : "Retry placement",
+          tone: skip ? "danger" : "default",
+          input: {
+            label: skip ? "Reason" : "Execution note",
+            placeholder: skip ? "Reason for the skip" : "Optional note",
+            required: skip,
+          },
+        });
+        if (note === null) return;
+        await api.resolveJobExecutionStep(
+          current.execution_id,
+          current.step_index,
+          skip ? "skip" : "retry",
+          note,
+        );
+      } else if (actionId === "cancel_job") {
+        if (await requestDialog({
+          title: "Cancel this job?",
+          message: "The execution cannot resume after it is cancelled.",
+          confirmLabel: "Cancel job",
+          tone: "danger",
+        }) === null) return;
+        await api.cancelJobExecution(current.execution_id);
+      }
+      await Promise.all([loadActivity(), loadOperationalData()]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setActivityAction(null);
+    }
+  };
+
+  const selectedFeeder = selection?.objectId
+    ? feederLaneTargets.find(
+      (target) => target.feeder.id === selection.objectId,
+    ) ?? null
+    : null;
+  const latestActivityResult = activity.recent[0] ?? null;
 
   return <div className="workspace-layout">
     <section className="workspace-map-card">
@@ -1977,8 +2106,19 @@ export function WorkspacePanel({
             />
             <title>{board.label}</title>
           </g>)}
+          {activity.active?.target?.region && <rect
+            className="workspace-active-target-region"
+            x={activity.active.target.region.x_min_mm}
+            y={-activity.active.target.region.y_max_mm}
+            width={activity.active.target.region.x_max_mm
+              - activity.active.target.region.x_min_mm}
+            height={activity.active.target.region.y_max_mm
+              - activity.active.target.region.y_min_mm}
+          >
+            <title>{activity.active.target.label}</title>
+          </rect>}
           {layers.placements && placementMarkers.map((placement) => <g
-            className={`workspace-selectable workspace-placement-position ${placement.status} ${placement.current ? "current" : ""} ${selection?.kind === "placement" && selection.id === placement.id ? "is-selected" : ""}`}
+            className={`workspace-selectable workspace-placement-position ${placement.status} ${placement.current ? "current" : ""} ${placement.current && activeExecution?.status === "needs_attention" ? "has-failure" : ""} ${selection?.kind === "placement" && selection.id === placement.id ? "is-selected" : ""}`}
             key={placement.id}
             onClick={(event) => selectPlacement(event, placement)}
             onKeyDown={(event) => activateOnKeyboard(
@@ -1989,6 +2129,8 @@ export function WorkspacePanel({
             tabIndex={0}
             transform={`translate(${placement.point[0]} ${-placement.point[1]}) rotate(${-placement.rotationDeg})`}
           >
+            {placement.current && activeExecution?.status === "needs_attention"
+              && <circle className="workspace-failure-marker" r={placementMarkerRadius * 2.2} />}
             <circle r={placementMarkerRadius} />
             {placement.current && <>
               <line
@@ -2261,6 +2403,27 @@ export function WorkspacePanel({
           <p className="workspace-selection-coordinate">
             X {selection.point[0].toFixed(2)} · Y {selection.point[1].toFixed(2)} mm
           </p>
+          {selectedFeeder && <dl className="workspace-facts compact workspace-feeder-facts">
+            <div><dt>State</dt><dd>{selectionAction === "scanning"
+              ? "Scanning"
+              : selectedFeeder.feeder.status === "ready"
+                ? "Ready"
+                : selectedFeeder.feeder.vision_review_required
+                  || selectedFeeder.feeder.status === "vision_draft"
+                  ? "Needs review"
+                  : "Tape detected"}</dd></div>
+            <div><dt>Part</dt><dd>{selectedFeeder.feeder.part_key ?? "Not assigned"}</dd></div>
+            <div><dt>Tape</dt><dd>{selectedFeeder.feeder.tape_width_mm.toFixed(0)} mm / {selectedFeeder.feeder.tape_pitch_mm.toFixed(1)} mm pitch</dd></div>
+            <div><dt>Occupancy</dt><dd>{selectedFeeder.feeder.pockets.filter(
+              (pocket) => pocket.occupancy === "occupied",
+            ).length} occupied · {selectedFeeder.feeder.pockets.filter(
+              (pocket) => pocket.occupancy === "empty",
+            ).length} empty</dd></div>
+            <div><dt>Revision</dt><dd>{selectedFeeder.feeder.active_revision
+              ? new Date(selectedFeeder.feeder.active_revision.created_at).toLocaleString()
+              : "Initial survey"}</dd></div>
+            <div><dt>Qualification</dt><dd>{label(selectedFeeder.feeder.status)}</dd></div>
+          </dl>}
           <div className="workspace-selection-actions">
             <button
               disabled={!selectionActionAllowed}
@@ -2274,7 +2437,7 @@ export function WorkspacePanel({
             >{selectionAction === "estimating"
                 ? "Estimating…"
                 : selectionAction === "scanning" ? "Scanning…" : "Rescan"}</button>}
-            {["placement", "pocket", "point"].includes(selection.kind) && <button
+            {["feeder", "feeder_slot", "placement", "pocket", "point"].includes(selection.kind) && <button
                 disabled={!selectionActionAllowed}
                 onClick={() => void quickCapture()}
                 type="button"
@@ -2362,29 +2525,85 @@ export function WorkspacePanel({
         </button>}
       </section>
 
-      <section className={`card workspace-job-card ${activeExecution ? "has-active-job" : ""}`}>
+      <section className={`card workspace-job-card ${activity.active ? "has-active-job" : ""}`}>
         <div className="card-heading">
-          <div><p className="eyebrow">Production</p><h2>{activeJob?.name ?? "No active job"}</h2></div>
-          {activeExecution && <span className={`badge state-${activeExecution.status}`}>
-            {label(activeExecution.status)}
+          <div><p className="eyebrow">Activity</p><h2>{activity.active
+            ? activity.active.kind === "operation"
+              ? label(activity.active.title)
+              : activity.active.title
+            : "Machine is idle"}</h2></div>
+          {activity.active && <span className={`badge state-${activity.active.status}`}>
+            {label(activity.active.status)}
           </span>}
         </div>
-        {activeExecution ? <>
-          <div className="workspace-progress-label">
-            <strong>{completedSteps}/{activeExecution.steps.length}</strong>
-            <span>placements complete</span>
+        {activity.active ? <>
+          <div className="workspace-current-step">
+            <small>{activity.active.target?.kind ?? "Current phase"}</small>
+            <strong>{activity.active.target?.label ?? label(activity.active.phase)}</strong>
+            <span>{label(activity.active.phase)}</span>
           </div>
-          <progress value={completedSteps} max={Math.max(activeExecution.steps.length, 1)} />
-          {currentStep && <div className="workspace-current-step">
-            <small>Current placement</small>
-            <strong>{currentStep.placement_reference}</strong>
-            <span>{label(currentStep.status)}</span>
+          {activity.active.progress && <>
+          <div className="workspace-progress-label">
+            <strong>{activity.active.progress.completed}/{activity.active.progress.total}</strong>
+            <span>{activity.active.progress.unit}{activity.active.progress.eta_seconds !== null
+              ? ` · about ${formatWorkspaceDuration(activity.active.progress.eta_seconds)} left`
+              : ""}</span>
+          </div>
+          <progress
+            value={activity.active.progress.completed}
+            max={Math.max(activity.active.progress.total, 1)}
+          />
+          </>}
+          {activity.active.message && <p>{activity.active.message}</p>}
+          {activity.active.allowed_actions.length > 0 && <div
+            className="workspace-activity-actions"
+          >
+            {activity.active.allowed_actions.map((action) => <button
+              className={action.destructive ? "danger" : undefined}
+              disabled={activityAction !== null}
+              key={action.id}
+              onClick={() => void runActivityAction(action.id)}
+              type="button"
+            >{activityAction === action.id ? "Working…" : action.label}</button>)}
           </div>}
-          {activeExecution.message && <p>{activeExecution.message}</p>}
-        </> : <p>Start a job when the machine and workspace are ready.</p>}
-        <button className="secondary" onClick={openJobs}>
-          {activeExecution ? "Open job controls" : "Open jobs"}
-        </button>
+          {activity.active.evidence.length > 0 && <details
+            className="workspace-evidence-details"
+          >
+            <summary>Evidence ({activity.active.evidence.length})</summary>
+            {activity.active.evidence.map((item) => <a
+              href={item.url}
+              key={item.url}
+              rel="noreferrer"
+              target="_blank"
+            >{item.label}</a>)}
+          </details>}
+        </> : <p>Start a job or select a map target.</p>}
+        {(selectionMessage || latestActivityResult) && <div
+          className={`workspace-latest-result state-${latestActivityResult?.status ?? "succeeded"}`}
+        >
+          <small>Latest result</small>
+          <strong>{selectionMessage || (latestActivityResult?.kind === "operation"
+            ? label(latestActivityResult.title)
+            : latestActivityResult?.title)}</strong>
+          {!selectionMessage && latestActivityResult?.message
+            && <span>{latestActivityResult.message}</span>}
+          {!selectionMessage && latestActivityResult
+            && latestActivityResult.evidence.length > 0 && <details
+              className="workspace-evidence-details"
+            >
+              <summary>Evidence ({latestActivityResult.evidence.length})</summary>
+              {latestActivityResult.evidence.map((item) => <a
+                href={item.url}
+                key={item.url}
+                rel="noreferrer"
+                target="_blank"
+              >{item.label}</a>)}
+            </details>}
+        </div>}
+        {(!activity.active || activity.active.kind === "job") && <button
+          className="secondary"
+          onClick={openJobs}
+        >{activity.active?.kind === "job" ? "Open job setup" : "Open jobs"}</button>}
       </section>
 
       <section className="card workspace-scan-card">

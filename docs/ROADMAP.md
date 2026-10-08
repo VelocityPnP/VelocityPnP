@@ -241,11 +241,14 @@ a failed placement.
 - [x] Promote each feeder rescan as one atomic lane revision containing the
   image registration, tape geometry, pocket positions, occupancy, and active
   feeder plan
-- [ ] Split the remaining monolithic React application into feature-focused
-  components and give Feeders clear navigation
-- [ ] Add artifact evidence, operation progress, inspection, and recovery
-  views
-- [ ] Add browser-level tests for the main simulated operator workflows
+- [x] Add a dedicated Feeder setup view with stable bank/lane names, part
+  assignment, qualification, revision history, and direct Workspace access
+- [x] Add a live Workspace activity console with scan/job progress, ETA where
+  measured, compact results, evidence links, and server-authorized recovery
+- [x] Add simulated browser tests for machine bootstrap, Workspace interaction,
+  and feeder setup workflows
+- [ ] Continue splitting calibration, board, and job setup out of the main
+  React application component
 
 See `docs/HARDWARE_VALIDATION.md` for measured attached-hardware evidence.
 Verify live machine state and get a new safety confirmation before motion.

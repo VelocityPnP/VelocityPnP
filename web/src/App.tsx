@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { api, formatErrorMessage, waitForOperation } from "./api";
 import { DialogProvider, useDialog } from "./Dialog";
+import { FeedersPanel } from "./FeedersPanel";
 import { selectActiveJobExecution, WorkspacePanel } from "./WorkspacePanel";
 import type {
   AutomatedCalibrationRun, BoardDesign, BoardRegistrationRun, CalibrationArtifactPlan,
@@ -15,7 +16,7 @@ import type {
 } from "./types";
 import "./styles.css";
 
-type Tab = "workspace" | "machine" | "calibration" | "boards" | "jobs";
+type Tab = "workspace" | "machine" | "feeders" | "calibration" | "boards" | "jobs";
 
 interface CalibrationActionState {
   operation: Operation;
@@ -182,6 +183,7 @@ function AppContent() {
   const [error, setErrorState] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [calibrationAction, setCalibrationAction] = useState<CalibrationActionState | null>(null);
+  const [workspaceFeederFocus, setWorkspaceFeederFocus] = useState<string | null>(null);
   const setError = useCallback((value: string | null) => {
     setErrorState(value === null ? null : formatErrorMessage(value));
   }, []);
@@ -244,6 +246,7 @@ function AppContent() {
         <nav aria-label="Primary navigation">
           <NavButton active={tab === "machine"} onClick={() => setTab("machine")} icon="⌁">Machine</NavButton>
           <NavButton active={tab === "workspace"} onClick={() => setTab("workspace")} icon="⌖">Workspace</NavButton>
+          <NavButton active={tab === "feeders"} onClick={() => setTab("feeders")} icon="▤">Feeders</NavButton>
           <NavButton active={tab === "calibration"} onClick={() => setTab("calibration")} icon="◎">Calibration</NavButton>
           <NavButton active={tab === "boards"} onClick={() => setTab("boards")} icon="▦">Boards</NavButton>
           <NavButton active={tab === "jobs"} onClick={() => setTab("jobs")} icon="▶">Jobs</NavButton>
@@ -255,19 +258,29 @@ function AppContent() {
       </aside>
       <main className={tab === "workspace" ? "workspace-main" : undefined}>
         <header className="topbar">
-          <div><p className="eyebrow">LumenPnP V3.0.2</p><h1>{tab === "workspace" ? "Live workspace" : tab === "machine" ? "Machine control" : tab === "calibration" ? "Machine calibration" : tab === "boards" ? "Board library" : "Job execution"}</h1></div>
+          <div><p className="eyebrow">LumenPnP V3.0.2</p><h1>{tab === "workspace" ? "Live workspace" : tab === "machine" ? "Machine control" : tab === "feeders" ? "Feeder setup" : tab === "calibration" ? "Machine calibration" : tab === "boards" ? "Board library" : "Job execution"}</h1></div>
           <div className="topbar-actions">
             <div className="machine-summary"><span className={`state-dot state-${status?.state ?? "disconnected"}`} /><span>{pretty(status?.state ?? "loading")}</span></div>
             <button className="estop" onClick={() => void run(async () => waitForOperation(await api.emergencyStop()))}>EMERGENCY STOP</button>
           </div>
         </header>
         {error && <div className="alert" role="alert"><span>!</span>{error}<button onClick={() => setError(null)}>Dismiss</button></div>}
-        {!status && (tab === "workspace" || tab === "machine" || tab === "calibration" || tab === "jobs") && <section className="card loading-card"><p className="eyebrow">Machine service</p><h2>Loading status…</h2><p>Waiting for the VelocityPnP daemon.</p></section>}
+        {!status && (tab === "workspace" || tab === "machine" || tab === "feeders" || tab === "calibration" || tab === "jobs") && <section className="card loading-card"><p className="eyebrow">Machine service</p><h2>Loading status…</h2><p>Waiting for the VelocityPnP daemon.</p></section>}
         {tab === "workspace" && status && <WorkspacePanel
           status={status}
           setError={setError}
           openMachine={() => setTab("machine")}
           openJobs={() => setTab("jobs")}
+          focusFeederId={workspaceFeederFocus}
+          onFocusConsumed={() => setWorkspaceFeederFocus(null)}
+        />}
+        {tab === "feeders" && status && <FeedersPanel
+          status={status}
+          setError={setError}
+          openWorkspace={(targetId) => {
+            setWorkspaceFeederFocus(targetId);
+            setTab("workspace");
+          }}
         />}
         {tab === "machine" && status && <MachinePanel status={status} devices={devices} calibrations={calibrations} events={events} busy={busy} run={run} openCalibration={() => setTab("calibration")} />}
         {tab === "calibration" && status && <CalibrationPanel
@@ -277,7 +290,11 @@ function AppContent() {
           activeAction={calibrationAction}
           setActiveAction={setCalibrationAction}
         />}
-        {tab === "boards" && <BoardsPanel status={status} setError={setError} />}
+        {tab === "boards" && <BoardsPanel
+          status={status}
+          setError={setError}
+          openFeeders={() => setTab("feeders")}
+        />}
         {tab === "jobs" && status && <JobsPanel
           status={status}
           setError={setError}
@@ -1144,9 +1161,10 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
   </div>;
 }
 
-function BoardsPanel({ status, setError }: {
+function BoardsPanel({ status, setError, openFeeders }: {
   status: MachineStatus | null;
   setError: (value: string | null) => void;
+  openFeeders: () => void;
 }) {
   const requestDialog = useDialog();
   const [boards, setBoards] = useState<BoardDesign[]>([]);
@@ -1430,6 +1448,7 @@ function BoardsPanel({ status, setError }: {
         <button disabled={!selectedScan || discovering} onClick={() => void discover()}>{discovering ? "Analyzing…" : "Analyze objects"}</button>
         <button disabled={!selectedScan || !hasProposals || inventoryBusy} onClick={() => void setInventoryBaseline()}>Use as baseline</button>
         <button disabled={!selectedScan || !hasProposals || inventoryBusy} onClick={() => void compareInventory()}>Compare to baseline</button>
+        <button className="secondary" onClick={openFeeders}>Open feeder setup</button>
       </div>
       {baseline && <p>Baseline saved from scan <strong>{baseline.scan_id.slice(0, 8)}</strong>. Future compatible scans can reuse unchanged inventory.</p>}
       {changes && <p>{pretty(changes.detection_mode)} found <strong>{changes.added_count}</strong> added, <strong>{changes.removed_count}</strong> removed, <strong>{changes.modified_count}</strong> modified, and <strong>{changes.unchanged_count}</strong> unchanged. <strong>{changes.target_regions.length}</strong> regions need refinement.</p>}
@@ -1459,21 +1478,19 @@ function BoardsPanel({ status, setError }: {
         <img src={`/api/v1/workspace-scans/${selectedScan}/artifacts/mosaic-board-candidates.png`} alt="Workspace mosaic with semantic object proposals" />
         <div><p><strong>{discovery.candidates.length}</strong> raised-surface proposals. Known fixtures are purple, boards are green, feeders are blue, and unresolved objects are amber. Matched boards show enabled top-side placements in cyan and KiCad fiducials in yellow.</p>
           {discovery.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}
-          <div className="candidate-list">{discovery.candidates.map((candidate) => <WorkspaceCandidateCard key={candidate.candidate_index} candidate={candidate} scanId={selectedScan} registering={registrationBusy} registrationAllowed={precisionMotionReady} analyzingFeeder={feederVisionBusy} onRegister={registerBoard} onAnalyzeFeeder={analyzeStripFeeder} />)}</div>
+          <div className="candidate-list">{discovery.candidates.map((candidate) => <WorkspaceCandidateCard key={candidate.candidate_index} candidate={candidate} scanId={selectedScan} registering={registrationBusy} registrationAllowed={precisionMotionReady} onRegister={registerBoard} />)}</div>
         </div>
       </div>}
     </section>
   </div>;
 }
 
-function WorkspaceCandidateCard({ candidate, scanId, registering, registrationAllowed, analyzingFeeder, onRegister, onAnalyzeFeeder }: {
+function WorkspaceCandidateCard({ candidate, scanId, registering, registrationAllowed, onRegister }: {
   candidate: WorkspaceBoardCandidate;
   scanId: string;
   registering: boolean;
   registrationAllowed: boolean;
-  analyzingFeeder: boolean;
   onRegister: (candidate: WorkspaceBoardCandidate, boardId: string) => void;
-  onAnalyzeFeeder: (candidate: WorkspaceBoardCandidate) => void;
 }) {
   const design = candidate.design_matches[0];
   const visualDesign = design?.registration_method === "visual_outline"
@@ -1486,7 +1503,6 @@ function WorkspaceCandidateCard({ candidate, scanId, registering, registrationAl
     <span>{((candidate.classification?.confidence ?? 0) * 100).toFixed(0)}% class confidence{candidate.known_fixture_id ? ` · ${pretty(candidate.known_fixture_id)}` : design ? ` · ${design.board_name}` : " · review required"}{design?.orientation_ambiguous ? " · orientation needs fiducials" : ""}</span>
     {candidate.evidence_artifact_name && <a href={`/api/v1/workspace-scans/${scanId}/artifacts/${candidate.evidence_artifact_name}`} target="_blank" rel="noreferrer">View normalized evidence</a>}
     {visualDesign && <button disabled={registering || !registrationAllowed} onClick={() => onRegister(candidate, visualDesign.board_id)}>{registering ? "Registering…" : "Register from fiducials"}</button>}
-    {candidate.classification?.class === "feeder" && !candidate.known_fixture_id && <button disabled={analyzingFeeder} onClick={() => onAnalyzeFeeder(candidate)}>{analyzingFeeder ? "Analyzing…" : "Analyze strip lanes"}</button>}
   </div>;
 }
 
