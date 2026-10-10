@@ -13,8 +13,9 @@ import type {
   WorkspaceScanSummary,
 } from "./types";
 import {
-  feederLaneOutline, feederScanRegion, formatWorkspaceDuration, jobPlacementMarkers,
-  latestFeederLanes, nearestFeederProposal, normalizeFeederSlotToBank,
+  activeWorkspaceDisplayPatches, feederLaneOutline, feederScanRegion,
+  formatWorkspaceDuration, jobPlacementMarkers, latestFeederLanes,
+  nearestFeederProposal, normalizeFeederSlotToBank,
   panWorkspaceViewport,
   selectActiveJobExecution,
   selectWorkspaceJob, workspaceArtifactOptions, workspaceComposition,
@@ -187,9 +188,11 @@ const feederRegistration: StripFeederMapRegistration = {
     {
       pocket_index: 1,
       center_machine_mm: [30, 34],
-      occupancy: "empty",
+      occupancy: "uncertain",
       occupancy_confidence: .95,
-      status: "empty",
+      occupancy_review_required: false,
+      operator_review_label: "unusable",
+      status: "unavailable",
       selected: false,
     },
   ],
@@ -468,12 +471,32 @@ describe("workspace operational map", () => {
     ]);
   });
 
-  it("uses the full feeder lane for feeder and pocket rescans", () => {
+  it("shows image patches only for the active physical feeder lanes", () => {
+    const active = {
+      ...displayPatch,
+      id: "active-feeder-patch",
+      kind: "feeder_lane" as const,
+      object_id: feederRegistration.id,
+    };
+    const stale = {
+      ...active,
+      id: "stale-feeder-patch",
+      object_id: "older-registration-for-the-same-lane",
+    };
+
+    expect(activeWorkspaceDisplayPatches(
+      [displayPatch, stale, active], [feederRegistration],
+    ).map((patch) => patch.id)).toEqual([
+      displayPatch.id, active.id,
+    ]);
+  });
+
+  it("uses the full feeder lane plus a model-crop margin for rescans", () => {
     expect(feederScanRegion(feederRegistration, scan.region)).toEqual({
-      x_min_mm: 20,
-      x_max_mm: 40,
-      y_min_mm: 20,
-      y_max_mm: 44,
+      x_min_mm: 18,
+      x_max_mm: 42,
+      y_min_mm: 18,
+      y_max_mm: 46,
     });
     expect(feederLaneOutline(feederRegistration).map(([xMm, yMm]) => [
       Math.round(xMm), Math.round(yMm),
@@ -885,6 +908,10 @@ describe("workspace operational map", () => {
     ))
       .toHaveLength(2);
     expect(container.querySelectorAll(".workspace-pocket-hit")).toHaveLength(2);
+    expect(container.querySelector(
+      ".workspace-feeder-pockets circle.reviewed-unavailable",
+    )).toBeTruthy();
+    expect(screen.getByText("Reviewed unavailable")).toBeTruthy();
     expect(container.querySelectorAll(".workspace-feeder-lane-boundary"))
       .toHaveLength(1);
     await user.click(container.querySelector(
@@ -920,12 +947,14 @@ describe("workspace operational map", () => {
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(screen.getByRole("img", { name: /Top-camera capture/ })
       .getAttribute("src")).toBe("blob:quick-capture");
+    expect(container.querySelector(".workspace-quick-capture-crosshair"))
+      .toBeTruthy();
     await user.click(container.querySelector(".workspace-placement-position")!);
     expect(screen.getByRole("button", { name: "Rescan" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Quick capture" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Rescan" }));
     expect(await screen.findByText(
-      /Estimated completion time is about 1 min 15 sec for 24 tiles/,
+      /Estimated scan time is about 1 min 15 sec for 24 tiles/,
     )).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     await user.click(container.querySelector(".workspace-job-board")!);

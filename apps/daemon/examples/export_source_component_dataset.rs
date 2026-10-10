@@ -11,14 +11,16 @@ use uuid::Uuid;
 use velocitypnp_domain::{
     BottomCameraMappingReport, CalibrationArtifactId, CameraRole, OperationStatus,
     PlacementExecutionReport, PlanarCameraCalibrationReport, PlanarCameraModel,
-    PlanarCameraModelKind, Pose, SourceComponentModelPrediction, StripFeederInventoryLane,
-    StripFeederInventoryReport, StripFeederRegistration, StripPocketOccupancy,
+    PlanarCameraModelKind, Pose, SourceComponentClass, SourceComponentModelPrediction,
+    StripFeederInventoryLane, StripFeederInventoryReport, StripFeederPocketOccupancyReview,
+    StripFeederPocketReviewLabel, StripFeederRegistration, StripPocketOccupancy,
 };
 use velocitypnp_model::SourceComponentModel;
 use velocitypnp_store::Store;
 use velocitypnp_vision::{
-    decode_gray_png, draft_strip_feeder_source_component, encode_gray_png,
-    StripFeederSourceComponentDraft, STRIP_FEEDER_SOURCE_COMPONENT_DRAFT_ALGORITHM,
+    crop_workspace_source_component, decode_gray_png, draft_strip_feeder_source_component,
+    encode_gray_png, StripFeederSourceComponentDraft,
+    STRIP_FEEDER_SOURCE_COMPONENT_DRAFT_ALGORITHM,
 };
 
 const SOURCE_ARTIFACT: &str = "source-pocket-before.png";
@@ -527,7 +529,28 @@ fn main() -> Result<()> {
             });
         }
     }
-    ensure!(!sources.is_empty(), "no source-pocket images were found");
+    let mut latest_rescan_reviews = BTreeMap::new();
+    if capture_run.is_none() {
+        for review in store.list_strip_feeder_pocket_occupancy_reviews()? {
+            let key = (
+                review.registration_id,
+                review.lane_revision_id,
+                review.pocket_index,
+            );
+            let replace = latest_rescan_reviews.get(&key).is_none_or(
+                |prior: &StripFeederPocketOccupancyReview| {
+                    (review.created_at, review.id) > (prior.created_at, prior.id)
+                },
+            );
+            if replace {
+                latest_rescan_reviews.insert(key, review);
+            }
+        }
+    }
+    ensure!(
+        !sources.is_empty() || !latest_rescan_reviews.is_empty(),
+        "no source-pocket images or reviewed lane-rescan pockets were found"
+    );
     sources.sort_by_key(|source| (source.registration.id, source.source_id));
 
     fs::create_dir_all(&output)?;
@@ -537,6 +560,7 @@ fn main() -> Result<()> {
     let mut models: BTreeMap<Uuid, (PlanarCameraModel, bool)> = BTreeMap::new();
     let mut samples = Vec::new();
     let mut carried_samples = Vec::new();
+    let mut operator_seeded_decisions = BTreeMap::new();
     'sources: for source in sources {
         let proposed_split =
             if capture_run.is_some() || evaluation_groups.contains(&source.registration.id) {
@@ -655,6 +679,225 @@ fn main() -> Result<()> {
             model_proposal,
         });
     }
+    let refreshes = store.list_strip_feeder_occupancy_refreshes()?;
+    for review in latest_rescan_reviews.into_values() {
+        let registration = by_id.get(&review.registration_id).with_context(|| {
+            format!(
+                "reviewed rescan registration {} is absent",
+                review.registration_id,
+            )
+        })?;
+        let report = refreshes
+            .iter()
+            .find(|report| {
+                report.registration_id == review.registration_id
+                    && report.source_scan_id == review.source_scan_id
+                    && report
+                        .lane_revision
+                        .as_ref()
+                        .is_some_and(|revision| revision.id == review.lane_revision_id)
+            })
+            .with_context(|| format!("review {} has no matching lane revision", review.id))?;
+        let revision = report
+            .lane_revision
+            .as_ref()
+            .context("reviewed occupancy report has no lane revision")?;
+        let observation = report
+            .observations
+            .iter()
+            .find(|observation| observation.pocket_index == review.pocket_index)
+            .with_context(|| format!("review {} has no matching pocket", review.id))?;
+        let encoded_crop = if let Some(name) = review.crop_artifact_name.as_deref() {
+            let (media_type, data) = store
+                .get_workspace_scan_artifact(review.source_scan_id, name)?
+                .with_context(|| format!("review {} crop {name} is absent", review.id))?;
+            ensure!(media_type == "image/png", "review crop is not a PNG");
+            if let Some(expected) = review.crop_sha256.as_deref() {
+                ensure!(
+                    hex_sha256(&data) == expected,
+                    "review {} crop digest changed",
+                    review.id,
+                );
+            }
+            data
+        } else {
+            let (media_type, mosaic_data) = store
+                .get_workspace_scan_artifact(
+                    review.source_scan_id,
+                    &review.source_mosaic_artifact_name,
+                )?
+                .with_context(|| format!("review {} source mosaic is absent", review.id))?;
+            ensure!(
+                media_type == "image/png",
+                "review source mosaic is not a PNG"
+            );
+            ensure!(
+                hex_sha256(&mosaic_data) == review.source_mosaic_sha256,
+                "review {} source mosaic digest changed",
+                review.id,
+            );
+            let mosaic = decode_gray_png(&mosaic_data)?;
+            let crop = match crop_workspace_source_component(
+                &mosaic,
+                revision.raster_transform,
+                observation.center_machine_mm,
+                revision.tape_rotation_deg,
+                revision.tape_width_mm,
+                revision.tape_pitch_mm,
+            ) {
+                Ok(crop) => crop,
+                Err(error) => {
+                    eprintln!(
+                        "skipping reviewed rescan pocket {}: crop cannot be reconstructed: {error}",
+                        review.id,
+                    );
+                    continue;
+                }
+            };
+            encode_gray_png(&crop)?
+        };
+        let source_sha256 = hex_sha256(&encoded_crop);
+        let frame = decode_gray_png(&encoded_crop)?;
+        let split = if evaluation_groups.contains(&registration.id) {
+            "eval"
+        } else {
+            "train"
+        };
+        let id = format!("workspace-rescan-review-{}", review.id);
+        let image_path = format!("images/{split}/{id}.png");
+        fs::write(output.join(&image_path), &encoded_crop)?;
+        let prediction = review.original_model_prediction.clone();
+        let predicted_occupancy = prediction
+            .as_ref()
+            .map(|prediction| {
+                if prediction.class.occupied() {
+                    StripPocketOccupancy::Occupied
+                } else {
+                    StripPocketOccupancy::Empty
+                }
+            })
+            .unwrap_or(review.original_occupancy);
+        let outline_px = prediction
+            .as_ref()
+            .filter(|prediction| prediction.pose.valid)
+            .map(|prediction| prediction.pose.outline_px);
+        let review_label_name = match review.label {
+            StripFeederPocketReviewLabel::Occupied => "occupied",
+            StripFeederPocketReviewLabel::Empty => "empty",
+            StripFeederPocketReviewLabel::ComponentOnEdge => "component_on_edge",
+            StripFeederPocketReviewLabel::Unusable => "unusable",
+        };
+        let mut evidence = vec![format!("operator_review_{review_label_name}")];
+        let reviewed_occupancy = match review.label {
+            StripFeederPocketReviewLabel::Occupied
+            | StripFeederPocketReviewLabel::ComponentOnEdge => StripPocketOccupancy::Occupied,
+            StripFeederPocketReviewLabel::Empty => StripPocketOccupancy::Empty,
+            StripFeederPocketReviewLabel::Unusable => StripPocketOccupancy::Uncertain,
+        };
+        if prediction.is_some() && predicted_occupancy != reviewed_occupancy {
+            evidence.push(if reviewed_occupancy == StripPocketOccupancy::Occupied {
+                "model_false_negative".into()
+            } else {
+                "model_false_positive".into()
+            });
+        }
+        if prediction
+            .as_ref()
+            .is_some_and(|prediction| !match review.label {
+                StripFeederPocketReviewLabel::Occupied => {
+                    prediction.class == SourceComponentClass::ComponentFlat
+                }
+                StripFeederPocketReviewLabel::Empty => {
+                    prediction.class == SourceComponentClass::Empty
+                }
+                StripFeederPocketReviewLabel::ComponentOnEdge => {
+                    prediction.class == SourceComponentClass::ComponentOnEdge
+                }
+                StripFeederPocketReviewLabel::Unusable => true,
+            })
+        {
+            evidence.push("model_class_correction".into());
+        }
+        let seed = match review.label {
+            StripFeederPocketReviewLabel::Empty => ReviewDecision {
+                decision: "empty".into(),
+                note: review.note.clone().unwrap_or_default(),
+                class_name: None,
+                outline_px: None,
+            },
+            StripFeederPocketReviewLabel::Unusable => ReviewDecision {
+                decision: "reject".into(),
+                note: review
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| "Image was marked unusable in the feeder review".into()),
+                class_name: None,
+                outline_px: None,
+            },
+            StripFeederPocketReviewLabel::Occupied
+            | StripFeederPocketReviewLabel::ComponentOnEdge => {
+                let class_name = if review.label == StripFeederPocketReviewLabel::ComponentOnEdge {
+                    "component_on_edge"
+                } else {
+                    "component_flat"
+                };
+                ReviewDecision {
+                    decision: if review.corrected_outline_px.is_some() {
+                        "accept"
+                    } else {
+                        "unreviewed"
+                    }
+                    .into(),
+                    note: review.note.clone().unwrap_or_else(|| {
+                        "Occupancy was reviewed in the feeder UI; verify the component box".into()
+                    }),
+                    class_name: Some(class_name.into()),
+                    outline_px: review.corrected_outline_px,
+                }
+            }
+        };
+        operator_seeded_decisions.insert(id.clone(), seed);
+        samples.push(DatasetSample {
+            id,
+            split: split.into(),
+            group_id: registration.id,
+            source_kind: "workspace_rescan_review".into(),
+            source_id: review.id,
+            source_artifact: review
+                .crop_artifact_name
+                .clone()
+                .unwrap_or_else(|| review.source_mosaic_artifact_name.clone()),
+            source_sha256,
+            image_path,
+            width_px: frame.width,
+            height_px: frame.height,
+            part_key: registration.part_key.clone(),
+            pocket_index: Some(review.pocket_index),
+            evidence,
+            draft_state: "operator_reviewed_occupancy".into(),
+            draft: StripFeederSourceComponentDraft {
+                algorithm_version: STRIP_FEEDER_SOURCE_COMPONENT_DRAFT_ALGORITHM.into(),
+                occupancy: predicted_occupancy,
+                occupancy_confidence: prediction
+                    .as_ref()
+                    .map_or(0.0, |prediction| prediction.class_confidence),
+                expected_size_mm: registration
+                    .surveyed_part_size_mm
+                    .or(registration.measured_part_size_mm),
+                measured_size_mm: None,
+                center_px: prediction
+                    .as_ref()
+                    .map(|prediction| prediction.pose.center_px),
+                outline_px,
+                rotation_deg: prediction
+                    .as_ref()
+                    .map(|prediction| prediction.pose.rotation_deg_mod_180),
+                review_required: true,
+                findings: observation.findings.clone(),
+            },
+            model_proposal: prediction,
+        });
+    }
     ensure!(
         capture_run.is_some()
             || samples.iter().any(|sample| sample.split == "train")
@@ -687,12 +930,15 @@ fn main() -> Result<()> {
         .iter()
         .map(|sample| sample.ground_truth.id.clone())
         .collect::<BTreeSet<_>>();
-    let (initial_decisions, ignored_carried_decisions, unfinished_carried_decisions) =
+    let (mut initial_decisions, ignored_carried_decisions, unfinished_carried_decisions) =
         if let Some(review) = &review_decisions {
             partition_review_decisions(review, &draft_ids, &carried_ids)?
         } else {
             (BTreeMap::new(), 0, 0)
         };
+    for (id, decision) in operator_seeded_decisions {
+        initial_decisions.entry(id).or_insert(decision);
+    }
     let carried_manifest_name =
         (!reviewed.is_empty()).then(|| "manifest.carried-ground-truth.json".to_string());
     if !reviewed.is_empty() {
@@ -756,6 +1002,8 @@ fn main() -> Result<()> {
             "accept or correct every evaluation label before scoring a model".into(),
             "OBB rotation is axis-only and does not resolve 180-degree polarity".into(),
             "operator review assigns on-edge components to a separate class".into(),
+            "reviewed lane-rescan pockets retain model predictions and operator corrections".into(),
+            "occupied lane-rescan reviews still require an operator-reviewed OBB".into(),
             "model confidence is calibrated from accepted evaluation labels".into(),
         ],
         samples,

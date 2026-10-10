@@ -443,6 +443,7 @@ pub enum StripFeederPocketStatus {
     Reserved,
     Consumed,
     NeedsReview,
+    Unavailable,
 }
 
 /// Last completed action for one strip-feeder pocket.
@@ -467,6 +468,8 @@ pub struct StripFeederPocketState {
     pub occupancy: StripPocketOccupancy,
     pub occupancy_confidence: f64,
     pub status: StripFeederPocketStatus,
+    #[serde(default)]
+    pub occupancy_review_id: Option<Uuid>,
     #[serde(default)]
     pub attempt_count: u32,
     #[serde(default)]
@@ -1268,6 +1271,7 @@ impl StripFeederRegistration {
                     } else {
                         StripFeederPocketStatus::NeedsReview
                     },
+                    occupancy_review_id: None,
                     attempt_count: 0,
                     consecutive_failure_count: 0,
                     reservation_id: None,

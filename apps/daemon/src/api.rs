@@ -3,12 +3,13 @@ use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::{header, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use futures::Future;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -56,7 +57,8 @@ use velocitypnp_domain::{
     StripFeederInventorySummary, StripFeederLaneProposal, StripFeederLaneRevision,
     StripFeederLiveHoldoutRun, StripFeederOccupancyRefreshReport, StripFeederPickupBenchmarkCycle,
     StripFeederPickupDisposition, StripFeederPickupQualificationReport,
-    StripFeederPickupQualificationRun, StripFeederPocketObservation, StripFeederPocketOutcome,
+    StripFeederPickupQualificationRun, StripFeederPocketObservation,
+    StripFeederPocketOccupancyReview, StripFeederPocketOutcome, StripFeederPocketReviewLabel,
     StripFeederPocketScanObservation, StripFeederPocketState, StripFeederPocketStatus,
     StripFeederRegistration, StripFeederRegistrationStatus, StripFeederSourceCaptureRun,
     StripFeederSourceCaptureSample, StripFeederVisionReport, StripPocketOccupancy,
@@ -175,7 +177,7 @@ const SOURCE_POCKET_PICK_INSPECTION_ARTIFACT: &str = "source-pocket-pick-inspect
 const SOURCE_POCKET_POSE_INSPECTION_ARTIFACT: &str = "source-pocket-pose-inspection.png";
 const SOURCE_POCKET_AFTER_ARTIFACT: &str = "source-pocket-after.png";
 const SOURCE_COMPONENT_SHADOW_ALGORITHM: &str = "source_component_shadow.v2";
-const SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM: &str = "source_component_pick_control.v2";
+const SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM: &str = "source_component_pick_control.v3";
 const MAXIMUM_SOURCE_COMPONENT_CENTER_DELTA_FRACTION: f64 = 0.04;
 const HELD_PART_SHADOW_ALGORITHM: &str = "held_part_shadow.v2";
 const HELD_PART_MODEL_CROP_SIZE_PX: u32 = 512;
@@ -1485,6 +1487,14 @@ pub fn router(state: AppState) -> Router {
             get(list_strip_feeder_revisions),
         )
         .route(
+            "/api/v1/strip-feeder-registrations/{id}/occupancy-review",
+            get(get_strip_feeder_occupancy_review),
+        )
+        .route(
+            "/api/v1/strip-feeder-registrations/{id}/occupancy-review/{pocket_index}",
+            axum::routing::put(review_strip_feeder_pocket_occupancy),
+        )
+        .route(
             "/api/v1/strip-feeder-registrations/{id}/live-holdouts",
             post(start_strip_feeder_live_holdout),
         )
@@ -1588,6 +1598,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/inspections/{id}/findings/{finding_id}/disposition",
             post(disposition_inspection_finding),
         )
+        .route("/api/{*path}", any(api_route_not_found))
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
         .layer(
             CorsLayer::new()
@@ -1644,6 +1655,10 @@ impl IntoResponse for ApiError {
 }
 
 type ApiResult<T> = Result<T, ApiError>;
+
+async fn api_route_not_found() -> ApiError {
+    ApiError::not_found("API route not found")
+}
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
@@ -6218,6 +6233,7 @@ fn evaluate_active_feeder_revision_patches(
         .map_err(ApiError::internal)?;
     reports.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     let mut seen = BTreeSet::new();
+    let mut selected_lanes = Vec::new();
     let mut active_feeders = BTreeSet::new();
     let mut patches = Vec::new();
     for report in reports {
@@ -6238,6 +6254,13 @@ fn evaluate_active_feeder_revision_patches(
         {
             continue;
         }
+        if selected_lanes
+            .iter()
+            .any(|selected| same_physical_feeder_lane(registration, selected))
+        {
+            continue;
+        }
+        selected_lanes.push(registration.clone());
         active_feeders.insert(report.registration_id);
         let Some(scan) = scan_by_id.get(&report.source_scan_id) else {
             continue;
@@ -6406,11 +6429,17 @@ fn evaluate_feeder_display_patches(
         })
         .collect::<Vec<_>>();
     registrations.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    let mut seen_lanes = BTreeSet::new();
+    let mut selected_lanes = Vec::new();
     registrations.retain(|registration| {
-        let center = registration.pick_centerline_machine_mm[0][0]
-            + registration.pick_centerline_machine_mm[1][0];
-        seen_lanes.insert((center * 10.0).round() as i64)
+        if selected_lanes
+            .iter()
+            .any(|selected| same_physical_feeder_lane(registration, selected))
+        {
+            false
+        } else {
+            selected_lanes.push(registration.clone());
+            true
+        }
     });
     let mut accepted_objects = BTreeSet::new();
     let mut patches = Vec::new();
@@ -6537,6 +6566,26 @@ fn evaluate_feeder_display_patches(
         }
     }
     Ok(patches)
+}
+
+fn feeder_lane_cross_coordinate(registration: &StripFeederRegistration) -> f64 {
+    let center_x = (registration.pick_centerline_machine_mm[0][0]
+        + registration.pick_centerline_machine_mm[1][0])
+        / 2.0;
+    let center_y = (registration.pick_centerline_machine_mm[0][1]
+        + registration.pick_centerline_machine_mm[1][1])
+        / 2.0;
+    let radians = registration.tape_rotation_deg.to_radians();
+    -radians.sin() * center_x + radians.cos() * center_y
+}
+
+fn same_physical_feeder_lane(
+    left: &StripFeederRegistration,
+    right: &StripFeederRegistration,
+) -> bool {
+    angle_difference_deg(left.tape_rotation_deg, right.tape_rotation_deg).abs() < 8.0
+        && (feeder_lane_cross_coordinate(left) - feeder_lane_cross_coordinate(right)).abs()
+            < 2.0_f64.max(left.tape_width_mm.min(right.tape_width_mm) * 0.45)
 }
 
 fn workspace_display_artifact_name(scan: &WorkspaceScanReport) -> Option<String> {
@@ -7637,6 +7686,7 @@ async fn refresh_strip_feeder_occupancy(
             "workspace rescan mosaic is not a PNG"
         )));
     }
+    let source_mosaic_sha256 = hex_sha256(&mosaic_data);
     let mosaic = decode_gray_png(&mosaic_data).map_err(ApiError::internal)?;
     let report_artifact_name = format!(
         "{STRIP_FEEDER_OCCUPANCY_ARTIFACT_PREFIX}{:03}-{}.json",
@@ -7646,7 +7696,7 @@ async fn refresh_strip_feeder_occupancy(
     let model_available = model.is_some();
     let registration_for_task = registration.clone();
     let proposal_for_task = proposal.clone();
-    let analysis = tokio::task::spawn_blocking(move || {
+    let mut analysis = tokio::task::spawn_blocking(move || {
         build_rescan_occupancy_observations(
             &mosaic,
             raster,
@@ -7658,11 +7708,28 @@ async fn refresh_strip_feeder_occupancy(
     })
     .await
     .map_err(ApiError::internal)?;
-    let mut warnings = analysis.warnings;
+    for (pocket_index, crop) in std::mem::take(&mut analysis.crops) {
+        let artifact_name = format!(
+            "strip-feeder-pocket-{:03}-{}-{pocket_index:04}.png",
+            body.candidate_index, registration.id,
+        );
+        let encoded = encode_gray_png(&crop).map_err(ApiError::internal)?;
+        let digest = hex_sha256(&encoded);
+        persist_workspace_artifact(&state, &mut scan, &artifact_name, "image/png", &encoded)
+            .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+        if let Some(observation) = analysis
+            .observations
+            .iter_mut()
+            .find(|observation| observation.pocket_index == pocket_index)
+        {
+            observation.crop_artifact_name = Some(artifact_name);
+            observation.crop_sha256 = Some(digest);
+        }
+    }
+    let mut warnings = std::mem::take(&mut analysis.warnings);
     if !model_available {
         warnings.push(
-            "the source-component model is unavailable; deterministic occupancy was retained"
-                .into(),
+            "the source-component model is unavailable; pocket occupancy requires review".into(),
         );
     }
     if analysis.observations.len() < 3 {
@@ -7715,6 +7782,7 @@ async fn refresh_strip_feeder_occupancy(
         report_artifact_name: report_artifact_name.clone(),
         created_at,
         model_available,
+        source_mosaic_sha256: Some(source_mosaic_sha256),
         lane_revision: Some(lane_revision.clone()),
         observations: analysis.observations,
         warnings,
@@ -8052,6 +8120,7 @@ fn select_rescan_feeder_proposal<'a>(
 
 struct RescanOccupancyAnalysis {
     observations: Vec<StripFeederPocketScanObservation>,
+    crops: Vec<(u32, GrayFrame)>,
     warnings: Vec<String>,
 }
 
@@ -8064,6 +8133,7 @@ fn build_rescan_occupancy_observations(
     model: Option<&SourceComponentModel>,
 ) -> RescanOccupancyAnalysis {
     let mut observations = Vec::new();
+    let mut crops = Vec::new();
     let mut warnings = Vec::new();
     for (index, deterministic) in proposal.pocket_observations.iter().enumerate() {
         let Ok(pocket_index) = u32::try_from(index) else {
@@ -8071,23 +8141,24 @@ fn build_rescan_occupancy_observations(
             break;
         };
         let mut findings = Vec::new();
+        let crop = match crop_workspace_source_component(
+            mosaic,
+            raster,
+            deterministic.center_machine_mm,
+            proposal.tape_rotation_deg,
+            proposal.tape_width_mm.unwrap_or(fallback_tape_width_mm),
+            proposal
+                .component_pitch_mm
+                .unwrap_or(fallback_tape_pitch_mm),
+        ) {
+            Ok(crop) => Some(crop),
+            Err(error) => {
+                findings.push(error.to_string());
+                None
+            }
+        };
         let model_prediction = model.and_then(|model| {
-            let crop = match crop_workspace_source_component(
-                mosaic,
-                raster,
-                deterministic.center_machine_mm,
-                proposal.tape_rotation_deg,
-                proposal.tape_width_mm.unwrap_or(fallback_tape_width_mm),
-                proposal
-                    .component_pitch_mm
-                    .unwrap_or(fallback_tape_pitch_mm),
-            ) {
-                Ok(crop) => crop,
-                Err(error) => {
-                    findings.push(error.to_string());
-                    return None;
-                }
-            };
+            let crop = crop.as_ref()?;
             match model.predict_gray(crop.width, crop.height, &crop.pixels) {
                 Ok(prediction) => Some(prediction),
                 Err(error) => {
@@ -8096,6 +8167,9 @@ fn build_rescan_occupancy_observations(
                 }
             }
         });
+        if let Some(crop) = crop {
+            crops.push((pocket_index, crop));
+        }
         let model_analysis_failed = model.is_some() && model_prediction.is_none();
         let (occupancy, confidence, mut review_required) = resolve_rescan_occupancy(
             deterministic.occupancy,
@@ -8113,6 +8187,8 @@ fn build_rescan_occupancy_observations(
             occupancy,
             confidence,
             review_required,
+            crop_artifact_name: None,
+            crop_sha256: None,
             findings,
         });
     }
@@ -8125,8 +8201,16 @@ fn build_rescan_occupancy_observations(
     }
     RescanOccupancyAnalysis {
         observations,
+        crops,
         warnings,
     }
+}
+
+fn hex_sha256(data: &[u8]) -> String {
+    Sha256::digest(data)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn resolve_rescan_occupancy(
@@ -8136,41 +8220,38 @@ fn resolve_rescan_occupancy(
     findings: &mut Vec<String>,
 ) -> (StripPocketOccupancy, f64, bool) {
     let Some(prediction) = prediction else {
-        return (
-            deterministic,
-            deterministic_confidence,
-            deterministic == StripPocketOccupancy::Uncertain,
+        findings.push(
+            "the source-component model is unavailable; deterministic occupancy is audit-only"
+                .into(),
         );
+        return (StripPocketOccupancy::Uncertain, 0.0, true);
     };
     if !prediction.confidence_gate_passed {
         findings.push("the source-component model did not pass its confidence gate".into());
-        return (deterministic, deterministic_confidence, true);
+        findings.push("deterministic occupancy is audit-only".into());
+        return (
+            StripPocketOccupancy::Uncertain,
+            prediction.class_confidence,
+            true,
+        );
     }
     let learned = if prediction.class.occupied() {
         StripPocketOccupancy::Occupied
     } else {
         StripPocketOccupancy::Empty
     };
-    if deterministic == StripPocketOccupancy::Uncertain {
-        findings.push("the gated model resolved uncertain deterministic occupancy".into());
-        return (
-            learned,
-            prediction.class_confidence,
-            prediction.class == SourceComponentClass::ComponentOnEdge,
+    if deterministic != learned {
+        findings.push(
+            "the source-component model overrode conflicting audit-only deterministic occupancy"
+                .into(),
         );
+    } else if deterministic_confidence > 0.0 {
+        findings.push("Audit-only deterministic occupancy agreed with the model".into());
     }
-    if deterministic == learned {
-        return (
-            deterministic,
-            deterministic_confidence.min(prediction.class_confidence),
-            prediction.class == SourceComponentClass::ComponentOnEdge,
-        );
-    }
-    findings.push("learned and deterministic occupancy disagree".into());
     (
-        StripPocketOccupancy::Uncertain,
-        deterministic_confidence.min(prediction.class_confidence),
-        true,
+        learned,
+        prediction.class_confidence,
+        prediction.class == SourceComponentClass::ComponentOnEdge,
     )
 }
 
@@ -8617,6 +8698,7 @@ fn registration_from_inventory_lane(
                     StripPocketOccupancy::Empty => StripFeederPocketStatus::Empty,
                     StripPocketOccupancy::Uncertain => StripFeederPocketStatus::NeedsReview,
                 },
+                occupancy_review_id: None,
                 attempt_count: 0,
                 consecutive_failure_count: 0,
                 reservation_id: None,
@@ -8667,7 +8749,7 @@ fn registration_from_inventory_lane(
                 lane.inventory_index + 1,
             ),
             "part identity and orientation are not assigned".into(),
-            "live pocket occupancy and pickup Z are not measured".into(),
+            "ML pocket occupancy and pickup Z are not validated".into(),
         ],
     })
 }
@@ -10335,6 +10417,7 @@ async fn create_strip_feeder_registration(
                     StripPocketOccupancy::Empty => StripFeederPocketStatus::Empty,
                     StripPocketOccupancy::Uncertain => StripFeederPocketStatus::NeedsReview,
                 },
+                occupancy_review_id: None,
                 attempt_count: 0,
                 consecutive_failure_count: 0,
                 reservation_id: None,
@@ -10351,7 +10434,7 @@ async fn create_strip_feeder_registration(
     if body.part_rotation_deg.is_none() {
         findings.push("part orientation is not assigned".into());
     }
-    findings.push("live pocket occupancy and pickup Z are not measured".into());
+    findings.push("ML pocket occupancy and pickup Z are not validated".into());
     let registration = StripFeederRegistration {
         id: Uuid::new_v4(),
         profile_id: scan.profile_id,
@@ -10407,6 +10490,7 @@ async fn list_strip_feeder_registrations(State(state): State<AppState>) -> ApiRe
 #[derive(Default)]
 struct StripFeederPocketMapEvidence {
     observations: HashMap<(Uuid, u32), (chrono::DateTime<Utc>, StripFeederPocketScanObservation)>,
+    reviews: HashMap<(Uuid, u32), StripFeederPocketOccupancyReview>,
     active_pocket_indices: HashMap<Uuid, BTreeSet<u32>>,
     active_revisions: HashMap<Uuid, (DateTime<Utc>, Uuid, StripFeederLaneRevision)>,
     revision_counts: HashMap<Uuid, usize>,
@@ -10470,6 +10554,27 @@ fn active_strip_feeder_pocket_map_evidence(
                 .insert(key, (report.created_at, observation));
         }
     }
+    for review in state
+        .store
+        .list_strip_feeder_pocket_occupancy_reviews()
+        .map_err(ApiError::internal)?
+    {
+        let active_revision_id = evidence
+            .active_revisions
+            .get(&review.registration_id)
+            .map(|(_, _, revision)| revision.id);
+        if active_revision_id != Some(review.lane_revision_id) {
+            continue;
+        }
+        let key = (review.registration_id, review.pocket_index);
+        let replace = evidence
+            .reviews
+            .get(&key)
+            .is_none_or(|prior| (review.created_at, review.id) > (prior.created_at, prior.id));
+        if replace {
+            evidence.reviews.insert(key, review);
+        }
+    }
     Ok(evidence)
 }
 
@@ -10510,14 +10615,21 @@ fn strip_feeder_pocket_map_entry(
                 .get(&registration.id)
                 .is_none_or(|indices| indices.contains(&pocket.pocket_index))
         }).map(|pocket| {
-            let scan_observation = evidence
+            let scan_evidence = evidence
                 .observations
-                .get(&(registration.id, pocket.pocket_index))
+                .get(&(registration.id, pocket.pocket_index));
+            let review = evidence
+                .reviews
+                .get(&(registration.id, pocket.pocket_index));
+            let current_scan_observation = scan_evidence
                 .filter(|(created_at, _)| *created_at >= pocket.updated_at);
-            let occupancy = scan_observation
+            let occupancy = review
+                .map(|_| pocket.occupancy)
+                .or_else(|| current_scan_observation
                 .map(|(_, observation)| observation.occupancy)
+                )
                 .unwrap_or(pocket.occupancy);
-            let occupancy_confidence = scan_observation
+            let occupancy_confidence = current_scan_observation
                 .map(|(_, observation)| observation.confidence)
                 .unwrap_or(pocket.occupancy_confidence);
             json!({
@@ -10527,13 +10639,18 @@ fn strip_feeder_pocket_map_entry(
                     .unwrap_or(pocket.nominal_center_machine_mm),
                 "occupancy": occupancy,
                 "occupancy_confidence": occupancy_confidence,
-                "occupancy_source": if scan_observation.is_some() {
+                "occupancy_source": if review.is_some() {
+                    "operator_review"
+                } else if current_scan_observation.is_some() {
                     "workspace_rescan"
                 } else {
                     "operational"
                 },
-                "occupancy_review_required": scan_observation
-                    .is_some_and(|(_, observation)| observation.review_required),
+                "occupancy_review_required": scan_evidence
+                    .is_some_and(|(_, observation)| observation.review_required)
+                    && review.is_none(),
+                "operator_review_id": review.map(|review| review.id),
+                "operator_review_label": review.map(|review| review.label),
                 "status": pocket.status,
                 "selected": registration.selected_pocket_index == Some(pocket.pocket_index),
             })
@@ -10714,6 +10831,266 @@ async fn list_strip_feeder_revisions(
             })),
             "warnings": report.warnings,
         })).collect::<Vec<_>>(),
+    })))
+}
+
+fn active_strip_feeder_occupancy_report(
+    state: &AppState,
+    registration_id: Uuid,
+) -> ApiResult<StripFeederOccupancyRefreshReport> {
+    state
+        .store
+        .list_strip_feeder_occupancy_refreshes()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|report| {
+            report.registration_id == registration_id && report.lane_revision.is_some()
+        })
+        .max_by_key(|report| report.created_at)
+        .ok_or_else(|| ApiError::not_found("strip feeder has no lane rescan to review"))
+}
+
+fn active_strip_feeder_lane_revision_created_at(
+    state: &AppState,
+    registration_id: Uuid,
+) -> ApiResult<Option<DateTime<Utc>>> {
+    Ok(state
+        .store
+        .list_strip_feeder_occupancy_refreshes()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|report| {
+            report.registration_id == registration_id && report.lane_revision.is_some()
+        })
+        .map(|report| report.created_at)
+        .max())
+}
+
+fn latest_strip_feeder_pocket_reviews(
+    state: &AppState,
+    registration_id: Uuid,
+    lane_revision_id: Uuid,
+) -> ApiResult<HashMap<u32, StripFeederPocketOccupancyReview>> {
+    let mut latest = HashMap::new();
+    for review in state
+        .store
+        .list_strip_feeder_pocket_occupancy_reviews()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|review| {
+            review.registration_id == registration_id && review.lane_revision_id == lane_revision_id
+        })
+    {
+        let replace = latest.get(&review.pocket_index).is_none_or(
+            |prior: &StripFeederPocketOccupancyReview| {
+                (review.created_at, review.id) > (prior.created_at, prior.id)
+            },
+        );
+        if replace {
+            latest.insert(review.pocket_index, review);
+        }
+    }
+    Ok(latest)
+}
+
+async fn get_strip_feeder_occupancy_review(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let registration = state
+        .store
+        .get_strip_feeder_registration(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("strip feeder registration not found"))?;
+    let report = active_strip_feeder_occupancy_report(&state, id)?;
+    let revision = report
+        .lane_revision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active feeder report has no lane revision"))?;
+    let reviews = latest_strip_feeder_pocket_reviews(&state, id, revision.id)?;
+    let unresolved_count = report
+        .observations
+        .iter()
+        .filter(|observation| {
+            observation.review_required && !reviews.contains_key(&observation.pocket_index)
+        })
+        .count();
+    Ok(Json(json!({
+        "registration_id": id,
+        "lane_revision_id": revision.id,
+        "source_scan_id": report.source_scan_id,
+        "created_at": report.created_at,
+        "unresolved_count": unresolved_count,
+        "mosaic": {
+            "artifact_name": revision.mosaic_artifact_name,
+            "sha256": report.source_mosaic_sha256,
+            "width_px": revision.mosaic_width_px,
+            "height_px": revision.mosaic_height_px,
+            "raster_transform": revision.raster_transform,
+        },
+        "pockets": report.observations.iter().map(|observation| {
+            let review = reviews.get(&observation.pocket_index);
+            let operational = registration.pockets.iter().find(|pocket| {
+                pocket.pocket_index == observation.pocket_index
+            });
+            json!({
+                "pocket_index": observation.pocket_index,
+                "center_machine_mm": observation.center_machine_mm,
+                "original_occupancy": observation.occupancy,
+                "original_confidence": observation.confidence,
+                "model_prediction": observation.model_prediction,
+                "automatic_review_required": observation.review_required,
+                "unresolved": observation.review_required && review.is_none(),
+                "findings": observation.findings,
+                "crop_artifact_name": review
+                    .and_then(|review| review.crop_artifact_name.as_ref())
+                    .or(observation.crop_artifact_name.as_ref()),
+                "crop_sha256": review
+                    .and_then(|review| review.crop_sha256.as_ref())
+                    .or(observation.crop_sha256.as_ref()),
+                "effective_occupancy": operational.map(|pocket| pocket.occupancy)
+                    .unwrap_or(observation.occupancy),
+                "effective_status": operational.map(|pocket| pocket.status),
+                "review": review,
+            })
+        }).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewStripFeederPocketOccupancyRequest {
+    lane_revision_id: Uuid,
+    label: StripFeederPocketReviewLabel,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn review_strip_feeder_pocket_occupancy(
+    State(state): State<AppState>,
+    Path((id, pocket_index)): Path<(Uuid, u32)>,
+    Json(body): Json<ReviewStripFeederPocketOccupancyRequest>,
+) -> ApiResult<Json<Value>> {
+    ensure_no_active_job_executions(&state)?;
+    let note = body
+        .note
+        .map(|note| note.trim().to_string())
+        .filter(|note| !note.is_empty());
+    if note.as_ref().is_some_and(|note| note.len() > 500) {
+        return Err(ApiError::bad_request(
+            "review note is longer than 500 bytes",
+        ));
+    }
+    let report = active_strip_feeder_occupancy_report(&state, id)?;
+    let revision = report
+        .lane_revision
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("active feeder report has no lane revision"))?;
+    if revision.id != body.lane_revision_id {
+        return Err(ApiError::bad_request(
+            "the feeder was rescanned after this review opened",
+        ));
+    }
+    let observation = report
+        .observations
+        .iter()
+        .find(|observation| observation.pocket_index == pocket_index)
+        .ok_or_else(|| ApiError::not_found("strip feeder pocket observation not found"))?;
+    let latest_reviews = latest_strip_feeder_pocket_reviews(&state, id, revision.id)?;
+    let supersedes_review_id = latest_reviews.get(&pocket_index).map(|review| review.id);
+    let (media_type, mosaic_data) = state
+        .store
+        .get_workspace_scan_artifact(report.source_scan_id, &revision.mosaic_artifact_name)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("feeder rescan mosaic not found"))?;
+    if media_type != "image/png" {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "feeder rescan mosaic is not a PNG"
+        )));
+    }
+    let source_mosaic_sha256 = hex_sha256(&mosaic_data);
+    if report
+        .source_mosaic_sha256
+        .as_ref()
+        .is_some_and(|expected| expected != &source_mosaic_sha256)
+    {
+        return Err(ApiError::bad_request(
+            "the retained feeder mosaic does not match its scan report",
+        ));
+    }
+
+    let mut crop_artifact_name = observation.crop_artifact_name.clone();
+    let mut crop_sha256 = observation.crop_sha256.clone();
+    if crop_artifact_name.is_none() {
+        let mosaic = decode_gray_png(&mosaic_data).map_err(ApiError::internal)?;
+        if let Ok(crop) = crop_workspace_source_component(
+            &mosaic,
+            revision.raster_transform,
+            observation.center_machine_mm,
+            revision.tape_rotation_deg,
+            revision.tape_width_mm,
+            revision.tape_pitch_mm,
+        ) {
+            let artifact_name = format!(
+                "strip-feeder-pocket-{:03}-{}-{pocket_index:04}.png",
+                report.source_candidate_index, id,
+            );
+            let encoded = encode_gray_png(&crop).map_err(ApiError::internal)?;
+            let digest = hex_sha256(&encoded);
+            let mut scan = state
+                .store
+                .get_workspace_scan(report.source_scan_id)
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| ApiError::not_found("feeder rescan not found"))?;
+            persist_workspace_artifact(&state, &mut scan, &artifact_name, "image/png", &encoded)
+                .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+            scan.updated_at = Utc::now();
+            persist_workspace_manifest(&state, &mut scan)
+                .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+            crop_artifact_name = Some(artifact_name);
+            crop_sha256 = Some(digest);
+        }
+    }
+    if let (Some(name), Some(expected)) = (&crop_artifact_name, &crop_sha256) {
+        let (_, data) = state
+            .store
+            .get_workspace_scan_artifact(report.source_scan_id, name)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("feeder pocket review crop not found"))?;
+        if hex_sha256(&data) != *expected {
+            return Err(ApiError::bad_request(
+                "the retained feeder pocket crop does not match its digest",
+            ));
+        }
+    }
+
+    let review = StripFeederPocketOccupancyReview {
+        id: Uuid::new_v4(),
+        registration_id: id,
+        lane_revision_id: revision.id,
+        source_scan_id: report.source_scan_id,
+        pocket_index,
+        label: body.label,
+        note,
+        reviewer: "web_ui".into(),
+        created_at: Utc::now(),
+        supersedes_review_id,
+        source_mosaic_artifact_name: revision.mosaic_artifact_name.clone(),
+        source_mosaic_sha256,
+        crop_artifact_name,
+        crop_sha256,
+        original_occupancy: observation.occupancy,
+        original_review_required: observation.review_required,
+        original_model_prediction: observation.model_prediction.clone(),
+        corrected_outline_px: None,
+    };
+    let registration = state
+        .store
+        .apply_strip_feeder_pocket_occupancy_review(&review)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(json!({
+        "review": review,
+        "registration": registration,
     })))
 }
 
@@ -10918,8 +11295,31 @@ fn live_holdout_pocket_index(
 ) -> ApiResult<usize> {
     requested.map_or_else(
         || {
+            let first = registration.pocket_centers_machine_mm.first().copied();
+            let last = registration.pocket_centers_machine_mm.last().copied();
+            let lane_midpoint = first
+                .zip(last)
+                .map(|(first, last)| [(first[0] + last[0]) * 0.5, (first[1] + last[1]) * 0.5]);
             registration
-                .next_available_pocket(None)
+                .pockets
+                .iter()
+                .filter(|pocket| {
+                    pocket.status == StripFeederPocketStatus::Available
+                        && pocket.occupancy == StripPocketOccupancy::Occupied
+                })
+                .min_by(|left, right| {
+                    let distance = |pocket: &StripFeederPocketState| {
+                        let center = pocket
+                            .measured_center_machine_mm
+                            .unwrap_or(pocket.nominal_center_machine_mm);
+                        lane_midpoint.map_or(f64::INFINITY, |midpoint| {
+                            (center[0] - midpoint[0]).hypot(center[1] - midpoint[1])
+                        })
+                    };
+                    distance(left)
+                        .total_cmp(&distance(right))
+                        .then_with(|| left.pocket_index.cmp(&right.pocket_index))
+                })
                 .map(|pocket| pocket.pocket_index as usize)
                 .ok_or_else(|| {
                     ApiError::bad_request(
@@ -11017,14 +11417,14 @@ async fn execute_strip_feeder_live_holdout_task(
         Ok(report) => {
             let message = if report.passed {
                 format!(
-                    "Live pocket holdout passed with {} sprocket centers, {:.3} mm correction, and {:.0}% occupancy confidence",
+                    "Lane alignment passed with {} sprocket centers and {:.3} mm correction; contrast occupancy was {:.0}% and audit-only",
                     report.sprocket_center_count,
                     report.correction_magnitude_mm,
                     report.occupancy_confidence * 100.0,
                 )
             } else {
                 format!(
-                    "Live pocket holdout rejected the draft: {}",
+                    "Lane alignment rejected the feeder: {}",
                     report.findings.join("; "),
                 )
             };
@@ -11055,24 +11455,19 @@ async fn execute_strip_feeder_live_holdout_task(
                     .find(|pocket| Some(pocket.pocket_index) == registration.selected_pocket_index)
                 {
                     pocket.measured_center_machine_mm = report.measured_pocket_machine_mm;
-                    pocket.occupancy = report.occupancy;
-                    pocket.occupancy_confidence = report.occupancy_confidence;
-                    if !matches!(
-                        pocket.status,
-                        StripFeederPocketStatus::Consumed | StripFeederPocketStatus::Reserved
-                    ) {
-                        pocket.status = StripFeederPocketStatus::Available;
-                    }
                     pocket.updated_at = Utc::now();
                 }
                 registration.findings.retain(|finding| {
-                    !finding.contains("live pocket occupancy") && !finding.contains("live holdout")
+                    !finding.contains("live feeder geometry")
+                        && !finding.contains("lane alignment")
+                        && !finding.contains("live pocket position")
+                        && !finding.contains("live holdout")
                 });
                 registration.findings.push(
                     if registration.pickup_z_mm.is_some() {
-                        "live pocket position and occupancy passed"
+                        "Lane alignment passed"
                     } else {
-                        "live pocket position and occupancy passed; pickup Z remains unmeasured"
+                        "Lane alignment passed; pickup Z remains unmeasured"
                     }
                     .into(),
                 );
@@ -11493,7 +11888,7 @@ struct SourceComponentPickControl {
     artifact_names: Vec<String>,
     findings: Vec<String>,
     rejection: Option<SourceComponentPickRejection>,
-    learned_control_authorized: bool,
+    model_control_authorized: bool,
 }
 
 struct SourceComponentPickRejection {
@@ -11501,45 +11896,23 @@ struct SourceComponentPickRejection {
     observed_empty: bool,
 }
 
-fn source_empty_observation_is_confirmed(
-    model_reported_empty: bool,
-    deterministic_occupancy: StripPocketOccupancy,
-) -> bool {
-    model_reported_empty && deterministic_occupancy == StripPocketOccupancy::Empty
-}
-
 fn source_component_class_rejection(
-    class: SourceComponentClass,
-    confidence_gate_passed: bool,
-    deterministic_occupancy: StripPocketOccupancy,
-) -> Option<&'static str> {
-    if confidence_gate_passed && class == SourceComponentClass::ComponentOnEdge {
-        Some("the source-component model found a component on edge")
-    } else if source_empty_observation_is_confirmed(
-        confidence_gate_passed && class == SourceComponentClass::Empty,
-        deterministic_occupancy,
-    ) {
-        Some("the source-component model and top-camera CV confirm an empty source pocket")
-    } else {
-        None
-    }
-}
-
-fn source_component_pose_can_control(
     prediction: &SourceComponentModelPrediction,
-    prior_inventory_occupancy: Option<StripPocketOccupancy>,
-    deterministic_occupancy: StripPocketOccupancy,
-) -> bool {
-    if !prediction.confidence_gate_passed || !prediction.pose.valid {
-        return false;
+) -> Option<&'static str> {
+    if !prediction.confidence_gate_passed {
+        return Some("the source-component model did not pass its confidence gate");
     }
     match prediction.class {
-        SourceComponentClass::ComponentFlat => true,
         SourceComponentClass::Empty => {
-            prior_inventory_occupancy == Some(StripPocketOccupancy::Occupied)
-                && deterministic_occupancy == StripPocketOccupancy::Occupied
+            Some("the source-component model found an empty source pocket")
         }
-        SourceComponentClass::ComponentOnEdge => false,
+        SourceComponentClass::ComponentOnEdge => {
+            Some("the source-component model found a component on edge")
+        }
+        SourceComponentClass::ComponentFlat if !prediction.pose.valid => {
+            Some("the source-component model did not provide a valid flat-part pose")
+        }
+        SourceComponentClass::ComponentFlat => None,
     }
 }
 
@@ -11577,16 +11950,9 @@ async fn select_source_component_pick_center(
     deterministic_center_machine_mm: [f64; 2],
 ) -> Result<SourceComponentPickControl, String> {
     let Some(model) = state.source_component_model.clone() else {
-        return Ok(SourceComponentPickControl {
-            center_machine_mm: deterministic_center_machine_mm,
-            artifact_names: Vec::new(),
-            findings: vec![
-                "the source-component model is unavailable; top-camera CV supplied the bounded pickup center"
-                    .into(),
-            ],
-            rejection: None,
-            learned_control_authorized: false,
-        });
+        return Err(
+            "the source-component model is unavailable; ML pickup control is required".into(),
+        );
     };
     let pocket = prepared
         .registration
@@ -11617,26 +11983,14 @@ async fn select_source_component_pick_center(
     {
         Ok(Ok(analysis)) => analysis,
         Ok(Err(error)) => {
-            return Ok(SourceComponentPickControl {
-                center_machine_mm: deterministic_center_machine_mm,
-                artifact_names: Vec::new(),
-                findings: vec![format!(
-                    "source-component inference failed; top-camera CV supplied the bounded pickup center: {error}"
-                )],
-                rejection: None,
-                learned_control_authorized: false,
-            });
+            return Err(format!(
+                "source-component inference failed; ML pickup control is required: {error}"
+            ));
         }
         Err(error) => {
-            return Ok(SourceComponentPickControl {
-                center_machine_mm: deterministic_center_machine_mm,
-                artifact_names: Vec::new(),
-                findings: vec![format!(
-                    "source-component inference task failed; top-camera CV supplied the bounded pickup center: {error}"
-                )],
-                rejection: None,
-                learned_control_authorized: false,
-            });
+            return Err(format!(
+                "source-component inference task failed; ML pickup control is required: {error}"
+            ));
         }
     };
     let prediction = &analysis.report.prediction;
@@ -11648,16 +12002,7 @@ async fn select_source_component_pick_center(
         .maximum_part_offset_mm;
     let model_reported_empty =
         prediction.confidence_gate_passed && prediction.class == SourceComponentClass::Empty;
-    let confirmed_empty = source_empty_observation_is_confirmed(
-        model_reported_empty,
-        analysis.report.deterministic_occupancy,
-    );
-    let mut rejection = source_component_class_rejection(
-        prediction.class,
-        prediction.confidence_gate_passed,
-        analysis.report.deterministic_occupancy,
-    )
-    .map(str::to_owned);
+    let mut rejection = source_component_class_rejection(prediction).map(str::to_owned);
     let deterministic_center_result = source_component_deterministic_machine_center(
         &analysis.crop,
         analysis.report.deterministic_center_px,
@@ -11671,12 +12016,7 @@ async fn select_source_component_pick_center(
     let deterministic_nominal_offset_mm = (deterministic_component_center_machine_mm[0]
         - nominal_pocket_machine_mm[0])
         .hypot(deterministic_component_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-    let learned_measurement = if source_component_pose_can_control(
-        prediction,
-        analysis.report.prior_inventory_occupancy,
-        analysis.report.deterministic_occupancy,
-    ) && rejection.is_none()
-    {
+    let learned_measurement = if rejection.is_none() {
         match source_component_crop_pixel_to_machine(
             &analysis.crop,
             prediction.pose.center_px,
@@ -11705,27 +12045,16 @@ async fn select_source_component_pick_center(
         None
     };
     if learned_measurement.is_none() && rejection.is_none() {
-        if let Some(error) = deterministic_center_error.as_ref() {
-            rejection = Some(error.clone());
-        } else if deterministic_nominal_offset_mm > maximum_offset_mm {
-            rejection = Some(format!(
-                "CV source-component center correction {deterministic_nominal_offset_mm:.3} mm exceeds the configured bound"
-            ));
-        }
+        rejection = Some("the source-component model did not provide a usable pickup pose".into());
     }
 
     analysis.report.algorithm_version = SOURCE_COMPONENT_PICK_CONTROL_ALGORITHM.into();
+    analysis.report.review_required = rejection.is_some();
     analysis
         .report
         .findings
         .retain(|finding| !finding.contains("shadow evidence"));
-    if model_reported_empty && !confirmed_empty {
-        analysis.report.findings.push(
-            "the learned empty result conflicts with occupied inventory and top-camera occupancy evidence; the bounded learned pose can still control pickup"
-                .into(),
-        );
-    }
-    let learned_control_authorized = learned_measurement.is_some();
+    let model_control_authorized = learned_measurement.is_some() && rejection.is_none();
     let (center_machine_mm, method_finding) = if let Some((
         learned_center_machine_mm,
         learned_nominal_offset_mm,
@@ -11745,15 +12074,10 @@ async fn select_source_component_pick_center(
                     .into(),
             );
         }
-        let method_finding = if model_reported_empty {
-            "occupied inventory and top-camera occupancy evidence overrode the learned empty class; the bounded learned pose supplied the pickup center"
-                .into()
-        } else {
-            format!(
-                "the source-component model supplied the pickup center with {:.1}% class confidence",
-                100.0 * prediction.class_confidence
-            )
-        };
+        let method_finding = format!(
+            "the source-component model supplied the pickup center with {:.1}% class confidence",
+            100.0 * prediction.class_confidence
+        );
         (learned_center_machine_mm, method_finding)
     } else if let Some(error) = rejection.as_deref() {
         analysis.report.control_authorized = false;
@@ -11767,15 +12091,7 @@ async fn select_source_component_pick_center(
             "the source-component control gate rejected motion".into(),
         )
     } else {
-        analysis.report.findings.push(
-            "the learned result did not pass the pickup-control gate; bounded top-camera CV supplied the pickup center"
-                .into(),
-        );
-        (
-            deterministic_component_center_machine_mm,
-            "the source-component model was inconclusive; bounded component CV supplied the pickup center"
-                .into(),
-        )
+        unreachable!("a missing model measurement must have a rejection")
     };
     analysis.report.report_artifact_name =
         "source-pocket-pick-source-component-control.json".into();
@@ -11819,9 +12135,9 @@ async fn select_source_component_pick_center(
         findings: vec![method_finding],
         rejection: rejection.map(|message| SourceComponentPickRejection {
             message,
-            observed_empty: confirmed_empty,
+            observed_empty: model_reported_empty,
         }),
-        learned_control_authorized,
+        model_control_authorized,
     })
 }
 
@@ -12131,19 +12447,26 @@ async fn start_strip_feeder_pickup_qualification(
             "requested pickup pocket is not available and occupied",
         ));
     }
-    let latest_holdout_id = registration
-        .latest_live_holdout_id
-        .ok_or_else(|| ApiError::bad_request("pickup qualification needs a live holdout"))?;
+    let latest_holdout_id = registration.latest_live_holdout_id.ok_or_else(|| {
+        ApiError::bad_request("pickup qualification needs a lane alignment check")
+    })?;
     let latest_holdout = state
         .store
         .get_strip_feeder_live_holdout(latest_holdout_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::bad_request("latest live holdout is missing"))?;
+    let active_revision_created_at =
+        active_strip_feeder_lane_revision_created_at(&state, registration.id)?;
+    if active_revision_created_at.is_some_and(|created_at| latest_holdout.created_at < created_at) {
+        return Err(ApiError::bad_request(
+            "pickup qualification needs a lane alignment check after the latest lane rescan",
+        ));
+    }
     if latest_holdout.status != OperationStatus::Succeeded
         || latest_holdout.calibration_id != registration.calibration_id
     {
         return Err(ApiError::bad_request(
-            "pickup qualification needs a current passed live holdout",
+            "pickup qualification needs a current passed lane alignment check",
         ));
     }
     let holdout_report = latest_holdout
@@ -12151,7 +12474,9 @@ async fn start_strip_feeder_pickup_qualification(
         .as_ref()
         .filter(|report| report.passed)
         .ok_or_else(|| {
-            ApiError::bad_request("pickup qualification needs a current passed live holdout")
+            ApiError::bad_request(
+                "pickup qualification needs a current passed lane alignment check",
+            )
         })?;
     let selected_pocket_machine_mm = [
         selected_pocket.nominal_center_machine_mm[0] + holdout_report.correction_x_mm,
@@ -13302,26 +13627,20 @@ async fn execute_physical_strip_feeder_pickup(
         &source_inspection.preview,
     )?;
     artifact_names.push(SOURCE_POCKET_PICK_INSPECTION_ARTIFACT.into());
-    if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
-        return Err("top vision did not confirm a part in the qualification pocket".into());
-    }
     let deterministic_center_machine_mm = source_inspection
         .report
         .before_measured_center_machine_mm
-        .ok_or_else(|| "top vision did not locate the qualification-pocket part".to_string())?;
-    let source_center_correction_mm = (deterministic_center_machine_mm[0]
-        - nominal_pocket_machine_mm[0])
-        .hypot(deterministic_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-    if source_center_correction_mm > pickup_profile.maximum_part_offset_mm {
-        return Err(format!(
-            "qualification-pocket part center correction \
-             {source_center_correction_mm:.3} mm exceeds the configured bound"
-        ));
-    }
-    findings.push(format!(
-        "top-camera CV measured a pickup-center correction of \
-         {source_center_correction_mm:.3} mm from the nominal pocket center"
-    ));
+        .unwrap_or(nominal_pocket_machine_mm);
+    findings.push(
+        match source_inspection.report.before_measured_center_machine_mm {
+            Some(center) => format!(
+                "top-camera CV recorded an audit-only contrast center {:.3} mm from nominal",
+                (center[0] - nominal_pocket_machine_mm[0])
+                    .hypot(center[1] - nominal_pocket_machine_mm[1]),
+            ),
+            None => "top-camera CV did not produce an audit-only contrast center".into(),
+        },
+    );
     let source_control = select_source_component_pick_center(
         state,
         prepared,
@@ -13335,6 +13654,9 @@ async fn execute_physical_strip_feeder_pickup(
     findings.extend(source_control.findings);
     if let Some(rejection) = source_control.rejection {
         return Err(rejection.message);
+    }
+    if !source_control.model_control_authorized {
+        return Err("the source-component model did not authorize pickup control".into());
     }
     let pocket_machine_mm = source_control.center_machine_mm;
 
@@ -13353,6 +13675,7 @@ async fn execute_physical_strip_feeder_pickup(
         prepared.lease_id,
         nozzle_id,
         &prepared.head_reference,
+        &prepared.geometry,
         None,
     )
     .await?;
@@ -19124,6 +19447,15 @@ impl CalibratedNozzleGeometry {
             .all(|value| value.is_finite())
             .then_some(correction)
     }
+
+    fn tip_offset_at(&self, controller_angle_deg: f64) -> Option<CurrentTipOffset> {
+        let [runout_x_mm, runout_y_mm] = self.runout_correction_at(controller_angle_deg)?;
+        let offset = CurrentTipOffset {
+            x_mm: self.head_offset_x_mm - runout_x_mm,
+            y_mm: self.head_offset_y_mm - runout_y_mm,
+        };
+        (offset.x_mm.is_finite() && offset.y_mm.is_finite()).then_some(offset)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -19207,6 +19539,25 @@ struct CurrentTipOffset {
 }
 
 impl CalibratedHeadReference {
+    fn nozzle_target(
+        &self,
+        geometry: &CalibratedNozzleGeometry,
+        controller_angle_deg: f64,
+        z_mm: f64,
+    ) -> Option<JogTarget> {
+        let offset = geometry.tip_offset_at(controller_angle_deg)?;
+        let target = JogTarget {
+            x_mm: self.top_camera_controller_x_mm - offset.x_mm,
+            y_mm: self.top_camera_controller_y_mm - offset.y_mm,
+            z_mm,
+            rotation_deg: None,
+        };
+        [target.x_mm, target.y_mm, target.z_mm]
+            .into_iter()
+            .all(f64::is_finite)
+            .then_some(target)
+    }
+
     fn current_tip_offset(&self, centered_nozzle_pose: Pose) -> Option<CurrentTipOffset> {
         let offset = CurrentTipOffset {
             x_mm: self.top_camera_controller_x_mm - centered_nozzle_pose.x_mm,
@@ -19880,6 +20231,7 @@ async fn execute_vacuum_probe(
         lease_id,
         &nozzle_id,
         &head_reference,
+        &geometry,
         calibrated_motion.as_mut(),
     )
     .await;
@@ -20367,6 +20719,7 @@ async fn measure_current_tip_offset(
     lease_id: Uuid,
     nozzle_id: &str,
     reference: &CalibratedHeadReference,
+    geometry: &CalibratedNozzleGeometry,
     mut calibrated: Option<&mut CalibratedMotionSequence>,
 ) -> Result<CurrentTipOffset, String> {
     let bottom = state.profile.bottom_vision.as_ref().unwrap();
@@ -20379,7 +20732,14 @@ async fn measure_current_tip_offset(
         stored_camera_profile(state, CameraRole::BottomCamera).map_err(|error| error.message)?;
     let camera_path =
         camera_path_for_role(CameraRole::BottomCamera).map_err(|error| error.message)?;
-    let seed_target = bottom.nozzle_target(nozzle);
+    let controller_angle_deg = state
+        .machine
+        .calibration_rotation_reference(lease_id, nozzle_id.to_string())
+        .await
+        .map_err(|error| error.to_string())?;
+    let seed_target = reference
+        .nozzle_target(geometry, controller_angle_deg, bottom.working_z_mm)
+        .ok_or_else(|| "calibrated bottom-camera nozzle target is invalid".to_string())?;
     let seed_feed_mm_per_min = safe_level_xy_feed(
         &state.profile,
         state.machine.status().pose,
@@ -29525,7 +29885,7 @@ async fn capture_geometry_nozzle(
     camera_profile: &CameraProfile,
     device_path: &str,
 ) -> Result<FiducialDetection, CalibrationStop> {
-    let (report, _) = capture_nozzle_tooling_with_retries(
+    let (report, attempts) = capture_nozzle_tooling_with_retries(
         state,
         None,
         camera_profile,
@@ -29537,8 +29897,11 @@ async fn capture_geometry_nozzle(
     .await?;
     if !report.passed {
         return Err(CalibrationStop::Rejected(format!(
-            "{} was not stably identified as {} during geometry calibration",
-            nozzle.nozzle_id, nozzle.expected_tip_id
+            "{} was not stably identified as {} during geometry calibration after {} attempts; {}",
+            nozzle.nozzle_id,
+            nozzle.expected_tip_id,
+            attempts.len(),
+            nozzle_tooling_attempt_summary(&report, bottom, nozzle),
         )));
     }
     mean_nozzle_detection(&report).ok_or_else(|| {
@@ -29547,6 +29910,31 @@ async fn capture_geometry_nozzle(
             nozzle.nozzle_id
         ))
     })
+}
+
+fn nozzle_tooling_attempt_summary(
+    report: &NozzleToolingReport,
+    bottom: &velocitypnp_domain::BottomVisionProfile,
+    nozzle: &velocitypnp_domain::NozzleToolingProfile,
+) -> String {
+    let detected_tip = report.detected_tip_id.as_deref().unwrap_or("none");
+    let metric =
+        |value: Option<f64>| value.map_or_else(|| "none".into(), |value| format!("{value:.3}"));
+    format!(
+        "last attempt detected {detected_tip} in {}/{} frames ({:.0}%); feature diameter {} mm \
+         (expected {:.3} +/- {:.3}); diameter range {} mm; center error {} px \
+         (limit {:.1}); center jitter {} px (limit 3.0)",
+        report.detected_samples,
+        report.requested_samples,
+        100.0 * report.detection_rate,
+        metric(report.mean_feature_diameter_mm),
+        nozzle.expected_feature_diameter_mm,
+        nozzle.feature_diameter_tolerance_mm,
+        metric(report.feature_diameter_range_mm),
+        metric(report.center_error_p95_px),
+        bottom.max_center_error_px,
+        metric(report.center_jitter_p95_px),
+    )
 }
 
 async fn capture_nozzle_tooling_with_retries(
@@ -31958,13 +32346,16 @@ fn validate_job_execution_machine(
     Ok(status.simulated)
 }
 
+type BoardPopulationKey = (Uuid, String);
+type TimedBoardPopulationObservation = (DateTime<Utc>, BoardPlacementScanObservation);
+type LatestBoardPopulationState = HashMap<BoardPopulationKey, TimedBoardPopulationObservation>;
+
 fn latest_board_population_state(
     state: &AppState,
     job: &Job,
     calibration_id: Uuid,
-) -> ApiResult<HashMap<(Uuid, String), (chrono::DateTime<Utc>, BoardPlacementScanObservation)>> {
-    let mut latest =
-        HashMap::<(Uuid, String), (chrono::DateTime<Utc>, BoardPlacementScanObservation)>::new();
+) -> ApiResult<LatestBoardPopulationState> {
+    let mut latest = LatestBoardPopulationState::new();
     for report in state
         .store
         .list_board_population_refreshes()
@@ -33561,12 +33952,16 @@ fn prepare_physical_placement_pickup(
     .ok_or_else(|| ApiError::bad_request("strip feeder has no available occupied pocket"))?;
     let selected_pocket_index = selected_pocket.pocket_index;
     let nominal_center = selected_pocket.nominal_center_machine_mm;
+    let active_revision_created_at =
+        active_strip_feeder_lane_revision_created_at(state, registration.id)?;
     let latest_holdout = registration
         .latest_live_holdout_id
         .and_then(|id| state.store.get_strip_feeder_live_holdout(id).ok().flatten())
         .filter(|holdout| {
             holdout.status == OperationStatus::Succeeded
                 && holdout.calibration_id == registration.calibration_id
+                && active_revision_created_at
+                    .is_none_or(|created_at| holdout.created_at >= created_at)
         })
         .ok_or_else(|| ApiError::bad_request("placement feeder has no current live holdout"))?;
     let holdout = latest_holdout
@@ -33879,6 +34274,8 @@ fn validate_production_strip_feeder_with_preference(
             "placement feeder part orientation does not match the job",
         ));
     }
+    let active_revision_created_at =
+        active_strip_feeder_lane_revision_created_at(state, registration.id)?;
     let holdout = registration
         .latest_live_holdout_id
         .and_then(|id| state.store.get_strip_feeder_live_holdout(id).ok().flatten())
@@ -33886,6 +34283,8 @@ fn validate_production_strip_feeder_with_preference(
             holdout.status == OperationStatus::Succeeded
                 && holdout.calibration_id == calibration_id
                 && holdout.report.as_ref().is_some_and(|report| report.passed)
+                && active_revision_created_at
+                    .is_none_or(|created_at| holdout.created_at >= created_at)
         });
     if holdout.is_none() {
         return Err(ApiError::bad_request(
@@ -36126,6 +36525,7 @@ async fn acquire_physical_placement_part(
         prepared.lease_id,
         nozzle_id,
         &prepared.head_reference,
+        &prepared.geometry,
         None,
     )
     .await?;
@@ -36222,7 +36622,10 @@ async fn acquire_physical_placement_part(
         }
         return Err(rejection.message.clone());
     }
-    let mut pocket_machine_mm = source_control.center_machine_mm;
+    if !source_control.model_control_authorized {
+        return Err("the source-component model did not authorize pickup control".into());
+    }
+    let pocket_machine_mm = source_control.center_machine_mm;
     let source_pose_inspection = if let Ok(references) =
         load_source_pose_references(state, &prepared.registration)
     {
@@ -36273,45 +36676,15 @@ async fn acquire_physical_placement_part(
         None
     };
     persist_placement_progress(state, run, report)?;
-    if source_control.learned_control_authorized {
-        if source_pose_inspection
-            .as_ref()
-            .is_some_and(|inspection| !inspection.report.passed)
-            || source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied
-        {
-            report.findings.push(
-                "the confident flat-part model controlled pickup while deterministic source vision remained audit-only"
-                    .into(),
-            );
-        }
-    } else {
-        if source_pose_inspection
-            .as_ref()
-            .is_some_and(|inspection| !inspection.report.passed)
-        {
-            return Err("top vision rejected the source package pose before nozzle descent".into());
-        }
-        if source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied {
-            return Err("top vision did not confirm a part in the reserved pocket".into());
-        }
-        let deterministic_center_machine_mm = source_pose_inspection
-            .as_ref()
-            .and_then(|inspection| inspection.report.candidate_measured_center_machine_mm)
-            .unwrap_or(deterministic_center_machine_mm);
-        let pocket_center_correction_mm = (deterministic_center_machine_mm[0]
-            - nominal_pocket_machine_mm[0])
-            .hypot(deterministic_center_machine_mm[1] - nominal_pocket_machine_mm[1]);
-        let production_source_center_limit_mm = pickup
-            .maximum_part_offset_mm
-            .max(0.4 * prepared.registration.tape_pitch_mm);
-        if pocket_center_correction_mm > production_source_center_limit_mm {
-            return Err(format!(
-                "reserved-pocket part center correction \
-                 {pocket_center_correction_mm:.3} mm exceeds the \
-                 {production_source_center_limit_mm:.3} mm production bound"
-            ));
-        }
-        pocket_machine_mm = deterministic_center_machine_mm;
+    if source_pose_inspection
+        .as_ref()
+        .is_some_and(|inspection| !inspection.report.passed)
+        || source_inspection.report.before_occupancy != StripPocketOccupancy::Occupied
+    {
+        report.findings.push(
+            "the accepted source-component model controlled pickup while deterministic source vision remained audit-only"
+                .into(),
+        );
     }
     persist_placement_progress(state, run, report)?;
     let alignment_nozzle_z_mm = 0.5 * (search.start_nozzle_z_mm + search.end_nozzle_z_mm);
@@ -37825,6 +38198,20 @@ mod tests {
     }
 
     #[test]
+    fn display_patch_keeps_only_the_newest_physical_feeder_lane() {
+        let now = Utc::now();
+        let current = test_pickup_registration(now);
+        let mut prior = test_pickup_registration(now - chrono::Duration::days(1));
+        prior.pick_centerline_machine_mm = [[10.3, -20.0], [10.3, 20.0]];
+        prior.pocket_centers_machine_mm = vec![[10.3, -20.0], [10.3, -16.0], [10.3, -12.0]];
+
+        assert!(same_physical_feeder_lane(&current, &prior));
+
+        prior.pick_centerline_machine_mm = [[18.0, -20.0], [18.0, 20.0]];
+        assert!(!same_physical_feeder_lane(&current, &prior));
+    }
+
+    #[test]
     fn active_lane_clip_uses_revised_pocket_extent() {
         let observation = |pocket_index, center_machine_mm| StripFeederPocketScanObservation {
             pocket_index,
@@ -37835,6 +38222,8 @@ mod tests {
             occupancy: StripPocketOccupancy::Occupied,
             confidence: 0.9,
             review_required: false,
+            crop_artifact_name: None,
+            crop_sha256: None,
             findings: Vec::new(),
         };
         let observations = vec![
@@ -37901,11 +38290,14 @@ mod tests {
         );
 
         assert_eq!(resolved, (StripPocketOccupancy::Occupied, 0.95, false));
-        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings,
+            ["the source-component model overrode conflicting audit-only deterministic occupancy"]
+        );
     }
 
     #[test]
-    fn conflicting_rescan_detectors_remain_uncertain() {
+    fn model_controls_rescan_occupancy_when_deterministic_audit_disagrees() {
         let mut findings = Vec::new();
         let resolved = resolve_rescan_occupancy(
             StripPocketOccupancy::Occupied,
@@ -37914,8 +38306,30 @@ mod tests {
             &mut findings,
         );
 
-        assert_eq!(resolved, (StripPocketOccupancy::Uncertain, 0.9, true));
-        assert_eq!(findings, ["learned and deterministic occupancy disagree"]);
+        assert_eq!(resolved, (StripPocketOccupancy::Empty, 0.95, false));
+        assert_eq!(
+            findings,
+            ["the source-component model overrode conflicting audit-only deterministic occupancy"]
+        );
+    }
+
+    #[test]
+    fn rescan_occupancy_requires_a_confident_model_result() {
+        let mut findings = Vec::new();
+        let resolved =
+            resolve_rescan_occupancy(StripPocketOccupancy::Occupied, 0.9, None, &mut findings);
+        assert_eq!(resolved, (StripPocketOccupancy::Uncertain, 0.0, true));
+
+        let mut prediction = source_prediction(SourceComponentClass::ComponentFlat);
+        prediction.confidence_gate_passed = false;
+        findings.clear();
+        let resolved = resolve_rescan_occupancy(
+            StripPocketOccupancy::Occupied,
+            0.9,
+            Some(&prediction),
+            &mut findings,
+        );
+        assert_eq!(resolved, (StripPocketOccupancy::Uncertain, 0.95, true));
     }
 
     #[test]
@@ -39510,6 +39924,8 @@ mod tests {
             occupancy: StripPocketOccupancy::Occupied,
             confidence: 0.9,
             review_required: false,
+            crop_artifact_name: None,
+            crop_sha256: None,
             findings: Vec::new(),
         };
         let evidence = StripFeederPocketMapEvidence {
@@ -39826,7 +40242,7 @@ mod tests {
     }
 
     #[test]
-    fn live_holdout_defaults_to_the_first_available_occupied_pocket() {
+    fn live_holdout_defaults_to_an_interior_available_occupied_pocket() {
         let now = Utc::now();
         let mut registration = test_pickup_registration(now);
         registration.ensure_pocket_state();
@@ -39842,6 +40258,17 @@ mod tests {
             live_holdout_pocket_index(&registration, Some(3)).unwrap(),
             3
         );
+
+        registration.pocket_centers_machine_mm = (0..28)
+            .map(|index| [163.0, 200.0 - f64::from(index) * 4.0])
+            .collect();
+        registration.pockets.clear();
+        registration.ensure_pocket_state();
+        for pocket in &mut registration.pockets {
+            pocket.occupancy = StripPocketOccupancy::Occupied;
+            pocket.status = StripFeederPocketStatus::Available;
+        }
+        assert_eq!(live_holdout_pocket_index(&registration, None).unwrap(), 13);
     }
 
     #[test]
@@ -41123,73 +41550,38 @@ mod tests {
             class: SourceComponentClass::Empty,
             ..prediction.clone()
         };
-        assert!(source_component_pose_can_control(
-            &empty_prediction,
-            Some(StripPocketOccupancy::Occupied),
-            StripPocketOccupancy::Occupied,
-        ));
-        assert!(!source_component_pose_can_control(
-            &empty_prediction,
-            Some(StripPocketOccupancy::Uncertain),
-            StripPocketOccupancy::Occupied,
-        ));
-        assert!(!source_component_pose_can_control(
-            &empty_prediction,
-            Some(StripPocketOccupancy::Occupied),
-            StripPocketOccupancy::Empty,
-        ));
+        assert!(source_component_class_rejection(&empty_prediction).is_some());
+        assert!(source_component_class_rejection(&prediction).is_none());
     }
 
     #[test]
-    fn source_empty_requires_learned_and_deterministic_agreement() {
-        assert!(!source_empty_observation_is_confirmed(
-            true,
-            StripPocketOccupancy::Occupied,
-        ));
-        assert!(!source_empty_observation_is_confirmed(
-            true,
-            StripPocketOccupancy::Uncertain,
-        ));
-        assert!(!source_empty_observation_is_confirmed(
-            false,
-            StripPocketOccupancy::Empty,
-        ));
-        assert!(source_empty_observation_is_confirmed(
-            true,
-            StripPocketOccupancy::Empty,
-        ));
-    }
+    fn source_pick_requires_a_confident_flat_model_pose() {
+        let mut prediction = source_prediction(SourceComponentClass::ComponentFlat);
+        assert!(source_component_class_rejection(&prediction).is_none());
 
-    #[test]
-    fn source_class_gate_falls_back_on_empty_disagreement() {
-        for occupancy in [
-            StripPocketOccupancy::Occupied,
-            StripPocketOccupancy::Uncertain,
-        ] {
-            assert_eq!(
-                source_component_class_rejection(SourceComponentClass::Empty, true, occupancy),
-                None,
-            );
-        }
-        assert!(source_component_class_rejection(
-            SourceComponentClass::Empty,
-            true,
-            StripPocketOccupancy::Empty,
-        )
-        .is_some());
-        assert!(source_component_class_rejection(
-            SourceComponentClass::ComponentOnEdge,
-            true,
-            StripPocketOccupancy::Occupied,
-        )
-        .is_some());
+        prediction.confidence_gate_passed = false;
         assert_eq!(
-            source_component_class_rejection(
-                SourceComponentClass::Empty,
-                false,
-                StripPocketOccupancy::Empty,
-            ),
-            None,
+            source_component_class_rejection(&prediction),
+            Some("the source-component model did not pass its confidence gate"),
+        );
+
+        prediction.confidence_gate_passed = true;
+        prediction.pose.valid = false;
+        assert_eq!(
+            source_component_class_rejection(&prediction),
+            Some("the source-component model did not provide a valid flat-part pose"),
+        );
+
+        prediction.class = SourceComponentClass::Empty;
+        assert_eq!(
+            source_component_class_rejection(&prediction),
+            Some("the source-component model found an empty source pocket"),
+        );
+
+        prediction.class = SourceComponentClass::ComponentOnEdge;
+        assert_eq!(
+            source_component_class_rejection(&prediction),
+            Some("the source-component model found a component on edge"),
         );
     }
 
@@ -43679,6 +44071,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_api_route_returns_json_not_found() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/not-a-real-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"error": {"code": "not_found", "message": "API route not found"}})
+        );
+    }
+
+    #[tokio::test]
     async fn vision_smoke_requires_external_safety_confirmation() {
         let response = router(test_state())
             .oneshot(
@@ -45364,6 +45782,10 @@ mod tests {
             fallback_top_mapping
         );
         assert_eq!(reference.bottom_camera_mapping[0][0], -0.036);
+        let target = reference.nozzle_target(&geometry, 720.0, 31.5).unwrap();
+        assert!((target.x_mm - 240.969).abs() < 1e-12);
+        assert!((target.y_mm - 217.690).abs() < 1e-12);
+        assert_eq!(target.z_mm, 31.5);
         assert_eq!(median_raw(&[255, 254, 255, 200, 255]), Some(255.0));
         assert_eq!(median_raw(&[226, 225, 227, 226]), Some(226.0));
         assert_eq!(median_raw(&[]), None);

@@ -74,6 +74,12 @@ cargo run -p velocitypnpd -- --database velocitypnp.db
 The daemon listens on `0.0.0.0:4080`. It has no user authentication, so use an
 isolated, trusted network or a host firewall. In another terminal:
 
+Daemon output is written to the console and to daily files in `logs/`. The
+default retention limit is 14 files, and `logs/velocitypnpd.current.log`
+points to the active file. Set `VELOCITYPNP_LOG_DIR` or pass `--log-dir` to
+change the directory. Set `VELOCITYPNP_LOG_RETENTION_FILES` or pass
+`--log-retention-files` to change retention.
+
 ```bash
 cargo run -p velocitypnp -- status
 cargo run -p velocitypnp -- connect
@@ -593,6 +599,34 @@ cargo run --release -p velocitypnp -- \
 
 Inventory occupancy is capture evidence, not final ground truth. Review it
 when tape contents changed after the source scan.
+
+A promoted feeder-lane rescan can also supply reviewed source-component
+evidence. In the Feeders pane, use `Needs review` to open the active rescan.
+The review shows the lane mosaic and a centered view of each pocket. The
+operator can mark any pocket as occupied, empty, on edge, or unusable. Each
+change is an append-only record. It keeps the original model result, model
+hash, source mosaic hash, crop hash, prior review, and optional note. The
+latest review updates operational pocket state. A later lane rescan makes an
+open review page stale and the API rejects its changes.
+
+A promoted lane rescan also invalidates the prior lane-alignment check, pickup
+qualification, and active feeder. The web UI automatically runs a new
+lane-alignment check against the promoted pocket lattice when a model-approved
+occupied pocket is available. The check uses safe-Z camera
+motion and the rescan safety confirmation. If no occupied pocket is available,
+review the pocket states and use `Recheck lane alignment` before qualification.
+The daemon rejects retained alignment evidence that predates the active lane
+revision.
+
+Qualification also runs the lane-alignment check first when current alignment
+evidence is missing. The qualification confirmation covers both operations.
+
+The source-component exporter includes the latest review for each pocket and
+lane revision. Empty labels and unusable images enter the offline review as
+completed decisions. Occupied and on-edge labels still need an accepted OBB
+unless the stored review has a corrected outline. All samples from one feeder
+registration stay in one split. A boundary pocket with no complete model crop
+stays in the audit history but is not exported for training.
 
 One physical feeder registration must stay entirely in the evaluation split.
 Do not split repeated views of one strip or pocket between training and

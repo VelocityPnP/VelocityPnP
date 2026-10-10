@@ -499,6 +499,10 @@ pub struct StripFeederPocketScanObservation {
     pub confidence: f64,
     pub review_required: bool,
     #[serde(default)]
+    pub crop_artifact_name: Option<String>,
+    #[serde(default)]
+    pub crop_sha256: Option<String>,
+    #[serde(default)]
     pub findings: Vec<String>,
 }
 
@@ -537,10 +541,54 @@ pub struct StripFeederOccupancyRefreshReport {
     pub created_at: DateTime<Utc>,
     pub model_available: bool,
     #[serde(default)]
+    pub source_mosaic_sha256: Option<String>,
+    #[serde(default)]
     pub lane_revision: Option<StripFeederLaneRevision>,
     pub observations: Vec<StripFeederPocketScanObservation>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+/// Operator label for one pocket in a promoted feeder-lane revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StripFeederPocketReviewLabel {
+    Occupied,
+    Empty,
+    ComponentOnEdge,
+    Unusable,
+}
+
+/// Append-only operator review of one feeder-pocket observation.
+///
+/// The original model result stays in the occupancy refresh report. This
+/// record supplies the operational override and durable retraining evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StripFeederPocketOccupancyReview {
+    pub id: Uuid,
+    pub registration_id: Uuid,
+    pub lane_revision_id: Uuid,
+    pub source_scan_id: Uuid,
+    pub pocket_index: u32,
+    pub label: StripFeederPocketReviewLabel,
+    #[serde(default)]
+    pub note: Option<String>,
+    pub reviewer: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub supersedes_review_id: Option<Uuid>,
+    pub source_mosaic_artifact_name: String,
+    pub source_mosaic_sha256: String,
+    #[serde(default)]
+    pub crop_artifact_name: Option<String>,
+    #[serde(default)]
+    pub crop_sha256: Option<String>,
+    pub original_occupancy: crate::StripPocketOccupancy,
+    pub original_review_required: bool,
+    #[serde(default)]
+    pub original_model_prediction: Option<crate::SourceComponentModelPrediction>,
+    #[serde(default)]
+    pub corrected_outline_px: Option<[[f64; 2]; 4]>,
 }
 
 /// Authoritative population state for one planned board placement.

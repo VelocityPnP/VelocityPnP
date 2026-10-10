@@ -1267,6 +1267,57 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/StripFeederRegistration" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /strip-feeder-registrations/{id}/occupancy-review:
+    get:
+      operationId: getStripFeederOccupancyReview
+      description: >-
+        Returns every pocket in the active promoted lane revision, the
+        immutable model result, and the latest operator review.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Active lane-revision review queue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripFeederOccupancyReviewQueue" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /strip-feeder-registrations/{id}/occupancy-review/{pocket_index}:
+    put:
+      operationId: reviewStripFeederPocketOccupancy
+      description: >-
+        Appends an operator label and atomically updates operational pocket
+        state. The request fails when a newer lane revision is active.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: pocket_index, in: path, required: true, schema: { type: integer, minimum: 0 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lane_revision_id, label]
+              properties:
+                lane_revision_id: { type: string, format: uuid }
+                label:
+                  type: string
+                  enum: [occupied, empty, component_on_edge, unusable]
+                note: { type: [string, "null"], maxLength: 500 }
+      responses:
+        "200":
+          description: Stored review and updated feeder registration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [review, registration]
+                properties:
+                  review:
+                    { $ref: "#/components/schemas/StripFeederPocketOccupancyReview" }
+                  registration:
+                    { $ref: "#/components/schemas/StripFeederRegistration" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /strip-feeder-registrations/{id}/live-holdouts:
     post:
       operationId: startStripFeederLiveHoldout
@@ -3212,6 +3263,7 @@ components:
         - occupancy
         - occupancy_confidence
         - status
+        - occupancy_review_id
         - attempt_count
         - consecutive_failure_count
         - reservation_id
@@ -3229,7 +3281,8 @@ components:
         occupancy_confidence: { type: number, minimum: 0, maximum: 1 }
         status:
           type: string
-          enum: [available, empty, reserved, consumed, needs_review]
+          enum: [available, empty, reserved, consumed, needs_review, unavailable]
+        occupancy_review_id: { type: [string, "null"], format: uuid }
         attempt_count: { type: integer, minimum: 0 }
         consecutive_failure_count: { type: integer, minimum: 0 }
         reservation_id: { type: [string, "null"], format: uuid }
@@ -3238,6 +3291,127 @@ components:
           type: [string, "null"]
           enum: [returned, consumed, retryable_failure, release_uncertain, interrupted, null]
         updated_at: { type: string, format: date-time }
+    StripFeederPocketOccupancyReview:
+      type: object
+      required:
+        - id
+        - registration_id
+        - lane_revision_id
+        - source_scan_id
+        - pocket_index
+        - label
+        - note
+        - reviewer
+        - created_at
+        - supersedes_review_id
+        - source_mosaic_artifact_name
+        - source_mosaic_sha256
+        - crop_artifact_name
+        - crop_sha256
+        - original_occupancy
+        - original_review_required
+        - original_model_prediction
+        - corrected_outline_px
+      properties:
+        id: { type: string, format: uuid }
+        registration_id: { type: string, format: uuid }
+        lane_revision_id: { type: string, format: uuid }
+        source_scan_id: { type: string, format: uuid }
+        pocket_index: { type: integer, minimum: 0 }
+        label:
+          type: string
+          enum: [occupied, empty, component_on_edge, unusable]
+        note: { type: [string, "null"] }
+        reviewer: { type: string }
+        created_at: { type: string, format: date-time }
+        supersedes_review_id: { type: [string, "null"], format: uuid }
+        source_mosaic_artifact_name: { type: string }
+        source_mosaic_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        crop_artifact_name: { type: [string, "null"] }
+        crop_sha256:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+        original_occupancy:
+          type: string
+          enum: [occupied, empty, uncertain]
+        original_review_required: { type: boolean }
+        original_model_prediction: { type: [object, "null"] }
+        corrected_outline_px:
+          type: [array, "null"]
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/Point2d" }
+    StripFeederOccupancyReviewQueue:
+      type: object
+      required:
+        - registration_id
+        - lane_revision_id
+        - source_scan_id
+        - created_at
+        - unresolved_count
+        - mosaic
+        - pockets
+      properties:
+        registration_id: { type: string, format: uuid }
+        lane_revision_id: { type: string, format: uuid }
+        source_scan_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        unresolved_count: { type: integer, minimum: 0 }
+        mosaic:
+          type: object
+          required: [artifact_name, sha256, width_px, height_px, raster_transform]
+          properties:
+            artifact_name: { type: string }
+            sha256:
+              type: [string, "null"]
+              pattern: "^[0-9a-f]{64}$"
+            width_px: { type: integer, minimum: 1 }
+            height_px: { type: integer, minimum: 1 }
+            raster_transform:
+              { $ref: "#/components/schemas/WorkspaceRasterTransform" }
+        pockets:
+          type: array
+          items:
+            type: object
+            required:
+              - pocket_index
+              - center_machine_mm
+              - original_occupancy
+              - original_confidence
+              - model_prediction
+              - automatic_review_required
+              - unresolved
+              - findings
+              - crop_artifact_name
+              - crop_sha256
+              - effective_occupancy
+              - effective_status
+              - review
+            properties:
+              pocket_index: { type: integer, minimum: 0 }
+              center_machine_mm: { $ref: "#/components/schemas/Point2d" }
+              original_occupancy:
+                type: string
+                enum: [occupied, empty, uncertain]
+              original_confidence: { type: number, minimum: 0, maximum: 1 }
+              model_prediction: { type: [object, "null"] }
+              automatic_review_required: { type: boolean }
+              unresolved: { type: boolean }
+              findings:
+                type: array
+                items: { type: string }
+              crop_artifact_name: { type: [string, "null"] }
+              crop_sha256: { type: [string, "null"] }
+              effective_occupancy:
+                type: string
+                enum: [occupied, empty, uncertain]
+              effective_status:
+                type: string
+                enum: [available, empty, reserved, consumed, needs_review, unavailable]
+              review:
+                oneOf:
+                  - { $ref: "#/components/schemas/StripFeederPocketOccupancyReview" }
+                  - type: "null"
     StripFeederLiveHoldoutReport:
       type: object
       required:

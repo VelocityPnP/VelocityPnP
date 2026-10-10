@@ -51,6 +51,7 @@ tokio-serial = { version = "5.4", default-features = false }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tract-onnx = { version = "=0.22.0", default-features = false }
 uuid = { version = "1.11", features = ["v4", "serde"] }

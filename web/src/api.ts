@@ -7,7 +7,8 @@ import type {
   Part, PlacementExecutionRun,
   PlacementOutcomeRecord, SensorReading,
   StripFeederLiveHoldoutRun,
-  StripFeederOccupancyRefreshReport,
+  StripFeederOccupancyRefreshReport, StripFeederOccupancyReviewQueue,
+  StripFeederPocketOccupancyReview, StripFeederPocketReviewLabel,
   StripFeederPickupQualificationRun, StripFeederRegistration,
   StripFeederInventoryReport, StripFeederVisionReport, VisualHomingResult,
   StripFeederMapRegistration, StripFeederRevisionSummary,
@@ -35,10 +36,26 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}${path}`, init);
-  const data = await response.json().catch(() => ({}));
+  const response = await fetch(`${BASE}${path}`, { ...init, cache: "no-store" });
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch {
+    const method = init?.method ?? "GET";
+    const contentType = response.headers.get("content-type") ?? "unknown content type";
+    throw new ApiError(
+      response.ok ? 502 : response.status,
+      `The daemon returned ${contentType} for ${method} ${BASE}${path}. `
+        + "The web UI and daemon may be different versions",
+    );
+  }
   if (!response.ok) {
-    throw new ApiError(response.status, data?.error?.message ?? `Request failed (${response.status})`);
+    const message = typeof data === "object" && data !== null
+      && "error" in data && typeof data.error === "object" && data.error !== null
+      && "message" in data.error && typeof data.error.message === "string"
+      ? data.error.message
+      : `Request failed (${response.status})`;
+    throw new ApiError(response.status, message);
   }
   return data as T;
 }
@@ -499,6 +516,20 @@ export const api = {
     (await request<{ revisions: StripFeederRevisionSummary[] }>(
       `/strip-feeder-registrations/${registrationId}/revisions`,
     )).revisions,
+  stripFeederOccupancyReview: (registrationId: string) =>
+    request<StripFeederOccupancyReviewQueue>(
+      `/strip-feeder-registrations/${registrationId}/occupancy-review`,
+    ),
+  reviewStripFeederPocketOccupancy: (
+    registrationId: string, pocketIndex: number, laneRevisionId: string,
+    label: StripFeederPocketReviewLabel, note?: string,
+  ) => jsonPut<{
+    review: StripFeederPocketOccupancyReview;
+    registration: StripFeederRegistration;
+  }>(
+    `/strip-feeder-registrations/${registrationId}/occupancy-review/${pocketIndex}`,
+    { lane_revision_id: laneRevisionId, label, note: note || null },
+  ),
   updateStripFeederAssignment: (
     registrationId: string, partKey: string | null, partRotationDeg: number | null,
   ) => jsonPut<StripFeederRegistration>(

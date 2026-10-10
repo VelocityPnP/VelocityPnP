@@ -90,8 +90,10 @@ The project is organized by measurable gates rather than calendar estimates.
   from retained workspace evidence
 - [x] Measure visible strip population, part pitch, part outline size, and
   present/absent feed-position counts across compatible focused scans
-- [x] Add persistent vision-assisted strip setup through live pocket,
-  bounded pickup Z, vacuum hold, bottom inspection, and release
+- [x] Add persistent vision-assisted strip setup through a live tape-geometry
+  check, bounded pickup Z, vacuum hold, bottom inspection, and release
+- [x] Make source-component ML authoritative for pocket occupancy, part pose,
+  and pickup center; retain deterministic image evidence as audit data
 - [x] Verify release with bottom-camera nozzle-clear evidence, an adaptive
   bounded depth schedule, and fail-closed top-camera confirmation
 - [x] Add persistent per-pocket reservation, evidence-gated consumption,
@@ -175,6 +177,8 @@ The project is organized by measurable gates rather than calendar estimates.
   confidence, and machine/configuration holdout tests
 - [x] Add a provenance-bearing source-component draft exporter with
   registration-grouped train/evaluation splits and operator review
+- [x] Add feeder-lane pocket review with append-only model corrections,
+  immediate operational state updates, and retraining export provenance
 - [x] Add review-guided flat-box refinement and an oriented box editor for
   difficult and on-edge source components
 - [x] Add persistent, inventory-driven safe-Z capture of balanced occupied and
@@ -239,8 +243,8 @@ a failed placement.
 - [x] Gate board and per-lane feeder display patches against registered
   fiducials or pocket lattices, with persisted transforms and residuals
 - [x] Promote each feeder rescan as one atomic lane revision containing the
-  image registration, tape geometry, pocket positions, occupancy, and active
-  feeder plan
+  image registration, tape geometry, pocket positions, and occupancy, while
+  invalidating prior geometry and qualification evidence
 - [x] Add a dedicated Feeder setup view with stable bank/lane names, part
   assignment, qualification, revision history, and direct Workspace access
 - [x] Add a live Workspace activity console with scan/job progress, ETA where

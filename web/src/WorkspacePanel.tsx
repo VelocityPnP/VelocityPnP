@@ -259,10 +259,22 @@ export function feederScanRegion(
   parent: WorkspaceScanRegion,
 ): WorkspaceScanRegion {
   const halfWidth = feeder.tape_width_mm / 2;
+  const cropHalfCross = halfWidth + 3;
+  const cropHalfAlong = Math.max(feeder.tape_pitch_mm * 1.5, 6);
+  const radians = feeder.tape_rotation_deg * Math.PI / 180;
+  const axis = [Math.cos(radians), Math.sin(radians)];
+  const normal = [-axis[1], axis[0]];
+  const cropHalfX = Math.abs(normal[0]) * cropHalfCross
+    + Math.abs(axis[0]) * cropHalfAlong;
+  const cropHalfY = Math.abs(normal[1]) * cropHalfCross
+    + Math.abs(axis[1]) * cropHalfAlong;
+  // Reserve one more pocket pitch for a newly exposed end pocket. The extra
+  // millimeter keeps the inference crop away from the raster boundary.
+  const padding = Math.max(cropHalfX, cropHalfY) + feeder.tape_pitch_mm + 1;
   return paddedRegion(
     feeder.pockets.map((pocket) => pocket.center_machine_mm),
     parent,
-    halfWidth + 6,
+    padding,
   );
 }
 
@@ -521,6 +533,16 @@ function displayPatchGeometry(patch: WorkspaceDisplayPatch): ImageGeometry {
 function displayPatchSvgTransform(patch: WorkspaceDisplayPatch): string {
   const matrix = patch.source_to_base.matrix;
   return `matrix(${matrix[0]} ${-matrix[3]} ${-matrix[1]} ${matrix[4]} ${matrix[2]} ${-matrix[5]})`;
+}
+
+export function activeWorkspaceDisplayPatches(
+  patches: WorkspaceDisplayPatch[],
+  feederLanes: StripFeederMapRegistration[],
+): WorkspaceDisplayPatch[] {
+  const activeFeederIds = new Set(feederLanes.map((feeder) => feeder.id));
+  return patches.filter((patch) =>
+    patch.kind !== "feeder_lane" || activeFeederIds.has(patch.object_id)
+  );
 }
 
 export function workspaceComposition(
@@ -1164,6 +1186,10 @@ export function WorkspacePanel({
     ),
     [feederRegistrations, selectedSummary, status.profile_id],
   );
+  const visibleDisplayPatches = useMemo(
+    () => activeWorkspaceDisplayPatches(displayPatches, feederLanes),
+    [displayPatches, feederLanes],
+  );
   const feederBanks = useMemo(() => workspaceFeederBanks(discovery), [discovery]);
   const feederLaneTargets = useMemo(
     () => workspaceFeederLaneTargets(feederLanes, feederBanks),
@@ -1522,7 +1548,7 @@ export function WorkspacePanel({
       setSelectionMessage("");
       const confirmed = await requestDialog({
         title: `Rescan ${selection.label}`,
-        message: `Scan ${rescanScope} and align the result to the current full workspace scan. Estimated completion time is about ${formatWorkspaceDuration(estimate.estimated_duration_seconds)} for ${estimate.planned_tiles} tiles. Confirm that the scan region and travel path are clear, both nozzles are level, and power isolation is reachable.`,
+        message: `Scan ${rescanScope} and align the result to the current full workspace scan. Estimated scan time is about ${formatWorkspaceDuration(estimate.estimated_duration_seconds)} for ${estimate.planned_tiles} tiles.${["feeder", "feeder_slot", "pocket"].includes(selection.kind) ? " A short lane-alignment check will run automatically after the scan." : ""} Confirm that the scan region and travel path are clear, both nozzles are level, and power isolation is reachable.`,
         confirmLabel: "Start rescan",
       });
       if (confirmed === null) return;
@@ -1626,6 +1652,23 @@ export function WorkspacePanel({
               candidates[0].candidate_index,
               rescanObjectId,
             );
+            const canCheckAlignment = occupancy.observations.some(
+              (observation) => observation.occupancy === "occupied"
+                && !observation.review_required,
+            );
+            let alignmentResult = "Lane alignment was not checked because no occupied pocket is ready.";
+            if (canCheckAlignment) {
+              setSelectionMessage("Checking lane alignment…");
+              const alignment = await api.startStripFeederLiveHoldout(
+                rescanObjectId, lease.id,
+              );
+              await waitForOperation(alignment.operation, (operation) => {
+                setSelectionMessage(
+                  operation.message ?? "Checking lane alignment…",
+                );
+              });
+              alignmentResult = "Lane alignment passed automatically.";
+            }
             const modelObservationCount = occupancy.observations.filter(
               (observation) => observation.model_prediction !== null,
             ).length;
@@ -1637,6 +1680,7 @@ export function WorkspacePanel({
                 : occupancy.model_available
                   ? "The model did not produce usable evidence."
                   : "The model was not available.",
+              alignmentResult,
             ].filter(Boolean).join(" ");
             await loadFeederData();
           } else {
@@ -1674,7 +1718,7 @@ export function WorkspacePanel({
         ].filter(Boolean).join(" ");
         await loadOperationalData();
       }
-      setSelectionMessage("Checking alignment…");
+      setSelectionMessage("Checking image alignment…");
       const patches = await loadDisplayPatches();
       const accepted = patches.some((patch) =>
         patch.source_scan_id === started.scan.id
@@ -1895,8 +1939,8 @@ export function WorkspacePanel({
           <h2>{selectedSummary ? "Whole workspace" : "Workspace"}</h2>
         </div>
         <div className="workspace-map-badges">
-          {displayPatches.length > 0 && <span className="map-status">
-            Full scan + {displayPatches.length} aligned updates
+          {visibleDisplayPatches.length > 0 && <span className="map-status">
+            Full scan + {visibleDisplayPatches.length} aligned updates
           </span>}
           {selectedStatus && <span className={`map-status map-status-${selectedStatus}`}>
             {label(selectedStatus)}
@@ -1987,7 +2031,7 @@ export function WorkspacePanel({
               <stop offset=".55" stopColor="#18394a" />
               <stop offset="1" stopColor="#071117" />
             </radialGradient>
-            {displayPatches.map((patch) => <clipPath
+            {visibleDisplayPatches.map((patch) => <clipPath
               id={`workspace-patch-${patch.id}`}
               key={patch.id}
               clipPathUnits="userSpaceOnUse"
@@ -2013,7 +2057,7 @@ export function WorkspacePanel({
             height={baseImageGeometry.height}
             preserveAspectRatio="none"
           />}
-          {layers.image && displayPatches.map((patch) => {
+          {layers.image && visibleDisplayPatches.map((patch) => {
             const geometry = displayPatchGeometry(patch);
             return <g
               className={`workspace-map-update patch-${patch.kind}`}
@@ -2191,7 +2235,7 @@ export function WorkspacePanel({
             />)}
             {target.feeder.pockets.map((pocket) => <circle
               key={pocket.pocket_index}
-              className={`${pocket.occupancy} status-${pocket.status} ${pocket.selected ? "selected" : ""} ${selection?.kind === "pocket" && selection.id === `${target.feeder.id}-${pocket.pocket_index}` ? "is-user-selected" : ""}`}
+              className={`${pocket.occupancy} status-${pocket.status} ${pocket.operator_review_label === "unusable" || pocket.operator_review_label === "component_on_edge" ? "reviewed-unavailable" : ""} ${pocket.selected ? "selected" : ""} ${selection?.kind === "pocket" && selection.id === `${target.feeder.id}-${pocket.pocket_index}` ? "is-user-selected" : ""}`}
               cx={pocket.center_machine_mm[0]}
               cy={-pocket.center_machine_mm[1]}
               onClick={(event) => selectPocket(
@@ -2208,7 +2252,7 @@ export function WorkspacePanel({
               role="button"
               tabIndex={0}
             >
-              <title>{`${target.label} · pocket ${pocket.pocket_index} · ${pocket.occupancy}${pocket.occupancy_source === "workspace_rescan" ? " from workspace rescan" : ""}${pocket.occupancy_review_required ? " · review" : ""} · ${label(pocket.status)}`}</title>
+              <title>{`${target.label} · pocket ${pocket.pocket_index} · ${pocket.occupancy}${pocket.occupancy_source === "workspace_rescan" ? " from workspace rescan" : ""}${pocket.occupancy_review_required ? " · review" : ""}${pocket.operator_review_label ? ` · operator: ${label(pocket.operator_review_label)}` : ""} · ${label(pocket.status)}`}</title>
             </circle>)}
           </g>)}
 
@@ -2465,12 +2509,15 @@ export function WorkspacePanel({
           {!selectionActionAllowed && selectionAction === null && <p
             className="workspace-selection-message"
           >Machine must be ready and fine-homed.</p>}
-          {quickCaptureUrl && <img
-            alt={`Top-camera capture at X ${selection.point[0].toFixed(2)}, Y ${selection.point[1].toFixed(2)}`}
-            className="workspace-quick-capture"
-            onError={() => setSelectionMessage("Quick capture failed.")}
-            src={quickCaptureUrl}
-          />}
+          {quickCaptureUrl && <div className="workspace-quick-capture-frame">
+            <img
+              alt={`Top-camera capture at X ${selection.point[0].toFixed(2)}, Y ${selection.point[1].toFixed(2)}`}
+              className="workspace-quick-capture"
+              onError={() => setSelectionMessage("Quick capture failed.")}
+              src={quickCaptureUrl}
+            />
+            <span aria-hidden="true" className="workspace-quick-capture-crosshair" />
+          </div>}
         </section>}
         {region && displayedViewport && <div className="workspace-zoom-controls">
           <button type="button" aria-label="Zoom out" onClick={() => zoomAtCenter(1.25)}>−</button>
@@ -2500,6 +2547,7 @@ export function WorkspacePanel({
           <span className="legend-populated">Occupied / populated</span>
           <span className="legend-empty">Empty / pending</span>
           <span className="legend-uncertain">Uncertain / review</span>
+          <span className="legend-unavailable">Reviewed unavailable</span>
         </div>
       </div>
     </section>
@@ -2617,7 +2665,7 @@ export function WorkspacePanel({
           </div>
           <progress value={capturedTiles} max={Math.max(plannedTiles, 1)} />
           <dl className="workspace-facts compact">
-            <div><dt>Aligned updates</dt><dd>{displayPatches.length}</dd></div>
+            <div><dt>Aligned updates</dt><dd>{visibleDisplayPatches.length}</dd></div>
             <div><dt>Coverage</dt><dd>{selectedScan.covered_fraction === null ? "Pending" : `${(selectedScan.covered_fraction * 100).toFixed(1)}%`}</dd></div>
           </dl>
           {selectedScan.failure && <div className="notice">{selectedScan.failure}</div>}

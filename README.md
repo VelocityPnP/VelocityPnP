@@ -77,6 +77,10 @@ Use it only on an isolated, trusted network, and use the host firewall to limit
 access. Pass `--web-dir` to select another build, or `--disable-web-ui` to serve
 only the API. The optional Vite development server listens on all IPv4
 interfaces at port `4081` and proxies `/api` to the loopback address.
+The daemon also writes daily logs to `logs/velocitypnpd.YYYY-MM-DD.log` and
+keeps at most 14 files. `logs/velocitypnpd.current.log` points to the active
+file. Use `--log-dir`, `--log-retention-files`, or
+`--disable-file-logging` to change this behavior.
 
 ```bash
 cargo run -p velocitypnp -- status

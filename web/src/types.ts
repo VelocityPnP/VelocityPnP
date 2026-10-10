@@ -998,9 +998,66 @@ export interface StripFeederOccupancyRefreshReport {
     occupancy: StripPocketOccupancy;
     confidence: number;
     review_required: boolean;
+    crop_artifact_name: string | null;
+    crop_sha256: string | null;
     findings: string[];
   }>;
   warnings: string[];
+}
+
+export type StripFeederPocketReviewLabel =
+  | "occupied" | "empty" | "component_on_edge" | "unusable";
+
+export interface StripFeederPocketOccupancyReview {
+  id: string;
+  registration_id: string;
+  lane_revision_id: string;
+  source_scan_id: string;
+  pocket_index: number;
+  label: StripFeederPocketReviewLabel;
+  note: string | null;
+  reviewer: string;
+  created_at: string;
+  supersedes_review_id: string | null;
+  source_mosaic_artifact_name: string;
+  source_mosaic_sha256: string;
+  crop_artifact_name: string | null;
+  crop_sha256: string | null;
+  original_occupancy: StripPocketOccupancy;
+  original_review_required: boolean;
+  original_model_prediction: SourceComponentModelPrediction | null;
+  corrected_outline_px: Array<[number, number]> | null;
+}
+
+export interface StripFeederOccupancyReviewQueue {
+  registration_id: string;
+  lane_revision_id: string;
+  source_scan_id: string;
+  created_at: string;
+  unresolved_count: number;
+  mosaic: {
+    artifact_name: string;
+    sha256: string | null;
+    width_px: number;
+    height_px: number;
+    raster_transform: WorkspaceRasterTransform;
+  };
+  pockets: Array<{
+    pocket_index: number;
+    center_machine_mm: [number, number];
+    original_occupancy: StripPocketOccupancy;
+    original_confidence: number;
+    model_prediction: SourceComponentModelPrediction | null;
+    automatic_review_required: boolean;
+    unresolved: boolean;
+    findings: string[];
+    crop_artifact_name: string | null;
+    crop_sha256: string | null;
+    effective_occupancy: StripPocketOccupancy;
+    effective_status: "available" | "empty" | "reserved" | "consumed"
+      | "needs_review" | "unavailable";
+    review: StripFeederPocketOccupancyReview | null;
+  }>;
 }
 
 export type BoardPlacementOccupancy = "populated" | "empty" | "uncertain";
@@ -1135,7 +1192,9 @@ export interface StripFeederRegistration {
     measured_center_machine_mm: [number, number] | null;
     occupancy: "occupied" | "empty" | "uncertain";
     occupancy_confidence: number;
-    status: "available" | "empty" | "reserved" | "consumed" | "needs_review";
+    status: "available" | "empty" | "reserved" | "consumed" | "needs_review"
+      | "unavailable";
+    occupancy_review_id?: string | null;
     attempt_count: number;
     consecutive_failure_count: number;
     reservation_id: string | null;
@@ -1191,9 +1250,12 @@ export interface StripFeederMapRegistration {
     center_machine_mm: [number, number];
     occupancy: "occupied" | "empty" | "uncertain";
     occupancy_confidence: number;
-    occupancy_source?: "operational" | "workspace_rescan";
+    occupancy_source?: "operational" | "workspace_rescan" | "operator_review";
     occupancy_review_required?: boolean;
-    status: "available" | "empty" | "reserved" | "consumed" | "needs_review";
+    operator_review_id?: string | null;
+    operator_review_label?: StripFeederPocketReviewLabel | null;
+    status: "available" | "empty" | "reserved" | "consumed" | "needs_review"
+      | "unavailable";
     selected: boolean;
   }>;
 }

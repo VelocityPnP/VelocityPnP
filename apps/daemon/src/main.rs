@@ -4,10 +4,11 @@ mod calibration_artifacts;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
-use std::{net::SocketAddr, time::Duration};
+use std::{backtrace::Backtrace, fs, net::SocketAddr, time::Duration};
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::{error, info, warn};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use velocitypnp_domain::MachineProfile;
 use velocitypnp_driver::{MachineDriver, MachineHandle, MarlinDriver, SimulatorDriver};
 use velocitypnp_model::{load_active_model_selection, ModelSelectionMode, ModelSelectionStatus};
@@ -35,6 +36,18 @@ struct Args {
 
     #[arg(long, default_value = "velocitypnp.db")]
     database: PathBuf,
+
+    /// Directory for daily daemon log files.
+    #[arg(long, env = "VELOCITYPNP_LOG_DIR", default_value = "logs")]
+    log_dir: PathBuf,
+
+    /// Maximum number of daily daemon log files to retain.
+    #[arg(long, env = "VELOCITYPNP_LOG_RETENTION_FILES", default_value_t = 14)]
+    log_retention_files: usize,
+
+    /// Write logs only to the console.
+    #[arg(long, default_value_t = false)]
+    disable_file_logging: bool,
 
     #[arg(long, default_value = "0.0.0.0:4080")]
     listen: SocketAddr,
@@ -69,14 +82,46 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "velocitypnp=info,tower_http=info".into()),
-        )
-        .init();
+async fn main() {
     let args = Args::parse();
+    let log_guard = match init_logging(&args) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("VelocityPnP logging initialization failed: {error:#}");
+            std::process::exit(1);
+        }
+    };
+    install_panic_logging();
+    if args.disable_file_logging {
+        info!("persistent file logging is disabled");
+    } else {
+        info!(
+            directory = %args.log_dir.display(),
+            rotation = "daily",
+            retained_files = args.log_retention_files,
+            "persistent logging enabled"
+        );
+    }
+
+    let result = run(args).await;
+    let exit_code = match result {
+        Ok(()) => {
+            info!("VelocityPnP daemon stopped");
+            0
+        }
+        Err(error) => {
+            error!(error = %format_args!("{error:#}"), "VelocityPnP daemon exited with an error");
+            1
+        }
+    };
+    drop(log_guard);
+    // Tokio can wait for long-lived blocking driver workers while it drops the
+    // runtime. The controller is already disconnected or startup failed, so
+    // exit now and let the OS close any remaining process resources.
+    std::process::exit(exit_code)
+}
+
+async fn run(args: Args) -> Result<()> {
     if !args.simulate && !args.allow_hardware {
         bail!("physical hardware is disabled; pass both --simulate=false and --allow-hardware after simulator validation");
     }
@@ -153,10 +198,60 @@ async fn main() -> Result<()> {
         }
     }
     serve_result?;
-    // Tokio can wait for long-lived blocking driver workers while it drops the
-    // runtime. The controller is already disconnected or timed out above, so
-    // exit now and let the OS close any remaining process resources.
-    std::process::exit(0)
+    Ok(())
+}
+
+fn init_logging(args: &Args) -> Result<Option<WorkerGuard>> {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "velocitypnp=info,tower_http=info".into());
+    let console_layer = tracing_subscriber::fmt::layer();
+    if args.disable_file_logging {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(console_layer)
+            .try_init()
+            .context("installing console logger")?;
+        return Ok(None);
+    }
+    if args.log_retention_files == 0 {
+        bail!("log retention must keep at least one file");
+    }
+    fs::create_dir_all(&args.log_dir)
+        .with_context(|| format!("creating daemon log directory {}", args.log_dir.display()))?;
+    let log_dir = fs::canonicalize(&args.log_dir)
+        .with_context(|| format!("resolving daemon log directory {}", args.log_dir.display()))?;
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("velocitypnpd")
+        .filename_suffix("log")
+        .latest_symlink("velocitypnpd.current.log")
+        .max_log_files(args.log_retention_files)
+        .build(&log_dir)
+        .with_context(|| format!("opening rotating daemon log in {}", args.log_dir.display()))?;
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(file_writer);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(file_layer)
+        .try_init()
+        .context("installing console and file logger")?;
+    Ok(Some(guard))
+}
+
+fn install_panic_logging() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let backtrace = Backtrace::force_capture();
+        error!(
+            panic = %panic_info,
+            backtrace = %backtrace,
+            "VelocityPnP daemon panicked"
+        );
+        default_hook(panic_info);
+    }));
 }
 
 struct StartupModelPackages {
@@ -278,10 +373,11 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
-    }
+    let signal = tokio::select! {
+        () = ctrl_c => "SIGINT",
+        () = terminate => "SIGTERM",
+    };
+    info!(signal, "shutdown signal received");
 }
 
 #[cfg(test)]
@@ -327,6 +423,24 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("has no index.html"));
+    }
+
+    #[test]
+    fn rotating_file_logging_is_enabled_by_default() {
+        let args = Args::try_parse_from(["velocitypnpd"]).unwrap();
+        assert_eq!(args.log_dir, PathBuf::from("logs"));
+        assert_eq!(args.log_retention_files, 14);
+        assert!(!args.disable_file_logging);
+
+        let console_only = Args::try_parse_from([
+            "velocitypnpd",
+            "--disable-file-logging",
+            "--log-retention-files",
+            "3",
+        ])
+        .unwrap();
+        assert!(console_only.disable_file_logging);
+        assert_eq!(console_only.log_retention_files, 3);
     }
 
     #[test]

@@ -25,6 +25,26 @@ describe("formatErrorMessage", () => {
   });
 });
 
+describe("API response validation", () => {
+  it("reports a web fallback response as a daemon version mismatch", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response("<!doctype html><title>VelocityPnP</title>", { status: 200 }),
+    ));
+
+    await expect(api.stripFeederOccupancyReview("registration-id"))
+      .rejects.toMatchObject({
+        status: 502,
+        message: "The daemon returned text/plain;charset=UTF-8 for GET "
+          + "/api/v1/strip-feeder-registrations/registration-id/occupancy-review. "
+          + "The web UI and daemon may be different versions.",
+      });
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/strip-feeder-registrations/registration-id/occupancy-review",
+      { cache: "no-store" },
+    );
+  });
+});
+
 describe("acquireOrRenewLease", () => {
   it("replaces a stale lease reported by the machine status", async () => {
     const replacement = { ...lease, id: "replacement-lease" };

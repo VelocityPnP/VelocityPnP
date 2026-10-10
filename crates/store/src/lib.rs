@@ -3,6 +3,7 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -11,8 +12,9 @@ use velocitypnp_domain::{
     BoardSurfaceMeasurementRun, CalibrationSnapshot, CameraProfile, CameraRole, Feeder,
     InspectionReport, Job, JobExecutionRun, MachineEvent, Operation, Part, PlacementExecutionRun,
     PlacementOutcomeRecord, StripFeederLiveHoldoutRun, StripFeederOccupancyRefreshReport,
-    StripFeederPickupQualificationRun, StripFeederPocketOutcome, StripFeederPocketScanObservation,
-    StripFeederPocketState, StripFeederPocketStatus, StripFeederRegistration,
+    StripFeederPickupQualificationRun, StripFeederPocketOccupancyReview, StripFeederPocketOutcome,
+    StripFeederPocketReviewLabel, StripFeederPocketScanObservation, StripFeederPocketState,
+    StripFeederPocketStatus, StripFeederRegistration, StripFeederRegistrationStatus,
     StripFeederSourceCaptureRun, StripPocketOccupancy, WorkspaceDisplayPatch,
     WorkspaceDisplayPatchKind, WorkspaceInventoryBaseline, WorkspaceScanReport,
 };
@@ -444,6 +446,12 @@ impl Store {
         self.list("strip_feeder_occupancy_refresh")
     }
 
+    pub fn list_strip_feeder_pocket_occupancy_reviews(
+        &self,
+    ) -> Result<Vec<StripFeederPocketOccupancyReview>> {
+        self.list("strip_feeder_pocket_occupancy_review")
+    }
+
     pub fn put_board_population_refresh(
         &self,
         report: &BoardPopulationRefreshReport,
@@ -650,6 +658,7 @@ impl Store {
             pocket.measured_center_machine_mm = Some(observation.center_machine_mm);
             pocket.occupancy = observation.occupancy;
             pocket.occupancy_confidence = observation.confidence;
+            pocket.occupancy_review_id = None;
             pocket.status = if observation.review_required {
                 StripFeederPocketStatus::NeedsReview
             } else {
@@ -699,6 +708,258 @@ impl Store {
                 serde_json::to_string(&registration)?,
             ],
         )?;
+        transaction.commit()?;
+        Ok(registration)
+    }
+
+    /// Applies an append-only operator review to the active lane revision.
+    ///
+    /// The review, operational pocket state, lane review gate, and active
+    /// feeder count change in one transaction. A newer lane revision or an
+    /// active pocket reservation makes the submitted review stale.
+    pub fn apply_strip_feeder_pocket_occupancy_review(
+        &self,
+        review: &StripFeederPocketOccupancyReview,
+    ) -> Result<StripFeederRegistration> {
+        anyhow::ensure!(
+            !review.reviewer.trim().is_empty()
+                && review.source_mosaic_sha256.len() == 64
+                && review.crop_artifact_name.is_some() == review.crop_sha256.is_some()
+                && review
+                    .crop_sha256
+                    .as_ref()
+                    .is_none_or(|digest| digest.len() == 64),
+            "strip feeder pocket review has invalid provenance"
+        );
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let reports = {
+            let mut statement =
+                transaction.prepare("SELECT document FROM entities WHERE kind = ?1")?;
+            let rows = statement.query_map(params!["strip_feeder_occupancy_refresh"], |row| {
+                row.get::<_, String>(0)
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .map(|document| {
+                    serde_json::from_str::<StripFeederOccupancyRefreshReport>(&document)
+                        .context("decoding strip feeder occupancy refresh")
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let report = reports
+            .iter()
+            .filter(|report| {
+                report.registration_id == review.registration_id && report.lane_revision.is_some()
+            })
+            .max_by_key(|report| report.created_at)
+            .context("active strip feeder lane revision not found")?;
+        let revision = report
+            .lane_revision
+            .as_ref()
+            .context("active strip feeder report has no lane revision")?;
+        anyhow::ensure!(
+            revision.id == review.lane_revision_id
+                && report.source_scan_id == review.source_scan_id
+                && revision.mosaic_artifact_name == review.source_mosaic_artifact_name,
+            "strip feeder pocket review is stale"
+        );
+        let observation = report
+            .observations
+            .iter()
+            .find(|observation| observation.pocket_index == review.pocket_index)
+            .context("strip feeder pocket observation not found")?;
+        anyhow::ensure!(
+            observation.occupancy == review.original_occupancy
+                && observation.review_required == review.original_review_required
+                && observation.model_prediction == review.original_model_prediction,
+            "strip feeder pocket review does not match its source observation"
+        );
+
+        let prior_reviews = {
+            let mut statement =
+                transaction.prepare("SELECT document FROM entities WHERE kind = ?1")?;
+            let rows = statement
+                .query_map(params!["strip_feeder_pocket_occupancy_review"], |row| {
+                    row.get::<_, String>(0)
+                })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .map(|document| {
+                    serde_json::from_str::<StripFeederPocketOccupancyReview>(&document)
+                        .context("decoding strip feeder pocket review")
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let latest_review = prior_reviews
+            .iter()
+            .filter(|prior| {
+                prior.registration_id == review.registration_id
+                    && prior.lane_revision_id == review.lane_revision_id
+                    && prior.pocket_index == review.pocket_index
+            })
+            .max_by_key(|prior| (prior.created_at, prior.id));
+        anyhow::ensure!(
+            review.supersedes_review_id == latest_review.map(|prior| prior.id),
+            "strip feeder pocket review was changed by another request"
+        );
+
+        let document: String = transaction
+            .query_row(
+                "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
+                params![
+                    "strip_feeder_registration",
+                    review.registration_id.to_string()
+                ],
+                |row| row.get(0),
+            )
+            .context("strip feeder registration not found")?;
+        let mut registration: StripFeederRegistration =
+            serde_json::from_str(&document).context("decoding strip feeder registration")?;
+        registration.ensure_pocket_state();
+        anyhow::ensure!(
+            registration.pockets.iter().all(|pocket| {
+                pocket.status != StripFeederPocketStatus::Reserved
+                    && pocket.reservation_id.is_none()
+            }),
+            "strip feeder pocket review cannot change state while a pocket is reserved"
+        );
+        let pocket = registration
+            .pockets
+            .iter_mut()
+            .find(|pocket| pocket.pocket_index == review.pocket_index)
+            .context("operational strip feeder pocket not found")?;
+        let (occupancy, status) = match review.label {
+            StripFeederPocketReviewLabel::Occupied => (
+                StripPocketOccupancy::Occupied,
+                StripFeederPocketStatus::Available,
+            ),
+            StripFeederPocketReviewLabel::Empty => {
+                (StripPocketOccupancy::Empty, StripFeederPocketStatus::Empty)
+            }
+            StripFeederPocketReviewLabel::ComponentOnEdge => (
+                StripPocketOccupancy::Occupied,
+                StripFeederPocketStatus::Unavailable,
+            ),
+            StripFeederPocketReviewLabel::Unusable => (
+                StripPocketOccupancy::Uncertain,
+                StripFeederPocketStatus::Unavailable,
+            ),
+        };
+        pocket.occupancy = occupancy;
+        pocket.occupancy_confidence = observation.confidence;
+        pocket.status = status;
+        pocket.occupancy_review_id = Some(review.id);
+        pocket.updated_at = review.created_at;
+
+        let mut reviewed_pockets = prior_reviews
+            .iter()
+            .filter(|prior| {
+                prior.registration_id == review.registration_id
+                    && prior.lane_revision_id == review.lane_revision_id
+            })
+            .map(|prior| prior.pocket_index)
+            .collect::<BTreeSet<_>>();
+        reviewed_pockets.insert(review.pocket_index);
+        registration.vision_review_required = report.observations.iter().any(|observation| {
+            observation.review_required && !reviewed_pockets.contains(&observation.pocket_index)
+        });
+        if registration.selected_pocket_index == Some(review.pocket_index)
+            && status != StripFeederPocketStatus::Available
+        {
+            let selected = registration.next_available_pocket(None).map(|pocket| {
+                (
+                    pocket.pocket_index,
+                    pocket
+                        .measured_center_machine_mm
+                        .unwrap_or(pocket.nominal_center_machine_mm),
+                )
+            });
+            registration.selected_pocket_index = selected.map(|item| item.0);
+            registration.selected_pocket_machine_mm = selected.map(|item| item.1);
+        } else if status == StripFeederPocketStatus::Available
+            && registration.selected_pocket_index.is_none()
+        {
+            registration.selected_pocket_index = Some(review.pocket_index);
+            registration.selected_pocket_machine_mm = Some(
+                pocket
+                    .measured_center_machine_mm
+                    .unwrap_or(pocket.nominal_center_machine_mm),
+            );
+        }
+        registration.updated_at = review.created_at;
+
+        let active_feeder = registration
+            .active_feeder_id
+            .map(|feeder_id| -> Result<Feeder> {
+                let document: String = transaction
+                    .query_row(
+                        "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
+                        params!["feeder", feeder_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .context("active strip feeder not found")?;
+                let mut feeder: Feeder =
+                    serde_json::from_str(&document).context("decoding active strip feeder")?;
+                let Feeder::Strip {
+                    first_pick,
+                    remaining,
+                    ..
+                } = &mut feeder
+                else {
+                    anyhow::bail!("active feeder is not a strip feeder");
+                };
+                if let Some(center) = registration.selected_pocket_machine_mm {
+                    first_pick.x_mm = center[0];
+                    first_pick.y_mm = center[1];
+                }
+                *remaining = registration
+                    .pockets
+                    .iter()
+                    .filter(|pocket| {
+                        pocket.status == StripFeederPocketStatus::Available
+                            && pocket.occupancy == StripPocketOccupancy::Occupied
+                    })
+                    .count()
+                    .try_into()
+                    .ok();
+                Ok(feeder)
+            })
+            .transpose()?;
+
+        for (kind, id, document) in [
+            (
+                "strip_feeder_registration",
+                registration.id.to_string(),
+                serde_json::to_string(&registration)?,
+            ),
+            (
+                "strip_feeder_pocket_occupancy_review",
+                review.id.to_string(),
+                serde_json::to_string(review)?,
+            ),
+        ] {
+            transaction.execute(
+                r#"INSERT INTO entities(kind, id, updated_at, document)
+                   VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3)
+                   ON CONFLICT(kind, id) DO UPDATE SET
+                     updated_at = excluded.updated_at,
+                     document = excluded.document"#,
+                params![kind, id, document],
+            )?;
+        }
+        if let Some(feeder) = active_feeder {
+            transaction.execute(
+                r#"UPDATE entities
+                   SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), document = ?3
+                   WHERE kind = ?1 AND id = ?2"#,
+                params![
+                    "feeder",
+                    feeder.id().to_string(),
+                    serde_json::to_string(&feeder)?,
+                ],
+            )?;
+        }
         transaction.commit()?;
         Ok(registration)
     }
@@ -797,6 +1058,7 @@ impl Store {
             }),
             "strip feeder lane cannot change while a pocket is reserved"
         );
+        let invalidated_feeder_id = registration.active_feeder_id.take();
 
         registration.source_scan_id = report.source_scan_id;
         registration.source_candidate_index = report.source_candidate_index;
@@ -829,6 +1091,7 @@ impl Store {
                         StripPocketOccupancy::Uncertain => StripFeederPocketStatus::NeedsReview,
                     }
                 },
+                occupancy_review_id: None,
                 attempt_count: 0,
                 consecutive_failure_count: 0,
                 reservation_id: None,
@@ -852,56 +1115,36 @@ impl Store {
             .observations
             .iter()
             .any(|observation| observation.review_required);
-
-        let active_feeder = registration
-            .active_feeder_id
-            .map(|feeder_id| -> Result<Feeder> {
-                let document: String = transaction
-                    .query_row(
-                        "SELECT document FROM entities WHERE kind = ?1 AND id = ?2",
-                        params!["feeder", feeder_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .context("active strip feeder not found")?;
-                let mut feeder: Feeder =
-                    serde_json::from_str(&document).context("decoding active strip feeder")?;
-                let Feeder::Strip {
-                    first_pick,
-                    tape_pitch_mm,
-                    tape_width_mm,
-                    tape_rotation_deg,
-                    remaining,
-                    ..
-                } = &mut feeder
-                else {
-                    anyhow::bail!("active feeder is not a strip feeder");
-                };
-                if let Some(center) = registration.selected_pocket_machine_mm {
-                    first_pick.x_mm = center[0];
-                    first_pick.y_mm = center[1];
-                }
-                if let Some(pickup_z_mm) = registration.pickup_z_mm {
-                    first_pick.z_mm = pickup_z_mm;
-                }
-                if let Some(part_rotation_deg) = registration.part_rotation_deg {
-                    first_pick.rotation_deg = part_rotation_deg;
-                }
-                *tape_pitch_mm = registration.tape_pitch_mm;
-                *tape_width_mm = registration.tape_width_mm;
-                *tape_rotation_deg = registration.tape_rotation_deg;
-                *remaining = registration
-                    .pockets
-                    .iter()
-                    .filter(|pocket| {
-                        pocket.status == StripFeederPocketStatus::Available
-                            && pocket.occupancy == StripPocketOccupancy::Occupied
-                    })
-                    .count()
-                    .try_into()
-                    .ok();
-                Ok(feeder)
-            })
-            .transpose()?;
+        registration.latest_live_holdout_id = None;
+        registration.latest_pickup_qualification_id = None;
+        registration.pickup_sequence_passed = false;
+        registration
+            .latest_pickup_sequence_qualification_ids
+            .clear();
+        registration.latest_placement_validation_id = None;
+        registration.pickup_z_mm = None;
+        registration.measured_part_size_mm = None;
+        registration.measured_part_rotation_deg = None;
+        registration.measured_part_confidence = None;
+        registration.status =
+            if registration.part_key.is_some() && !registration.vision_review_required {
+                StripFeederRegistrationStatus::LiveValidationRequired
+            } else {
+                StripFeederRegistrationStatus::VisionDraft
+            };
+        registration.findings.retain(|finding| {
+            !finding.contains("live feeder geometry")
+                && !finding.contains("live pocket position")
+                && !finding.contains("live holdout")
+                && !finding.contains("lane alignment")
+                && !finding.contains("pickup qualification")
+                && !finding.contains("pickup-return qualification")
+                && !finding.contains("guarded board placement")
+                && !finding.contains("pickup Z")
+        });
+        registration
+            .findings
+            .push("Lane rescan requires a new lane alignment check and qualification".into());
 
         let stale_documents = {
             let mut statement = transaction
@@ -961,16 +1204,10 @@ impl Store {
                 params![kind, id, document],
             )?;
         }
-        if let Some(feeder) = active_feeder {
+        if let Some(feeder_id) = invalidated_feeder_id {
             transaction.execute(
-                r#"UPDATE entities
-                   SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), document = ?3
-                   WHERE kind = ?1 AND id = ?2"#,
-                params![
-                    "feeder",
-                    feeder_id(&feeder).to_string(),
-                    serde_json::to_string(&feeder)?,
-                ],
+                "DELETE FROM entities WHERE kind = ?1 AND id = ?2",
+                params!["feeder", feeder_id.to_string()],
             )?;
         }
         transaction.commit()?;
@@ -1691,6 +1928,7 @@ mod tests {
             report_artifact_name: "occupancy.json".into(),
             created_at: Utc::now(),
             model_available: true,
+            source_mosaic_sha256: None,
             lane_revision: None,
             observations: Vec::new(),
             warnings: Vec::new(),
@@ -1739,6 +1977,7 @@ mod tests {
             occupancy,
             occupancy_confidence: 0.5,
             status,
+            occupancy_review_id: None,
             attempt_count: 1,
             consecutive_failure_count: 0,
             reservation_id: None,
@@ -1805,6 +2044,8 @@ mod tests {
                 occupancy,
                 confidence: 0.95,
                 review_required,
+                crop_artifact_name: None,
+                crop_sha256: None,
                 findings: Vec::new(),
             };
 
@@ -1859,6 +2100,7 @@ mod tests {
             occupancy: StripPocketOccupancy::Occupied,
             occupancy_confidence: 0.9,
             status: StripFeederPocketStatus::Consumed,
+            occupancy_review_id: None,
             attempt_count: 3,
             consecutive_failure_count: 1,
             reservation_id: None,
@@ -1956,6 +2198,8 @@ mod tests {
                 occupancy,
                 confidence: 0.96,
                 review_required,
+                crop_artifact_name: None,
+                crop_sha256: None,
                 findings: Vec::new(),
             };
         let report = StripFeederOccupancyRefreshReport {
@@ -1967,6 +2211,7 @@ mod tests {
             report_artifact_name: "lane-revision.json".into(),
             created_at: observed_at,
             model_available: true,
+            source_mosaic_sha256: None,
             lane_revision: Some(velocitypnp_domain::StripFeederLaneRevision {
                 id: Uuid::new_v4(),
                 display_patch_id: new_patch_id,
@@ -2038,8 +2283,19 @@ mod tests {
         assert_eq!(promoted.selected_pocket_index, Some(1));
         assert_eq!(promoted.selected_pocket_machine_mm, Some([20.0, 10.0]));
         assert_eq!(
+            promoted.status,
+            velocitypnp_domain::StripFeederRegistrationStatus::VisionDraft
+        );
+        assert!(promoted.active_feeder_id.is_none());
+        assert!(promoted.latest_live_holdout_id.is_none());
+        assert!(promoted.latest_pickup_qualification_id.is_none());
+        assert!(!promoted.pickup_sequence_passed);
+        assert!(promoted.latest_pickup_sequence_qualification_ids.is_empty());
+        assert!(promoted.latest_placement_validation_id.is_none());
+        assert!(promoted.pickup_z_mm.is_none());
+        assert_eq!(
             store.list_strip_feeder_occupancy_refreshes().unwrap(),
-            [report]
+            [report.clone()]
         );
 
         let patches = store.list_workspace_display_patches().unwrap();
@@ -2058,25 +2314,67 @@ mod tests {
             Some("Superseded by a newer feeder lane revision")
         );
 
-        let feeders = store.list_feeders().unwrap();
-        let Feeder::Strip {
-            first_pick,
-            tape_pitch_mm,
-            tape_width_mm,
-            tape_rotation_deg,
-            remaining,
-            ..
-        } = &feeders[0]
-        else {
-            panic!("active feeder changed type");
+        assert!(store.list_feeders().unwrap().is_empty());
+
+        let lane_revision_id = report.lane_revision.as_ref().unwrap().id;
+        let first_review = StripFeederPocketOccupancyReview {
+            id: Uuid::new_v4(),
+            registration_id,
+            lane_revision_id,
+            source_scan_id,
+            pocket_index: 2,
+            label: StripFeederPocketReviewLabel::Empty,
+            note: Some("model false positive".into()),
+            reviewer: "test".into(),
+            created_at: observed_at + chrono::Duration::seconds(1),
+            supersedes_review_id: None,
+            source_mosaic_artifact_name: "mosaic.png".into(),
+            source_mosaic_sha256: "a".repeat(64),
+            crop_artifact_name: None,
+            crop_sha256: None,
+            original_occupancy: StripPocketOccupancy::Uncertain,
+            original_review_required: true,
+            original_model_prediction: None,
+            corrected_outline_px: None,
         };
-        assert_eq!([first_pick.x_mm, first_pick.y_mm], [20.0, 10.0]);
-        assert_eq!(first_pick.z_mm, 12.5);
-        assert_eq!(first_pick.rotation_deg, 90.0);
-        assert_eq!(*tape_pitch_mm, 8.0);
-        assert_eq!(*tape_width_mm, 12.0);
-        assert_eq!(*tape_rotation_deg, 90.0);
-        assert_eq!(*remaining, Some(1));
+        let reviewed = store
+            .apply_strip_feeder_pocket_occupancy_review(&first_review)
+            .unwrap();
+        assert_eq!(reviewed.pockets[2].occupancy, StripPocketOccupancy::Empty);
+        assert_eq!(reviewed.pockets[2].status, StripFeederPocketStatus::Empty);
+        assert_eq!(
+            reviewed.pockets[2].occupancy_review_id,
+            Some(first_review.id)
+        );
+        assert!(!reviewed.vision_review_required);
+
+        let second_review = StripFeederPocketOccupancyReview {
+            id: Uuid::new_v4(),
+            label: StripFeederPocketReviewLabel::Occupied,
+            note: Some("corrected after closer inspection".into()),
+            created_at: observed_at + chrono::Duration::seconds(2),
+            supersedes_review_id: Some(first_review.id),
+            ..first_review.clone()
+        };
+        let corrected = store
+            .apply_strip_feeder_pocket_occupancy_review(&second_review)
+            .unwrap();
+        assert_eq!(
+            corrected.pockets[2].occupancy,
+            StripPocketOccupancy::Occupied
+        );
+        assert_eq!(
+            corrected.pockets[2].status,
+            StripFeederPocketStatus::Available
+        );
+        assert_eq!(
+            store
+                .list_strip_feeder_pocket_occupancy_reviews()
+                .unwrap()
+                .len(),
+            2,
+        );
+        assert!(store.list_feeders().unwrap().is_empty());
     }
 
     #[test]
@@ -2144,6 +2442,7 @@ mod tests {
             occupancy,
             occupancy_confidence: 0.9,
             status,
+            occupancy_review_id: None,
             attempt_count: 0,
             consecutive_failure_count: 0,
             reservation_id: None,

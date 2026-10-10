@@ -12,8 +12,8 @@ use velocitypnp_domain::{
 };
 
 pub const STRIP_FEEDER_VISION_ALGORITHM: &str = "strip_feeder_vision.v6";
-pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v3";
-pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v4";
+pub const STRIP_FEEDER_LIVE_HOLDOUT_ALGORITHM: &str = "strip_feeder_live_holdout.v4";
+pub const STRIP_FEEDER_POCKET_RETURN_ALGORITHM: &str = "strip_feeder_pocket_return.v5";
 pub const STRIP_FEEDER_SOURCE_POSE_ALGORITHM: &str = "strip_feeder_source_pose.v3";
 pub const STRIP_FEEDER_SOURCE_COMPONENT_DRAFT_ALGORITHM: &str =
     "strip_feeder_source_component_draft.v1";
@@ -1032,17 +1032,17 @@ pub fn inspect_strip_feeder_pocket_return(
                 && after <= maximum_nominal_offset_mm
                 && shift <= maximum_return_shift_mm
         });
-    let passed = before_occupancy == StripPocketOccupancy::Occupied
-        && after_occupancy == StripPocketOccupancy::Occupied
-        && centers_passed
+    let passed = centers_passed
         && appearance_similarity
             .is_some_and(|similarity| similarity >= MINIMUM_POCKET_RETURN_APPEARANCE_SIMILARITY);
     let mut findings = Vec::new();
     if before_occupancy != StripPocketOccupancy::Occupied {
-        findings.push("the source pocket was not occupied before pickup".into());
+        findings
+            .push("audit-only contrast evidence did not indicate occupancy before pickup".into());
     }
     if after_occupancy != StripPocketOccupancy::Occupied {
-        findings.push("the source pocket was not occupied after release".into());
+        findings
+            .push("audit-only contrast evidence did not indicate occupancy after release".into());
     }
     if before_center.is_none() || after_center.is_none() {
         findings.push("the source pocket center was not measured in both views".into());
@@ -1070,7 +1070,7 @@ pub fn inspect_strip_feeder_pocket_return(
         ));
     }
     if passed {
-        findings.push("top vision confirmed the returned part in its source pocket".into());
+        findings.push("top vision matched the source-pocket appearance after return".into());
     }
     let preview = render_pocket_return_preview(
         &before_crop,
@@ -1501,17 +1501,10 @@ pub fn analyze_live_strip_feeder_holdout(
             measured_center.map_or(0.0, |measurement| measurement.confidence),
         ));
     }
-    let requested_occupied = visible_pockets.iter().find(|item| {
-        item.0 == 0 && pocket_occupancy_from_evidence(item.2) == StripPocketOccupancy::Occupied
-    });
-    let selected = requested_occupied.or_else(|| {
-        visible_pockets.iter().max_by(|first, second| {
-            first
-                .2
-                .total_cmp(&second.2)
-                .then_with(|| first.3.total_cmp(&second.3))
-        })
-    });
+    let selected = visible_pockets
+        .iter()
+        .find(|item| item.0 == 0)
+        .or_else(|| visible_pockets.iter().min_by_key(|item| item.0.abs()));
     let occupancy_confidence = selected.map_or(0.0, |item| item.2);
     let occupancy = pocket_occupancy_from_evidence(occupancy_confidence);
     let selected_index = selected.map_or(0, |item| item.0);
@@ -1561,22 +1554,20 @@ pub fn analyze_live_strip_feeder_holdout(
         findings.push("the live pocket phase has weak periodic image support".into());
     }
     if occupancy != StripPocketOccupancy::Occupied {
-        findings.push("no pocket has strong occupied-component image support".into());
+        findings.push("audit-only contrast evidence did not indicate an occupied pocket".into());
     }
-    let passed = geometry_passed && occupancy == StripPocketOccupancy::Occupied;
+    let passed = geometry_passed;
     if passed {
-        findings
-            .push("fresh sprocket geometry and one occupied pocket passed the live holdout".into());
+        findings.push("fresh sprocket geometry passed the live holdout".into());
     }
     let correction_score =
         (1.0 - correction_magnitude_mm / LIVE_HOLDOUT_MAX_CORRECTION_MM).clamp(0.0, 1.0);
     let residual_score =
         (1.0 - track.residual_p95_mm / LIVE_HOLDOUT_MAX_PITCH_RESIDUAL_MM).clamp(0.0, 1.0);
-    let confidence = (0.30 * track.confidence
-        + 0.20 * residual_score
+    let confidence = (0.35 * track.confidence
+        + 0.25 * residual_score
         + 0.20 * periodicity_confidence.clamp(0.0, 1.0)
-        + 0.20 * occupancy_confidence
-        + 0.10 * correction_score)
+        + 0.20 * correction_score)
         .clamp(0.0, 1.0);
     let preview_pockets = visible_pockets
         .iter()
@@ -4859,7 +4850,7 @@ mod tests {
     }
 
     #[test]
-    fn live_holdout_rectifies_the_camera_and_selects_an_occupied_pocket() {
+    fn live_holdout_rectifies_the_camera_and_validates_tape_geometry() {
         let width = 500_u32;
         let height = 500_u32;
         let mut pixels = vec![105_u8; (width * height) as usize];

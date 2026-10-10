@@ -117,7 +117,7 @@ const TOOLING_CLUSTER_DIAMETER_LIMIT_PX: f64 = 2.0;
 const TOOLING_CONCENTRIC_CENTER_LIMIT_PX: f64 = 8.0;
 const TOOLING_CONCENTRIC_DIAMETER_GAP_PX: f64 = 8.0;
 const TOOLING_MIN_DETECTION_RATE: f64 = 0.6;
-const TOOLING_DARK_THRESHOLDS: [u8; 3] = [45, 60, 90];
+const TOOLING_DARK_THRESHOLDS: [u8; 4] = [30, 45, 60, 90];
 const HEIGHT_TRACKING_DARK_THRESHOLDS: [u8; 7] = [30, 45, 60, 90, 120, 150, 180];
 const HEAD_CAMERA_THRESHOLDS: [u8; 6] = [30, 45, 60, 90, 120, 150];
 const CAMERA_OUTER_CIRCLE_THRESHOLDS: [u8; 9] = [60, 90, 120, 150, 165, 180, 195, 210, 225];
@@ -3236,6 +3236,46 @@ mod tests {
                     && (target.y_px - 132.0).abs() < 1e-9
             })));
         assert_eq!(report.center_jitter_p95_px, Some(0.0));
+    }
+
+    #[test]
+    fn tooling_detects_a_dim_n24_inside_its_soft_outer_edge() {
+        let machine: velocitypnp_domain::MachineProfile =
+            serde_json::from_str(include_str!("../../../profiles/lumenpnp-v3.0.2.json")).unwrap();
+        let mut bottom_vision = machine.bottom_vision.unwrap();
+        bottom_vision.frame_center_x_px = 128.0;
+        bottom_vision.frame_center_y_px = 128.0;
+        bottom_vision.max_center_error_px = 100.0;
+        bottom_vision.units_per_pixel_x_mm = 0.03125;
+        bottom_vision.units_per_pixel_y_mm = 0.03125;
+        let n2 = bottom_vision.nozzles[1].clone();
+        let frames = (0..5)
+            .map(|_| {
+                let mut frame = frame_with_dark_annulus(256, 256, 128, 128, 87, 65);
+                for y in 0..256_i32 {
+                    for x in 0..256_i32 {
+                        let radius_squared = (x - 128).pow(2) + (y - 128).pow(2);
+                        if radius_squared <= 84_i32.pow(2) && radius_squared >= 65_i32.pow(2) {
+                            frame.pixels[(y as u32 * 256 + x as u32) as usize] = 20;
+                        } else if frame.pixels[(y as u32 * 256 + x as u32) as usize] == 75 {
+                            frame.pixels[(y as u32 * 256 + x as u32) as usize] = 40;
+                        }
+                    }
+                }
+                frame
+            })
+            .collect::<Vec<_>>();
+
+        assert!(detect_dark_annular_fiducials(&frames[0], 45, 100.0, 173.0).is_empty());
+        let report = summarize_nozzle_tooling(&frames, &bottom_vision, &n2);
+
+        assert!(report.passed);
+        assert_eq!(report.detected_tip_id.as_deref(), Some("N24"));
+        assert_eq!(report.detected_samples, 5);
+        assert!(report
+            .detections
+            .iter()
+            .all(|detection| { detection.is_some_and(|target| target.diameter_px == 169.0) }));
     }
 
     #[test]
