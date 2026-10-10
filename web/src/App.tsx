@@ -289,6 +289,7 @@ function AppContent() {
           setError={setError}
           activeAction={calibrationAction}
           setActiveAction={setCalibrationAction}
+          openMachine={() => setTab("machine")}
         />}
         {tab === "boards" && <BoardsPanel
           status={status}
@@ -533,22 +534,10 @@ function MachinePanel({ status, devices, calibrations, events, busy, run, openCa
           <button disabled={busy || !["unhomed", "ready"].includes(status.state) || Boolean(lease)} onClick={() => void run(api.lease)}>Acquire 15 min lease</button>
         </SequenceStep>
         <SequenceStep number="4" title="Coarse home" done={status.homed}>
-          <div className="sequence-action">
-            <button disabled={busy || !lease || !["unhomed", "ready"].includes(status.state)} onClick={() => void home()}>{status.homed ? "Home again" : "Home machine"}</button>
-            <small>{status.homed
-              ? "The controller axis references are established."
-              : "First establish the controller axis references."}</small>
-          </div>
+          <button disabled={busy || !lease || !["unhomed", "ready"].includes(status.state)} onClick={() => void home()}>{status.homed ? "Home again" : "Home machine"}</button>
         </SequenceStep>
         <SequenceStep number="5" title="Fine home" done={Boolean(status.calibration_revision)}>
-          <div className="sequence-action">
-            <button disabled={busy || !lease || status.state !== "ready" || !status.homed} onClick={() => void fineHome()}>{fineHomeSnapshot ? status.calibration_revision ? "Fine-home again" : "Fine-home XYZ" : "Set up precision calibration"}</button>
-            <small>{status.calibration_revision
-              ? "Fine XYZ home is active for this controller session."
-              : fineHomeSnapshot
-                ? "Use the stored machine calibration to refine X/Y and Z."
-                : "A full calibration must measure motion response and datum contact first."}</small>
-          </div>
+          <button disabled={busy || !lease || status.state !== "ready" || !status.homed} onClick={() => void fineHome()}>{fineHomeSnapshot ? status.calibration_revision ? "Fine-home again" : "Fine-home XYZ" : "Set up precision calibration"}</button>
         </SequenceStep>
       </div>
     </section>
@@ -568,7 +557,7 @@ function MachinePanel({ status, devices, calibrations, events, busy, run, openCa
     </section>
 
     <section className="card devices-card">
-      <div className="card-heading"><div><p className="eyebrow">Machine hardware</p><h2>Attached devices</h2></div><span className="count">{attachedDevices.length}</span></div>
+      <div className="card-heading"><div><p className="eyebrow">Machine hardware</p><h2>Detected devices</h2></div><span className="count">{attachedDevices.length}</span></div>
       <div className="device-list">{attachedDevices.map((device) => <div className="device" key={device.path}>
         <span className="device-icon">{device.kind === "camera" ? "◉" : "↯"}</span>
         <div><strong>{device.product ?? device.kind}</strong><small>{device.suggested_role ? pretty(device.suggested_role) : device.path}</small></div>
@@ -603,12 +592,13 @@ function SequenceStep({ number, title, done, children }: { number: string; title
 
 function StateBadge({ state }: { state: string }) { return <span className={`badge state-${state}`}>{pretty(state)}</span>; }
 
-function CalibrationPanel({ status, devices, setError, activeAction, setActiveAction }: {
+function CalibrationPanel({ status, devices, setError, activeAction, setActiveAction, openMachine }: {
   status: MachineStatus;
   devices: Device[];
   setError: (value: string | null) => void;
   activeAction: CalibrationActionState | null;
   setActiveAction: Dispatch<SetStateAction<CalibrationActionState | null>>;
+  openMachine: () => void;
 }) {
   const requestDialog = useDialog();
   const [steps, setSteps] = useState<CalibrationStep[]>([]);
@@ -1016,7 +1006,9 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
         : snapshotLoadState === "loading" ? "Loading calibration snapshots…"
           : snapshotLoadState === "error" ? "Calibration snapshots unavailable"
             : "No calibration snapshot"}</h2>
-      <p>The machine executes supported steps, retains raw evidence and residuals, and invalidates downstream measurements when an upstream result changes.</p>
+      <p>{active
+        ? "New upstream measurements invalidate dependent results."
+        : "Create a snapshot to store machine measurements and evidence."}</p>
       {status.simulated && <div className="notice">Simulation can exercise the runner but can never mark a machine production-ready.</div>}
       {!active ? snapshotLoadState === "loaded"
         ? <button onClick={() => void createSnapshot()}>Create calibration</button>
@@ -1145,7 +1137,7 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
         </div>}
         {activeRun.failure && !runSuperseded && <div className="notice">{formatErrorMessage(activeRun.failure)}</div>}
       </div>}
-      <small>Machine measurements complete each automated step. Reciprocal camera geometry supplies the working-plane transfer. Manual target observations are diagnostic overrides only.</small>
+      <small>Manual target observations are diagnostic only.</small>
     </section>
     <section className="workflow">{steps.map((step, index) => {
       const done = completed.has(step.id); const automated = step.automation === "automated";
@@ -1154,7 +1146,9 @@ function CalibrationPanel({ status, devices, setError, activeAction, setActiveAc
         <div className="workflow-index">{done ? "✓" : String(index + 1).padStart(2, "0")}</div>
         <div><div className="step-labels">{automated && <span>Automated</span>}{step.requires_motion && <span>Motion</span>}{step.requires_fixture && <span>Fixture</span>}</div><h3>{step.title}</h3><p>{step.description}</p>
           {step.dependencies.length > 0 && <small>Requires {step.dependencies.map(pretty).join(", ")}</small>}</div>
-        <button disabled>{done ? "Measured" : ready ? "Use controls above" : automated ? "Waiting for prerequisites" : "Not implemented"}</button>
+        {step.id === "coarse_homing" && !done
+          ? <button className="secondary" onClick={openMachine}>Open Machine</button>
+          : <button disabled>{done ? "Measured" : ready ? "Ready" : automated ? "Waiting for prerequisites" : "Not implemented"}</button>}
       </article>;
     })}</section>
     {snapshots.length > 1 && <p className="snapshot-count">{snapshots.length} calibration snapshots retained</p>}
@@ -1433,7 +1427,7 @@ function BoardsPanel({ status, setError, openFeeders }: {
       <label className="file-drop optional"><span>{bom?.name ?? "Optional BOM (.csv)"}</span><input type="file" accept=".csv,text/csv" onChange={(e) => setBom(e.target.files?.[0] ?? null)} /></label>
       <button disabled={!pcb} onClick={() => void upload()}>Import and validate</button>
     </section>
-    <section className="board-list">{boards.length === 0 ? <div className="card empty-board"><strong>No boards imported</strong><p>Your validated designs will appear here.</p></div> : boards.map((board) => {
+    <section className="board-list">{boards.length === 0 ? <div className="card empty-board"><strong>No boards imported</strong></div> : boards.map((board) => {
       const active = board.placements.filter((p) => p.enabled && !p.fiducial).length;
       return <article className="card board-card" key={board.id}><div className="board-preview"><span>PCB</span><i /></div><div><p className="eyebrow">KiCad {board.source_version ?? "unknown"}</p><h2>{board.name}</h2><div className="board-stats"><span><strong>{active}</strong> placements</span><span><strong>{board.placements.filter((p) => p.fiducial).length}</strong> fiducials</span><span><strong>{formatSize(board)}</strong> size</span></div>{board.warnings.map((warning) => <p className="warning" key={warning}>⚠ {warning}</p>)}</div></article>;
     })}</section>

@@ -14,6 +14,8 @@ import subprocess
 import tarfile
 import tempfile
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 import uuid
 
 
@@ -325,9 +327,27 @@ def verify_cached_package(package: Path, model: dict[str, Any]) -> None:
 
 
 def download_github_asset(model: dict[str, Any], destination: Path) -> None:
+    request = Request(
+        model["asset"]["download_url"],
+        headers={"User-Agent": "velocitypnp-model-manager"},
+    )
+    direct_error: Exception | None = None
+    try:
+        with (
+            urlopen(request, timeout=120) as source,
+            destination.open("wb") as output,
+        ):
+            shutil.copyfileobj(source, output)
+        return
+    except (HTTPError, URLError, OSError) as error:
+        direct_error = error
+
     executable = shutil.which("gh")
     if executable is None:
-        raise RuntimeError("GitHub CLI is required to download private model assets")
+        raise RuntimeError(
+            f"model download failed: {direct_error}; install and authenticate the "
+            "GitHub CLI if the model repository is private"
+        ) from direct_error
     with destination.open("wb") as output:
         result = subprocess.run(
             [

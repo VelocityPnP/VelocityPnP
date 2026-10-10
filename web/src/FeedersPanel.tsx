@@ -615,7 +615,9 @@ export function FeedersPanel({ status, setError, openWorkspace }: FeedersPanelPr
     </section>
 
     <section className="panel feeder-detail">
-      {!selected && <div className="empty-board"><strong>Select a feeder lane.</strong></div>}
+      {!selected && <div className="empty-board"><strong>{feederItems.length
+        ? "Select a feeder lane"
+        : "No feeder lanes available"}</strong></div>}
       {selected && <>
         <div className="section-heading">
           <div><p className="eyebrow">Stable lane identity</p><h2>{selected.label}</h2></div>

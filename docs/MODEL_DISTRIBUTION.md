@@ -1,8 +1,9 @@
 # Model distribution
 
 VelocityPnP uses immutable model packages from
-`VelocityPnP/velocitypnp-models`. The source repository tracks an exact model
-set in `models.lock.json`. Model weights stay outside Git.
+[VelocityPnP/velocitypnp-models](https://github.com/VelocityPnP/velocitypnp-models).
+The source repository tracks an exact model set in `models.lock.json`. Model
+weights stay outside Git.
 
 ## Validate and cache
 
@@ -25,8 +26,8 @@ commands.
 The default cache is `$XDG_CACHE_HOME/velocitypnp/models`. If
 `XDG_CACHE_HOME` is unset, the default is
 `~/.cache/velocitypnp/models`. Use `--cache-dir` before the subcommand to
-select a different cache. A private model repository requires an authenticated
-GitHub CLI.
+select a different cache. Public release assets download over HTTPS. A private
+fork requires an installed and authenticated GitHub CLI.
 
 The cache uses the package SHA-256 as its directory key. The current source
 component pin is `source-component-pose/2026-09-27.1`; the held-part and

@@ -3,6 +3,10 @@
 No machine movement or placement run was part of this check. The model
 packages were not activated or released.
 
+This is a historical validation record. The catalog approved the held-part
+and placement packages on 2026-10-03 only for the guarded roles in their model
+cards. The limits recorded below still apply.
+
 ## Feeder v4 spot check
 
 The Rust runtime called all 46 recent feeder images flat and placed its

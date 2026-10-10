@@ -16,6 +16,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from velocitypnp.model_cache import (  # noqa: E402
     activate_lock,
     current_selection,
+    download_github_asset,
     load_lock,
     rollback_selection,
     sha256_bytes,
@@ -151,6 +152,17 @@ class ModelCacheTests(unittest.TestCase):
         self.assertTrue(
             all(item["status"] == "approved" for item in document["models"])
         )
+
+    def test_public_asset_download_does_not_require_github_cli(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, model = self.make_package(root, "1", b"one")
+            model["asset"]["download_url"] = archive.as_uri()
+            destination = root / "download.tar.gz"
+
+            download_github_asset(model, destination)
+
+            self.assertEqual(destination.read_bytes(), archive.read_bytes())
 
     def test_sync_is_content_addressed_and_does_not_activate(self) -> None:
         with TemporaryDirectory() as directory:

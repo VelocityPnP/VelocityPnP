@@ -298,8 +298,6 @@ p { line-height: 1.5; }
 }
 .danger:hover:not(:disabled) { border-color: var(--red); background: #a63b37; }
 .step-done > span { border-color: var(--green); color: #102117; background: var(--green); }
-.sequence-action { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
-.sequence-action small { max-width: 240px; color: var(--muted); font-size: 10px; line-height: 1.4; text-align: right; }
 .dro { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
 .dro div { min-width: 0; border: 1px solid #202c28; border-radius: 7px; padding: 12px 10px; background: #0c1210; }
 .dro span { display: block; margin-bottom: 5px; color: var(--green); font: 10px var(--mono); }
@@ -1528,14 +1526,6 @@ p { line-height: 1.5; }
     padding: 11px 0;
   }
   .sequence-step > button { grid-column: 2; justify-self: start; }
-  .sequence-action {
-    grid-column: 2;
-    width: 100%;
-    align-items: flex-start;
-    justify-content: flex-start;
-    flex-direction: column;
-  }
-  .sequence-action small { max-width: none; text-align: left; }
   .dro { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dro strong { font-size: 16px; }
   .hardware-checks > div { grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; }

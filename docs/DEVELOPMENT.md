@@ -1808,7 +1808,8 @@ cargo run -p velocitypnp-model \
 Raw captures and working samples are below `datasets/`, which Git ignores.
 Their image hashes and registration IDs provide the source identity needed for
 later grouped train and evaluation splits. Publish each finalized reviewed
-dataset as an immutable asset in the private model repository.
+dataset as an immutable asset in the
+[model repository](https://github.com/VelocityPnP/velocitypnp-models).
 
 ### Automatic board registration
 
@@ -2031,8 +2032,11 @@ clear. Starting the physical driver is intentionally verbose:
 cargo run --release -p velocitypnpd -- \
   --simulate=false \
   --allow-hardware \
-  --serial-port /dev/serial/by-id/usb-STMicroelectronics_MARLIN_OPULO_LUMEN_REV4_CDC_in_FS_Mode_3286336D3331-if00
+  --serial-port /dev/serial/by-id/YOUR_CONTROLLER
 ```
+
+List `/dev/serial/by-id/` and use the stable link for your controller. The
+daemon has no machine-specific default serial path.
 
 Opening a USB CDC controller may reset it. Connect does only the bounded Marlin
 identity query, unit/mode setup, and documented integrated-vacuum-sensor
@@ -2358,7 +2362,7 @@ power isolation. The nozzle tubes must also be seated, routed normally, and
 free of snags.
 
 ```bash
-velocitypnp new-calibration --machine-serial 3286336D3331
+velocitypnp new-calibration --machine-serial YOUR_MACHINE_SERIAL
 velocitypnp calibrate CALIBRATION_UUID \
   --lease "$VELOCITYPNP_LEASE" \
   --confirm-safety-checks

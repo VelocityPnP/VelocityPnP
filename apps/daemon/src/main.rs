@@ -25,11 +25,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     allow_hardware: bool,
 
-    #[arg(
-        long,
-        default_value = "/dev/serial/by-id/usb-STMicroelectronics_MARLIN_OPULO_LUMEN_REV4_CDC_in_FS_Mode_3286336D3331-if00"
-    )]
-    serial_port: PathBuf,
+    /// Stable path to the physical controller. Required with --simulate=false.
+    #[arg(long)]
+    serial_port: Option<PathBuf>,
 
     #[arg(long, default_value_t = 115_200)]
     baud: u32,
@@ -150,8 +148,9 @@ async fn run(args: Args) -> Result<()> {
     let driver: Box<dyn MachineDriver> = if args.simulate {
         Box::new(SimulatorDriver::new(profile.bounds, profile.safe_z_mm))
     } else {
+        let serial_port = physical_serial_port(&args)?;
         Box::new(MarlinDriver::new(
-            args.serial_port.to_string_lossy(),
+            serial_port.to_string_lossy(),
             args.baud,
             profile.home_pose,
             profile.homing.clone(),
@@ -199,6 +198,12 @@ async fn run(args: Args) -> Result<()> {
     }
     serve_result?;
     Ok(())
+}
+
+fn physical_serial_port(args: &Args) -> Result<&Path> {
+    args.serial_port
+        .as_deref()
+        .context("physical hardware requires --serial-port with a stable controller path")
 }
 
 fn init_logging(args: &Args) -> Result<Option<WorkerGuard>> {
@@ -386,10 +391,31 @@ mod tests {
 
     #[test]
     fn physical_mode_requires_an_explicit_false_value() {
-        let args = Args::try_parse_from(["velocitypnpd", "--simulate=false", "--allow-hardware"])
-            .expect("documented physical-mode arguments must parse");
+        let args = Args::try_parse_from([
+            "velocitypnpd",
+            "--simulate=false",
+            "--allow-hardware",
+            "--serial-port",
+            "/dev/serial/by-id/test-controller",
+        ])
+        .expect("documented physical-mode arguments must parse");
         assert!(!args.simulate);
         assert!(args.allow_hardware);
+        assert_eq!(
+            args.serial_port,
+            Some(PathBuf::from("/dev/serial/by-id/test-controller"))
+        );
+    }
+
+    #[test]
+    fn physical_mode_requires_a_controller_path() {
+        let args =
+            Args::try_parse_from(["velocitypnpd", "--simulate=false", "--allow-hardware"]).unwrap();
+
+        assert!(physical_serial_port(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("requires --serial-port"));
     }
 
     #[test]

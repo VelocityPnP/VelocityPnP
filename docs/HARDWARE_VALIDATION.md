@@ -420,7 +420,7 @@ new attached-hardware pass before these results apply to the revised path.
 
 The complete head-geometry run passed on the attached machine on 2026-08-15.
 Run `aead8ce5-2bbe-4491-8461-4797b12449a0` belongs to calibration
-`f6acd39d-b509-4e42-b265-132c0efcf8d2` for machine serial `3286336D3331`.
+`f6acd39d-b509-4e42-b265-132c0efcf8d2` for the attached machine.
 All 14 runner checks passed. The run stored seven settled reciprocal-camera
 frames in SQLite for later diagnosis.
 

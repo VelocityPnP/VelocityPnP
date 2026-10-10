@@ -35,7 +35,7 @@ with Client("http://127.0.0.1:4080/api/v1") as pnp:
     # Set this only after physically checking the nozzles and travel envelope.
     pnp.home(lease["id"], safety_checks_confirmed=True)
     datum = pnp.visual_home(lease["id"])  # observation only by default
-    snapshot = pnp.create_calibration("3286336D3331")
+    snapshot = pnp.create_calibration("YOUR_MACHINE_SERIAL")
     report = pnp.calibrate(
         snapshot["id"],
         lease["id"],

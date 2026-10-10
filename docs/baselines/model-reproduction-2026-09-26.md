@@ -5,10 +5,9 @@ or released.
 
 ## Source tree
 
-Both runs used a clean detached checkout on `svl-spark`:
+Both runs used clean detached checkouts:
 
 - commit: `61b44e197b7d41b9b5cfcfcfa5717ee7866f27af`
-- path: `/home/tsmith/velocitypnp-training/clean-20260926`
 - Git dirty state recorded by each manifest: `false`
 
 The pinned NVIDIA training container reported PyTorch 2.14.0a0, CUDA 13.4,
@@ -61,8 +60,9 @@ agreement-gated daemon policy remains necessary.
 
 ## Release state
 
-These outputs correct the dirty-source provenance in the published candidate
-manifests. They do not improve the weights. Keep them as local candidates
-until the combined source-component review, clean retrain, independent feeder
-holdout, and runtime checks are complete. Then publish all approved packages
-under a new immutable model release. Do not replace the existing release.
+These outputs confirm the weights in the immutable held-part and placement
+packages. They do not change the original package manifests. On 2026-10-03,
+the model catalog approved both packages only for the guarded roles in their
+model cards. The later source-component package has separate clean-run and
+holdout evidence. See [model distribution](../MODEL_DISTRIBUTION.md) for the
+current selected set.
